@@ -1,15 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
 import { POLICY_VERSION, type InstallInput, type InstallationRecord, type RemoveInput, type ResolutionRecord, type ReviewInput, type ReviewRecord } from './contracts.js'
-import { EvolutionError, errorMessage } from './errors.js'
-import { discoverGithubCandidates } from './github/index.js'
+import { discoverRemoteCandidates } from './discovery/remote.js'
+import { EvolutionError } from './errors.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { CommandRunner } from './process/runner.js'
-import { capabilityQueries } from './resolver/keywords.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
 import { hashObject } from './state/hashes.js'
@@ -33,6 +33,7 @@ function materialReviewFacts(review: ReviewRecord): unknown {
     sourceIdentity,
     inspectedFiles: review.inspectedFiles,
     manifest: review.manifest,
+    compatibility: review.compatibility,
   }
 }
 
@@ -42,15 +43,6 @@ function assertRequirement(requirement: string): string {
     throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
   }
   return value
-}
-
-function githubQueries(requirement: string): string[] {
-  const capabilities = capabilityQueries(requirement)
-  if (capabilities.length === 0) return []
-  return [
-    `${capabilities[0]} topic:dsh-plugin`,
-    ...capabilities.slice(0, 4).map((query) => `${query} dsh`),
-  ]
 }
 
 export class CapabilityEvolutionService {
@@ -71,24 +63,23 @@ export class CapabilityEvolutionService {
   async resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
     const local = await resolveLocalCapabilities(this.ctx, requirement, exec)
-    const queries = githubQueries(requirement)
     let remoteCandidates: ResolutionRecord['remoteCandidates'] = []
+    let remoteCandidateSource: ResolutionRecord['remoteCandidateSource']
+    let queries: string[] = []
     const reasons = [...local.reasons]
     if (local.githubShouldRun) {
-      try {
-        remoteCandidates = await discoverGithubCandidates({
-          runner: this.runner,
-          config: this.config,
-          cwd: local.cwd,
-          queries,
-          signal: exec.signal,
-        })
-        reasons.push(remoteCandidates.length > 0
-          ? `GitHub discovery returned ${remoteCandidates.length} bounded candidate summaries.`
-          : 'GitHub discovery returned no reusable DSH plugin candidates.')
-      } catch (error) {
-        reasons.push(`GitHub discovery was unavailable: ${errorMessage(error)}`)
-      }
+      const discovery = await discoverRemoteCandidates({
+        ctx: this.ctx,
+        config: this.config,
+        runner: this.runner,
+        cwd: local.cwd,
+        requirement,
+        exec,
+      })
+      remoteCandidates = discovery.candidates
+      remoteCandidateSource = discovery.source
+      queries = discovery.queries
+      reasons.push(...discovery.reasons)
     }
     const record: ResolutionRecord = {
       schemaVersion: 1,
@@ -100,6 +91,7 @@ export class CapabilityEvolutionService {
       decision: !local.githubShouldRun ? 'use_local' : remoteCandidates.length > 0 ? 'inspect_remote' : 'none',
       localCandidates: local.candidates,
       remoteCandidates,
+      ...(remoteCandidateSource ? { remoteCandidateSource } : {}),
       queries,
       reasons,
     }
@@ -109,6 +101,7 @@ export class CapabilityEvolutionService {
 
   async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewRecord> {
     const resolution = await this.store.getResolution(input.resolutionId)
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
     if (input.sourceKind === 'github') {
       if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
@@ -124,6 +117,7 @@ export class CapabilityEvolutionService {
         ref: input.ref ?? candidate.defaultBranch ?? 'HEAD',
         resolutionId: resolution.id,
         requirement: resolution.requirement,
+        ...(runtimeVersion ? { runtimeVersion } : {}),
         signal: exec.signal,
       })
     } else {
@@ -140,6 +134,7 @@ export class CapabilityEvolutionService {
         baseReviewId: base.id,
         resolutionId: resolution.id,
         requirement: resolution.requirement,
+        ...(runtimeVersion ? { runtimeVersion } : {}),
       })
       if (local.record.sourceSnapshot.kind !== 'local'
         || local.record.sourceSnapshot.baseCommit.toLowerCase() !== base.sourceSnapshot.commit.toLowerCase()) {
@@ -163,6 +158,7 @@ export class CapabilityEvolutionService {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const resolution = await this.store.getResolution(review.resolutionId)
+        const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, signal)
         let current: ReviewRecord
         if (review.sourceSnapshot.kind === 'github') {
           current = await reviewGithubPlugin({
@@ -173,6 +169,7 @@ export class CapabilityEvolutionService {
             ref: review.sourceSnapshot.commit,
             resolutionId: resolution.id,
             requirement: resolution.requirement,
+            ...(runtimeVersion ? { runtimeVersion } : {}),
             ...(signal ? { signal } : {}),
           })
         } else {
@@ -184,6 +181,7 @@ export class CapabilityEvolutionService {
             baseReviewId: review.sourceSnapshot.baseReviewId,
             resolutionId: resolution.id,
             requirement: resolution.requirement,
+            ...(runtimeVersion ? { runtimeVersion } : {}),
           })).record
         }
         return hashObject(materialReviewFacts(current)) === hashObject(materialReviewFacts(review))
@@ -193,6 +191,23 @@ export class CapabilityEvolutionService {
     }
     return false
   }
+
+  private async dshRuntimeVersion(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
+    try {
+      const result = await this.runner.run({
+        argv: [this.config.dshCommand, ...this.config.dshCommandArgs, '--version'],
+        cwd,
+        allowFailure: true,
+        timeoutMs: this.config.commandTimeoutMs,
+        ...(signal ? { signal } : {}),
+      })
+      if (result.exitCode !== 0) return undefined
+      const candidate = result.stdout.trim().split(/\s+/u)[0]
+      return candidate ? valid(candidate) ?? undefined : undefined
+    } catch {
+      return undefined
+    }
+  }
 }
 
-export const _testing = { assertRequirement, githubQueries, materialReviewFacts }
+export const _testing = { assertRequirement, materialReviewFacts }

@@ -42,8 +42,9 @@ export async function resolveLocalCapabilities(
     ? { scope, signal: exec.signal }
     : { signal: exec.signal })
   const assembledNames = new Set(assembly.tools.map((tool) => tool.name))
-  const registryNames = new Set(registryTools.map((tool) => tool.name))
-  const hasBridge = [...BRIDGE_TOOLS].every((toolName) => registryNames.has(toolName))
+  // Registration is not reachability: the model can use the bridge only when
+  // all three bridge tools are present in this Agent scope's assembled prompt.
+  const hasBridge = [...BRIDGE_TOOLS].every((toolName) => assembledNames.has(toolName))
   const ownTools = new Set<string>(TOOL_NAMES)
   const candidates: LocalCapabilityCandidate[] = []
 

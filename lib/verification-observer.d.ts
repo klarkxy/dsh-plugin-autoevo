@@ -4,6 +4,7 @@ import { Context } from "@deepseek-ai/cordis";
 interface Config {
   receiptPath: string;
   expectedTools: string[];
+  expectedText?: string;
 }
 declare const Config: Schema<Config>;
 declare const name = "dsh-plugin-autoevo-verification-observer";

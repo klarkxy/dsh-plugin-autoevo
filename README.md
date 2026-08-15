@@ -17,10 +17,18 @@
 ## 安装
 
 ```powershell
-dsh plugin --profile web add github:klarkxy/dsh-plugin-autoevo
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.1
 ```
 
 安装后重启对应 DSH 进程。bundle 在进程启动时加载。
+
+升级到新的已发布版本时，显式替换 tag 后重新执行安装命令，例如：
+
+```powershell
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.1
+```
+
+DSH 的 `plugin` 命令把依赖操作转交给 pnpm：registry semver、Git tag 和 exact commit 都能作为版本边界，但 DSH 不会自动追踪或热加载新版本。固定 tag/commit 后需要显式升级，并重启对应进程。
 
 本仓库开发安装：
 
@@ -35,11 +43,11 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 ## 工作方式
 
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
-- 本地能力不足时，用已认证的 `gh` 做有界 GitHub 搜索，再由 Agent rerank。发现入口是 `dsh-plugin` topic。
+- 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)；它缺失、失败或没有有效结果时，才用已认证的 `gh` 做有界 GitHub 搜索。两条发现路径都从 `dsh-plugin` topic 取候选，再由 Agent rerank。
 - 审查精确 commit 上的 manifest、README 和必要源码，只输出路径、派生事实、风险代码与内容 hash。
-- 安装条件：`full + use`，风险 `low` 或 `medium`，兼容性 `compatible` 或 `unknown`，manifest 精确声明 `dsh.bundle.patch`。
+- 安装条件：`full + use`，风险 `low` 或 `medium`，实际 DSH 版本兼容性为 `compatible`，manifest 精确声明且快照内存在可解析的 `dsh.bundle.patch`。
 - 安装和移除都需要 DSH 一次性批准 `allowed-once`。
-- 临时试用在隔离 DSH home 中进行。验证需要真实的 `tool/call`、匹配的成功 `tool/result` 和任务结果。
+- 临时试用在隔离 DSH home 中进行。验证需要真实的 `tool/call`、匹配的成功 `tool/result`，以及会话中以 `turn/end: completed` 收口的最终回答；还可要求回答包含精确预期文本。
 - `partial` 候选先做最小修改并运行上游测试，再本地重审为 `full`，然后打成固定 tgz 再安装。
 - 通用修改在当前任务完成后给出贡献建议。fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
 
@@ -49,28 +57,29 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-它应先调用 `capability_resolve`。GitHub 搜索使用本机已登录的 `gh`。
+它应先调用 `capability_resolve`。如果当前 scope 安装并开放了 `find_dsh_plugin`，AutoEvo 会优先复用它；否则 GitHub 搜索使用本机已登录的 `gh`。
 
 ## Agent 工具
 
 | 工具 | 作用 | 环境 |
 |---|---|---|
-| `capability_resolve` | 检查本地能力；需要时搜索 GitHub 候选摘要 | 只读 |
+| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`，再降级到内置 `gh` 候选搜索 | 只读 |
 | `plugin_review` | 审查 GitHub exact commit 或 workspace 内的本地 Git 修改 | 只读 |
 | `plugin_install` | 复核审查凭据、请求批准、物化安装包并做真实任务验证 | 需批准 |
 | `plugin_remove` | 按 installation receipt 精确移除 | 需批准 |
 
-模型只看到这四个工具。
+AutoEvo 只新增这四个高层工具；当前 Profile 的其他工具仍由其 Agent scope 决定。
 
 ## 基线
 
-维护线 `0.1.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。
+维护线 `0.1.1`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
 
 ```powershell
 node --version
 pnpm --version
 gh auth status
-pnpm check
+pnpm check         # 完整门：静态检查、单测、Loader、local/full/partial E2E
+pnpm check:release # 完整门 + pack dry-run；发布前必须通过
 ```
 
 设计见 [架构说明](docs/architecture.md)，安全门槛见 [安全模型](docs/security.md)。

@@ -1,4 +1,4 @@
-export const POLICY_VERSION = 'v1-2026-08-15'
+export const POLICY_VERSION = 'v2-2026-08-15'
 
 export const TOOL_NAMES = [
   'capability_resolve',
@@ -11,6 +11,7 @@ export type ToolName = (typeof TOOL_NAMES)[number]
 
 export type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
+export type RemoteCandidateSource = 'dsh-find-plugin' | 'github'
 
 export interface LocalCapabilityCandidate {
   kind: 'tool' | 'skill'
@@ -25,7 +26,7 @@ export interface RemotePluginCandidate {
   name: string
   description: string
   stars: number
-  updatedAt: string
+  updatedAt: string | null
   topics: string[]
   packageName?: string
   defaultBranch?: string
@@ -41,6 +42,7 @@ export interface ResolutionRecord {
   decision: ResolutionDecision
   localCandidates: LocalCapabilityCandidate[]
   remoteCandidates: RemotePluginCandidate[]
+  remoteCandidateSource?: RemoteCandidateSource
   queries: string[]
   reasons: string[]
 }
@@ -111,6 +113,7 @@ export interface ReviewRecord {
   compatibility: {
     status: CompatibilityStatus
     reason: string
+    runtimeVersion: string | null
   }
   missingCapabilities: string[]
   findings: ReviewFinding[]
@@ -119,6 +122,7 @@ export interface ReviewRecord {
 }
 
 export type InstallationRetention = 'temporary' | 'persistent'
+export type InstallationState = 'installed' | 'not_installed' | 'unknown'
 
 export interface VerificationEvidence {
   attempted: boolean
@@ -132,6 +136,7 @@ export interface VerificationEvidence {
   receiptPath?: string
   taskResultObserved: boolean
   taskResultSha256?: string
+  taskResultMatchedExpectation?: boolean
   reason: string
 }
 
@@ -147,6 +152,8 @@ export interface InstallationRecord {
   installSpec: string
   ownedArtifactRoot?: string
   artifactSha256?: string
+  /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
+  installState?: InstallationState
   installed: boolean
   loaded: boolean
   verified: boolean
@@ -177,6 +184,7 @@ export interface InstallInput {
   targetProfile: string
   retention: InstallationRetention
   verificationTask?: string
+  verificationExpectedText?: string
 }
 
 export interface RemoveInput {

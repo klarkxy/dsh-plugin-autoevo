@@ -64,9 +64,11 @@ class ScriptedAdapter extends LlmAdapter {
         return { kind: 'tool', name: 'calculator', arguments: { expression: this.config.expression ?? '6 * 7' } }
       }
       const last = pairs.at(-1)
-      return last?.isError
+      const resultText = JSON.stringify(last?.result)
+      const expectedResult = String(this.config.expectedResult ?? '')
+      return last?.isError || (expectedResult && !resultText.includes(expectedResult))
         ? { kind: 'text', text: 'E2E_CALCULATOR_ERROR' }
-        : { kind: 'text', text: `E2E_CALCULATOR_OK ${JSON.stringify(last?.result)}` }
+        : { kind: 'text', text: `E2E_CALCULATOR_OK ${resultText}` }
     }
 
     if (this.config.scenario === 'resolve-local') {
@@ -116,6 +118,7 @@ class ScriptedAdapter extends LlmAdapter {
           target_profile: 'headless',
           retention: 'temporary',
           verification_task: 'Use the calculator tool to calculate 6 * 7 and answer with the result.',
+          verification_expected_text: '42',
         },
       }
     }
@@ -187,6 +190,7 @@ class ScriptedAdapter extends LlmAdapter {
           target_profile: 'headless',
           retention: 'temporary',
           verification_task: 'Use calculator to calculate 1e3 + 2 and answer with the result.',
+          verification_expected_text: '1002',
         },
       }
     }

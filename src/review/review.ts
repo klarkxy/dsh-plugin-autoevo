@@ -1,8 +1,9 @@
 import { readdir, readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
-import { satisfies, validRange } from 'semver'
+import { parseDocument } from 'yaml'
+import { satisfies, valid, validRange } from 'semver'
 import type { RuntimeConfig } from '../config.js'
-import type { InspectedFile, ManifestFacts, ReviewFinding, ReviewRecord } from '../contracts.js'
+import { POLICY_VERSION, type InspectedFile, type ManifestFacts, type ReviewFinding, type ReviewRecord } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
@@ -56,6 +57,7 @@ export interface ReviewContentInput {
   files: readonly ContentFile[]
   truncated?: boolean
   maintained?: boolean
+  runtimeVersion?: string
 }
 
 export interface LocalReviewResult {
@@ -66,6 +68,52 @@ export interface LocalReviewResult {
 
 const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx', '.json', '.yaml', '.yml'])
 const LIFECYCLE_SCRIPTS = new Set(['preinstall', 'install', 'postinstall', 'prepublish', 'prepare', 'prepack', 'postpack', 'prepublishOnly'])
+const LOADER_PATCH_EXTENSIONS = new Set(['.json', '.yaml', '.yml'])
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function safeBundlePatchPath(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0')
+    || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) return undefined
+  const relative = value.replace(/^\.\//u, '')
+  const parts = relative.split('/')
+  if (parts.some((part) => part === '.' || part === '..' || part === '' || part.includes(':'))) return undefined
+  const normalized = path.posix.normalize(relative)
+  if (!normalized || normalized === '.' || !LOADER_PATCH_EXTENSIONS.has(path.posix.extname(normalized).toLowerCase())) return undefined
+  return normalized
+}
+
+function loaderPatchProblem(file: ContentFile): string | undefined {
+  let parsed: unknown
+  try {
+    const document = parseDocument(Buffer.from(file.content).toString('utf8'), {
+      customTags: [{
+        tag: 'tag:yaml.org,2002:js',
+        resolve: (value: string) => ({ __jsExpr: value }),
+      }],
+    })
+    if (document.errors.length > 0) return 'the declared bundle patch is not valid Loader JSON/YAML'
+    parsed = document.toJS()
+  } catch {
+    return 'the declared bundle patch is not valid Loader JSON/YAML'
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return 'the declared bundle patch must be a non-empty patch list'
+  for (const item of parsed) {
+    const patch = record(item)
+    if (!patch) return 'every Loader patch must be an object'
+    if (Object.hasOwn(patch, 'insert')) {
+      if (!Array.isArray(patch.insert) || patch.insert.length === 0
+        || patch.insert.some((entry) => typeof record(entry)?.name !== 'string' || !(record(entry)?.name as string).trim())) {
+        return 'Loader patch insert entries must be non-empty objects with module names'
+      }
+    } else if (typeof patch.id !== 'string' || !patch.id.trim()) {
+      return 'non-insert Loader patches must name a target id'
+    }
+  }
+  return undefined
+}
 
 function jsonObject(value: Uint8Array): Record<string, unknown> | undefined {
   try {
@@ -108,9 +156,10 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
   const dependencies = Object.keys(stringRecord(pkg?.dependencies)).sort()
   const peerDependencies = stringRecord(pkg?.peerDependencies)
   const license = typeof pkg?.license === 'string' ? pkg.license : undefined
-  const bundlePatch = typeof bundle?.patch === 'string' ? bundle.patch : undefined
+  const bundlePatchDeclared = typeof bundle?.patch === 'string'
+  const bundlePatch = safeBundlePatchPath(bundle?.patch)
   return {
-    kind: bundlePatch ? 'bundle' : hasSkill ? 'skill' : pkg ? 'legacy' : 'unknown',
+    kind: bundlePatchDeclared ? 'bundle' : hasSkill ? 'skill' : pkg ? 'legacy' : 'unknown',
     ...(isSafePackageName(pkg?.name) ? { packageName: pkg.name } : {}),
     ...(typeof pkg?.version === 'string' ? { packageVersion: pkg.version } : {}),
     ...(bundlePatch ? { bundlePatch } : {}),
@@ -134,6 +183,19 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
   const packageHash = packageFile ? sha256(packageFile.content) : sha256('package.json absent')
   if (manifest.kind === 'bundle' && !isSafePackageName(pkg?.name)) {
     findings.push(finding('unsafe_package_name', 'block', 'package.json', 'package name is missing or unsafe for DSH package management', packageHash))
+  }
+  if (manifest.kind === 'bundle') {
+    if (!manifest.bundlePatch) {
+      findings.push(finding('bundle_patch_path', 'block', 'package.json', 'dsh.bundle.patch must be a safe relative .json/.yaml/.yml path', packageHash))
+    } else {
+      const patchFile = files.find((file) => file.path === manifest.bundlePatch)
+      if (!patchFile) {
+        findings.push(finding('bundle_patch_missing', 'block', manifest.bundlePatch, 'the declared bundle patch was not present in the inspected snapshot', packageHash))
+      } else {
+        const problem = loaderPatchProblem(patchFile)
+        if (problem) findings.push(finding('bundle_patch_invalid', 'block', manifest.bundlePatch, problem, sha256(patchFile.content)))
+      }
+    }
   }
   for (const name of manifest.scripts) {
     const value = scripts[name] ?? ''
@@ -180,13 +242,15 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
   return findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source))
 }
 
-function compatibility(manifest: ManifestFacts): ReviewRecord['compatibility'] {
+function compatibility(manifest: ManifestFacts, runtimeVersion?: string): ReviewRecord['compatibility'] {
   const relevant = Object.entries(manifest.peerDependencies).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
-  if (relevant.length === 0) return { status: 'unknown', reason: 'No DSH peer dependency range is declared.' }
-  if (relevant.some(([, range]) => !validRange(range) || !satisfies('0.1.0-rc.6', range, { includePrerelease: true }))) {
-    return { status: 'incompatible', reason: 'At least one declared DSH peer range excludes 0.1.0-rc.6.' }
+  const runtime = runtimeVersion && valid(runtimeVersion)
+  if (!runtime) return { status: 'unknown', reason: 'The active DSH runtime version could not be established.', runtimeVersion: null }
+  if (relevant.length === 0) return { status: 'unknown', reason: 'No DSH peer dependency range is declared.', runtimeVersion: runtime }
+  if (relevant.some(([, range]) => !validRange(range) || !satisfies(runtime, range, { includePrerelease: true }))) {
+    return { status: 'incompatible', reason: `At least one declared DSH peer range excludes the active runtime ${runtime}.`, runtimeVersion: runtime }
   }
-  return { status: 'compatible', reason: 'Declared DSH peer ranges include 0.1.0-rc.6.' }
+  return { status: 'compatible', reason: `Declared DSH peer ranges include the active runtime ${runtime}.`, runtimeVersion: runtime }
 }
 
 function requirementTerms(requirement: string): string[] {
@@ -245,7 +309,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
   const securityRisk: ReviewRecord['securityRisk'] = findings.some((item) => item.severity === 'block') ? 'high'
     : findings.some((item) => item.severity === 'warning') || input.truncated ? 'medium'
       : 'low'
-  const compatible = compatibility(manifest)
+  const compatible = compatibility(manifest, input.runtimeVersion)
   const license = manifest.license ?? null
   const maintained = input.maintained ?? false
   const recommendation: ReviewRecord['recommendation'] = input.truncated || manifest.kind !== 'bundle' || securityRisk === 'high' || compatible.status === 'incompatible' || fit === 'none'
@@ -255,8 +319,8 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
       : 'modify'
   return {
     schemaVersion: 1,
-    id: input.id ?? `review_${hashObject({ policyVersion: 'v1-2026-08-15', requirement: input.requirement, sourceSnapshot: input.sourceSnapshot, inspectedFiles, manifest })}`,
-    policyVersion: 'v1-2026-08-15',
+    id: input.id ?? `review_${hashObject({ policyVersion: POLICY_VERSION, requirement: input.requirement, sourceSnapshot: input.sourceSnapshot, inspectedFiles, manifest, compatible })}`,
+    policyVersion: POLICY_VERSION,
     createdAt: input.createdAt ?? new Date().toISOString(),
     resolutionId: input.resolutionId,
     requirement: input.requirement,
@@ -272,7 +336,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     missingCapabilities,
     findings: findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source)),
     recommendation,
-    installSpec: input.truncated || compatible.status === 'incompatible' || manifest.kind !== 'bundle' ? null
+    installSpec: input.truncated || compatible.status !== 'compatible' || manifest.kind !== 'bundle' || securityRisk === 'high' ? null
       : input.sourceSnapshot.kind === 'github' && manifest.packageName
         ? `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
         : null,
@@ -307,6 +371,7 @@ function priority(filePath: string): number {
   const lower = filePath.toLowerCase()
   if (filePath === 'package.json') return 0
   if (/(^|\/)dsh\.bundle(?:\.|\/|$)/i.test(filePath)) return 1
+  if (/(^|\/)[^/]*patch\.(?:json|ya?ml)$/i.test(filePath)) return 1
   if (/(^|\/)skill\.md$/i.test(filePath)) return 1
   if (/^readme(?:\.|$)/i.test(path.posix.basename(filePath))) return 2
   if (SOURCE_EXTENSIONS.has(path.posix.extname(lower))) return 3
@@ -383,6 +448,7 @@ export async function reviewGithubPlugin(options: {
   ref: string
   resolutionId: string
   requirement: string
+  runtimeVersion?: string
   signal?: AbortSignal
 }): Promise<ReviewRecord> {
   const result = await githubSnapshot(options)
@@ -393,6 +459,7 @@ export async function reviewGithubPlugin(options: {
     files: result.snapshot.files,
     truncated: result.snapshot.truncated,
     maintained: result.maintained,
+    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
   })
 }
 
@@ -454,6 +521,7 @@ export async function reviewLocalPlugin(options: {
   baseReviewId: string
   resolutionId: string
   requirement: string
+  runtimeVersion?: string
 }): Promise<LocalReviewResult> {
   if (!/^review_[a-f0-9]{16,64}$/.test(options.baseReviewId)) throw new EvolutionError('invalid_input', 'Invalid base review id')
   const workspace = await realpath(options.workspaceRoot)
@@ -477,6 +545,7 @@ export async function reviewLocalPlugin(options: {
     files: snapshot.files,
     truncated: snapshot.truncated,
     maintained: true,
+    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
   })
   return { record, contentHash }
 }

@@ -52,7 +52,7 @@ describe('immutable local package materialization', () => {
     const review: ReviewRecord = {
       schemaVersion: 1,
       id: `review_${'a'.repeat(64)}`,
-      policyVersion: 'v1-2026-08-15',
+      policyVersion: 'v2-2026-08-15',
       createdAt: '2026-08-15T00:00:00.000Z',
       resolutionId: `resolution_${'b'.repeat(24)}`,
       requirement: 'local tool',
@@ -64,7 +64,7 @@ describe('immutable local package materialization', () => {
       securityRisk: 'low',
       maintained: true,
       license: 'MIT',
-      compatibility: { status: 'compatible', reason: 'test' },
+      compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
       missingCapabilities: [],
       findings: [],
       recommendation: 'use',

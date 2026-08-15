@@ -36,7 +36,12 @@ describe('local matching', () => {
     ]
     const ctx = {
       tools: { schemas: () => schemas },
-      systemPrompt: { assemble: async () => ({ tools: [{ name: 'browser_screenshot' }] }) },
+      systemPrompt: { assemble: async () => ({ tools: [
+        { name: 'tool_search' },
+        { name: 'tool_describe' },
+        { name: 'tool_call' },
+        { name: 'browser_screenshot' },
+      ] }) },
       skills: {
         list: async () => [{
           name: 'telegram-messaging',
@@ -60,5 +65,29 @@ describe('local matching', () => {
       expect.objectContaining({ name: 'browser_screenshot' }),
     ]))
     expect(result.githubShouldRun).toBe(false)
+  })
+
+  it('does not claim tool-search reachability when bridge tools are registered but outside the Agent scope', async () => {
+    const ctx = {
+      tools: { schemas: () => [
+        { name: 'tool_search', description: 'Search tools' },
+        { name: 'tool_describe', description: 'Describe tools' },
+        { name: 'tool_call', description: 'Call tools' },
+        { name: 'telegram_send', description: 'Send Telegram messages' },
+      ] },
+      systemPrompt: { assemble: async () => ({ tools: [] }) },
+      skills: { list: async () => [] },
+    } as unknown as Context
+
+    const result = await resolveLocalCapabilities(
+      ctx,
+      'Send a Telegram message',
+      { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+    )
+
+    expect(result.candidates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'telegram_send' }),
+    ]))
+    expect(result.githubShouldRun).toBe(true)
   })
 })

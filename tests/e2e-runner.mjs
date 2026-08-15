@@ -162,6 +162,7 @@ async function runScenario() {
   const childPatch = await writePatch('child.cordis.yml', modelPatches({
     scenario: 'calculator-child',
     expression: scenario === 'partial-flow' ? '1e3 + 2' : '6 * 7',
+    expectedResult: scenario === 'partial-flow' ? 1002 : 42,
   }))
   const mainPatches = [
     ...modelPatches({ scenario, ...partial }),
@@ -200,6 +201,7 @@ async function runScenario() {
   assert.equal(installation.verified, true)
   assert.equal(installation.removed, true)
   assert.equal(installation.verification.taskResultObserved, true)
+  assert.equal(installation.verification.taskResultMatchedExpectation, true)
   assert.ok(installation.verification.expectedTools.every((name) => installation.verification.calledTools.includes(name)))
   assert.ok(installation.verification.expectedTools.every((name) => installation.verification.resultTools.includes(name)))
   assert.equal(installation.verification.failedTools.length, 0)

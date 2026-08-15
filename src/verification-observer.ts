@@ -1,26 +1,34 @@
+import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 export interface Config {
   receiptPath: string
   expectedTools: string[]
+  expectedText?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
   receiptPath: Schema.string().required(),
   expectedTools: Schema.array(Schema.string()).default([]),
+  expectedText: Schema.string().default(''),
 })
 
 export const name = 'dsh-plugin-autoevo-verification-observer'
-export const inject = ['tools']
+export const inject = ['tools', 'sessions']
 
-interface ReceiptEvent {
+type ReceiptEvent = {
   kind: 'tool/call' | 'tool/result'
   callId: string
   name: string
   isError?: boolean
+} | {
+  kind: 'task/result'
+  resultSha256: string
+  matchedExpectation?: boolean
 }
 
 function appendReceipt(receiptPath: string, event: ReceiptEvent): void {
@@ -39,10 +47,14 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('verification receiptPath must be absolute')
   }
   const expected = new Set(config.expectedTools)
+  const callSessions = new Map<string, string>()
+  const successfulSessions = new Set<string>()
+  const finalByTurn = new Map<string, { resultSha256: string; matchedExpectation?: boolean }>()
   mkdirSync(path.dirname(config.receiptPath), { recursive: true })
 
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (expected.has(exec.name)) {
+      if (exec.agent) callSessions.set(exec.callId, String(exec.agent.session.id))
       appendReceipt(config.receiptPath, {
         kind: 'tool/call',
         callId: exec.callId,
@@ -54,6 +66,9 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.on('tools/result', (exec, result) => {
     if (expected.has(exec.name)) {
+      const sessionId = callSessions.get(exec.callId)
+      callSessions.delete(exec.callId)
+      if (sessionId && result.isError === false) successfulSessions.add(sessionId)
       appendReceipt(config.receiptPath, {
         kind: 'tool/result',
         callId: exec.callId,
@@ -62,5 +77,28 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
   })
-}
 
+  ctx.on('session/event', (session, event: SessionEvent) => {
+    if (event.type === 'assistant/message') {
+      if (!successfulSessions.has(String(session.id))) return
+      const text = event.data.message.content
+        .filter((block): block is Extract<(typeof event.data.message.content)[number], { type: 'text' }> => block.type === 'text')
+        .map((block) => block.text)
+        .join('')
+        .trim()
+      if (!text) return
+      finalByTurn.set(`${session.id}:${event.data.turn}`, {
+        resultSha256: createHash('sha256').update(text).digest('hex'),
+        ...(config.expectedText ? { matchedExpectation: text.includes(config.expectedText) } : {}),
+      })
+      return
+    }
+    if (event.type !== 'turn/end') return
+    const turnKey = `${session.id}:${event.data.turn}`
+    const candidate = finalByTurn.get(turnKey)
+    finalByTurn.delete(turnKey)
+    if (event.data.reason.kind === 'completed' && candidate) {
+      appendReceipt(config.receiptPath, { kind: 'task/result', ...candidate })
+    }
+  })
+}

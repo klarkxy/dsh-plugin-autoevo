@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-autoevo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH capability reuse and safe evolution layer. Evolution continues.",
   "license": "SATA",
   "repository": {
@@ -57,16 +57,20 @@
     "test:e2e:full": "node tests/e2e-runner.mjs full-flow",
     "test:e2e:partial": "node tests/e2e-runner.mjs partial-flow",
     "test:e2e": "pnpm test:e2e:local && pnpm test:e2e:full && pnpm test:e2e:partial",
-    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader",
+    "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader",
+    "check": "pnpm check:fast && pnpm test:e2e",
+    "check:release": "pnpm check && pnpm pack:dry-run",
     "pack:dry-run": "pnpm pack --dry-run"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "semver": "^7.7.2"
+    "semver": "^7.7.2",
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.6 <0.2.0",
     "@deepseek-ai/dsh-skill": ">=0.1.0-rc.6 <0.2.0",
     "@deepseek-ai/dsh-subprocess": ">=0.1.0-rc.6 <0.2.0",
     "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6 <0.2.0",

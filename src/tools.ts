@@ -11,7 +11,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
   return [
     defineTool({
       name: 'capability_resolve',
-      description: 'Check scoped DSH tools and skills first, then search GitHub only when local reuse is insufficient.',
+      description: 'Check scoped DSH tools and skills first, then prefer find_dsh_plugin and fall back to built-in gh search only when local reuse is insufficient.',
       parameters: {
         requirement: { type: 'string', required: true, description: 'Concrete capability required by the current user task.' },
       },
@@ -51,6 +51,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
         target_profile: { type: 'string', required: true, description: 'Explicit DSH profile name; never inferred.' },
         retention: { type: 'string', enum: ['temporary', 'persistent'], required: true },
         verification_task: { type: 'string', description: 'Task for a fresh DSH child. Required for temporary trials; optional persistent installs remain unverified until a later run.' },
+        verification_expected_text: { type: 'string', description: 'Optional exact text that must appear in the completed child final answer.' },
       },
       output: jsonOutput,
       async execute(args, exec) {
@@ -59,6 +60,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           targetProfile: args.target_profile,
           retention: args.retention,
           ...(args.verification_task !== undefined ? { verificationTask: args.verification_task } : {}),
+          ...(args.verification_expected_text !== undefined ? { verificationExpectedText: args.verification_expected_text } : {}),
         }, exec) as unknown as JsonValue
       },
     }),

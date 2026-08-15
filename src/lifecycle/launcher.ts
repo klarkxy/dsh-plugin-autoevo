@@ -6,7 +6,6 @@ import type { ReviewRecord, VerificationEvidence } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import type { CommandResult, CommandRunner } from '../process/runner.js'
-import { sha256 } from '../state/hashes.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
 
 interface SessionFile {
@@ -18,6 +17,9 @@ interface ReceiptEvidence {
   calledTools: string[]
   resultTools: string[]
   failedTools: string[]
+  taskResultObserved: boolean
+  taskResultSha256?: string
+  taskResultMatchedExpectation?: boolean
 }
 
 async function collectSessionFiles(root: string): Promise<SessionFile[]> {
@@ -49,7 +51,7 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     body = await readFile(receiptPath, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { calledTools: [], resultTools: [], failedTools: [] }
+      return { calledTools: [], resultTools: [], failedTools: [], taskResultObserved: false }
     }
     throw error
   }
@@ -58,6 +60,8 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
   const called = new Set<string>()
   const successful = new Set<string>()
   const failed = new Set<string>()
+  let taskResultSha256: string | undefined
+  let taskResultMatchedExpectation: boolean | undefined
   for (const line of body.split(/\r?\n/u)) {
     if (!line.trim()) continue
     let value: unknown
@@ -68,6 +72,11 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     }
     if (typeof value !== 'object' || value === null) continue
     const event = value as Record<string, unknown>
+    if (event.kind === 'task/result' && typeof event.resultSha256 === 'string' && /^[a-f0-9]{64}$/u.test(event.resultSha256)) {
+      taskResultSha256 = event.resultSha256
+      taskResultMatchedExpectation = typeof event.matchedExpectation === 'boolean' ? event.matchedExpectation : undefined
+      continue
+    }
     if (typeof event.callId !== 'string' || typeof event.name !== 'string') continue
     if (event.kind === 'tool/call') {
       calls.set(event.callId, event.name)
@@ -82,10 +91,13 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     calledTools: [...called].sort(),
     resultTools: [...successful].sort(),
     failedTools: [...failed].sort(),
+    taskResultObserved: Boolean(taskResultSha256),
+    ...(taskResultSha256 ? { taskResultSha256 } : {}),
+    ...(taskResultMatchedExpectation !== undefined ? { taskResultMatchedExpectation } : {}),
   }
 }
 
-function verificationOverlay(receiptPath: string, expectedTools: readonly string[]): unknown[] {
+function verificationOverlay(receiptPath: string, expectedTools: readonly string[], expectedText?: string): unknown[] {
   // tsdown bundles lifecycle code into lib/index.js while emitting the observer
   // as a sibling entry, so this URL must stay relative to that bundled artifact.
   const observerUrl = new URL('./verification-observer.js', import.meta.url).href
@@ -96,6 +108,7 @@ function verificationOverlay(receiptPath: string, expectedTools: readonly string
       config: {
         receiptPath,
         expectedTools: [...expectedTools],
+        ...(expectedText ? { expectedText } : {}),
       },
     }],
   }]
@@ -189,6 +202,7 @@ export class DshLauncher {
     cwd: string,
     task: string,
     expectedTools: readonly string[],
+    expectedText?: string,
     signal?: AbortSignal,
   ): Promise<VerificationEvidence> {
     const startedAt = Date.now()
@@ -199,7 +213,7 @@ export class DshLauncher {
     await mkdir(verificationRoot, { recursive: true })
     await writeFile(
       overlayPath,
-      `${JSON.stringify(verificationOverlay(receiptPath, expectedTools), null, 2)}\n`,
+      `${JSON.stringify(verificationOverlay(receiptPath, expectedTools, expectedText), null, 2)}\n`,
       { encoding: 'utf8', flag: 'wx' },
     )
 
@@ -223,7 +237,7 @@ export class DshLauncher {
       && expected.every((name) => evidence.calledTools.includes(name)
         && evidence.resultTools.includes(name)
         && !evidence.failedTools.includes(name))
-    const taskResultObserved = result.stdout.trim().length > 0
+    const taskResultObserved = evidence.taskResultObserved
     return {
       attempted: true,
       task,
@@ -235,14 +249,19 @@ export class DshLauncher {
       sessionFiles,
       receiptPath,
       taskResultObserved,
-      ...(taskResultObserved ? { taskResultSha256: sha256(result.stdout) } : {}),
+      ...(evidence.taskResultSha256 ? { taskResultSha256: evidence.taskResultSha256 } : {}),
+      ...(evidence.taskResultMatchedExpectation !== undefined
+        ? { taskResultMatchedExpectation: evidence.taskResultMatchedExpectation }
+        : {}),
       reason: result.exitCode !== 0
         ? `DSH child exited with code ${result.exitCode ?? 'null'}.`
         : !toolRoundTrip
           ? 'The child exited, but the trusted observer did not prove a successful target tool round-trip.'
           : !taskResultObserved
-            ? 'The target tool round-trip succeeded, but the DSH child emitted no task result.'
-            : 'The trusted child overlay observed a matching tool/call and successful tool/result, and DSH emitted a task result.',
+            ? 'The target tool round-trip succeeded, but no completed-turn final answer was observed.'
+            : evidence.taskResultMatchedExpectation === false
+              ? 'The child completed with a final answer, but it did not contain the required expected text.'
+              : 'The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.',
     }
   }
 }

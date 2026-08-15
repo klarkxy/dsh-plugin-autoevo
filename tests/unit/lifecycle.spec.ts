@@ -22,7 +22,7 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
   return {
     schemaVersion: 1,
     id: `review_${'a'.repeat(64)}`,
-    policyVersion: 'v1-2026-08-15',
+    policyVersion: 'v2-2026-08-15',
     createdAt: '2026-08-15T00:00:00.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
     requirement: 'calculator',
@@ -39,7 +39,7 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
     securityRisk: 'medium',
     maintained: true,
     license: 'MIT',
-    compatibility: { status: 'compatible', reason: 'test' },
+    compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
     missingCapabilities: [],
     findings: [{ code: 'lifecycle_script', severity: 'info', source: 'package.json', detail: 'declares lifecycle script: prepare' }],
     recommendation: 'use',
@@ -90,6 +90,12 @@ describe('lifecycle validation', () => {
       targetProfile: 'persistent',
       retention: 'persistent',
     })).toBeUndefined()
+    expect(() => installTesting.verificationExpectation({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationExpectedText: '42',
+    }, undefined)).toThrow(/requires a verificationTask/u)
   })
 
   it('rejects shell metacharacters in local artifact paths forwarded by DSH on Windows', () => {
@@ -194,6 +200,86 @@ describe('lifecycle validation', () => {
       verificationTask: 'test calculator',
     }, execution())).resolves.toMatchObject({ installed: false, verified: false, removed: true })
     await expect(readdir(path.join(root, 'trials'))).resolves.toEqual([])
+  })
+
+  it('reconciles a persistent dependency after an ambiguous install-command failure', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => { throw new Error('timeout after manifest update') },
+      hasProfileDependency: async () => true,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, execution())
+
+    expect(result).toMatchObject({ installState: 'installed', installed: true, verified: false, removed: false })
+    expect(result.verification.reason).toContain('profile reconciliation found the dependency installed')
+  })
+
+  it('marks a persistent install outcome unknown when reconciliation also fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => { throw new Error('timeout') },
+      hasProfileDependency: async () => { throw new Error('profile unreadable') },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, execution())
+
+    expect(result).toMatchObject({ installState: 'unknown', installed: false, verified: false, removed: false })
+    expect(result.verification.reason).toContain('recovery is required')
+  })
+
+  it('rejects a completed child answer that misses the required expected text', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      verify: async (): Promise<VerificationEvidence> => ({
+        attempted: true,
+        task: 'calculate 6 * 7',
+        exitCode: 0,
+        expectedTools: ['calculator'],
+        calledTools: ['calculator'],
+        resultTools: ['calculator'],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: true,
+        taskResultSha256: 'f'.repeat(64),
+        taskResultMatchedExpectation: false,
+        reason: 'wrong result',
+      }),
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'trial',
+      retention: 'temporary',
+      verificationTask: 'calculate 6 * 7',
+      verificationExpectedText: '42',
+    }, execution())
+
+    expect(result).toMatchObject({ installState: 'installed', installed: true, loaded: true, verified: false, removed: true })
   })
 
   it('uses a provisional receipt to recover from final receipt persistence failure', async () => {

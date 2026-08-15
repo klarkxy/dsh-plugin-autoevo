@@ -68,7 +68,7 @@ function asCandidate(item: GithubSearchItem): RemotePluginCandidate | null {
 
 function compareCandidates(left: RemotePluginCandidate, right: RemotePluginCandidate): number {
   return right.stars - left.stars
-    || right.updatedAt.localeCompare(left.updatedAt)
+    || (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '')
     || left.repository.localeCompare(right.repository)
 }
 

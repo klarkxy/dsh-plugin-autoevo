@@ -14,7 +14,10 @@ capability_resolve
    ├─ ctx.tools.schemas(scope)
    ├─ ctx.systemPrompt.assemble(scope)
    ├─ ctx.skills.list(cwd, scope)
-   └─ local miss ──► gh api repository search
+   └─ local miss ──► find_dsh_plugin (current Agent scope)
+                         │ absent / error / no valid result
+                         ▼
+                    gh api repository search
                                   │
                                   ▼
                             plugin_review
@@ -31,7 +34,7 @@ capability_resolve
                                   │
                                   ▼
                       isolated DSH child Agent
-                    tool/call + tool/result + output
+              tool/call + tool/result + completed final answer
                                   │
                                   ▼
                            plugin_remove
@@ -48,6 +51,8 @@ capability_resolve
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本。工具缺失、被拒绝、超时、失败、返回空集合或只含畸形 URL 时，再执行自身 argv-only 的认证 `gh api` 搜索。无论候选来自哪一层，都必须经过同一套 `plugin_review` exact-commit 门禁。
+
 ## 4. 数据与状态
 
 持久状态在配置的 `stateDir`：
@@ -63,15 +68,16 @@ stateDir/
    └─ tool-roundtrip.jsonl
 ```
 
-`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 provisional installation receipt；最终 receipt 写失败时，temporary trial 会补偿清理，persistent 安装保留可恢复记录。
+`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写失败时，temporary trial 会补偿清理，persistent 安装保留不会谎报未安装的恢复锚点。
 
-Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash，以及 material manifest facts。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容或 manifest 变化会使凭据过期。
+Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash、material manifest facts，以及实际 DSH runtime 版本和兼容性。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容、manifest 或 runtime 兼容性变化会使凭据过期。
 
 ## 5. 状态语义
 
-- `installed`：DSH Profile 依赖安装命令已经成功。
+- `installState`：`installed`、`not_installed` 或 `unknown`。持久安装命令异常后必须读取 Profile dependency 协调状态；读取也失败时保持 `unknown` 并要求恢复，不能断言未安装。
+- `installed`：兼容旧回执的布尔投影；仅 `installState: installed` 为 true。
 - `loaded`：隔离子进程退出成功，可信 observer 至少看到一个预期工具的真实调用。
-- `verified`：每个预期工具都有 call-id 匹配的成功 `tool/result`，并且 DSH 给出了任务结果。
+- `verified`：每个预期工具都有 call-id 匹配的成功 `tool/result`，DSH 会话给出以 `turn/end: completed` 收口的最终回答，并且可选预期文本匹配。
 - `restartRequired`：常驻 Profile 已写入依赖，新进程加载新 bundle。
 - `removed`：临时 owned trial 已删除，或持久安装 receipt 已完成 remove。
 
@@ -88,10 +94,11 @@ GitHub review 为 `partial/modify` 时，Agent 从精确 commit 建立 workspace
 ## 7. 实现入口
 
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
+- [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 优先与内置 `gh` 回退编排、候选归一化和来源记录。
 - [src/github/discovery.ts](../src/github/discovery.ts)：有界 GitHub 候选搜索。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。
 - [src/lifecycle/install.ts](../src/lifecycle/install.ts)：批准、重验证、状态机和失败清理。
 - [src/lifecycle/snapshot.ts](../src/lifecycle/snapshot.ts)：完整本地文件绑定、owned snapshot 与固定 tgz。
 - [src/lifecycle/launcher.ts](../src/lifecycle/launcher.ts)：DSH CLI 与隔离验证进程。
-- [src/verification-observer.ts](../src/verification-observer.ts)：只记录工具名与 callId 的往返 observer。
+- [src/verification-observer.ts](../src/verification-observer.ts)：记录工具名/callId 往返，以及完成轮最终回答的 hash 和可选预期文本匹配结果；不记录模型正文。
 - [src/lifecycle/remove.ts](../src/lifecycle/remove.ts)：receipt 驱动的精确移除。

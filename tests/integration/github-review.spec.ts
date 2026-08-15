@@ -16,6 +16,7 @@ describe('local review binding', () => {
     const plugin = path.join(workspace, 'plugin')
     await mkdir(path.join(plugin, 'src'), { recursive: true })
     await writeFile(path.join(plugin, 'package.json'), JSON.stringify({ name: 'local-tool', dsh: { bundle: { patch: './cordis.patch.yml', tools: ['local-tool'] } }, peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' } }))
+    await writeFile(path.join(plugin, 'cordis.patch.yml'), '- insert:\n    - id: local-tool\n      name: local-tool\n')
     await writeFile(path.join(plugin, 'src', 'index.ts'), "defineTool('local-tool')")
     await writeFile(path.join(plugin, 'native.wasm'), Buffer.from([0, 97, 115, 109, 1]))
     const runner: CommandRunner = {
@@ -31,6 +32,7 @@ describe('local review binding', () => {
       const result = await reviewLocalPlugin({
         runner, config, workspaceRoot: workspace, path: plugin, baseReviewId: 'review_0123456789abcdef',
         resolutionId: 'resolution_0123456789abcdef', requirement: 'local tool',
+        runtimeVersion: '0.1.0-rc.6',
       })
       expect(result.record.sourceSnapshot).toEqual({ kind: 'local', path: plugin, baseReviewId: 'review_0123456789abcdef', baseCommit: 'b'.repeat(40), statusHash: expect.any(String) })
       expect(result.record.installSpec).toBeNull()
@@ -40,6 +42,7 @@ describe('local review binding', () => {
       const changed = await reviewLocalPlugin({
         runner, config, workspaceRoot: workspace, path: plugin, baseReviewId: 'review_0123456789abcdef',
         resolutionId: 'resolution_0123456789abcdef', requirement: 'local tool',
+        runtimeVersion: '0.1.0-rc.6',
       })
       expect(changed.contentHash).not.toBe(result.contentHash)
     } finally {
@@ -58,6 +61,7 @@ describe('local review binding', () => {
       dsh: { bundle: { patch: './cordis.patch.yml', tools: ['local-tool'] } },
       peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
     }))
+    await writeFile(path.join(plugin, 'cordis.patch.yml'), '- insert:\n    - id: local-tool\n      name: local-tool\n')
     await writeFile(path.join(linked, 'runtime.js'), 'export const value = 1')
     await symlink(linked, path.join(plugin, 'linked-runtime'), 'junction')
     const runner: CommandRunner = {
@@ -73,6 +77,7 @@ describe('local review binding', () => {
       const result = await reviewLocalPlugin({
         runner, config, workspaceRoot: workspace, path: plugin, baseReviewId: 'review_0123456789abcdef',
         resolutionId: 'resolution_0123456789abcdef', requirement: 'local tool',
+        runtimeVersion: '0.1.0-rc.6',
       })
       expect(result.record.recommendation).toBe('skip')
       expect(result.record.installSpec).toBeNull()

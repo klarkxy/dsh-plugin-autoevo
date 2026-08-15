@@ -4,7 +4,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
-import type { InstallInput, InstallationRecord, ReviewRecord, VerificationEvidence } from '../contracts.js'
+import type { InstallationState, InstallInput, InstallationRecord, ReviewRecord, VerificationEvidence } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import { hashObject } from '../state/hashes.js'
@@ -28,6 +28,15 @@ function verificationTask(input: InstallInput): string | undefined {
     throw new EvolutionError('invalid_input', 'temporary installation requires a non-empty verificationTask')
   }
   return task || undefined
+}
+
+function verificationExpectation(input: InstallInput, task: string | undefined): string | undefined {
+  const expected = input.verificationExpectedText?.normalize('NFKC').trim()
+  if (expected !== undefined && expected.length > 1_000) {
+    throw new EvolutionError('invalid_input', 'verificationExpectedText must not exceed 1000 characters')
+  }
+  if (expected && !task) throw new EvolutionError('invalid_input', 'verificationExpectedText requires a verificationTask')
+  return expected || undefined
 }
 
 function emptyVerification(expectedTools: readonly string[]): VerificationEvidence {
@@ -71,7 +80,7 @@ function interruptedVerification(task: string, expectedTools: readonly string[])
   }
 }
 
-function failedInstallation(expectedTools: readonly string[]): VerificationEvidence {
+function failedInstallation(expectedTools: readonly string[], installState: InstallationState): VerificationEvidence {
   return {
     attempted: false,
     expectedTools: [...expectedTools],
@@ -80,7 +89,11 @@ function failedInstallation(expectedTools: readonly string[]): VerificationEvide
     failedTools: [],
     sessionFiles: [],
     taskResultObserved: false,
-    reason: 'The DSH installation command did not complete successfully.',
+    reason: installState === 'installed'
+      ? 'The DSH installation command did not complete successfully, but profile reconciliation found the dependency installed; verification is still required.'
+      : installState === 'not_installed'
+        ? 'The DSH installation command did not complete successfully and profile reconciliation found no installed dependency.'
+        : 'The DSH installation command did not complete successfully and profile reconciliation failed; recovery is required before retrying.',
   }
 }
 
@@ -128,6 +141,7 @@ export class PluginInstaller {
   async install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
     validateProfile(input.targetProfile)
     const task = verificationTask(input)
+    const expectedText = verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
     const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(review.installSpec)
@@ -196,6 +210,7 @@ export class PluginInstaller {
       installSpec,
       ...(ownedArtifactRoot ? { ownedArtifactRoot } : {}),
       ...(artifactSha256 ? { artifactSha256 } : {}),
+      installState: 'unknown',
       installed: false,
       loaded: false,
       verified: false,
@@ -216,10 +231,22 @@ export class PluginInstaller {
     } catch {
       const removed = input.retention === 'temporary'
       if (removed) await this.removeOwnedDirectory(trialRoot, trialsRoot)
+      let installState: InstallationState = 'not_installed'
+      if (input.retention === 'persistent') {
+        try {
+          installState = await this.launcher.hasProfileDependency(dshHome, input.targetProfile, packageName)
+            ? 'installed'
+            : 'not_installed'
+        } catch {
+          installState = 'unknown'
+        }
+      }
       const failedRecord: InstallationRecord = {
         ...provisional,
+        installState,
+        installed: installState === 'installed',
         removed,
-        verification: failedInstallation(review.manifest.expectedTools),
+        verification: failedInstallation(review.manifest.expectedTools, installState),
       }
       await this.store.put('installations', failedRecord)
       return failedRecord
@@ -233,6 +260,7 @@ export class PluginInstaller {
           cwd,
           task,
           review.manifest.expectedTools,
+          expectedText,
           exec.signal,
         )
       } catch {
@@ -244,7 +272,8 @@ export class PluginInstaller {
     const loaded = verification.attempted && verification.exitCode === 0
       && verification.expectedTools.length > 0
       && verification.expectedTools.some((name) => verification.calledTools.includes(name))
-    const verified = loaded && verification.taskResultObserved && verification.expectedTools.length > 0
+    const verified = loaded && verification.taskResultObserved && verification.taskResultMatchedExpectation !== false
+      && verification.expectedTools.length > 0
       && verification.expectedTools.every((name) => verification.calledTools.includes(name)
         && verification.resultTools.includes(name)
         && !verification.failedTools.includes(name))
@@ -254,6 +283,7 @@ export class PluginInstaller {
       && review.recommendation === 'use' && Boolean(review.license)
     const record: InstallationRecord = {
       ...provisional,
+      installState: 'installed',
       installed: true,
       loaded,
       verified,
@@ -300,4 +330,4 @@ export class PluginInstaller {
   }
 }
 
-export const _testing = { validateProfile, verificationTask }
+export const _testing = { validateProfile, verificationTask, verificationExpectation }
