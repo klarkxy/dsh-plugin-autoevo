@@ -1,0 +1,7 @@
+node_modules/
+.npm-cache/
+.dsh/
+.capability-evolution/
+.e2e-work/
+coverage/
+*.tgz

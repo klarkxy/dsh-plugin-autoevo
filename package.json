@@ -1,0 +1,101 @@
+{
+  "name": "dsh-plugin-autoevo",
+  "version": "0.1.0",
+  "description": "DSH capability reuse and safe evolution layer. Evolution continues.",
+  "license": "SATA",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klarkxy/dsh-plugin-autoevo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/klarkxy/dsh-plugin-autoevo/issues"
+  },
+  "homepage": "https://github.com/klarkxy/dsh-plugin-autoevo#readme",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "deepseek-harness",
+    "capability-reuse"
+  ],
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./verification-observer": {
+      "types": "./lib/verification-observer.d.ts",
+      "import": "./lib/verification-observer.js",
+      "default": "./lib/verification-observer.js"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests",
+    "test": "vitest run",
+    "test:loader": "node tests/loader-smoke.mjs",
+    "test:e2e:local": "node tests/e2e-runner.mjs resolve-local",
+    "test:e2e:full": "node tests/e2e-runner.mjs full-flow",
+    "test:e2e:partial": "node tests/e2e-runner.mjs partial-flow",
+    "test:e2e": "pnpm test:e2e:local && pnpm test:e2e:full && pnpm test:e2e:partial",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader",
+    "pack:dry-run": "pnpm pack --dry-run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "semver": "^7.7.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-skill": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6 <0.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/cordis-plugin-group": "1.0.1",
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-loader-smoke": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-skill": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-subprocess": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-subprocess-local": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-approval": "0.1.0-rc.6",
+    "@typescript-eslint/parser": "8.41.0",
+    "@types/node": "24.3.0",
+    "@types/semver": "7.7.0",
+    "eslint": "9.34.0",
+    "tsdown": "0.22.14",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

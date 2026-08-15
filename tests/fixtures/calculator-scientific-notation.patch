@@ -1,0 +1,149 @@
+diff --git a/README.en.md b/README.en.md
+index 05e3fdd..64c5175 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -63,13 +63,13 @@ export function apply(ctx: Context): void {
+     name: 'calculator',
+     description:
+       'Evaluate a mathematical expression safely. ' +
+-      'Supports +, -, *, /, %, **, parentheses, and functions: ' +
++      'Supports decimal and scientific notation, +, -, *, /, %, **, parentheses, and functions: ' +
+       'abs, ceil, floor, round, max, min, sqrt, pow, log, log2, log10, exp, sin, cos, tan, PI, E.',
+     parameters: {
+       expression: {
+         type: 'string',
+         required: true,
+-        description: 'Mathematical expression, e.g. "15 + 27 * sqrt(9)"',
++        description: 'Mathematical expression, e.g. "1e3 + 2" or "15 + 27 * sqrt(9)"',
+       },
+     },
+     output: {
+@@ -86,7 +86,7 @@ export function apply(ctx: Context): void {
+ 
+ | Category | Items |
+ |------|------|
+-| Arithmetic | `+` `-` `*` `/` `%` `**` (power, right-associative: `2 ** 3 ** 2` = 512) |
++| Numbers and arithmetic | decimals, scientific notation (`1e3`, `1e-3`), `+` `-` `*` `/` `%` `**` |
+ | Functions (single arg) | `abs` `ceil` `floor` `round` `sqrt` `log` `log2` `log10` `exp` `sin` `cos` `tan` |
+ | Functions (multiple args) | `pow(x, y)` `max(a, b, ...)` `min(a, b, ...)` |
+ | Constants | `PI` `E` |
+@@ -183,7 +183,7 @@ The tool name satisfies DeepSeek's function-name constraints (≤64 characters,
+ 1. **Distribution chain**: `@deepseek-ai/dsh-tools` is now published as a private npm package with DSH 0.1.0-rc.6 (npm); the plugin installs directly via `dsh plugin add github:omdsh-dev/...` or the tarball, with no need to place it in the monorepo for workspace resolution
+ 2. **Trigonometric functions use radians**: consistent with `Math.sin`/`Math.cos`; write `sin(30 * PI / 180)` when you need degrees
+ 3. **No big integers**: JS `number` is an IEEE 754 double; the safe integer range is ±9e15, beyond which precision is lost
+-4. **No scientific notation**: `1e5` is rejected by the lexer layer
++4. **Finite doubles only**: scientific notation is supported, but overflow and non-finite results are rejected
+ 
+ ## Testing
+ 
+diff --git a/README.md b/README.md
+index eb3cc37..d452bcd 100644
+--- a/README.md
++++ b/README.md
+@@ -63,13 +63,13 @@ export function apply(ctx: Context): void {
+     name: 'calculator',
+     description:
+       'Evaluate a mathematical expression safely. ' +
+-      'Supports +, -, *, /, %, **, parentheses, and functions: ' +
++      'Supports decimal and scientific notation, +, -, *, /, %, **, parentheses, and functions: ' +
+       'abs, ceil, floor, round, max, min, sqrt, pow, log, log2, log10, exp, sin, cos, tan, PI, E.',
+     parameters: {
+       expression: {
+         type: 'string',
+         required: true,
+-        description: 'Mathematical expression, e.g. "15 + 27 * sqrt(9)"',
++        description: 'Mathematical expression, e.g. "1e3 + 2" or "15 + 27 * sqrt(9)"',
+       },
+     },
+     output: {
+@@ -86,7 +86,7 @@ export function apply(ctx: Context): void {
+ 
+ | 类别 | 项目 |
+ |------|------|
+-| 算术 | `+` `-` `*` `/` `%` `**`（幂，右结合：`2 ** 3 ** 2` = 512） |
++| 数字与算术 | 小数、科学计数法（`1e3`、`1e-3`）、`+` `-` `*` `/` `%` `**` |
+ | 函数（单参） | `abs` `ceil` `floor` `round` `sqrt` `log` `log2` `log10` `exp` `sin` `cos` `tan` |
+ | 函数（多参） | `pow(x, y)` `max(a, b, ...)` `min(a, b, ...)` |
+ | 常量 | `PI` `E` |
+@@ -183,7 +183,7 @@ calculator { expression: "15 + 27 * sqrt(9)" }  →  96
+ 1. **分发链路**：`@deepseek-ai/dsh-tools` 已随 DSH 0.1.0-rc.6（npm）发布为私有 npm 包；插件经 `dsh plugin add github:omdsh-dev/...` 或 tarball 直接安装，无需放入 monorepo 走 workspace 解析
+ 2. **三角函数使用弧度**：与 `Math.sin`/`Math.cos` 一致；需要角度时写 `sin(30 * PI / 180)`
+ 3. **不支持大整数**：JS `number` 是 IEEE 754 double，安全整数范围 ±9e15，超出有精度损失
+-4. **不支持科学计数法**：`1e5` 会被词法层拒绝
++4. **仅限有限双精度数**：支持科学计数法，但会拒绝溢出和非有限结果
+ 
+ ## 测试
+ 
+diff --git a/src/evaluate.ts b/src/evaluate.ts
+index 1ce4d75..410b395 100644
+--- a/src/evaluate.ts
++++ b/src/evaluate.ts
+@@ -48,11 +48,11 @@ function tokenize(input: string): string[] {
+     const ch = input.charAt(i)
+     if (/\s/.test(ch)) { i++; continue }
+     if (/[0-9]/.test(ch) || (ch === '.' && i + 1 < input.length && /[0-9]/.test(input.charAt(i + 1)))) {
+-      const m = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(input.slice(i))
++      const m = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(input.slice(i))
+       if (!m) throw new Error(`Invalid number at position ${i}`)
+-      // CALC-06：数字后紧跟 e/E 是科学计数法形态（含 1e、1e+、1e-5），专门报错
++      // 完整指数部分作为同一个数字 token；残缺的 1e / 1e+ / 1e- 明确拒绝。
+       if (/[eE]/.test(input.charAt(i + m[0].length))) {
+-        throw new Error('Scientific notation is not supported')
++        throw new Error(`Invalid scientific notation at position ${i}`)
+       }
+       tokens.push(m[0]); i += m[0].length; continue
+     }
+@@ -122,7 +122,7 @@ function parse(input: string): number {
+       return value
+     }
+     if (t === ')') throw new Error('Unexpected ")"')
+-    if (/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(t)) return Number(t)
++    if (/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(t)) return Number(t)
+     if (/^[A-Za-z_]\w*$/.test(t)) {
+       // CALC-01：own-property 白名单（Object.hasOwn 不落入原型链）
+       if (Object.hasOwn(CONSTANTS, t)) {
+diff --git a/src/index.ts b/src/index.ts
+index c5df46d..2c0c482 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -19,13 +19,13 @@ export function apply(ctx: Context): void {
+     name: 'calculator',
+     description:
+       'Evaluate a mathematical expression safely. ' +
+-      'Supports +, -, *, /, %, **, parentheses, and functions: ' +
++      'Supports decimal and scientific notation, +, -, *, /, %, **, parentheses, and functions: ' +
+       'abs, ceil, floor, round, max, min, sqrt, pow, log, log2, log10, exp, sin, cos, tan, PI, E.',
+     parameters: {
+       expression: {
+         type: 'string',
+         required: true,
+-        description: 'Mathematical expression, e.g. "15 + 27 * sqrt(9)"',
++        description: 'Mathematical expression, e.g. "1e3 + 2" or "15 + 27 * sqrt(9)"',
+       },
+     },
+     output: {
+diff --git a/tests/evaluate.spec.ts b/tests/evaluate.spec.ts
+index d617450..e68f3c6 100644
+--- a/tests/evaluate.spec.ts
++++ b/tests/evaluate.spec.ts
+@@ -137,12 +137,14 @@ describe('review regressions', () => {
+     expect(() => evaluate(42 as unknown as string)).toThrow('calculator: expression must be a string')
+   })
+ 
+-  it('CALC-06: scientific notation gets a dedicated error', () => {
+-    expect(() => evaluate('1e5')).toThrow('Scientific notation is not supported')
+-    expect(() => evaluate('1e-5')).toThrow('Scientific notation is not supported')
+-    expect(() => evaluate('6.02e23')).toThrow('Scientific notation is not supported')
+-    expect(() => evaluate('1E+3')).toThrow('Scientific notation is not supported')
+-    expect(() => evaluate('1e')).toThrow('Scientific notation is not supported')
++  it('CALC-06: supports complete scientific notation and rejects incomplete exponents', () => {
++    expect(evaluate('1e5')).toBe(100_000)
++    expect(evaluate('1e-5')).toBe(0.00001)
++    expect(evaluate('6.02e2')).toBe(602)
++    expect(evaluate('1E+3 + 2')).toBe(1002)
++    for (const malformed of ['1e', '1e+', '1e-']) {
++      expect(() => evaluate(malformed)).toThrow('Invalid scientific notation')
++    }
+   })
+ 
+   it('boundary: empty expression rejects', () => {

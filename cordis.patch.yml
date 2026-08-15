@@ -1,0 +1,6 @@
+- insert:
+    - id: autoevo
+      name: dsh-plugin-autoevo
+      config:
+        dshHome: !!js dshHomePath()
+        stateDir: !!js dshHomePath('autoevo')
