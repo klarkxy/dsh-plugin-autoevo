@@ -45,11 +45,7 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 ## Try it
 
-```powershell
-npx @deepseek-ai/dsh@0.1.0-rc.6 web
-```
-
-Open http://127.0.0.1:3080 and add an API key in Settings. In another terminal, install AutoEvo, restart Web, then tell the Agent:
+After install and restart, tell the current Agent:
 
 > I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 

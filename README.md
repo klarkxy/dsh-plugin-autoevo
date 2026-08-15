@@ -45,11 +45,7 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 ## 试用
 
-```powershell
-npx @deepseek-ai/dsh@0.1.0-rc.6 web
-```
-
-打开 http://127.0.0.1:3080 ，在设置中填写 API Key。另开终端安装 AutoEvo，重启 Web，然后对 Agent 说：
+安装并重启后，对当前 Agent 说：
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
