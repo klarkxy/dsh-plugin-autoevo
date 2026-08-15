@@ -5,24 +5,22 @@ English | [中文](README.md)
 > Evolution continues.
 
 <p align="center">
-  <img src="docs/assets/persona.jpg" alt="AutoEvo" width="420">
+  <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-Need a capability? Hunt an existing plugin, inspect it, load it, fire it. Upgrade what is almost enough. Writing from scratch is surrender.
-
-`dsh-plugin-autoevo` is the deploy-and-upgrade rig inside DeepSeek Harness. It arms an Agent with community plugins: find, review, slam into a profile, then kit out the ones that are only halfway there.
-
-Sonar hunts. The reactor feeds. Torpedoes deploy. ICBMs upgrade. The ammunition is work other people already shipped.
+`dsh-plugin-autoevo` is a capability-reuse and safe-evolution plugin for DeepSeek Harness (DSH). When an Agent needs a new ability, it checks local tools and skills first, then searches, reviews, and deploys a community plugin — and improves a candidate when only a small gap remains.
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
-## Load
+`Reuse before build. Improve before replace.`
+
+## Install
 
 ```powershell
 dsh plugin --profile web add github:klarkxy/dsh-plugin-autoevo
 ```
 
-Restart DSH. Bundles chamber only at process start.
+Restart the DSH process afterward. Bundles load at process start.
 
 From this checkout:
 
@@ -32,42 +30,54 @@ pnpm build
 pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this-repo>"
 ```
 
-`link:` is for this trusted checkout only. Third-party plugins are packed into owned `file:...tgz` rounds.
+`link:` is only for this trusted checkout. Third-party candidates are materialized as owned `file:...tgz` packages.
 
-## Arsenal
+## How it works
 
-| Gear | Job | Trigger |
-|---|---|---|
-| `capability_resolve` | Inventory local arms, then hunt community ammo | read-only |
-| `plugin_review` | Crack an exact commit and inspect | read-only |
-| `plugin_install` | Deploy after approval, prove it with a live task | approval |
-| `plugin_remove` | Extract one installation by receipt | approval |
+- Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
+- When local capability is insufficient, search GitHub through an authenticated `gh` CLI, then let the Agent rerank. Discovery starts at the `dsh-plugin` topic.
+- Review the exact commit: manifest, README, and the source that matters. Results are paths, derived facts, risk codes, and content hashes.
+- Install when the review is `full + use`, risk is `low` or `medium`, compatibility is `compatible` or `unknown`, and the manifest declares `dsh.bundle.patch`.
+- Install and remove both require a one-time DSH `allowed-once` approval.
+- Temporary trials run in an isolated DSH home. Verification needs a real `tool/call`, a matching successful `tool/result`, and a task result.
+- `partial` candidates get a minimal patch, upstream tests, a local re-review to `full`, then an immutable tgz.
+- After the current task is done, generic improvements can be suggested as a contribution. fork, push, and PR still use `git` / `gh` after another explicit approval.
 
-The model only gets these four.
-
-Deploy gate: `full + use`, risk `low` / `medium`, compatibility `compatible` / `unknown`, manifest must declare `dsh.bundle.patch`. Temporary trials run in an isolated home. A real `tool/call` plus a successful `tool/result` is the only proof that counts. `partial` gets patched, tested, re-reviewed, then kitted on.
-
-## Fire
+## Try it
 
 ```powershell
 npx @deepseek-ai/dsh@0.1.0-rc.6 web
 ```
 
-Open http://127.0.0.1:3080, add a key, load AutoEvo in another terminal, restart, then throw this at her:
+Open http://127.0.0.1:3080 and add an API key in Settings. In another terminal, install AutoEvo, restart Web, then tell the Agent:
 
-> I need a DSH plugin that can evaluate scientific notation. Find an existing one and install it.
+> I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 
-She should draw `capability_resolve` first. GitHub hunting uses the `gh` login already on the machine.
+It should call `capability_resolve` first. GitHub search uses the `gh` login already on this machine.
+
+## Agent tools
+
+| Tool | Role | Surface |
+|---|---|---|
+| `capability_resolve` | Check local capabilities; search GitHub summaries when needed | read-only |
+| `plugin_review` | Review a GitHub exact commit or a local Git checkout | read-only |
+| `plugin_install` | Revalidate the review, request approval, materialize the package, verify a real task | approval |
+| `plugin_remove` | Remove exactly one installation by receipt | approval |
+
+The model only sees these four tools.
 
 ## Baseline
 
-`0.1.0` · DSH `0.1.0-rc.6` · Cordis `4.0.1` · Node.js `>=22.19.0 \|\| >=24`
+Maintenance line `0.1.0`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`.
 
 ```powershell
+node --version
+pnpm --version
+gh auth status
 pnpm check
 ```
 
-[Architecture](docs/architecture.md) · [Security](docs/security.md)
+Design: [architecture](docs/architecture.md). Safety gates: [security](docs/security.md).
 
 ## License
 
