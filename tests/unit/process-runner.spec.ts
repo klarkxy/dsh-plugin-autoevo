@@ -23,9 +23,7 @@ describe('subprocess environment boundary', () => {
       NO_COLOR: '1',
       CLICOLOR: '0',
       CLICOLOR_FORCE: '0',
-      GH_FORCE_TTY: '0',
       TERM: 'dumb',
     })
   })
 })
-

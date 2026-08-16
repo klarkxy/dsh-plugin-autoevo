@@ -81,6 +81,11 @@ describe('evolution-mode entry', () => {
     const bad = mockContext({ getValue: { owner: 'other', protocolVersion: 1 } })
     expect(readEvolutionModeMarker(bad.ctx)).toBeUndefined()
 
+    const decorated = mockContext({
+      getValue: { ...createEvolutionModeMarker(), foreign: true },
+    })
+    expect(readEvolutionModeMarker(decorated.ctx)).toBeUndefined()
+
     const missing = mockContext({ getValue: undefined })
     expect(readEvolutionModeMarker(missing.ctx)).toBeUndefined()
   })

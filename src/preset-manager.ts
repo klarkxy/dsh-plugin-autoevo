@@ -2,12 +2,12 @@ import { randomBytes } from 'node:crypto'
 import {
   access,
   constants,
+  lstat,
   mkdir,
   readdir,
   readFile,
   rename,
   rmdir,
-  stat,
   unlink,
   writeFile,
 } from 'node:fs/promises'
@@ -136,6 +136,9 @@ export async function verifyPristine(
   targetDir: string,
   manifest: EvolutionPresetManifest,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!isEvolutionPresetManifest(manifest)) {
+    return { ok: false, reason: 'manifest schema or managed file set is invalid' }
+  }
   const resolvedTarget = path.resolve(targetDir)
   const expectedNames = new Set<string>([
     ...Object.keys(manifest.files),
@@ -153,7 +156,10 @@ export async function verifyPristine(
       return { ok: false, reason: `extra file present: ${name}` }
     }
     const childPath = path.join(resolvedTarget, name)
-    const info = await stat(childPath)
+    const info = await lstat(childPath)
+    if (info.isSymbolicLink()) {
+      return { ok: false, reason: `linked entry is not managed content: ${name}` }
+    }
     if (!info.isFile()) {
       return { ok: false, reason: `unexpected non-file entry: ${name}` }
     }
@@ -196,33 +202,37 @@ async function writeStagedPreset(
   await writeFile(manifestPath, serializeManifest(manifest), 'utf8')
 }
 
-/** Bounded cleanup: only remove files/dirs under known temp tree after containment checks. */
+/** Bounded cleanup for the flat, exact managed preset tree; never follows links. */
 async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Promise<void> {
   const resolvedTree = assertContained(containmentRoot, treeRoot, 'cleanup tree')
   if (!(await pathExists(resolvedTree))) return
 
-  const stack: string[] = [resolvedTree]
-  const directories: string[] = []
+  const rootInfo = await lstat(resolvedTree)
+  if (rootInfo.isSymbolicLink()) {
+    await unlink(resolvedTree)
+    return
+  }
+  if (!rootInfo.isDirectory()) {
+    throw new Error(`AutoEvo refused cleanup of non-directory preset tree: ${resolvedTree}`)
+  }
 
-  while (stack.length > 0) {
-    const current = stack.pop()!
-    assertContained(resolvedTree, current, 'cleanup walk')
-    const info = await stat(current)
-    if (info.isDirectory()) {
-      directories.push(current)
-      const entries = await readdir(current)
-      for (const entry of entries) {
-        stack.push(path.join(current, entry))
-      }
-    } else {
-      await unlink(current)
+  const allowedNames = new Set<string>([
+    ...EVOLUTION_PRESET_MANAGED_CONTENT_FILES,
+    EVOLUTION_PRESET_MANIFEST_FILENAME,
+  ])
+  const entries = await readdir(resolvedTree, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!allowedNames.has(entry.name)) {
+      throw new Error(`AutoEvo refused cleanup of unexpected preset entry: ${entry.name}`)
     }
+    const child = assertContained(resolvedTree, path.join(resolvedTree, entry.name), 'cleanup entry')
+    const childInfo = await lstat(child)
+    if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
+      throw new Error(`AutoEvo refused cleanup of nested preset directory: ${entry.name}`)
+    }
+    await unlink(child)
   }
-
-  for (const directory of directories.reverse()) {
-    assertContained(resolvedTree, directory, 'cleanup rmdir')
-    await rmdir(directory)
-  }
+  await rmdir(resolvedTree)
 }
 
 async function readInstalledManifest(targetDir: string): Promise<EvolutionPresetManifest | undefined> {

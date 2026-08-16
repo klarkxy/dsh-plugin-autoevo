@@ -5,6 +5,7 @@ import { Config as ConfigSchema, normalizeConfig, type Config as ConfigShape } f
 import { CreationGuard } from './creation-guard.js'
 import {
   EVOLUTION_MODE_SERVICE_KEY,
+  EVOLUTION_PRESET_ID,
   isEvolutionModeMarker,
 } from './evolution-contracts.js'
 import { materializeEvolutionPreset } from './preset-manager.js'
@@ -32,6 +33,7 @@ const POLICY = `Capability reuse policy:
 9. Finish the user's task before suggesting an upstream contribution. Never fork, push, or open an upstream PR without explicit user approval.`
 
 interface AgentPresetsService {
+  composedPreset?(agentCtx: Agent['ctx']): string | undefined
   serviceFor?(agent: Agent, key: string): unknown
 }
 
@@ -43,14 +45,17 @@ function resolveAgentPresets(ctx: Context): AgentPresetsService | undefined {
 function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean {
   return (agent: Agent) => {
     const agentPresets = resolveAgentPresets(ctx)
-    if (!agentPresets?.serviceFor) return false
+    if (!agentPresets?.serviceFor || !agentPresets.composedPreset) return false
     try {
+      if (agentPresets.composedPreset(agent.ctx) !== EVOLUTION_PRESET_ID) return false
       return isEvolutionModeMarker(agentPresets.serviceFor(agent, EVOLUTION_MODE_SERVICE_KEY))
     } catch {
       return false
     }
   }
 }
+
+export const _testing = { createIsEvolutionMode }
 
 export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)

@@ -1,5 +1,6 @@
 import Schema from "@deepseek-ai/schemastery";
 import { Context } from "@deepseek-ai/cordis";
+import { Agent } from "@deepseek-ai/dsh-agent";
 //#region src/config.d.ts
 interface Config$1 {
   dshHome?: string;
@@ -24,7 +25,11 @@ declare const name = "autoevo";
 declare const inject: readonly ["tools", "skills", "subprocess", "systemPrompt"];
 type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
+declare function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean;
+declare const _testing: {
+  createIsEvolutionMode: typeof createIsEvolutionMode;
+};
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { Config, apply, inject, name };
+export { Config, _testing, apply, inject, name };
 //# sourceMappingURL=index.d.ts.map

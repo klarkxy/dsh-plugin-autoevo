@@ -77,6 +77,8 @@ export function createEvolutionModeMarker(): EvolutionModeMarker {
 export function isEvolutionModeMarker(value: unknown): value is EvolutionModeMarker {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort((a, b) => a.localeCompare(b))
+  if (keys.length !== 2 || keys[0] !== 'owner' || keys[1] !== 'protocolVersion') return false
   return record.owner === EVOLUTION_MODE_OWNER
     && record.protocolVersion === EVOLUTION_MODE_PROTOCOL_VERSION
 }
@@ -89,6 +91,10 @@ export function isEvolutionPresetManifest(value: unknown): value is EvolutionPre
   if (typeof record.templateVersion !== 'string' || record.templateVersion.length === 0) return false
   if (record.files === null || typeof record.files !== 'object' || Array.isArray(record.files)) return false
   const files = record.files as Record<string, unknown>
+  const expectedFiles = [...EVOLUTION_PRESET_MANAGED_CONTENT_FILES].sort((a, b) => a.localeCompare(b))
+  const actualFiles = Object.keys(files).sort((a, b) => a.localeCompare(b))
+  if (actualFiles.length !== expectedFiles.length) return false
+  if (actualFiles.some((key, index) => key !== expectedFiles[index])) return false
   for (const [key, digest] of Object.entries(files)) {
     if (typeof key !== 'string' || key.length === 0) return false
     if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) return false

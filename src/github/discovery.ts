@@ -2,6 +2,7 @@ import type { RuntimeConfig } from '../config.js'
 import type { RemotePluginCandidate } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import type { CommandRunner } from '../process/runner.js'
+import { sha256 } from '../state/hashes.js'
 
 interface GithubSearchItem {
   full_name?: unknown
@@ -43,14 +44,16 @@ function asSearchResponse(stdout: string): GithubSearchResponse {
     if (!value || typeof value !== 'object') throw new Error('not an object')
     return value as GithubSearchResponse
   } catch (cause) {
-    const preview = cleaned.replace(/\s+/gu, ' ').slice(0, 240) || '<empty>'
+    const stdoutBytes = Buffer.byteLength(cleaned)
+    const stdoutSha256 = sha256(cleaned)
     throw new EvolutionError(
       'github_unavailable',
-      `GitHub returned malformed repository search data (${Buffer.byteLength(cleaned)} bytes): ${preview}`,
+      `GitHub returned malformed repository search data (${stdoutBytes} bytes, sha256 ${stdoutSha256})`,
       {
         cause: cause instanceof Error ? cause.message : String(cause),
-        stdoutPreview: preview,
-        stdoutBytes: Buffer.byteLength(cleaned),
+        parseCategory: 'invalid_json',
+        stdoutBytes,
+        stdoutSha256,
       },
     )
   }

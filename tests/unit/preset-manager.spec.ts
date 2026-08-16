@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -144,6 +144,34 @@ describe('materializeEvolutionPreset', () => {
     expect(await readFile(path.join(target, 'notes.txt'), 'utf8')).toBe('mine\n')
   })
 
+  it('preserves a same-name directory with a plausible but incomplete manifest', async () => {
+    const root = await tempDir('autoevo-preset-incomplete-manifest')
+    const dshHome = path.join(root, 'dsh')
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    await mkdir(target, { recursive: true })
+    const manifest = {
+      owner: 'dsh-plugin-autoevo',
+      schemaVersion: 1,
+      templateVersion: 'foreign',
+      files: {},
+    }
+    await writeFile(
+      path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME),
+      `${JSON.stringify(manifest)}\n`,
+      'utf8',
+    )
+    const templateDir = await writeTemplate(root, baseTemplate)
+
+    const result = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+
+    expect(result.status).toBe('preserved')
+    expect(result.reason).toMatch(/no valid AutoEvo manifest/u)
+    expect(JSON.parse(await readFile(
+      path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME),
+      'utf8',
+    ))).toEqual(manifest)
+  })
+
   it('preserves when a managed file is missing', async () => {
     const root = await tempDir('autoevo-preset-missing')
     const dshHome = path.join(root, 'dsh')
@@ -234,5 +262,32 @@ describe('materializeEvolutionPreset', () => {
     }
     const manifest = buildManifest(hashes)
     await expect(verifyPristine(target, manifest)).resolves.toEqual({ ok: true })
+  })
+
+  it('never follows linked entries while verifying or cleaning an owned temp tree', async () => {
+    const root = await tempDir('autoevo-preset-link')
+    const outside = path.join(root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'keep.txt'), 'keep\n', 'utf8')
+
+    const tree = path.join(root, 'presets', '.evolution.backup-link')
+    await mkdir(tree, { recursive: true })
+    await writeFile(path.join(tree, EVOLUTION_PRESET_MANIFEST_FILENAME), '{}\n', 'utf8')
+    await writeFile(path.join(tree, 'agent.cordis.yml'), 'agent\n', 'utf8')
+    await symlink(outside, path.join(tree, 'preset.yml'), 'junction')
+
+    const manifest = buildManifest({
+      'preset.yml': sha256(Buffer.from('anything')),
+      'agent.cordis.yml': sha256(Buffer.from('agent\n')),
+    })
+    await expect(verifyPristine(tree, manifest)).resolves.toEqual({
+      ok: false,
+      reason: expect.stringContaining('linked entry'),
+    })
+
+    await _testing.cleanupOwnedTree(tree, path.dirname(tree))
+    expect(await readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe('keep\n')
+    await expect(readFile(path.join(tree, 'agent.cordis.yml'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

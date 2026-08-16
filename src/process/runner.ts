@@ -44,7 +44,6 @@ function effectiveEnvironment(
     env.NO_COLOR = '1'
     env.CLICOLOR = '0'
     env.CLICOLOR_FORCE = '0'
-    env.GH_FORCE_TTY = '0'
     if (env.TERM === undefined) env.TERM = 'dumb'
   }
   if (/^git(?:\.exe)?$/iu.test(command)) {
