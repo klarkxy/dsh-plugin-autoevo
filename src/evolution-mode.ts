@@ -2,7 +2,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import { CREATOR_SKILL_NAME, registerCreatorSkill } from './creator-skill.js'
 import {
   EVOLUTION_MODE_SERVICE_KEY,
-  EVOLUTION_PRESET_DISPLAY_NAME,
   createEvolutionModeMarker,
   isEvolutionModeMarker,
   type EvolutionModeMarker,
@@ -11,7 +10,7 @@ import {
 export const name = 'autoevo-evolution-mode'
 export const inject = ['skills', 'systemPrompt'] as const
 
-const EVOLUTION_WORKFLOW = `Capability Evolution mode (${EVOLUTION_PRESET_DISPLAY_NAME}):
+const EVOLUTION_WORKFLOW = `Capability Evolution mode:
 1. Reuse first, improve second, create last. Prefer existing tools, skills, and reviewed plugins over building from scratch.
 2. Before any new capability work, call capability_resolve for the concrete requirement. Treat its authorization as the sole authority: reuse_required / review_required / modify_required block scratch creation; only scratch_ready permits one successful cordis_define with plugin.kind="new". reuse_required is terminal for the dynamic-new branch: use the named capability directly; do not inspect Cordis, design a wrapper, or troubleshoot unrelated scaffolding to turn that capability into a new Plugin. If reuse is technically unavailable, report that concrete failure instead of bypassing the authorization.
 3. For dynamic Cordis Plugin work in this mode, load ${CREATOR_SKILL_NAME} and follow its workflow. Technical failures of cordis_define(kind:new) may retry under the same live grant; a successful define consumes it.

@@ -1,3 +1,3 @@
 name: 能力进化
-description: 先复用，再改进，最后才创建
+description: 用于按需创造新能力：具备创造模式的全部能力，并提供社区插件复用、审查安装和受控的动态 Cordis 插件创建。
 order: 5

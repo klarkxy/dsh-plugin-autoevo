@@ -30,7 +30,7 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agent 身份的 `cordis_define(kind:new)`。
 
-1. 真·能力进化模式：`agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 必须返回 owner 为 `dsh-plugin-autoevo` 且协议版本匹配的标记。preset id 或同名外来 preset 不能冒充。
+1. 真正的能力进化模式：`agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 必须返回 owner 为 `dsh-plugin-autoevo` 且协议版本匹配的标记。preset id 或同名外来 preset 不能冒充。
 2. 模式外：拒绝并提示切换到 **能力进化**；即使内存里残留 `scratch_ready` 也不放行。
 3. 模式内：没有当前 Agent 的 `scratch_ready` 权限时，调用会以明确理由失败；`reuse_required`、`modify_required` 与 `review_required` 均不能创建。权限在调用进入前绑定 callId，避免并发消费；失败或取消后恢复，成功后消费。每次新的 `capability_resolve` 先撤销旧权限，并建立新的 generation；较晚返回的旧解析，以及不属于该 Agent 当前 resolution 的 review，都不能恢复或覆盖权限。
 
@@ -55,7 +55,7 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 { "kind": "task/result", "resultSha256": "...", "matchedExpectation": true }
 ```
 
-验证器核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。stdout 日志不再算任务完成。最终回答只保存 SHA-256；如果调用方给出预期文本，observer 只额外保存匹配布尔值。
+验证器核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。仅凭 stdout 日志不算任务完成。最终回答只保存 SHA-256；如果调用方给出预期文本，observer 只额外保存匹配布尔值。
 
 ## 5. 删除
 
@@ -69,7 +69,7 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 
 ## 7. 运行假设
 
-- 隔离 DSH home/profile 隔离的是配置与依赖。获准安装的包以当前用户权限运行。
+- 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值与 prompt injection 信号，供安装决策使用。
 - `medium` 风险候选在理由清晰的批准后可以试用；`high` 风险停在审查阶段。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。

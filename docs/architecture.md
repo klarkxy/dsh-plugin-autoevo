@@ -40,9 +40,13 @@ capability_resolve
                            plugin_remove
 ```
 
-动态 Cordis 新建入口还有一条执行门禁：带 Agent 身份的 `cordis_define(kind:new)` 首先要求 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回 AutoEvo 的精确模式标记（owner `dsh-plugin-autoevo` + 协议版本）。标记只由 scoped 导出 `dsh-plugin-autoevo/evolution-mode` 在 preset isolate realm 内发布；preset id 本身不是授权依据。模式外调用被拒绝并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
+动态 Cordis 新建入口还有一条执行门禁。带 Agent 身份的 `cordis_define(kind:new)` 首先要求 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回 AutoEvo 的精确模式标记（owner `dsh-plugin-autoevo` + 协议版本）。标记只由 scoped 导出 `dsh-plugin-autoevo/evolution-mode` 在 preset isolate realm 内发布；preset id 本身不是授权依据。
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution` 安全物化到 `<dshHome>/.agent-presets/evolution`：首次写入 staging 后原子 rename；同版本同 hash 为 no-op；仅在已有目录具备有效 AutoEvo manifest 且文件集与 hash 完全一致时升级；用户修改、外来同名目录、缺文件或多余文件一律保留并诊断。配置为 `false` 时跳过安装/升级且永不自动删除。
+模式外调用会被拒绝，并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。
+
+权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
+
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution` 安全物化到 `<dshHome>/.agent-presets/evolution`：首次写入 staging 后原子 rename；同版本同 hash 为 no-op；仅在已有目录具备有效 AutoEvo manifest 且文件集与 hash 完全一致时升级；用户修改、外来同名目录、缺文件或多余文件一律保留并诊断。配置为 `false` 时跳过安装与升级，且永不自动删除。
 
 ## 3. DSH 接缝
 
@@ -74,7 +78,7 @@ stateDir/
    └─ tool-roundtrip.jsonl
 ```
 
-`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写失败时，temporary trial 会补偿清理，persistent 安装保留不会谎报未安装的恢复锚点。
+`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
 
 V3 resolution receipt 记录 `authorization` 与远端发现是否完整。远端候选按仓库归组，以该 GitHub review 及其本地改进 lineage 的最新结果为准：任一 `use` 要求复用，任一 `modify` 要求继续修改，存在未审候选则继续审查，只有全部为 `skip` 才可从零创建。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
 
@@ -97,7 +101,7 @@ GitHub review 为 `partial/modify` 时，Agent 从精确 commit 建立 workspace
 
 本地快照成为 `full/use` 之后才能安装。批准后，安装器把已审查字节复制到 owned snapshot，比较完整路径/hash/size，再用 `npm pack --ignore-scripts` 生成 tgz，复核 snapshot 后交给 DSH 的是 owned `file:...tgz`。temporary artifact 随 trial 清理；persistent artifact 随 receipt 驱动的 remove 清理。
 
-贡献建议在本地修改具备许可证、full fit 且已经 verified 之后标为可建议。实际提交前先完成当前任务、检查 diff 里的用户特定内容，并取得这一次 fork/push/PR 的明确批准。
+只有当本地修改具备许可证、fit 为 `full` 且已 `verified` 时，贡献建议才会标为可建议。实际提交前先完成当前任务、检查 diff 里的用户特定内容，并取得这一次 fork/push/PR 的明确批准。
 
 ## 7. 实现入口
 

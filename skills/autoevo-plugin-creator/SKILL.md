@@ -16,7 +16,7 @@ Do not load or follow the shipped `cordis-plugin-development` skill. Use the cur
 Use this skill only for a request to create or operate a live dynamic Cordis Plugin.
 
 - **New capability**: no existing target Plugin is named and a new `cordis_define` with `plugin.kind: "new"` would be needed.
-- **Existing update or repair**: the request names an existing Plugin (for example `@pluginId`), or diagnoses/restarts a previously defined Plugin. This branch bypasses `capability_resolve`.
+- **Existing update or repair**: the request names an existing Plugin (for example `@pluginId`), or diagnoses/restarts a previously defined Plugin. This branch skips `capability_resolve`.
 - **Near miss**: static DSH/npm plugin development, a repository export or release, documentation, or a general Cordis question. Do not call AutoEvo or Cordis Plugin tools; handle it through the capability that owns that work.
 
 Never issue a broad inventory merely to explore. Inspect only the exact runtime surface needed by the chosen design.

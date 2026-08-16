@@ -34,11 +34,11 @@ async function writeTemplate(root: string, files: Record<string, string>): Promi
 }
 
 const baseTemplate = {
-  'preset.yml': 'name: 能力进化\ndescription: 先复用，再改进，最后才创建\n',
+  'preset.yml': 'name: 能力进化\ndescription: 用于按需创造新能力：具备创造模式的全部能力，并提供社区插件复用、审查安装和受控的动态 Cordis 插件创建。\n',
   'agent.cordis.yml': '- id: tool-cordis\n  name: "@deepseek-ai/dsh-tool-cordis"\n',
 }
 
-function manifestFor(files: Record<keyof typeof baseTemplate, string>, templateVersion = '1') {
+function manifestFor(files: Record<keyof typeof baseTemplate, string>, templateVersion = EVOLUTION_PRESET_TEMPLATE_VERSION) {
   return buildManifest({
     'preset.yml': sha256(Buffer.from(files['preset.yml'])),
     'agent.cordis.yml': sha256(Buffer.from(files['agent.cordis.yml'])),
@@ -124,16 +124,16 @@ describe('materializeEvolutionPreset', () => {
       dshHome,
       enabled: true,
       templateDir: nextTemplate,
-      templateVersion: '2',
+      templateVersion: '3',
       trustedPriorManifests: [manifestFor(baseTemplate)],
     })
     expect(upgraded.status).toBe('upgraded')
-    expect(upgraded.templateVersion).toBe('2')
+    expect(upgraded.templateVersion).toBe('3')
     const body = await readFile(path.join(resolveEvolutionPresetPaths(dshHome).targetDir, 'preset.yml'), 'utf8')
     expect(body).toContain('upgraded')
   })
 
-  it('upgrades the packaged v1 manifest through the built-in allowlist', async () => {
+  it('upgrades the shipped manifest through the built-in allowlist', async () => {
     const root = await tempDir('autoevo-preset-known-release')
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
@@ -350,7 +350,7 @@ describe('materializeEvolutionPreset', () => {
       dshHome,
       enabled: true,
       templateDir: nextTemplate,
-      templateVersion: '2',
+      templateVersion: '3',
       trustedPriorManifests: [manifestFor(baseTemplate)],
       rename: async (from, to) => {
         renameCount += 1

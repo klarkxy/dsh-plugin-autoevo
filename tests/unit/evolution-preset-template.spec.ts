@@ -48,7 +48,7 @@ describe('evolution preset template', () => {
 
   it('persona teaches reuse-before-create without dropping ordinary tools', () => {
     const composition = readFileSync(join(presetRoot, 'agent.cordis.yml'), 'utf8')
-    expect(composition).toContain('能力进化')
+    expect(composition).toContain('Capability Evolution')
     expect(composition).toContain('reuse first')
     expect(composition).toContain('capability_resolve')
     expect(composition).toContain('autoevo-plugin-creator')

@@ -103,7 +103,7 @@ class ScriptedAdapter extends LlmAdapter {
       const denial = pairs[0]
       const denialText = typeof denial.result === 'string' ? denial.result : JSON.stringify(denial.result)
       if (!denial.isError
-        || !denialText.includes('AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the 能力进化 (evolution) agent preset')
+        || !denialText.includes('AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset')
         || denialText.includes('UNKNOWN_TOOL')
         || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }

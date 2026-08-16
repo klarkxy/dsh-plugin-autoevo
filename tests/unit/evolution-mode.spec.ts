@@ -55,7 +55,7 @@ describe('evolution-mode entry', () => {
     const prompt = section.mock.calls[0]![0]
     expect(prompt.name).toBe('autoevo:evolution-mode')
     expect(prompt.order).toBe(119)
-    expect(prompt.text).toContain('能力进化')
+    expect(prompt.text).toContain('Capability Evolution')
     expect(prompt.text).toContain('capability_resolve')
     expect(prompt.text).toContain(CREATOR_SKILL_NAME)
     expect(prompt.text).toContain('reuse_required is terminal')
