@@ -44,9 +44,13 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 安装 AutoEvo 后，默认会把用户 Agent preset **能力进化**（id `evolution`，描述「先复用，再改进，最后才创建」）安全地物化到 `<dshHome>/.agent-presets/evolution`。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 时跳过安装/升级，但**不会**自动删除已有 preset。
 
+该目录属于 DSH 的用户 preset 根，因此 UI 会把它标记为**自定义**、trust 为 `user`；它不是内置系统模式。首次安装或升级后必须重启对应 DSH 进程。AutoEvo 只会升级内容与包内已知历史 manifest 完全一致的受管版本；用户改过文件、manifest、文件集合，或已有同名外国目录时一律保留并记录警告，不覆盖、不删除。
+
 在空白/新会话中把 Agent 切换到 **能力进化**，即可进入受托管的动态创建路径：preset 挂载 `dsh-plugin-autoevo/evolution-mode`，注册 `autoevo-plugin-creator` 技能，并在 isolate realm 内发布 `autoevoEvolutionMode` 标记。仅当 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回该标记时，AutoEvo 才承认当前 Agent 处于真·能力进化模式；preset id 本身不是授权依据。
 
 官方 **创造模式 / Creator** 仍用于既有插件修复与静态开发；AutoEvo **不会**在全局替换 `cordis-plugin-development` 技能。
+
+卸载 AutoEvo 前，先在 DSH 的 Agent preset 管理界面移除 **能力进化**，再移除插件依赖并重启。仅把 `evolutionPreset` 设为 `false` 不会删除现有目录。
 
 ## 工作方式
 

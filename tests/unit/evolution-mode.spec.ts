@@ -58,6 +58,8 @@ describe('evolution-mode entry', () => {
     expect(prompt.text).toContain('能力进化')
     expect(prompt.text).toContain('capability_resolve')
     expect(prompt.text).toContain(CREATOR_SKILL_NAME)
+    expect(prompt.text).toContain('reuse_required is terminal')
+    expect(prompt.text).toContain('do not inspect Cordis')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

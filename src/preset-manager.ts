@@ -14,6 +14,7 @@ import {
 import path from 'node:path'
 import {
   EVOLUTION_PRESET_ID,
+  EVOLUTION_PRESET_KNOWN_MANIFESTS,
   EVOLUTION_PRESET_MANAGED_CONTENT_FILES,
   EVOLUTION_PRESET_MANIFEST_FILENAME,
   EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
@@ -34,6 +35,11 @@ export interface MaterializeEvolutionPresetOptions {
   logger?: { info?(msg: string): void; warn?(msg: string): void }
   /** Test-only rename override (defaults to fs.promises.rename). */
   rename?: (from: string, to: string) => Promise<void>
+  /**
+   * Test-only prior package manifests. Production callers use the built-in
+   * shipped-manifest allowlist, never an on-disk manifest as its own proof.
+   */
+  trustedPriorManifests?: readonly EvolutionPresetManifest[]
 }
 
 export interface EvolutionPresetPaths {
@@ -96,6 +102,10 @@ function serializeManifest(manifest: EvolutionPresetManifest): string {
     templateVersion: manifest.templateVersion,
     files,
   }, null, 2)}\n`
+}
+
+function manifestsMatch(left: EvolutionPresetManifest, right: EvolutionPresetManifest): boolean {
+  return serializeManifest(left) === serializeManifest(right)
 }
 
 async function pathExists(target: string): Promise<boolean> {
@@ -209,8 +219,7 @@ async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Prom
 
   const rootInfo = await lstat(resolvedTree)
   if (rootInfo.isSymbolicLink()) {
-    await unlink(resolvedTree)
-    return
+    throw new Error(`AutoEvo refused cleanup of linked preset tree: ${resolvedTree}`)
   }
   if (!rootInfo.isDirectory()) {
     throw new Error(`AutoEvo refused cleanup of non-directory preset tree: ${resolvedTree}`)
@@ -271,8 +280,16 @@ export async function materializeEvolutionPreset(
   const { files: contentFiles, hashes } = await readTemplateFiles(options.templateDir)
   const desiredManifest = buildManifest(hashes, templateVersion)
 
-  const targetExists = await pathExists(paths.targetDir)
-  if (!targetExists) {
+  let targetInfo: Awaited<ReturnType<typeof lstat>> | undefined
+  try {
+    targetInfo = await lstat(paths.targetDir)
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+      throw error
+    }
+  }
+
+  if (!targetInfo) {
     await mkdir(paths.presetsRoot, { recursive: true })
     assertContained(paths.dshHome, paths.presetsRoot, 'presets root create')
     const stagingDir = assertContained(
@@ -296,9 +313,28 @@ export async function materializeEvolutionPreset(
     }
   }
 
+  if (targetInfo.isSymbolicLink() || !targetInfo.isDirectory()) {
+    const reason = targetInfo.isSymbolicLink()
+      ? 'existing evolution preset target is a link; preserved without changes'
+      : 'existing evolution preset target is not a directory; preserved without changes'
+    options.logger?.warn?.(reason)
+    return { status: 'preserved', targetDir: paths.targetDir, reason }
+  }
+
   const installedManifest = await readInstalledManifest(paths.targetDir)
   if (!installedManifest) {
     const reason = 'existing evolution directory has no valid AutoEvo manifest; preserved without changes'
+    options.logger?.warn?.(reason)
+    return { status: 'preserved', targetDir: paths.targetDir, reason }
+  }
+
+  const isCurrentDesiredManifest = manifestsMatch(installedManifest, desiredManifest)
+  const trustedPriorManifests = options.trustedPriorManifests ?? EVOLUTION_PRESET_KNOWN_MANIFESTS
+  const isKnownPriorManifest = trustedPriorManifests.some((known) => {
+    return isEvolutionPresetManifest(known) && manifestsMatch(installedManifest, known)
+  })
+  if (!isCurrentDesiredManifest && !isKnownPriorManifest) {
+    const reason = 'existing evolution directory manifest is not a known AutoEvo release; preserved without changes'
     options.logger?.warn?.(reason)
     return { status: 'preserved', targetDir: paths.targetDir, reason }
   }
@@ -310,14 +346,7 @@ export async function materializeEvolutionPreset(
     return { status: 'preserved', targetDir: paths.targetDir, reason }
   }
 
-  const sameVersion = installedManifest.templateVersion === templateVersion
-  const sameHashes = EVOLUTION_PRESET_MANAGED_CONTENT_FILES.every(
-    (relative) => installedManifest.files[relative] === desiredManifest.files[relative],
-  )
-  const sameFileSet = Object.keys(installedManifest.files).length === Object.keys(desiredManifest.files).length
-    && Object.keys(desiredManifest.files).every((key) => key in installedManifest.files)
-
-  if (sameVersion && sameHashes && sameFileSet) {
+  if (isCurrentDesiredManifest) {
     return {
       status: 'noop',
       targetDir: paths.targetDir,
@@ -376,6 +405,7 @@ export const _testing = {
   assertContained,
   isPathInside,
   serializeManifest,
+  manifestsMatch,
   cleanupOwnedTree,
   posixJoin,
   listExactChildren,

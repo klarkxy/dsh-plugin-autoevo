@@ -40,17 +40,36 @@ export const EVOLUTION_PRESET_MANAGED_CONTENT_FILES = [
 export type EvolutionPresetManagedContentFile =
   (typeof EVOLUTION_PRESET_MANAGED_CONTENT_FILES)[number]
 
-export interface EvolutionModeMarker {
-  owner: typeof EVOLUTION_MODE_OWNER
-  protocolVersion: typeof EVOLUTION_MODE_PROTOCOL_VERSION
-}
-
 export interface EvolutionPresetManifest {
   owner: typeof EVOLUTION_MODE_OWNER
   schemaVersion: typeof EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION
   templateVersion: string
   /** SHA-256 hex digests keyed by relative posix path for the exact managed file set. */
   files: Record<string, string>
+}
+
+/**
+ * Exact manifests that AutoEvo itself has shipped and may therefore upgrade.
+ *
+ * The on-disk manifest is only an integrity record, not an authority token:
+ * a user can rewrite both content and hashes.  Keep this allowlist in the
+ * package so an altered manifest is preserved instead of being upgraded over.
+ */
+export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
+  Object.freeze({
+    owner: EVOLUTION_MODE_OWNER,
+    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+    templateVersion: '1',
+    files: Object.freeze({
+      'agent.cordis.yml': '1998d90fcb17ab3ca0a43e831ade6fe1f4e9513fe9efbe6777e00c417963edb5',
+      'preset.yml': '6a571f49983f3c3bdde1b70c4500a0594ecea5f67dad7a893895d2952dbda751',
+    }),
+  }),
+])
+
+export interface EvolutionModeMarker {
+  owner: typeof EVOLUTION_MODE_OWNER
+  protocolVersion: typeof EVOLUTION_MODE_PROTOCOL_VERSION
 }
 
 export type EvolutionPresetInstallStatus =

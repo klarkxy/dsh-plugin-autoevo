@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -36,6 +36,13 @@ async function writeTemplate(root: string, files: Record<string, string>): Promi
 const baseTemplate = {
   'preset.yml': 'name: 能力进化\ndescription: 先复用，再改进，最后才创建\n',
   'agent.cordis.yml': '- id: tool-cordis\n  name: "@deepseek-ai/dsh-tool-cordis"\n',
+}
+
+function manifestFor(files: Record<keyof typeof baseTemplate, string>, templateVersion = '1') {
+  return buildManifest({
+    'preset.yml': sha256(Buffer.from(files['preset.yml'])),
+    'agent.cordis.yml': sha256(Buffer.from(files['agent.cordis.yml'])),
+  }, templateVersion)
 }
 
 afterEach(async () => {
@@ -103,11 +110,32 @@ describe('materializeEvolutionPreset', () => {
       enabled: true,
       templateDir: nextTemplate,
       templateVersion: '2',
+      trustedPriorManifests: [manifestFor(baseTemplate)],
     })
     expect(upgraded.status).toBe('upgraded')
     expect(upgraded.templateVersion).toBe('2')
     const body = await readFile(path.join(resolveEvolutionPresetPaths(dshHome).targetDir, 'preset.yml'), 'utf8')
     expect(body).toContain('upgraded')
+  })
+
+  it('upgrades the packaged v1 manifest through the built-in allowlist', async () => {
+    const root = await tempDir('autoevo-preset-known-release')
+    const dshHome = path.join(root, 'dsh')
+    const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
+    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir: packageTemplate })
+
+    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
+      ...baseTemplate,
+      'preset.yml': 'name: next package version\n',
+    })
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: nextTemplate,
+      templateVersion: '2',
+    })
+
+    expect(result.status).toBe('upgraded')
   })
 
   it('preserves user-modified managed files', async () => {
@@ -130,6 +158,40 @@ describe('materializeEvolutionPreset', () => {
     })
     expect(result.status).toBe('preserved')
     expect(await readFile(path.join(target, 'preset.yml'), 'utf8')).toBe('name: user-changed\n')
+  })
+
+  it('preserves recomputed canonical manifests that are not known package releases', async () => {
+    const root = await tempDir('autoevo-preset-recomputed-manifest')
+    const dshHome = path.join(root, 'dsh')
+    const templateDir = await writeTemplate(root, baseTemplate)
+    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const manifestPath = path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME)
+    const modifiedTemplate = {
+      ...baseTemplate,
+      'preset.yml': 'name: user-controlled\n',
+    }
+    const recomputedManifest = manifestFor(modifiedTemplate)
+    const recomputedBytes = _testing.serializeManifest(recomputedManifest)
+    await writeFile(path.join(target, 'preset.yml'), modifiedTemplate['preset.yml'], 'utf8')
+    await writeFile(manifestPath, recomputedBytes, 'utf8')
+
+    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
+      ...baseTemplate,
+      'preset.yml': 'name: next\n',
+    })
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: nextTemplate,
+      templateVersion: '2',
+      trustedPriorManifests: [manifestFor(baseTemplate)],
+    })
+
+    expect(result.status).toBe('preserved')
+    expect(result.reason).toMatch(/not a known AutoEvo release/u)
+    expect(await readFile(path.join(target, 'preset.yml'), 'utf8')).toBe(modifiedTemplate['preset.yml'])
+    expect(await readFile(manifestPath, 'utf8')).toBe(recomputedBytes)
   })
 
   it('preserves a foreign same-name directory without a valid manifest', async () => {
@@ -188,6 +250,7 @@ describe('materializeEvolutionPreset', () => {
       enabled: true,
       templateDir,
       templateVersion: '2',
+      trustedPriorManifests: [manifestFor(baseTemplate)],
     })
 
     expect(result.status).toBe('preserved')
@@ -229,6 +292,7 @@ describe('materializeEvolutionPreset', () => {
       enabled: true,
       templateDir,
       templateVersion: '2',
+      trustedPriorManifests: [manifestFor(baseTemplate)],
     })
     expect(result.status).toBe('preserved')
     expect(result.reason).toMatch(/missing|not pristine/i)
@@ -272,6 +336,7 @@ describe('materializeEvolutionPreset', () => {
       enabled: true,
       templateDir: nextTemplate,
       templateVersion: '2',
+      trustedPriorManifests: [manifestFor(baseTemplate)],
       rename: async (from, to) => {
         renameCount += 1
         // First rename is target -> backup (allow). Second is staging -> target (fail).
@@ -333,5 +398,24 @@ describe('materializeEvolutionPreset', () => {
     expect(await readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe('keep\n')
     await expect(readFile(path.join(tree, 'agent.cordis.yml'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('preserves a root preset junction without touching its external target', async () => {
+    const root = await tempDir('autoevo-preset-root-link')
+    const dshHome = path.join(root, 'dsh')
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const outside = path.join(root, 'outside')
+    await mkdir(path.dirname(target), { recursive: true })
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'keep.txt'), 'keep\n', 'utf8')
+    await symlink(outside, target, 'junction')
+    const templateDir = await writeTemplate(root, baseTemplate)
+
+    const result = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+
+    expect(result.status).toBe('preserved')
+    expect(result.reason).toMatch(/link/u)
+    expect((await lstat(target)).isSymbolicLink()).toBe(true)
+    expect(await readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe('keep\n')
   })
 })

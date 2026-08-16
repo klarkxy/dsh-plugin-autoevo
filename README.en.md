@@ -44,9 +44,13 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 After AutoEvo installs, it safely materializes the user agent preset **Capability Evolution** (id `evolution`, display name `能力进化`, description `先复用，再改进，最后才创建`) under `<dshHome>/.agent-presets/evolution` by default. Config `evolutionPreset` defaults to `true`. Setting it to `false` skips install/update and **never** auto-deletes an existing preset.
 
+Because this directory lives in DSH's user preset root, the UI marks it **Custom** with `user` trust; it is not a built-in system mode. Restart the corresponding DSH process after first install or upgrade. AutoEvo upgrades only managed versions whose files and manifest exactly match a package-known historical release. User-edited files or manifests, an unexpected file set, and a foreign same-name directory are preserved with a warning and are never overwritten or deleted.
+
 Start or switch a blank/new session to **能力进化** for the managed dynamic-creation path. The preset mounts `dsh-plugin-autoevo/evolution-mode`, registers the `autoevo-plugin-creator` skill, and publishes the `autoevoEvolutionMode` marker behind an isolate realm. AutoEvo accepts an Agent as genuine evolution mode only when `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` returns that exact marker; the preset id alone is never authority.
 
 Official **Creator** remains for existing-plugin repair and static development. AutoEvo does **not** globally replace the shipped `cordis-plugin-development` skill.
+
+Before uninstalling AutoEvo, remove **能力进化** through DSH's Agent preset management UI, then remove the plugin dependency and restart. Setting `evolutionPreset` to `false` alone does not delete the existing directory.
 
 ## How it works
 

@@ -2,6 +2,10 @@ import { fileURLToPath } from 'node:url'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { Config as ConfigSchema, normalizeConfig, type Config as ConfigShape } from './config.js'
+import {
+  installCordisInspectCompatibility,
+  type CordisInspectRegistryLike,
+} from './cordis-inspect-compat.js'
 import { CreationGuard } from './creation-guard.js'
 import {
   EVOLUTION_MODE_SERVICE_KEY,
@@ -59,12 +63,21 @@ export const _testing = { createIsEvolutionMode }
 
 export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)
+  const log = ctx.logger('autoevo')
+  const cordisInspect = ctx.get('cordisInspect') as CordisInspectRegistryLike | undefined
+  if (cordisInspect && typeof cordisInspect.register === 'function') {
+    ctx.effect(
+      () => installCordisInspectCompatibility(cordisInspect),
+      'autoevo: share first-party Cordis Inspect providers across Creator and evolution presets',
+    )
+  } else {
+    log.warn('Host cordisInspect registry unavailable; Creator/evolution coexistence compatibility is inactive')
+  }
   const store = new StateStore(config.stateDir)
   const runner = new DshCommandRunner(ctx.subprocess, config)
   const creationGuard = new CreationGuard({ isEvolutionMode: createIsEvolutionMode(ctx) })
   const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard)
 
-  const log = ctx.logger('autoevo')
   void materializeEvolutionPreset({
     dshHome: config.dshHome,
     enabled: config.evolutionPreset,
