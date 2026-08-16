@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-autoevo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH capability reuse and safe evolution layer. Evolution continues.",
   "license": "SATA",
   "repository": {
