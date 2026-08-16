@@ -33,7 +33,7 @@ function denialReason(authorization?: ResolutionAuthorization): string {
   if (authorization.state === 'modify_required') return `${prefix}: improve the reviewed partial candidate instead of building from scratch. ${authorization.reason}`
   if (authorization.state === 'review_required') return `${prefix}: finish or retry candidate discovery and review first. ${authorization.reason}`
   if (authorization.state === 'market_required') {
-    return `${prefix}: install the DSH plugin marketplace first, restart DSH, then call capability_resolve again. ${authorization.reason}`
+    return `${prefix}: wait for the DSH plugin marketplace script install and a DSH restart, then call capability_resolve again. Do not create a plugin. ${authorization.reason}`
   }
   return `${prefix}: the scratch-build authorization has already been reserved or consumed.`
 }

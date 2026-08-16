@@ -176,6 +176,13 @@ export interface InstallationRecord {
   restartRequired: boolean
   removed: boolean
   verification: VerificationEvidence
+  /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
+  installFailure?: {
+    code: string
+    message: string
+    exitCode?: number | null
+    diagnosticHash?: string
+  }
   contributionAdvice?: {
     eligible: boolean
     reason: string

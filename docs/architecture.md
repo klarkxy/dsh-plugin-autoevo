@@ -17,7 +17,7 @@ capability_resolve
    └─ local miss ──► find_dsh_plugin (current Agent scope)
                          │ absent
                          ▼
-                    offer dsh-find-plugin marketplace
+                    script-install dsh-find-plugin (approval)
                          │ installed, no valid result
                          ▼
                     no reusable candidate ──► scratch_ready
@@ -65,7 +65,7 @@ capability_resolve
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，只给出 `awesome-dsh-plugin/dsh-find-plugin` 这一条市场安装候选（`market_required`）；该市场会同步 awesome-dsh-plugin 精选目录。市场已装但没有相关命中，视为没有可复用插件。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
 
 ## 4. 数据与状态
 

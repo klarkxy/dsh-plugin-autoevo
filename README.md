@@ -31,10 +31,12 @@ DSH 的 `plugin` 命令把依赖操作转交给 pnpm。semver、Git tag 和 exac
 ```powershell
 pnpm install
 pnpm build
-pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this-repo>"
+New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
+npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.2.0.tgz"
 ```
 
-`link:` 只用于本仓库这份可信 checkout。第三方候选会打成 owned `file:...tgz`。
+开发包同样使用不可变 `file:...tgz`。这也避开了 DSH rc.6 在 Windows 上转交含空格 `link:` 路径时的参数拆分问题。第三方候选也会打成 owned `file:...tgz`。
 
 ## 能力进化模式
 
@@ -52,7 +54,7 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 - 模式内：本地可复用、候选可修改、或候选尚未审完时同样拒绝创建。只有发现和审查都确认没有可用候选后，才发放一次 `scratch_ready`。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
 - `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
-- 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)。若市场未安装，先请用户审查并安装它（会同步 awesome-dsh-plugin 精选目录），不要直接用 `gh` 搜索。市场已装但没有相关候选时，视为没有可复用插件。
+- 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)。若市场未安装，AutoEvo 在一次性批准后用脚本安装 `dsh-find-plugin` 并尽量热加载到当前进程；热加载失败才需要重启。不要审查市场插件，也不要直接用 `gh` 搜索。市场已装但没有相关候选时，视为没有可复用插件。
 - 审查精确 commit 上的 manifest、README 和必要源码，只输出路径、派生事实、风险代码与内容 hash。
 - 安装条件：`full + use`，风险 `low` 或 `medium`，实际 DSH 版本兼容，且 manifest 声明的 `dsh.bundle.patch` 在快照内可解析。
 - 安装和移除都需要 DSH 一次性批准 `allowed-once`。
@@ -66,13 +68,13 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-它应先调用 `capability_resolve`。如果当前 scope 还没有 `find_dsh_plugin`，应先安装市场插件，而不是直接搜 GitHub。
+它应先调用 `capability_resolve`。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
 
 ## Agent 工具
 
 | 工具 | 作用 | 环境 |
 |---|---|---|
-| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`，没有市场则请用户先安装 | 只读 |
+| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`；没有市场则申请批准并用脚本安装 | 只读 / 装市场时需批准 |
 | `plugin_review` | 审查 GitHub exact commit 或 workspace 内的本地 Git 修改 | 只读 |
 | `plugin_install` | 复核审查凭据、请求批准、安装已审查的包并做真实任务验证 | 需批准 |
 | `plugin_remove` | 按 installation receipt 精确移除 | 需批准 |

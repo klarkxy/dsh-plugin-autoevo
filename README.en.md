@@ -31,10 +31,12 @@ From this checkout:
 ```powershell
 pnpm install
 pnpm build
-pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this-repo>"
+New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
+npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.2.0.tgz"
 ```
 
-`link:` is only for this trusted checkout. Third-party candidates become owned `file:...tgz` packages.
+The development install also uses an immutable `file:...tgz`. This avoids DSH rc.6 splitting a Windows `link:` argument whose path contains spaces. Third-party candidates likewise become owned `file:...tgz` packages.
 
 ## Capability Evolution mode
 
@@ -52,7 +54,7 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 - Inside the mode, reusable local capability, a modifiable candidate, or unfinished review still blocks creation. Only after discovery and review confirm there is no viable candidate does AutoEvo issue one `scratch_ready` grant. Technical failures may retry; success consumes the grant; a new resolution revokes an older one.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not treat generic development tools as plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
-- When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. If that marketplace is missing, ask the user to review and install it first (it syncs the curated awesome-dsh-plugin catalog). Do not search GitHub directly. An installed marketplace with no relevant hit means there is no reusable plugin.
+- When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. If that marketplace is missing, AutoEvo installs `dsh-find-plugin` by script after one-time approval and hot-loads it when the host allows. Restart only if hot-load fails. Do not review the marketplace as the requested capability, and do not search GitHub directly. An installed marketplace with no relevant hit means there is no reusable plugin.
 - Review the exact commit: manifest, README, and the source that matters. Results are paths, derived facts, risk codes, and content hashes.
 - Install when the review is `full + use`, risk is `low` or `medium`, the live DSH runtime is `compatible`, and the declared `dsh.bundle.patch` exists in the snapshot and parses as a Loader patch.
 - Install and remove both require a one-time DSH `allowed-once` approval.
@@ -66,13 +68,13 @@ After install and restart, tell the current Agent:
 
 > I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 
-It should call `capability_resolve` first. If `find_dsh_plugin` is not in the current scope, install the marketplace first instead of searching GitHub.
+It should call `capability_resolve` first. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
 
 ## Agent tools
 
 | Tool | Role | Surface |
 |---|---|---|
-| `capability_resolve` | Check local capabilities; prefer `find_dsh_plugin`; if the marketplace is missing, install it first | read-only |
+| `capability_resolve` | Check local capabilities; prefer `find_dsh_plugin`; if the marketplace is missing, approve a script install | read-only / approval when installing marketplace |
 | `plugin_review` | Review a GitHub exact commit or a local Git checkout | read-only |
 | `plugin_install` | Revalidate the review, request approval, install the reviewed package, verify a real task | approval |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |

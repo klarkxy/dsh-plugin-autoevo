@@ -4,7 +4,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 import { TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
-import { capabilityAnchors, isNameDropMention, normalizeSearchText } from './keywords.js'
+import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
@@ -20,10 +20,19 @@ export function matchConfidence(requirement: string, name: string, description: 
 
   for (const anchor of anchors) {
     let strength = 0
+    const descriptionSignals = new Set(anchor.aliases
+      .filter((alias) => normalizedDescription.includes(alias))
+      // "grok build" and "grok" are the same semantic signal. Collapse
+      // overlapping product aliases so a laundry-list mention does not become
+      // corroboration merely because one phrase contains another.
+      .map((alias) => alias.includes(anchor.key) ? anchor.key : alias))
+    const hasCorroboratingDescriptionSignals = descriptionSignals.size >= 2
     for (const alias of anchor.aliases) {
       if (normalizedName === alias) strength = Math.max(strength, 1)
       else if (normalizedName.includes(alias) || alias.includes(normalizedName)) strength = Math.max(strength, 0.92)
-      if (normalizedDescription.includes(alias) && !isNameDropMention(normalizedDescription, alias)) {
+      if (normalizedDescription.includes(alias)
+        && !isHeavyNameDropMention(normalizedDescription, alias)
+        && (hasCorroboratingDescriptionSignals || !isNameDropMention(normalizedDescription, alias))) {
         strength = Math.max(strength, 0.58)
       }
     }

@@ -28,10 +28,10 @@ Before any new definition, state the concrete capability in one sentence and cal
 | Authorization | Required next action | Scratch definition |
 | --- | --- | --- |
 | `reuse_required` | Use the available local tool or skill for the task. | Stop |
-| `review_required` | Review the indicated candidate with `plugin_review`; act on the resulting authorization. | Stop |
+| `review_required` | Review each indicated candidate with `plugin_review`; act on the resulting authorization. | Stop |
 | `modify_required` | Modify the reviewed partial candidate minimally, then review it again. | Stop |
-| `market_required` | Review/install `awesome-dsh-plugin/dsh-find-plugin`, restart DSH, then resolve again. That marketplace is not the requested capability. | Stop |
-| `scratch_ready` | Inspect the exact runtime contracts, then make one new definition. | Allowed once |
+| `market_required` | AutoEvo installs `dsh-find-plugin` by script after approval and hot-loads it when possible. Tell the user to approve if asked. Restart DSH only if hot-load fails. Do not review the marketplace as the requested capability. | Stop |
+| `scratch_ready` | Only after discovery and review found nothing reusable. If you found a GitHub DSH plugin yourself, call `plugin_review` on that `owner/repo` first instead of recreating it. | Allowed once, and only if no unreviewed GitHub plugin remains |
 
 Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed `cordis_define(kind: "new")` may retry with the same live grant; a successful one consumes it. Do not bypass a non-scratch result by changing wording, creating a same-named Plugin, or defining a static package.
 

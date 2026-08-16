@@ -6,6 +6,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord, VerificationEvidence } from '../../src/contracts.js'
+import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
@@ -191,15 +192,32 @@ describe('lifecycle validation', () => {
     const store = new StateStore(root)
     await store.put('reviews', review())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const launcher = { install: async () => { throw new Error('simulated install failure') } } as unknown as DshLauncher
+    const launcher = { install: async () => {
+      throw new EvolutionError('command_failed', 'dsh exited with code 1', {
+        exitCode: 1,
+        diagnosticHash: 'b'.repeat(64),
+      })
+    } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
-    await expect(installer.install({
+    const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'trial',
       retention: 'temporary',
       verificationTask: 'test calculator',
-    }, execution())).resolves.toMatchObject({ installed: false, verified: false, removed: true })
+    }, execution())
+    expect(result).toMatchObject({
+      installed: false,
+      verified: false,
+      removed: true,
+      installFailure: {
+        code: 'command_failed',
+        message: 'dsh exited with code 1',
+        exitCode: 1,
+        diagnosticHash: 'b'.repeat(64),
+      },
+    })
+    expect(result.verification.reason).toContain(`Diagnostic sha256: ${'b'.repeat(64)}`)
     await expect(readdir(path.join(root, 'trials'))).resolves.toEqual([])
   })
 

@@ -80,7 +80,34 @@ function interruptedVerification(task: string, expectedTools: readonly string[])
   }
 }
 
-function failedInstallation(expectedTools: readonly string[], installState: InstallationState): VerificationEvidence {
+function installFailure(error: unknown): NonNullable<InstallationRecord['installFailure']> {
+  if (error instanceof EvolutionError) {
+    const message = error.message.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
+    const exitCode = typeof error.details.exitCode === 'number' || error.details.exitCode === null
+      ? error.details.exitCode
+      : undefined
+    const diagnosticHash = typeof error.details.diagnosticHash === 'string'
+      && /^[a-f0-9]{64}$/u.test(error.details.diagnosticHash)
+      ? error.details.diagnosticHash
+      : undefined
+    return {
+      code: error.code,
+      message,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(diagnosticHash ? { diagnosticHash } : {}),
+    }
+  }
+  const message = (error instanceof Error ? error.message : String(error))
+    .normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
+  return { code: 'command_failed', message: message || 'Unknown installation failure' }
+}
+
+function failedInstallation(
+  expectedTools: readonly string[],
+  installState: InstallationState,
+  failure: NonNullable<InstallationRecord['installFailure']>,
+): VerificationEvidence {
+  const diagnostic = failure.diagnosticHash ? ` Diagnostic sha256: ${failure.diagnosticHash}.` : ''
   return {
     attempted: false,
     expectedTools: [...expectedTools],
@@ -89,11 +116,12 @@ function failedInstallation(expectedTools: readonly string[], installState: Inst
     failedTools: [],
     sessionFiles: [],
     taskResultObserved: false,
-    reason: installState === 'installed'
+    reason: (installState === 'installed'
       ? 'The DSH installation command did not complete successfully, but profile reconciliation found the dependency installed; verification is still required.'
       : installState === 'not_installed'
         ? 'The DSH installation command did not complete successfully and profile reconciliation found no installed dependency.'
-        : 'The DSH installation command did not complete successfully and profile reconciliation failed; recovery is required before retrying.',
+        : 'The DSH installation command did not complete successfully and profile reconciliation failed; recovery is required before retrying.')
+      + ` ${failure.message}.${diagnostic}`,
   }
 }
 
@@ -228,7 +256,8 @@ export class PluginInstaller {
 
     try {
       await this.launcher.install(dshHome, input.targetProfile, installSpec, cwd, exec.signal)
-    } catch {
+    } catch (error) {
+      const failure = installFailure(error)
       const removed = input.retention === 'temporary'
       if (removed) await this.removeOwnedDirectory(trialRoot, trialsRoot)
       let installState: InstallationState = 'not_installed'
@@ -246,7 +275,8 @@ export class PluginInstaller {
         installState,
         installed: installState === 'installed',
         removed,
-        verification: failedInstallation(review.manifest.expectedTools, installState),
+        installFailure: failure,
+        verification: failedInstallation(review.manifest.expectedTools, installState, failure),
       }
       await this.store.put('installations', failedRecord)
       return failedRecord

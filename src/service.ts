@@ -7,6 +7,7 @@ import {
   POLICY_VERSION,
   type InstallInput,
   type InstallationRecord,
+  type RemotePluginCandidate,
   type RemoveInput,
   type ResolutionAuthorization,
   type ResolutionRecord,
@@ -15,16 +16,68 @@ import {
   type ReviewResult,
 } from './contracts.js'
 import type { CreationGuard } from './creation-guard.js'
-import { discoverRemoteCandidates } from './discovery/remote.js'
+import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY } from './discovery/remote.js'
 import { EvolutionError } from './errors.js'
+import { validateGithubRepository } from './github/index.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
+import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
+
+function prefersChinese(text: string): boolean {
+  return /[\p{Script=Han}]/u.test(text)
+}
+
+export function adoptGithubCandidate(
+  resolution: ResolutionRecord,
+  repositoryInput: string,
+): { resolution: ResolutionRecord, candidate: RemotePluginCandidate } {
+  const repository = validateGithubRepository(repositoryInput)
+  if (repository.toLowerCase() === FIND_PLUGIN_REPOSITORY.toLowerCase()) {
+    throw new EvolutionError(
+      'invalid_input',
+      'dsh-find-plugin is marketplace infrastructure, not a capability candidate',
+      { repository },
+    )
+  }
+  const existing = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
+  if (existing) return { resolution, candidate: existing }
+
+  const candidate: RemotePluginCandidate = {
+    repository,
+    name: repository.split('/')[1]!,
+    description: '',
+    stars: 0,
+    updatedAt: null,
+    topics: ['dsh-plugin'],
+  }
+  const reason = prefersChinese(resolution.requirement)
+    ? `已把 ${repository} 纳入审查。先看现成插件怎么写，不要直接自建。`
+    : `Adopted ${repository} for review. Inspect the existing plugin before creating one.`
+  const authorization: ResolutionAuthorization = {
+    state: 'review_required',
+    resolutionId: resolution.id,
+    reason,
+  }
+  return {
+    candidate,
+    resolution: {
+      ...resolution,
+      decision: 'inspect_remote',
+      remoteCandidates: [...resolution.remoteCandidates, candidate],
+      remoteCandidateSource: resolution.remoteCandidateSource === 'marketplace-setup' || !resolution.remoteCandidateSource
+        ? 'github'
+        : resolution.remoteCandidateSource,
+      authorization,
+      reasons: [...resolution.reasons, reason],
+    },
+  }
+}
 
 function newResolutionId(requirement: string): string {
   return `resolution_${hashObject({ requirement, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
@@ -69,7 +122,7 @@ function initialAuthorization(
     return {
       state: 'market_required',
       resolutionId,
-      reason: 'Install the DSH plugin marketplace (awesome-dsh-plugin/dsh-find-plugin) first. It syncs the curated catalog. Restart DSH, then call capability_resolve again. Direct GitHub search is skipped because it drifts.',
+      reason: 'The DSH plugin marketplace (dsh-find-plugin) must finish installing and loading before capability search. Restart is required only when current-process loading fails. It is infrastructure, not the requested capability.',
     }
   }
   if (decision === 'inspect_remote') {
@@ -144,6 +197,7 @@ function authorizationForResolution(
 export class CapabilityEvolutionService {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
+  private readonly launcher: DshLauncher
 
   constructor(
     private readonly ctx: Context,
@@ -152,9 +206,9 @@ export class CapabilityEvolutionService {
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
   ) {
-    const launcher = new DshLauncher(runner, config)
-    this.installer = new PluginInstaller(ctx, config, store, launcher, (review, signal) => this.revalidate(review, signal))
-    this.remover = new PluginRemover(ctx, config, store, launcher)
+    this.launcher = new DshLauncher(runner, config)
+    this.installer = new PluginInstaller(ctx, config, store, this.launcher, (review, signal) => this.revalidate(review, signal))
+    this.remover = new PluginRemover(ctx, config, store, this.launcher)
   }
 
   async resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord> {
@@ -180,8 +234,38 @@ export class CapabilityEvolutionService {
       remoteDiscoveryComplete = discovery.complete
       queries = discovery.queries
       reasons.push(...discovery.reasons)
+      if (discovery.source === 'marketplace-setup') {
+        const setup = await installMarketplace({
+          ctx: this.ctx,
+          config: this.config,
+          launcher: this.launcher,
+          cwd: local.cwd,
+          exec,
+          requirement,
+        })
+        reasons.push(setup.reason)
+        if (setup.status === 'loaded') {
+          const again = await discoverRemoteCandidates({
+            ctx: this.ctx,
+            config: this.config,
+            runner: this.runner,
+            cwd: local.cwd,
+            requirement,
+            exec,
+          })
+          remoteCandidates = again.candidates
+          remoteCandidateSource = again.source
+          remoteDiscoveryComplete = again.complete
+          queries = [...queries, ...again.queries]
+          reasons.push(...again.reasons)
+        }
+      }
     }
-    const decision: ResolutionRecord['decision'] = !local.githubShouldRun ? 'use_local' : remoteCandidates.length > 0 ? 'inspect_remote' : 'none'
+    const decision: ResolutionRecord['decision'] = !local.githubShouldRun
+      ? 'use_local'
+      : remoteCandidateSource === 'marketplace-setup' || remoteCandidates.length > 0
+        ? 'inspect_remote'
+        : 'none'
     const id = newResolutionId(requirement)
     const authorization = initialAuthorization(id, decision, remoteDiscoveryComplete, remoteCandidateSource)
     const record: ResolutionRecord = {
@@ -206,14 +290,18 @@ export class CapabilityEvolutionService {
   }
 
   async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult> {
-    const resolution = await this.store.getResolution(input.resolutionId)
+    let resolution = await this.store.getResolution(input.resolutionId)
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
     if (input.sourceKind === 'github') {
       if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
-      const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === input.repository?.toLowerCase())
+      let candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === input.repository?.toLowerCase())
       if (!candidate) {
-        throw new EvolutionError('invalid_input', 'The repository is not a candidate from this resolution', { repository: input.repository })
+        const adopted = adoptGithubCandidate(resolution, input.repository)
+        resolution = adopted.resolution
+        candidate = adopted.candidate
+        await this.store.put('resolutions', resolution)
+        this.creationGuard.applyReviewAuthorization(exec.agent, resolution.authorization!)
       }
       review = await reviewGithubPlugin({
         runner: this.runner,
@@ -318,4 +406,10 @@ export class CapabilityEvolutionService {
   }
 }
 
-export const _testing = { assertRequirement, authorizationForResolution, initialAuthorization, materialReviewFacts }
+export const _testing = {
+  adoptGithubCandidate,
+  assertRequirement,
+  authorizationForResolution,
+  initialAuthorization,
+  materialReviewFacts,
+}

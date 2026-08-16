@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
+import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -33,7 +33,7 @@ const exec = {
 
 describe('remote discovery precedence', () => {
   it('uses a current-scope find_dsh_plugin result without calling gh', async () => {
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_request: { arguments: { query: string, lang: string } }) => ({
       isError: false as const,
       value: {
         results: [{
@@ -54,9 +54,13 @@ describe('remote discovery precedence', () => {
     const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: '科学计数法计算器', exec })
 
     expect(get).toHaveBeenCalledWith(FIND_PLUGIN_TOOL, exec.agent)
+    const queries = execute.mock.calls.map((call) => (call[0] as { arguments: { query: string, lang: string } }).arguments)
+    expect(queries.length).toBeGreaterThan(1)
+    expect(queries.some((item) => item.query === 'scientific notation' || item.query === '科学计数法')).toBe(true)
+    expect(queries.every((item) => item.lang === 'zh')).toBe(true)
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({
       name: FIND_PLUGIN_TOOL,
-      arguments: expect.objectContaining({ query: 'calculator', lang: 'zh', limit: 5 }),
+      arguments: expect.objectContaining({ limit: 5 }),
       parent: exec.token,
       rootCallId: exec.rootCallId,
     }))
@@ -86,24 +90,25 @@ describe('remote discovery precedence', () => {
     expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.source).toBe('marketplace-setup')
-    expect(result.candidates).toEqual([expect.objectContaining({ repository: FIND_PLUGIN_REPOSITORY })])
-    expect(result.reasons.join(' ')).toContain('Install the DSH plugin marketplace')
+    expect(result.candidates).toEqual([])
+    expect(result.reasons.join(' ')).toContain('will install the DSH plugin marketplace')
   })
 
   it('does not fall back to GitHub when the installed marketplace returns nothing relevant', async () => {
+    const execute = vi.fn(async (_request: { arguments: { query: string } }) => ({
+      isError: false as const,
+      value: { results: [{
+        name: 'open-design',
+        url: 'https://github.com/nexu-io/open-design',
+        description: 'Claude Code / Codex / Cursor / OpenCode design plugin',
+        stars: 99,
+      }] },
+      content: [],
+    }))
     const ctx = {
       tools: {
         get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => ({
-          isError: false as const,
-          value: { results: [{
-            name: 'open-design',
-            url: 'https://github.com/nexu-io/open-design',
-            description: 'Claude Code / Codex / Cursor / OpenCode design plugin',
-            stars: 99,
-          }] },
-          content: [],
-        })),
+        execute,
       },
     } as unknown as Context
     const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
@@ -121,6 +126,7 @@ describe('remote discovery precedence', () => {
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
     expect(result.reasons.join(' ')).toContain('GitHub fallback was not used')
+    expect(execute.mock.calls.some((call) => (call[0] as { arguments: { query: string } }).arguments.query.includes('codex'))).toBe(true)
   })
 
   it('treats an empty marketplace result as no reusable candidate', async () => {
@@ -219,6 +225,53 @@ describe('remote discovery precedence', () => {
     expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([candidate])
   })
 
+  it('runs every marketplace phrase and keeps GitHub hits that match the requirement', async () => {
+    const execute = vi.fn(async (request: { arguments: { query: string } }) => {
+      if (request.arguments.query.includes('grok build')) {
+        return {
+          isError: false as const,
+          value: { results: [{
+            name: 'dsh-plugin-grok',
+            url: 'https://github.com/toolazytoname/dsh-plugin-grok',
+            description: 'Call the local Grok Build CLI from DSH',
+            stars: 4,
+          }] },
+          content: [],
+        }
+      }
+      return {
+        isError: false as const,
+        value: { results: [{
+          name: 'EchoBird',
+          url: 'https://github.com/edison7009/EchoBird',
+          description: 'Claude Code, Codex CLI, Grok Build, DeepSeek Harness, Kimi Code',
+          stars: 3041,
+        }] },
+        content: [],
+      }
+    })
+    const ctx = {
+      tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute },
+    } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
+      exec,
+    })
+
+    expect(runner.run).not.toHaveBeenCalled()
+    expect(execute.mock.calls.length).toBeGreaterThan(1)
+    expect(result.source).toBe('dsh-find-plugin')
+    expect(result.candidates).toEqual([expect.objectContaining({
+      repository: 'toolazytoname/dsh-plugin-grok',
+    })])
+  })
+
   it('fails closed when the installed marketplace throws', async () => {
     const ctx = {
       tools: {
@@ -234,5 +287,34 @@ describe('remote discovery precedence', () => {
     expect(result.candidates).toEqual([])
     expect(result.complete).toBe(false)
     expect(result.reasons.join(' ')).toContain('unavailable')
+  })
+
+  it('keeps discovery incomplete when only some marketplace queries succeed', async () => {
+    let calls = 0
+    const ctx = {
+      tools: {
+        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
+        execute: vi.fn(async () => {
+          calls += 1
+          if (calls === 1) return { isError: false as const, value: { results: [] }, content: [] }
+          throw new Error('transient marketplace failure')
+        }),
+      },
+    } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
+      exec,
+    })
+
+    expect(calls).toBeGreaterThan(1)
+    expect(result.candidates).toEqual([])
+    expect(result.complete).toBe(false)
+    expect(result.reasons.join(' ')).toContain('transient marketplace failure')
   })
 })

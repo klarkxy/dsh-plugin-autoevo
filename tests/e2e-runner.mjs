@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 const scenario = process.argv[2] ?? 'full-flow'
-const supported = new Set(['resolve-local', 'adversarial-define', 'full-flow', 'partial-flow'])
+const supported = new Set(['resolve-local', 'adversarial-define', 'marketplace-flow', 'full-flow', 'partial-flow'])
 if (!supported.has(scenario)) throw new Error(`unknown E2E scenario: ${scenario}`)
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
@@ -131,7 +131,22 @@ async function filesBelow(directory, suffix) {
 }
 
 async function installPlugin() {
-  const localSpec = `link:${projectRoot.replaceAll('\\', '/')}`
+  // DSH rc.6 forwards plugin arguments through a Windows shell. A workspace
+  // link whose path contains spaces can be split before pnpm sees it, so the
+  // E2E bootstrap uses the same immutable-tarball shape as real owned
+  // artifacts instead of depending on shell quoting.
+  const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+  const packed = await runProcess(process.execPath, [
+    npmCli,
+    'pack',
+    projectRoot,
+    '--pack-destination',
+    root,
+    '--ignore-scripts',
+  ], { env: { npm_config_cache: path.join(root, 'npm-cache') } })
+  const archive = packed.stdout.trim().split(/\r?\n/u).at(-1)
+  assert.ok(archive, 'npm pack did not report an archive')
+  const localSpec = `file:${path.join(root, archive).replaceAll('\\', '/')}`
   await runDsh(['plugin', '--profile', 'headless', 'add', '--save-exact', localSpec])
   const profile = JSON.parse(await readFile(path.join(dshHome, 'profiles', 'headless', 'package.json'), 'utf8'))
   assert.equal(profile.dependencies['dsh-plugin-autoevo'], localSpec)
@@ -170,8 +185,8 @@ async function runScenario() {
     { id: 'autoevo', config: {
       dshHome,
       stateDir,
-      dshCommand: process.execPath,
-      dshCommandArgs: [dshBin],
+      dshCommand: scenario === 'marketplace-flow' ? 'dsh' : process.execPath,
+      dshCommandArgs: scenario === 'marketplace-flow' ? [] : [dshBin],
       commandTimeoutMs: 120_000,
       verificationPatchPaths: [childPatch],
     } },
@@ -183,12 +198,16 @@ async function runScenario() {
   const mainPatch = await writePatch('main.cordis.yml', mainPatches)
   const task = scenario === 'resolve-local' || scenario === 'adversarial-define'
     ? 'Resolve a capability that is already local and report the decision.'
+    : scenario === 'marketplace-flow'
+      ? 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.'
     : 'Exercise the approved capability reuse workflow and report only after cleanup.'
   const result = await runDsh(['--profile', 'headless', '--patch', mainPatch, task], 600_000)
   const expectedMarker = scenario === 'resolve-local'
     ? 'E2E_RESOLVE_LOCAL_OK'
     : scenario === 'adversarial-define'
       ? 'E2E_ADVERSARIAL_DEFINE_OK'
+      : scenario === 'marketplace-flow'
+        ? 'E2E_MARKETPLACE_FLOW_OK'
       : scenario === 'full-flow' ? 'E2E_FULL_FLOW_OK' : 'E2E_PARTIAL_FLOW_OK'
   assert.match(result.stdout, new RegExp(expectedMarker, 'u'))
 
@@ -212,6 +231,19 @@ async function runScenario() {
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
     return { scenario, marker: expectedMarker, remoteSearchSkipped: true }
+  }
+
+  if (scenario === 'marketplace-flow') {
+    const profile = JSON.parse(await readFile(path.join(dshHome, 'profiles', 'headless', 'package.json'), 'utf8'))
+    assert.equal(typeof profile.dependencies['dsh-find-plugin'], 'string')
+    assert.ok(profile.dsh.profile.bundles.includes('dsh-find-plugin'))
+    return {
+      scenario,
+      marker: expectedMarker,
+      marketplaceDependency: profile.dependencies['dsh-find-plugin'],
+      hotLoad: 'same process',
+      search: 'dsh-plugin-grok discovered',
+    }
   }
 
   const installationFiles = await filesBelow(path.join(stateDir, 'installations'), '.json')

@@ -79,6 +79,7 @@ class ScriptedAdapter extends LlmAdapter {
     }
 
     if (this.config.scenario === 'adversarial-define') return this.adversarialDefine(pairs)
+    if (this.config.scenario === 'marketplace-flow') return this.marketplaceFlow(pairs)
 
     if (this.config.scenario === 'full-flow') return this.fullFlow(pairs)
     if (this.config.scenario === 'partial-flow') return this.partialFlow(pairs)
@@ -115,6 +116,32 @@ class ScriptedAdapter extends LlmAdapter {
     return resolution?.decision === 'use_local'
       ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} local=${JSON.stringify(resolution)}` }
       : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected use_local ${JSON.stringify(resolution)}` }
+  }
+
+  marketplaceFlow(pairs) {
+    if (pairs.length === 0) {
+      return {
+        kind: 'tool',
+        name: 'capability_resolve',
+        arguments: { requirement: '在 DSH 会话中调用 xAI Grok Build 的能力' },
+      }
+    }
+    const last = pairs.at(-1)
+    if (last?.isError) {
+      return { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(last.result)}` }
+    }
+    const resolution = last?.result
+    const repositories = resolution?.remoteCandidates?.map((candidate) => candidate.repository) ?? []
+    const passed = resolution?.remoteCandidateSource === 'dsh-find-plugin'
+      && resolution?.authorization?.state === 'review_required'
+      && resolution?.remoteDiscoveryComplete === true
+      && resolution?.queries?.some((query) => query.includes('grok build'))
+      && repositories.some((repository) => /dsh-(?:grok|xai|oauth)/iu.test(repository))
+      && !repositories.includes('edison7009/EchoBird')
+      && resolution?.reasons?.some((reason) => reason.includes('hot-loaded') || reason.includes('热加载'))
+    return passed
+      ? { kind: 'text', text: `E2E_MARKETPLACE_FLOW_OK ${JSON.stringify({ repositories, queries: resolution.queries })}` }
+      : { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(resolution)}` }
   }
 
   fullFlow(pairs) {

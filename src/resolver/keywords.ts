@@ -3,6 +3,12 @@ const STOP_WORDS = new Set([
   'want', 'with', '需要', '希望', '可以', '帮我', '功能', '能力', '插件', '工具',
 ])
 
+const HOST_GENERIC_TERMS = new Set([
+  'dsh', 'deepseek', 'harness', 'session', 'cli', 'app', 'user',
+  'agentic', 'coding', 'api', 'chat', 'completion', 'completions', 'key', 'model', 'service',
+  'com', 'www', 'html', 'http', 'https',
+])
+
 const GENERIC_TERMS = new Set([
   'plugin', 'tool', 'api', 'content', 'search', 'build', 'create', 'platform',
   '插件', '工具', '接口', '内容', '搜索', '构建', '创建', '平台',
@@ -39,7 +45,7 @@ const CONCEPTS: ReadonlyArray<{ patterns: RegExp[]; queries: string[] }> = [
     queries: ['browser automation', 'playwright', 'screenshot', 'web testing'],
   },
   {
-    patterns: [/telegram/iu, /电报/u, /forum topic/iu, /消息/u],
+    patterns: [/telegram/iu, /电报/u, /forum topic/iu],
     queries: ['telegram', 'telegram bot', 'messaging'],
   },
   {
@@ -80,10 +86,12 @@ interface CapabilityAnchorDefinition {
 }
 
 const ANCHOR_DEFINITIONS: ReadonlyArray<CapabilityAnchorDefinition> = [
+  { key: 'grok', patterns: [/\bgrok(?:\s+build)?\b/iu, /\bxai\b/iu], aliases: ['grok build', 'grok', 'xai'], weight: 1.4 },
+  { key: 'codex', patterns: [/\bopenai\s+codex\b/iu, /\bcodex(?:\s+cli)?\b/iu], aliases: ['openai codex', 'codex'], weight: 1.4 },
   { key: 'powershell', patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu], aliases: ['powershell', 'pwsh', '命令行', 'shell command'], weight: 0.9 },
   { key: 'browser', patterns: [/浏览器/u, /网页/u, /chrome/iu, /browser/iu, /playwright/iu], aliases: ['浏览器', '网页', 'chrome', 'browser', 'playwright', 'browser automation', 'web testing'], weight: 0.65 },
   { key: 'screenshot', patterns: [/截图/u, /screenshot/iu], aliases: ['截图', 'screenshot'], weight: 0.7 },
-  { key: 'telegram', patterns: [/telegram/iu, /电报/u, /forum topic/iu, /消息/u], aliases: ['telegram', '电报', 'forum topic', '消息', 'messaging'], weight: 0.9 },
+  { key: 'telegram', patterns: [/telegram/iu, /电报/u, /forum topic/iu], aliases: ['telegram', '电报', 'forum topic', 'messaging'], weight: 0.9 },
   { key: 'calculation', patterns: [/计算/u, /算式/u, /calculator/iu, /calculation/iu, /math/iu], aliases: ['计算', '算式', 'calculator', 'calculation', 'math'], weight: 0.85 },
   { key: 'scientific-notation', patterns: [/科学计数法/u, /scientific notation/iu, /exponential notation/iu], aliases: ['科学计数法', 'scientific notation', 'exponential notation'], weight: 0.95 },
   { key: 'pdf', patterns: [/pdf/iu, /文档/u], aliases: ['pdf', '文档', 'document processing'], weight: 0.8 },
@@ -111,16 +119,24 @@ export function normalizeSearchText(value: string): string {
  * A focused "call Codex from DSH" mention is not a name-drop.
  */
 export function isNameDropMention(text: string, alias: string): boolean {
+  return peerProductMentions(text, alias) >= 2
+}
+
+/** A long product catalogue is never corroborating capability evidence. */
+export function isHeavyNameDropMention(text: string, alias: string): boolean {
+  return peerProductMentions(text, alias) >= 4
+}
+
+function peerProductMentions(text: string, alias: string): number {
   const haystack = normalizeSearchText(text)
   const needle = normalizeSearchText(alias)
-  if (!needle || !haystack.includes(needle)) return false
+  if (!needle || !haystack.includes(needle)) return 0
   let peers = 0
   for (const product of PEER_PRODUCTS) {
     if (product === needle || needle.includes(product) || product.includes(needle)) continue
     if (haystack.includes(product)) peers += 1
-    if (peers >= 2) return true
   }
-  return false
+  return peers
 }
 
 export function capabilityQueries(requirement: string): string[] {
@@ -136,6 +152,39 @@ export function capabilityQueries(requirement: string): string[] {
     queries.push(...cjk.slice(0, 2))
   }
   return [...new Set(queries)].slice(0, 5)
+}
+
+const MARKETPLACE_QUERY_LIMIT = 5
+
+/**
+ * Phrase queries for find_dsh_plugin. Keep word order from the requirement so
+ * GitHub search can rank "grok build"; do not reduce the intent to one token.
+ */
+export function marketplaceSearchQueries(requirement: string): string[] {
+  const normalized = normalizeSearchText(requirement)
+  const queries: string[] = []
+  const english = (normalized.match(/[a-z][a-z0-9.+]{2,}/g) ?? [])
+    .filter((token) => !STOP_WORDS.has(token) && !HOST_GENERIC_TERMS.has(token))
+
+  if (english.length >= 2) {
+    queries.push(english.slice(0, 4).join(' '))
+    queries.push(english.slice(0, 2).join(' '))
+    if (english.length >= 3) queries.push(english.slice(1, 3).join(' '))
+  } else if (english.length === 1) {
+    queries.push(english[0]!)
+  }
+
+  for (const concept of CONCEPTS) {
+    if (concept.patterns.some((pattern) => pattern.test(normalized))) queries.push(...concept.queries)
+  }
+
+  if (english.length === 0) {
+    const cjk = (normalized.match(/[\p{Script=Han}]{2,8}/gu) ?? [])
+      .filter((phrase) => !STOP_WORDS.has(phrase) && !HOST_GENERIC_TERMS.has(phrase) && !GENERIC_TERMS.has(phrase))
+    queries.push(...cjk.slice(0, 2))
+  }
+
+  return [...new Set(queries.map((query) => query.trim()).filter(Boolean))].slice(0, MARKETPLACE_QUERY_LIMIT)
 }
 
 export function capabilityTerms(requirement: string): string[] {

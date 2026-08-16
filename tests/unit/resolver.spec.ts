@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { capabilityQueries, capabilityTerms, isNameDropMention } from '../../src/resolver/keywords.js'
+import { capabilityQueries, capabilityTerms, marketplaceSearchQueries, isNameDropMention } from '../../src/resolver/keywords.js'
 import { resolveLocalCapabilities, _testing } from '../../src/resolver/local.js'
 
 describe('capability query generation', () => {
@@ -16,6 +16,42 @@ describe('capability query generation', () => {
 
   it('keeps scientific notation as a reviewable capability term', () => {
     expect(capabilityTerms('计算器需要支持科学计数法')).toContain('scientific notation')
+  })
+
+  it('sends marketplace phrases in requirement order instead of a single guessed token', () => {
+    expect(marketplaceSearchQueries('我需要一个能在dsh里调用codex的能力。')).toEqual(['codex'])
+    expect(marketplaceSearchQueries('在 DSH 会话中调用 xAI Grok Build 的能力')).toEqual([
+      'xai grok build',
+      'xai grok',
+      'grok build',
+    ])
+    expect(marketplaceSearchQueries('通过 xAI API 调用 Grok chat completions，发送消息并返回回复')).toEqual([
+      'xai grok',
+    ])
+  })
+
+  it('keeps product intent focused instead of treating ordinary messages as Telegram', () => {
+    const requirement = '通过 xAI API 调用 Grok chat completions，发送消息并返回回复'
+    expect(_testing.matchConfidence(
+      requirement,
+      'THEWOLFWALKER/dsh-notifier',
+      'Telegram and messaging notifications for DSH',
+    )).toBeLessThan(0.3)
+    expect(_testing.matchConfidence(
+      requirement,
+      'toolazytoname/dsh-plugin-grok',
+      'Drive the local Grok Build CLI from DSH',
+    )).toBeGreaterThanOrEqual(0.3)
+    expect(_testing.matchConfidence(
+      requirement,
+      'hahaha-taotao/dsh-oauth-api',
+      'OAuth plugin for Grok/xAI, Codex, and Claude Code',
+    )).toBeGreaterThanOrEqual(0.3)
+    expect(_testing.matchConfidence(
+      requirement,
+      'edison7009/EchoBird',
+      'Claude Code, Codex CLI, Grok Build, xAI, DeepSeek Harness, Kimi Code, Qwen Code, Aider, OpenCode',
+    )).toBeLessThan(0.3)
   })
 })
 

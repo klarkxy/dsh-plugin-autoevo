@@ -1,7 +1,34 @@
+import path from 'node:path'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError } from '../errors.js'
 import { sha256 } from '../state/hashes.js'
+
+const WINDOWS_CMD_SHIMS = new Set(['.cmd', '.bat'])
+
+/** Node 24 refuses to spawn a .cmd/.bat without a shell (EINVAL). */
+export function argvForResolvedExecutable(
+  executable: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): [string, ...string[]] {
+  if (platform !== 'win32' || !WINDOWS_CMD_SHIMS.has(path.extname(executable).toLowerCase())) {
+    return [executable, ...args]
+  }
+  if (path.basename(executable).toLowerCase() !== 'dsh.cmd') {
+    throw new EvolutionError('command_failed', 'Refusing to shell-interpret an unsupported Windows command shim', {
+      executable,
+    })
+  }
+  // Node 24 refuses to spawn .cmd directly, while cmd.exe introduces a second
+  // parser over user-controlled task text and file specs. npm/pnpm DSH shims
+  // have two stable layouts; invoke the real JS entry with Node instead.
+  const directory = path.dirname(executable)
+  const dshBin = path.basename(directory).toLowerCase() === '.bin'
+    ? path.resolve(directory, '..', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    : path.join(directory, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  return [process.execPath, dshBin, ...args]
+}
 
 export interface CommandRequest {
   argv: readonly [string, ...string[]]
@@ -86,18 +113,26 @@ export class DshCommandRunner implements CommandRunner {
       })
     }
 
-    const handle = this.subprocess.spawn({
-      argv: [executable, ...args],
-      cwd: request.cwd,
-      env: effectiveEnv,
-      graceMs: 2_000,
-      signal,
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: 2_000_000 },
-        stderr: { maxBytes: 512_000 },
-      },
-    })
+    let handle
+    try {
+      handle = this.subprocess.spawn({
+        argv: argvForResolvedExecutable(executable, args),
+        cwd: request.cwd,
+        env: effectiveEnv,
+        graceMs: 2_000,
+        signal,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: 2_000_000 },
+          stderr: { maxBytes: 512_000 },
+        },
+      })
+    } catch (error) {
+      throw new EvolutionError('command_failed', `Failed to start ${command}`, {
+        command,
+        cause: error instanceof Error ? error.message : String(error),
+      })
+    }
 
     let outcome
     try {
@@ -130,4 +165,4 @@ export class DshCommandRunner implements CommandRunner {
   }
 }
 
-export const _testing = { effectiveEnvironment }
+export const _testing = { effectiveEnvironment, argvForResolvedExecutable }

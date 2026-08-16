@@ -110,6 +110,24 @@ describe('resolution authorization state', () => {
       .toBe('review_required')
   })
 
+  it('adopts an explicit GitHub plugin so review can run instead of scratch', () => {
+    const record = resolution()
+    record.decision = 'none'
+    record.remoteCandidates = []
+    delete record.remoteCandidateSource
+    record.authorization = {
+      state: 'scratch_ready',
+      resolutionId: record.id,
+      reason: 'no candidates',
+    }
+    const adopted = _testing.adoptGithubCandidate(record, 'toolazytoname/dsh-plugin-grok')
+    expect(adopted.candidate.repository).toBe('toolazytoname/dsh-plugin-grok')
+    expect(adopted.resolution.decision).toBe('inspect_remote')
+    expect(adopted.resolution.authorization?.state).toBe('review_required')
+    expect(adopted.resolution.remoteCandidates.map((item) => item.repository)).toEqual(['toolazytoname/dsh-plugin-grok'])
+    expect(() => _testing.adoptGithubCandidate(record, 'awesome-dsh-plugin/dsh-find-plugin')).toThrow(/marketplace infrastructure/)
+  })
+
   it('authorizes scratch only after every candidate is rejected', () => {
     expect(_testing.authorizationForResolution(resolution(), [
       candidateReview('acme/one', 'skip', '4'),
