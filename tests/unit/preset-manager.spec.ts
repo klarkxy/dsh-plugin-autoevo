@@ -172,6 +172,50 @@ describe('materializeEvolutionPreset', () => {
     ))).toEqual(manifest)
   })
 
+  it('preserves a managed preset when the manifest has an extra top-level field', async () => {
+    const root = await tempDir('autoevo-preset-extra-manifest-field')
+    const dshHome = path.join(root, 'dsh')
+    const templateDir = await writeTemplate(root, baseTemplate)
+    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const manifestPath = path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    manifest.userNote = 'keep me'
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir,
+      templateVersion: '2',
+    })
+
+    expect(result.status).toBe('preserved')
+    expect(JSON.parse(await readFile(manifestPath, 'utf8'))).toMatchObject({ userNote: 'keep me' })
+  })
+
+  it('preserves a managed preset when the manifest bytes are non-canonical', async () => {
+    const root = await tempDir('autoevo-preset-noncanonical-manifest')
+    const dshHome = path.join(root, 'dsh')
+    const templateDir = await writeTemplate(root, baseTemplate)
+    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const manifestPath = path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    const userFormatting = `${JSON.stringify(manifest)}\n`
+    await writeFile(manifestPath, userFormatting, 'utf8')
+
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir,
+      templateVersion: '2',
+    })
+
+    expect(result.status).toBe('preserved')
+    expect(await readFile(manifestPath, 'utf8')).toBe(userFormatting)
+  })
+
   it('preserves when a managed file is missing', async () => {
     const root = await tempDir('autoevo-preset-missing')
     const dshHome = path.join(root, 'dsh')

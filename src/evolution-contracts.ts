@@ -86,6 +86,10 @@ export function isEvolutionModeMarker(value: unknown): value is EvolutionModeMar
 export function isEvolutionPresetManifest(value: unknown): value is EvolutionPresetManifest {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
+  const expectedKeys = ['files', 'owner', 'schemaVersion', 'templateVersion']
+  const actualKeys = Object.keys(record).sort((a, b) => a.localeCompare(b))
+  if (actualKeys.length !== expectedKeys.length) return false
+  if (actualKeys.some((key, index) => key !== expectedKeys[index])) return false
   if (record.owner !== EVOLUTION_MODE_OWNER) return false
   if (record.schemaVersion !== EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION) return false
   if (typeof record.templateVersion !== 'string' || record.templateVersion.length === 0) return false

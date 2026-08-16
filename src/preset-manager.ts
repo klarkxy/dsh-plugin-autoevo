@@ -239,8 +239,12 @@ async function readInstalledManifest(targetDir: string): Promise<EvolutionPreset
   const manifestPath = path.join(targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME)
   if (!(await pathExists(manifestPath))) return undefined
   try {
-    const raw = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown
-    return isEvolutionPresetManifest(raw) ? raw : undefined
+    const text = await readFile(manifestPath, 'utf8')
+    const raw = JSON.parse(text) as unknown
+    if (!isEvolutionPresetManifest(raw)) return undefined
+    // The manifest itself is managed content. Any byte-level edit, including
+    // formatting-only changes, makes the directory user-owned and fail-closed.
+    return text === serializeManifest(raw) ? raw : undefined
   } catch {
     return undefined
   }
