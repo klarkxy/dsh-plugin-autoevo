@@ -17,7 +17,7 @@ English | [中文](README.md)
 ## Install
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.2
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
 ```
 
 Restart the DSH process afterward. Bundles load at process start.
@@ -25,7 +25,7 @@ Restart the DSH process afterward. Bundles load at process start.
 To upgrade to another published version, replace the tag explicitly and run the install command again. For example:
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.2
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
 ```
 
 DSH forwards `plugin` dependency operations to pnpm: registry semver, Git tags, and exact commits can all define a version boundary, but DSH neither follows new releases automatically nor hot-loads them. Explicitly change the pinned tag/commit and restart the corresponding process.
@@ -86,7 +86,7 @@ AutoEvo adds these four high-level tools and guards `cordis_define(kind:new)` at
 
 ## Baseline
 
-Maintenance line `0.1.2`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
+Maintenance line `0.2.0`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
 
 ```powershell
 node --version

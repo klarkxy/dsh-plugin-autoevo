@@ -17,7 +17,7 @@
 ## 安装
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.2
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
 ```
 
 安装后重启对应 DSH 进程。bundle 在进程启动时加载。
@@ -25,7 +25,7 @@ dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1
 升级到新的已发布版本时，显式替换 tag 后重新执行安装命令，例如：
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.1.2
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
 ```
 
 DSH 的 `plugin` 命令把依赖操作转交给 pnpm：registry semver、Git tag 和 exact commit 都能作为版本边界，但 DSH 不会自动追踪或热加载新版本。固定 tag/commit 后需要显式升级，并重启对应进程。
@@ -86,7 +86,7 @@ AutoEvo 新增这四个高层工具，并监听 DSH 工具执行边界来保护 
 
 ## 基线
 
-维护线 `0.1.2`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
+维护线 `0.2.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
 
 ```powershell
 node --version
