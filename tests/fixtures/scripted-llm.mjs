@@ -78,9 +78,43 @@ class ScriptedAdapter extends LlmAdapter {
       return { kind: 'text', text: `E2E_RESOLVE_LOCAL_OK ${JSON.stringify(pairs.at(-1)?.result)}` }
     }
 
+    if (this.config.scenario === 'adversarial-define') return this.adversarialDefine(pairs)
+
     if (this.config.scenario === 'full-flow') return this.fullFlow(pairs)
     if (this.config.scenario === 'partial-flow') return this.partialFlow(pairs)
     return { kind: 'text', text: 'E2E_SCRIPTED_READY' }
+  }
+
+  adversarialDefine(pairs) {
+    if (pairs.length === 0) {
+      return {
+        kind: 'tool',
+        name: 'cordis_define',
+        arguments: {
+          plugin: {
+            kind: 'new',
+            name: 'adversarial-e2e-probe',
+          },
+        },
+      }
+    }
+
+    if (pairs.length === 1) {
+      const denial = pairs[0]
+      const denialText = typeof denial.result === 'string' ? denial.result : JSON.stringify(denial.result)
+      if (!denial.isError
+        || !denialText.includes('AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.')
+        || denialText.includes('UNKNOWN_TOOL')
+        || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
+        return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }
+      }
+      return { kind: 'tool', name: 'capability_resolve', arguments: { requirement: 'run a PowerShell command' } }
+    }
+
+    const resolution = pairs.at(-1)?.result
+    return resolution?.decision === 'use_local'
+      ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} local=${JSON.stringify(resolution)}` }
+      : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected use_local ${JSON.stringify(resolution)}` }
   }
 
   fullFlow(pairs) {

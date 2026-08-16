@@ -7,6 +7,7 @@ import { errorMessage } from '../errors.js'
 import { discoverGithubCandidates, validateGithubRepository } from '../github/index.js'
 import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries } from '../resolver/keywords.js'
+import { matchConfidence } from '../resolver/local.js'
 
 export const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
 
@@ -24,6 +25,7 @@ interface FindPluginValue {
 export interface RemoteDiscoveryResult {
   candidates: RemotePluginCandidate[]
   source?: RemoteCandidateSource
+  complete: boolean
   queries: string[]
   reasons: string[]
 }
@@ -74,6 +76,17 @@ function normalizeFindPluginCandidates(value: unknown, limit: number): RemotePlu
   return [...candidates.values()]
     .sort((left, right) => right.stars - left.stars || left.repository.localeCompare(right.repository))
     .slice(0, limit)
+}
+
+function relevantFinderCandidates(
+  requirement: string,
+  candidates: readonly RemotePluginCandidate[],
+): RemotePluginCandidate[] {
+  return candidates.filter((candidate) => matchConfidence(
+    requirement,
+    `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
+    `${candidate.description} ${candidate.topics.join(' ')}`,
+  ) >= 0.3)
 }
 
 export function findPluginQuery(requirement: string): string {
@@ -136,10 +149,10 @@ export async function discoverRemoteCandidates(options: {
   if (finder) {
     queries.push(findPluginQuery(options.requirement))
     try {
-      const candidates = await discoverWithFindPlugin(options)
+      const candidates = relevantFinderCandidates(options.requirement, await discoverWithFindPlugin(options))
       if (candidates.length > 0) {
         reasons.push(`find_dsh_plugin returned ${candidates.length} bounded candidate summaries; built-in gh search was skipped.`)
-        return { candidates, source: 'dsh-find-plugin', queries, reasons }
+        return { candidates, source: 'dsh-find-plugin', complete: true, queries, reasons }
       }
       reasons.push('find_dsh_plugin returned no valid reusable candidates; falling back to built-in gh search.')
     } catch (error) {
@@ -165,13 +178,14 @@ export async function discoverRemoteCandidates(options: {
     return {
       candidates,
       ...(candidates.length > 0 ? { source: 'github' as const } : {}),
+      complete: true,
       queries,
       reasons,
     }
   } catch (error) {
     reasons.push(`Built-in gh discovery was unavailable: ${boundedText(errorMessage(error), 300)}`)
-    return { candidates: [], queries, reasons }
+    return { candidates: [], complete: false, queries, reasons }
   }
 }
 
-export const _testing = { boundedText, normalizeFindPluginCandidates, repositoryFromUrl }
+export const _testing = { boundedText, normalizeFindPluginCandidates, relevantFinderCandidates, repositoryFromUrl }

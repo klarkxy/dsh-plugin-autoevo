@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { InstallationRecord, ResolutionRecord, ReviewRecord } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
@@ -43,6 +43,25 @@ export class StateStore {
     return this.get('installations', id) as Promise<InstallationRecord>
   }
 
+  async listReviews(resolutionId: string): Promise<ReviewRecord[]> {
+    assertRecordId(resolutionId)
+    const directory = path.join(this.root, 'reviews')
+    let entries: string[]
+    try {
+      entries = await readdir(directory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const reviews: ReviewRecord[] = []
+    for (const entry of entries.sort()) {
+      if (!/^review_[a-f0-9]{16,64}\.json$/u.test(entry)) continue
+      const record = JSON.parse(await readFile(path.join(directory, entry), 'utf8')) as ReviewRecord
+      if (record.resolutionId === resolutionId) reviews.push(record)
+    }
+    return reviews
+  }
+
   private async get(kind: RecordKind, id: string): Promise<StoredRecord> {
     assertRecordId(id)
     try {
@@ -58,4 +77,3 @@ export class StateStore {
     }
   }
 }
-

@@ -8,7 +8,7 @@
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。Agent 需要新能力时，先检查本地已有工具和技能，再搜索、审查、部署社区插件，并在候选只差一点时改进后继续使用。
+`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。Agent 需要新能力时，先检查本地已有工具和技能，再搜索、审查、部署社区插件，并在候选只差一点时改进后继续使用。对动态 Cordis 插件入口，AutoEvo 会在工具执行层强制执行这条顺序。
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -42,6 +42,8 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 ## 工作方式
 
+- `cordis_define` 的 `plugin.kind = "new"` 调用必须先经过 `capability_resolve`。本地可复用、候选可修改或候选尚未审完时都会被拒绝；只有完整发现和审查确认无可用候选后，才向当前 Agent 发放一次成功创建权限。技术性失败可重试，成功即消费；新解析会撤销旧权限。
+- `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
 - 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)；它缺失、失败或没有有效结果时，才用已认证的 `gh` 做有界 GitHub 搜索。两条发现路径都从 `dsh-plugin` topic 取候选，再由 Agent rerank。
 - 审查精确 commit 上的 manifest、README 和必要源码，只输出路径、派生事实、风险代码与内容 hash。
@@ -68,7 +70,7 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 | `plugin_install` | 复核审查凭据、请求批准、物化安装包并做真实任务验证 | 需批准 |
 | `plugin_remove` | 按 installation receipt 精确移除 | 需批准 |
 
-AutoEvo 只新增这四个高层工具；当前 Profile 的其他工具仍由其 Agent scope 决定。
+AutoEvo 新增这四个高层工具，并监听 DSH 工具执行边界来保护 `cordis_define(kind:new)`；当前 Profile 的其他工具仍由其 Agent scope 决定。
 
 ## 基线
 
@@ -78,7 +80,7 @@ AutoEvo 只新增这四个高层工具；当前 Profile 的其他工具仍由其
 node --version
 pnpm --version
 gh auth status
-pnpm check         # 完整门：静态检查、单测、Loader、local/full/partial E2E
+pnpm check         # 完整门：静态检查、单测、Loader、local/adversarial/full/partial E2E
 pnpm check:release # 完整门 + pack dry-run；发布前必须通过
 ```
 

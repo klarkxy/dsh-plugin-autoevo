@@ -40,6 +40,8 @@ capability_resolve
                            plugin_remove
 ```
 
+动态 Cordis 新建入口还有一条执行门禁：带 Agent 身份的 `cordis_define(kind:new)` 在 `tools/pre-execute` 预留一次性权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
+
 ## 3. DSH 接缝
 
 入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。四个 required services：
@@ -49,9 +51,11 @@ capability_resolve
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
 
+`tools` 同时承载新建门禁。它只识别带 Agent 身份、结构化的 `cordis_define` 且 `plugin.kind = "new"`，不会猜测普通文件、shell、Git 或无 Agent 的内部调用意图；`plugin.kind = "existing"` 也直接放行。
+
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本。工具缺失、被拒绝、超时、失败、返回空集合或只含畸形 URL 时，再执行自身 argv-only 的认证 `gh api` 搜索。无论候选来自哪一层，都必须经过同一套 `plugin_review` exact-commit 门禁。
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，明显无关的热门仓库不会制造永久 `review_required`。工具缺失、被拒绝、超时、失败、返回空集合或只含畸形/无关候选时，再执行自身 argv-only 的认证 `gh api` 搜索。`gh` 命中来自带能力词的仓库查询，本身作为发现证据保留，避免丢弃仅在 topics 等 GitHub 索引字段中声明能力的真实候选。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
 
 ## 4. 数据与状态
 
@@ -69,6 +73,8 @@ stateDir/
 ```
 
 `StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写失败时，temporary trial 会补偿清理，persistent 安装保留不会谎报未安装的恢复锚点。
+
+V3 resolution receipt 记录 `authorization` 与远端发现是否完整。远端候选按仓库归组，以该 GitHub review 及其本地改进 lineage 的最新结果为准：任一 `use` 要求复用，任一 `modify` 要求继续修改，存在未审候选则继续审查，只有全部为 `skip` 才可从零创建。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
 
 Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash、material manifest facts，以及实际 DSH runtime 版本和兼容性。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容、manifest 或 runtime 兼容性变化会使凭据过期。
 
@@ -94,6 +100,7 @@ GitHub review 为 `partial/modify` 时，Agent 从精确 commit 建立 workspace
 ## 7. 实现入口
 
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
+- [src/creation-guard.ts](../src/creation-guard.ts)：动态 Cordis 新建调用的一次性运行时授权与并发预留。
 - [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 优先与内置 `gh` 回退编排、候选归一化和来源记录。
 - [src/github/discovery.ts](../src/github/discovery.ts)：有界 GitHub 候选搜索。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。

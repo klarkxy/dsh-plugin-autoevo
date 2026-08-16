@@ -3,24 +3,41 @@ import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 import { TOOL_NAMES } from '../contracts.js'
-import { capabilityTerms, normalizeSearchText } from './keywords.js'
+import { capabilityAnchors, normalizeSearchText } from './keywords.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
-function matchConfidence(requirement: string, name: string, description: string): number {
-  const terms = capabilityTerms(requirement)
-  if (terms.length === 0) return 0
+export function matchConfidence(requirement: string, name: string, description: string): number {
+  const anchors = capabilityAnchors(requirement)
+  if (anchors.length === 0) return 0
   const normalizedName = normalizeSearchText(name)
   const normalizedDescription = normalizeSearchText(description)
-  let score = 0
-  for (const term of terms) {
-    const normalizedTerm = normalizeSearchText(term)
-    if (!normalizedTerm) continue
-    if (normalizedName === normalizedTerm) score += 0.55
-    else if (normalizedName.includes(normalizedTerm) || normalizedTerm.includes(normalizedName)) score += 0.35
-    if (normalizedDescription.includes(normalizedTerm)) score += 0.18
+  let specificWeight = 0
+  let specificCoverage = 0
+  let genericWeight = 0
+  let genericCoverage = 0
+
+  for (const anchor of anchors) {
+    let strength = 0
+    for (const alias of anchor.aliases) {
+      if (normalizedName === alias) strength = Math.max(strength, 1)
+      else if (normalizedName.includes(alias) || alias.includes(normalizedName)) strength = Math.max(strength, 0.92)
+      if (normalizedDescription.includes(alias)) strength = Math.max(strength, 0.58)
+    }
+    if (anchor.generic) {
+      genericWeight += anchor.weight
+      genericCoverage += anchor.weight * strength
+    } else {
+      specificWeight += anchor.weight
+      specificCoverage += anchor.weight * strength
+    }
   }
-  return Math.min(0.99, score)
+
+  // Each anchor contributes at most its best name-or-description match.  This
+  // prevents repeated wording in a long description from saturating the score.
+  if (specificWeight === 0) return Math.min(0.18, genericCoverage / Math.max(genericWeight, 1))
+  const genericBoost = genericWeight === 0 ? 0 : (genericCoverage / genericWeight) * 0.04
+  return Math.min(0.99, specificCoverage / specificWeight + genericBoost)
 }
 
 export interface LocalResolution {

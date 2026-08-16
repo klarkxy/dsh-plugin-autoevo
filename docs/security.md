@@ -6,7 +6,7 @@
 
 GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据分类。系统提示只含本插件固定策略。审查输出是来源路径、派生风险代码、短事实说明、blob/content hash、fit 和兼容性结论。
 
-`find_dsh_plugin` 是可选的第三方发现后端，不是信任根。AutoEvo 只在它对当前 Agent registry scope 可见时经 DSH nested tool pipeline 调用；返回的 note、描述和安装命令都视为不可信数据。只有严格 GitHub 仓库 URL 会被归一化为候选标识，摘要长度受限；空、畸形或失败结果降级到内置 `gh` 搜索。两条路径产生的候选都不能跳过下述审查与批准门槛。
+`find_dsh_plugin` 是可选的第三方发现后端，不是信任根。AutoEvo 只在它对当前 Agent registry scope 可见时经 DSH nested tool pipeline 调用；返回的 note、描述和安装命令都视为不可信数据。只有严格 GitHub 仓库 URL 会被归一化为候选标识，摘要长度受限，并且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点；空、畸形、明显无关或失败结果降级到内置 `gh` 搜索。内置 `gh` 结果由带能力词的仓库查询命中，不再用缺少完整索引字段的短摘要二次否决。两条路径产生的候选都不能跳过下述审查与批准门槛。
 
 ## 2. 安装门槛
 
@@ -25,6 +25,12 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；`npm pack --ignore-scripts` 生成 tgz 后再复核 snapshot，最终安装该 tgz。Windows 上 DSH rc.6 会经 shell 转发 pnpm 参数，owned artifact path 和卸载用 package name 都经过 shell 安全校验；移除前再校验一次 receipt 中的 package name。
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
+
+## 2.1 新插件创建门禁
+
+AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agent 身份的 `cordis_define(kind:new)`。没有当前 Agent 的 `scratch_ready` 权限时，调用会以明确理由失败；`reuse_required`、`modify_required` 与 `review_required` 均不能创建。权限在调用进入前绑定 callId，避免并发消费；失败或取消后恢复，成功后消费。每次新的 `capability_resolve` 先撤销旧权限，并建立新的 generation；较晚返回的旧解析，以及不属于该 Agent 当前 resolution 的 review，都不能恢复或覆盖权限。
+
+这不是通用代码意图分类器：普通编辑、命令、测试、Git 操作、AutoEvo 自身安装流程、无 Agent 的内部工具调用与 `cordis_define(kind:existing)` 不在门禁范围内。权限仅驻留内存；持久 V1/V2 旧记录不会在重启后恢复创建能力。
 
 ## 3. 进程与凭据
 

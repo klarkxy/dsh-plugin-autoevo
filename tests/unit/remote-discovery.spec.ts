@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import { discoverRemoteCandidates, FIND_PLUGIN_TOOL } from '../../src/discovery/remote.js'
+import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -78,6 +78,7 @@ describe('remote discovery precedence', () => {
     }))
     expect(runner.run).not.toHaveBeenCalled()
     expect(result.source).toBe('dsh-find-plugin')
+    expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([expect.objectContaining({
       repository: 'acme/scientific-calculator',
       stars: 42,
@@ -93,6 +94,7 @@ describe('remote discovery precedence', () => {
 
     expect(runner.run).toHaveBeenCalled()
     expect(result.source).toBe('github')
+    expect(result.complete).toBe(true)
     expect(result.candidates[0]?.repository).toBe('fallback/calculator')
     expect(result.reasons.join(' ')).toContain('not available in the current Agent scope')
   })
@@ -134,5 +136,68 @@ describe('remote discovery precedence', () => {
 
     expect(result.source).toBe('github')
     expect(result.candidates.some((candidate) => candidate.repository === 'acme/plugin')).toBe(false)
+  })
+
+  it('drops finder and GitHub summaries that have no requirement anchor', async () => {
+    const ctx = {
+      tools: {
+        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
+        execute: vi.fn(async () => ({
+          isError: false as const,
+          value: { results: [{
+            name: 'open-design',
+            url: 'https://github.com/acme/open-design',
+            description: 'A general design system repository',
+            stars: 99,
+          }] },
+          content: [],
+        })),
+      },
+    } as unknown as Context
+    const runner = {
+      run: vi.fn(async () => ({
+        exitCode: 0,
+        signal: null,
+        stderr: '',
+        stdout: JSON.stringify({ items: [] }),
+      })),
+    } as CommandRunner
+
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: 'frobulate-qzvm Q7V9M2X4 R3K8N5P1',
+      exec,
+    })
+
+    expect(runner.run).toHaveBeenCalled()
+    expect(result.complete).toBe(true)
+    expect(result.candidates).toEqual([])
+  })
+
+  it('keeps finder candidates with requirement evidence in topics or package name', () => {
+    const candidate = {
+      repository: 'acme/plugin-bundle',
+      name: 'plugin-bundle',
+      description: 'A DSH capability bundle',
+      stars: 1,
+      updatedAt: null,
+      topics: ['dsh-plugin', 'frobulate'],
+      packageName: 'dsh-plugin-frobulate',
+    }
+    expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([candidate])
+  })
+
+  it('fails closed when both discovery paths are unavailable', async () => {
+    const ctx = { tools: { get: vi.fn(() => undefined) } } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('offline') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+
+    expect(result.candidates).toEqual([])
+    expect(result.complete).toBe(false)
+    expect(result.reasons.join(' ')).toContain('unavailable')
   })
 })

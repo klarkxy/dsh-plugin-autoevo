@@ -6,13 +6,14 @@ import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 const scenario = process.argv[2] ?? 'full-flow'
-const supported = new Set(['resolve-local', 'full-flow', 'partial-flow'])
+const supported = new Set(['resolve-local', 'adversarial-define', 'full-flow', 'partial-flow'])
 if (!supported.has(scenario)) throw new Error(`unknown E2E scenario: ${scenario}`)
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const dshBin = path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const scriptedPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'scripted-llm.mjs')).href
 const approvalPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'approval-allow-once.mjs')).href
+const cordisDefineProbe = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'cordis-define-probe.mjs')).href
 const root = await mkdtemp(path.join(os.tmpdir(), `capability-evolution-${scenario}-`))
 const dshHome = path.join(root, 'dsh-home')
 const stateDir = path.join(dshHome, 'autoevo')
@@ -174,15 +175,35 @@ async function runScenario() {
       commandTimeoutMs: 120_000,
       verificationPatchPaths: [childPatch],
     } },
+    ...(scenario === 'adversarial-define'
+      ? [{ insert: [{ id: 'capability-evolution-e2e-cordis-define-probe', name: cordisDefineProbe }] }]
+      : []),
     { insert: [{ id: 'capability-evolution-e2e-approval', name: approvalPlugin }] },
   ]
   const mainPatch = await writePatch('main.cordis.yml', mainPatches)
-  const task = scenario === 'resolve-local'
+  const task = scenario === 'resolve-local' || scenario === 'adversarial-define'
     ? 'Resolve a capability that is already local and report the decision.'
     : 'Exercise the approved capability reuse workflow and report only after cleanup.'
   const result = await runDsh(['--profile', 'headless', '--patch', mainPatch, task], 600_000)
-  const expectedMarker = scenario === 'resolve-local' ? 'E2E_RESOLVE_LOCAL_OK' : scenario === 'full-flow' ? 'E2E_FULL_FLOW_OK' : 'E2E_PARTIAL_FLOW_OK'
+  const expectedMarker = scenario === 'resolve-local'
+    ? 'E2E_RESOLVE_LOCAL_OK'
+    : scenario === 'adversarial-define'
+      ? 'E2E_ADVERSARIAL_DEFINE_OK'
+      : scenario === 'full-flow' ? 'E2E_FULL_FLOW_OK' : 'E2E_PARTIAL_FLOW_OK'
   assert.match(result.stdout, new RegExp(expectedMarker, 'u'))
+
+  if (scenario === 'adversarial-define') {
+    assert.match(result.stdout, /AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first\./u)
+    assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL|E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
+    assert.match(result.stdout, /"decision":"use_local"/u)
+    return {
+      scenario,
+      marker: expectedMarker,
+      guard: 'denied cordis_define(kind:new) before capability_resolve',
+      denial: 'AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.',
+      resolution: 'use_local',
+    }
+  }
 
   if (scenario === 'resolve-local') {
     assert.match(result.stdout, /"decision":"use_local"/u)

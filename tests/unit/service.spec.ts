@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { githubQueries } from '../../src/discovery/remote.js'
 import { _testing } from '../../src/service.js'
 import { hashObject } from '../../src/state/hashes.js'
@@ -43,5 +43,76 @@ describe('GitHub query plan', () => {
     expect(queries[0]).toContain('topic:dsh-plugin')
     expect(queries).toContain('scientific notation dsh')
     expect(queries.length).toBeLessThanOrEqual(5)
+  })
+})
+
+function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
+  const id = `resolution_${'b'.repeat(24)}`
+  return {
+    schemaVersion,
+    id,
+    policyVersion: schemaVersion === 2 ? POLICY_VERSION : 'v2-2026-08-15',
+    createdAt: '2026-08-16T00:00:00.000Z',
+    requirement: 'calculator',
+    cwd: 'C:/workspace',
+    decision: 'inspect_remote',
+    localCandidates: [],
+    remoteCandidates: [
+      { repository: 'acme/one', name: 'one', description: '', stars: 1, updatedAt: null, topics: [] },
+      { repository: 'acme/two', name: 'two', description: '', stars: 1, updatedAt: null, topics: [] },
+    ],
+    remoteCandidateSource: 'github',
+    remoteDiscoveryComplete: true,
+    ...(schemaVersion === 2
+      ? { authorization: { state: 'review_required' as const, resolutionId: id, reason: 'review candidates' } }
+      : {}),
+    queries: [],
+    reasons: [],
+  }
+}
+
+function candidateReview(repository: string, recommendation: ReviewRecord['recommendation'], suffix: string): ReviewRecord {
+  const record = review('main')
+  record.id = `review_${suffix.repeat(64)}`
+  record.resolutionId = resolution().id
+  record.policyVersion = POLICY_VERSION
+  record.sourceSnapshot = {
+    kind: 'github', repository, requestedRef: 'main', commit: suffix.repeat(40), defaultBranch: 'main',
+  }
+  record.recommendation = recommendation
+  record.fit = recommendation === 'use' ? 'full' : recommendation === 'modify' ? 'partial' : 'none'
+  return record
+}
+
+describe('resolution authorization state', () => {
+  it('maps initial resolution outcomes and fails closed on incomplete discovery', () => {
+    const id = resolution().id
+    expect(_testing.initialAuthorization(id, 'use_local', true).state).toBe('reuse_required')
+    expect(_testing.initialAuthorization(id, 'inspect_remote', true).state).toBe('review_required')
+    expect(_testing.initialAuthorization(id, 'none', true).state).toBe('scratch_ready')
+    expect(_testing.initialAuthorization(id, 'none', false).state).toBe('review_required')
+  })
+
+  it('fails closed for legacy resolutions', () => {
+    expect(_testing.authorizationForResolution(resolution(1), []).state).toBe('review_required')
+  })
+
+  it('prioritizes reuse and modify over incomplete reviews', () => {
+    expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'use', '1')]).state)
+      .toBe('reuse_required')
+    expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'modify', '2')]).state)
+      .toBe('modify_required')
+  })
+
+  it('keeps review required while any candidate is unreviewed', () => {
+    expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'skip', '3')]).state)
+      .toBe('review_required')
+  })
+
+  it('authorizes scratch only after every candidate is rejected', () => {
+    expect(_testing.authorizationForResolution(resolution(), [
+      candidateReview('acme/one', 'skip', '4'),
+      candidateReview('acme/two', 'skip', '5'),
+    ]).state).toBe('scratch_ready')
   })
 })

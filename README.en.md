@@ -8,7 +8,7 @@ English | [中文](README.md)
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` is a capability-reuse and safe-evolution plugin for DeepSeek Harness (DSH). When an Agent needs a new ability, it checks local tools and skills first, then searches, reviews, and deploys a community plugin — and improves a candidate when only a small gap remains.
+`dsh-plugin-autoevo` is a capability-reuse and safe-evolution plugin for DeepSeek Harness (DSH). When an Agent needs a new ability, it checks local tools and skills first, then searches, reviews, and deploys a community plugin — and improves a candidate when only a small gap remains. For dynamic Cordis plugins, AutoEvo enforces that order at the tool-execution boundary.
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -42,6 +42,8 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 ## How it works
 
+- A `cordis_define` call with `plugin.kind = "new"` must follow `capability_resolve`. Reusable local capability, a modifiable candidate, or unfinished candidate review blocks creation. Only completed discovery and review with no viable candidate gives the current Agent one successful creation grant. Technical failures may retry, success consumes it, and a new resolution revokes an older grant.
+- `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not guess that generic development tools are plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
 - When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. Only when it is absent, fails, or yields no valid results does AutoEvo fall back to bounded GitHub search through authenticated `gh`. Both paths discover candidates from the `dsh-plugin` topic before Agent reranking.
 - Review the exact commit: manifest, README, and the source that matters. Results are paths, derived facts, risk codes, and content hashes.
@@ -68,7 +70,7 @@ It should call `capability_resolve` first. AutoEvo reuses `find_dsh_plugin` when
 | `plugin_install` | Revalidate the review, request approval, materialize the package, verify a real task | approval |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |
 
-AutoEvo adds only these four high-level tools; every other tool remains governed by the current Profile's Agent scope.
+AutoEvo adds these four high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.
 
 ## Baseline
 
@@ -78,7 +80,7 @@ Maintenance line `0.1.1`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node
 node --version
 pnpm --version
 gh auth status
-pnpm check         # full gate: static checks, unit tests, Loader, local/full/partial E2E
+pnpm check         # full gate: static checks, unit tests, Loader, local/adversarial/full/partial E2E
 pnpm check:release # full gate + pack dry-run; required before release
 ```
 

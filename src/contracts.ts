@@ -1,4 +1,4 @@
-export const POLICY_VERSION = 'v2-2026-08-15'
+export const POLICY_VERSION = 'v3-2026-08-16'
 
 export const TOOL_NAMES = [
   'capability_resolve',
@@ -10,8 +10,15 @@ export const TOOL_NAMES = [
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 export type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none'
+export type AuthorizationState = 'reuse_required' | 'review_required' | 'modify_required' | 'scratch_ready'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'github'
+
+export interface ResolutionAuthorization {
+  state: AuthorizationState
+  resolutionId: string
+  reason: string
+}
 
 export interface LocalCapabilityCandidate {
   kind: 'tool' | 'skill'
@@ -33,7 +40,8 @@ export interface RemotePluginCandidate {
 }
 
 export interface ResolutionRecord {
-  schemaVersion: 1
+  /** V1 records remain readable but never restore a scratch-build grant. */
+  schemaVersion: 1 | 2
   id: string
   policyVersion: string
   createdAt: string
@@ -43,6 +51,10 @@ export interface ResolutionRecord {
   localCandidates: LocalCapabilityCandidate[]
   remoteCandidates: RemotePluginCandidate[]
   remoteCandidateSource?: RemoteCandidateSource
+  /** Whether every configured discovery fallback completed successfully. */
+  remoteDiscoveryComplete?: boolean
+  /** Present on V2 records created by policy V3. */
+  authorization?: ResolutionAuthorization
   queries: string[]
   reasons: string[]
 }
@@ -119,6 +131,10 @@ export interface ReviewRecord {
   findings: ReviewFinding[]
   recommendation: ReviewRecommendation
   installSpec: string | null
+}
+
+export interface ReviewResult extends ReviewRecord {
+  authorization: ResolutionAuthorization
 }
 
 export type InstallationRetention = 'temporary' | 'persistent'

@@ -3,7 +3,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
-import { POLICY_VERSION, type InstallInput, type InstallationRecord, type RemoveInput, type ResolutionRecord, type ReviewInput, type ReviewRecord } from './contracts.js'
+import {
+  POLICY_VERSION,
+  type InstallInput,
+  type InstallationRecord,
+  type RemoveInput,
+  type ResolutionAuthorization,
+  type ResolutionRecord,
+  type ReviewInput,
+  type ReviewRecord,
+  type ReviewResult,
+} from './contracts.js'
+import type { CreationGuard } from './creation-guard.js'
 import { discoverRemoteCandidates } from './discovery/remote.js'
 import { EvolutionError } from './errors.js'
 import { PluginInstaller } from './lifecycle/install.js'
@@ -45,6 +56,76 @@ function assertRequirement(requirement: string): string {
   return value
 }
 
+function initialAuthorization(
+  resolutionId: string,
+  decision: ResolutionRecord['decision'],
+  remoteDiscoveryComplete: boolean,
+): ResolutionAuthorization {
+  if (decision === 'use_local') {
+    return { state: 'reuse_required', resolutionId, reason: 'A sufficiently relevant local capability is already available.' }
+  }
+  if (decision === 'inspect_remote') {
+    return { state: 'review_required', resolutionId, reason: 'Review every discovered candidate before scratch development.' }
+  }
+  return remoteDiscoveryComplete
+    ? { state: 'scratch_ready', resolutionId, reason: 'Local and remote discovery completed without a reusable candidate; one new Cordis Plugin may be defined.' }
+    : { state: 'review_required', resolutionId, reason: 'Remote discovery did not complete; retry capability_resolve before scratch development.' }
+}
+
+function authorizationForResolution(
+  resolution: ResolutionRecord,
+  reviews: readonly ReviewRecord[],
+): ResolutionAuthorization {
+  const legacy = resolution.schemaVersion !== 2 || resolution.policyVersion !== POLICY_VERSION || !resolution.authorization
+  if (legacy) {
+    return {
+      state: 'review_required',
+      resolutionId: resolution.id,
+      reason: 'This resolution predates the current fail-closed policy; run capability_resolve again.',
+    }
+  }
+  if (resolution.decision === 'use_local') return resolution.authorization!
+  if (resolution.decision === 'none') return resolution.authorization!
+
+  const latestForCandidate = resolution.remoteCandidates.map((candidate) => {
+    const roots = reviews.filter((review) => review.sourceSnapshot.kind === 'github'
+      && review.sourceSnapshot.repository.toLowerCase() === candidate.repository.toLowerCase())
+    const lineage = roots.flatMap((root) => [
+      root,
+      ...reviews.filter((review) => review.sourceSnapshot.kind === 'local'
+        && review.sourceSnapshot.baseReviewId === root.id),
+    ])
+    return lineage.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0]
+  })
+
+  if (latestForCandidate.some((review) => review?.recommendation === 'use')) {
+    return {
+      state: 'reuse_required',
+      resolutionId: resolution.id,
+      reason: 'At least one reviewed candidate is a complete reusable fit.',
+    }
+  }
+  if (latestForCandidate.some((review) => review?.recommendation === 'modify')) {
+    return {
+      state: 'modify_required',
+      resolutionId: resolution.id,
+      reason: 'At least one reviewed candidate can be improved instead of replaced.',
+    }
+  }
+  if (latestForCandidate.some((review) => review === undefined)) {
+    return {
+      state: 'review_required',
+      resolutionId: resolution.id,
+      reason: 'Every discovered candidate must reach a terminal review before scratch development.',
+    }
+  }
+  return {
+    state: 'scratch_ready',
+    resolutionId: resolution.id,
+    reason: 'Every discovered candidate was reviewed and rejected; one new Cordis Plugin may be defined.',
+  }
+}
+
 export class CapabilityEvolutionService {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
@@ -54,6 +135,7 @@ export class CapabilityEvolutionService {
     private readonly config: RuntimeConfig,
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
+    private readonly creationGuard: CreationGuard,
   ) {
     const launcher = new DshLauncher(runner, config)
     this.installer = new PluginInstaller(ctx, config, store, launcher, (review, signal) => this.revalidate(review, signal))
@@ -62,10 +144,12 @@ export class CapabilityEvolutionService {
 
   async resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
+    const guardGeneration = this.creationGuard.beginResolution(exec.agent)
     const local = await resolveLocalCapabilities(this.ctx, requirement, exec)
     let remoteCandidates: ResolutionRecord['remoteCandidates'] = []
     let remoteCandidateSource: ResolutionRecord['remoteCandidateSource']
     let queries: string[] = []
+    let remoteDiscoveryComplete = !local.githubShouldRun
     const reasons = [...local.reasons]
     if (local.githubShouldRun) {
       const discovery = await discoverRemoteCandidates({
@@ -78,28 +162,35 @@ export class CapabilityEvolutionService {
       })
       remoteCandidates = discovery.candidates
       remoteCandidateSource = discovery.source
+      remoteDiscoveryComplete = discovery.complete
       queries = discovery.queries
       reasons.push(...discovery.reasons)
     }
+    const decision: ResolutionRecord['decision'] = !local.githubShouldRun ? 'use_local' : remoteCandidates.length > 0 ? 'inspect_remote' : 'none'
+    const id = newResolutionId(requirement)
+    const authorization = initialAuthorization(id, decision, remoteDiscoveryComplete)
     const record: ResolutionRecord = {
-      schemaVersion: 1,
-      id: newResolutionId(requirement),
+      schemaVersion: 2,
+      id,
       policyVersion: POLICY_VERSION,
       createdAt: new Date().toISOString(),
       requirement,
       cwd: local.cwd,
-      decision: !local.githubShouldRun ? 'use_local' : remoteCandidates.length > 0 ? 'inspect_remote' : 'none',
+      decision,
       localCandidates: local.candidates,
       remoteCandidates,
       ...(remoteCandidateSource ? { remoteCandidateSource } : {}),
+      remoteDiscoveryComplete,
+      authorization,
       queries,
       reasons,
     }
     await this.store.put('resolutions', record)
+    this.creationGuard.applyResolutionAuthorization(exec.agent, authorization, guardGeneration)
     return record
   }
 
-  async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewRecord> {
+  async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult> {
     const resolution = await this.store.getResolution(input.resolutionId)
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
@@ -143,7 +234,9 @@ export class CapabilityEvolutionService {
       review = local.record
     }
     await this.store.put('reviews', review)
-    return review
+    const authorization = authorizationForResolution(resolution, await this.store.listReviews(resolution.id))
+    this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
+    return { ...review, authorization }
   }
 
   install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
@@ -210,4 +303,4 @@ export class CapabilityEvolutionService {
   }
 }
 
-export const _testing = { assertRequirement, materialReviewFacts }
+export const _testing = { assertRequirement, authorizationForResolution, initialAuthorization, materialReviewFacts }
