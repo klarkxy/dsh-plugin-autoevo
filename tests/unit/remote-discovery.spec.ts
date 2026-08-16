@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
+import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -29,24 +29,7 @@ const exec = {
   agent: { session: { header: { cwd: 'C:/workspace' } } },
 } as unknown as ToolRunContext
 
-function githubRunner(): CommandRunner {
-  return {
-    run: vi.fn(async () => ({
-      exitCode: 0,
-      signal: null,
-      stderr: '',
-      stdout: JSON.stringify({ items: [{
-        full_name: 'fallback/calculator',
-        name: 'calculator',
-        description: 'Fallback calculator plugin',
-        stargazers_count: 3,
-        updated_at: '2026-08-15T00:00:00Z',
-        topics: ['dsh-plugin'],
-        default_branch: 'main',
-      }] }),
-    })),
-  }
-}
+
 
 describe('remote discovery precedence', () => {
   it('uses a current-scope find_dsh_plugin result without calling gh', async () => {
@@ -87,37 +70,89 @@ describe('remote discovery precedence', () => {
     })])
   })
 
-  it('falls back to authenticated gh when find_dsh_plugin is absent', async () => {
+  it('offers the plugin marketplace instead of searching GitHub when find_dsh_plugin is absent', async () => {
     const ctx = { tools: { get: vi.fn(() => undefined) } } as unknown as Context
-    const runner = githubRunner()
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: '我需要一个能在dsh里调用codex的能力。',
+      exec,
+    })
 
-    expect(runner.run).toHaveBeenCalled()
-    expect(result.source).toBe('github')
+    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
-    expect(result.candidates[0]?.repository).toBe('fallback/calculator')
-    expect(result.reasons.join(' ')).toContain('not available in the current Agent scope')
+    expect(result.source).toBe('marketplace-setup')
+    expect(result.candidates).toEqual([expect.objectContaining({ repository: FIND_PLUGIN_REPOSITORY })])
+    expect(result.reasons.join(' ')).toContain('Install the DSH plugin marketplace')
   })
 
-  it.each([
-    ['empty', { isError: false as const, value: { results: [] }, content: [] }],
-    ['failed', { isError: true as const, error: { message: 'rate limited' }, content: [] }],
-  ])('falls back to gh when find_dsh_plugin is %s', async (_label, toolResult) => {
+  it('does not fall back to GitHub when the installed marketplace returns nothing relevant', async () => {
     const ctx = {
       tools: {
         get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => toolResult),
+        execute: vi.fn(async () => ({
+          isError: false as const,
+          value: { results: [{
+            name: 'open-design',
+            url: 'https://github.com/nexu-io/open-design',
+            description: 'Claude Code / Codex / Cursor / OpenCode design plugin',
+            stars: 99,
+          }] },
+          content: [],
+        })),
       },
     } as unknown as Context
-    const runner = githubRunner()
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: '我需要一个能在dsh里调用codex的能力。',
+      exec,
+    })
+
+    expect(runner.run).not.toHaveBeenCalled()
+    expect(result.complete).toBe(true)
+    expect(result.candidates).toEqual([])
+    expect(result.reasons.join(' ')).toContain('GitHub fallback was not used')
+  })
+
+  it('treats an empty marketplace result as no reusable candidate', async () => {
+    const ctx = {
+      tools: {
+        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
+        execute: vi.fn(async () => ({ isError: false as const, value: { results: [] }, content: [] })),
+      },
+    } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
 
-    expect(runner.run).toHaveBeenCalled()
-    expect(result.source).toBe('github')
-    expect(result.candidates[0]?.repository).toBe('fallback/calculator')
-    expect(result.reasons.join(' ')).toContain('falling back to built-in gh search')
+    expect(runner.run).not.toHaveBeenCalled()
+    expect(result.complete).toBe(true)
+    expect(result.candidates).toEqual([])
+  })
+
+  it('fails closed when the installed marketplace errors', async () => {
+    const ctx = {
+      tools: {
+        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
+        execute: vi.fn(async () => ({ isError: true as const, error: { message: 'rate limited' }, content: [] })),
+      },
+    } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+
+    expect(runner.run).not.toHaveBeenCalled()
+    expect(result.complete).toBe(false)
+    expect(result.candidates).toEqual([])
   })
 
   it('rejects malformed finder URLs and ignores install commands', async () => {
@@ -131,15 +166,15 @@ describe('remote discovery precedence', () => {
         })),
       },
     } as unknown as Context
-    const runner = githubRunner()
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
 
-    expect(result.source).toBe('github')
+    expect(runner.run).not.toHaveBeenCalled()
     expect(result.candidates.some((candidate) => candidate.repository === 'acme/plugin')).toBe(false)
   })
 
-  it('drops finder and GitHub summaries that have no requirement anchor', async () => {
+  it('drops finder summaries that have no requirement anchor', async () => {
     const ctx = {
       tools: {
         get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
@@ -155,14 +190,7 @@ describe('remote discovery precedence', () => {
         })),
       },
     } as unknown as Context
-    const runner = {
-      run: vi.fn(async () => ({
-        exitCode: 0,
-        signal: null,
-        stderr: '',
-        stdout: JSON.stringify({ items: [] }),
-      })),
-    } as CommandRunner
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
@@ -173,7 +201,7 @@ describe('remote discovery precedence', () => {
       exec,
     })
 
-    expect(runner.run).toHaveBeenCalled()
+    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
   })
@@ -191,12 +219,18 @@ describe('remote discovery precedence', () => {
     expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([candidate])
   })
 
-  it('fails closed when both discovery paths are unavailable', async () => {
-    const ctx = { tools: { get: vi.fn(() => undefined) } } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('offline') }) } as CommandRunner
+  it('fails closed when the installed marketplace throws', async () => {
+    const ctx = {
+      tools: {
+        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
+        execute: vi.fn(async () => { throw new Error('offline') }),
+      },
+    } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
 
+    expect(runner.run).not.toHaveBeenCalled()
     expect(result.candidates).toEqual([])
     expect(result.complete).toBe(false)
     expect(result.reasons.join(' ')).toContain('unavailable')

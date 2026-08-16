@@ -4,12 +4,23 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
 import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
-import { discoverGithubCandidates, validateGithubRepository } from '../github/index.js'
+import { validateGithubRepository } from '../github/index.js'
 import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
 
 export const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
+export const FIND_PLUGIN_REPOSITORY = 'awesome-dsh-plugin/dsh-find-plugin'
+
+export const MARKETPLACE_SETUP_CANDIDATE: RemotePluginCandidate = {
+  repository: FIND_PLUGIN_REPOSITORY,
+  name: 'dsh-find-plugin',
+  description: 'DSH plugin marketplace. Searches the public dsh-plugin topic and syncs bilingual descriptions from the curated awesome-dsh-plugin catalog (live plugins.json with a bundled snapshot fallback). Install this before searching GitHub directly.',
+  stars: 0,
+  updatedAt: null,
+  topics: ['dsh-plugin'],
+  defaultBranch: 'main',
+}
 
 interface FindPluginItem {
   name?: unknown
@@ -78,7 +89,7 @@ function normalizeFindPluginCandidates(value: unknown, limit: number): RemotePlu
     .slice(0, limit)
 }
 
-function relevantFinderCandidates(
+function relevantRemoteCandidates(
   requirement: string,
   candidates: readonly RemotePluginCandidate[],
 ): RemotePluginCandidate[] {
@@ -131,9 +142,10 @@ async function discoverWithFindPlugin(options: {
 }
 
 /**
- * Prefer the ecosystem's dedicated discovery tool when it is visible in the
- * current Agent registry scope. Empty, malformed, denied, timed-out, or failed
- * results fall back to AutoEvo's authenticated argv-only gh search.
+ * Prefer the ecosystem marketplace tool when it is visible in the current
+ * Agent registry scope. If that tool is missing, offer to install it instead
+ * of searching GitHub directly. An installed finder that returns nothing is
+ * treated as "no reusable candidate", not a reason to run raw gh search.
  */
 export async function discoverRemoteCandidates(options: {
   ctx: Context
@@ -149,43 +161,33 @@ export async function discoverRemoteCandidates(options: {
   if (finder) {
     queries.push(findPluginQuery(options.requirement))
     try {
-      const candidates = relevantFinderCandidates(options.requirement, await discoverWithFindPlugin(options))
+      const candidates = relevantRemoteCandidates(options.requirement, await discoverWithFindPlugin(options))
       if (candidates.length > 0) {
-        reasons.push(`find_dsh_plugin returned ${candidates.length} bounded candidate summaries; built-in gh search was skipped.`)
+        reasons.push(`find_dsh_plugin returned ${candidates.length} bounded candidate summaries.`)
         return { candidates, source: 'dsh-find-plugin', complete: true, queries, reasons }
       }
-      reasons.push('find_dsh_plugin returned no valid reusable candidates; falling back to built-in gh search.')
+      reasons.push('find_dsh_plugin returned no valid reusable candidates; GitHub fallback was not used.')
+      return { candidates: [], complete: true, queries, reasons }
     } catch (error) {
-      reasons.push(`find_dsh_plugin was unavailable: ${boundedText(errorMessage(error), 300)}; falling back to built-in gh search.`)
+      reasons.push(`find_dsh_plugin was unavailable: ${boundedText(errorMessage(error), 300)}`)
+      return { candidates: [], complete: false, queries, reasons }
     }
-  } else {
-    reasons.push('find_dsh_plugin is not available in the current Agent scope; falling back to built-in gh search.')
   }
 
-  const fallbackQueries = githubQueries(options.requirement)
-  queries.push(...fallbackQueries)
-  try {
-    const candidates = await discoverGithubCandidates({
-      runner: options.runner,
-      config: options.config,
-      cwd: options.cwd,
-      queries: fallbackQueries,
-      signal: options.exec.signal,
-    })
-    reasons.push(candidates.length > 0
-      ? `Built-in gh discovery returned ${candidates.length} bounded candidate summaries.`
-      : 'Built-in gh discovery returned no reusable DSH plugin candidates.')
-    return {
-      candidates,
-      ...(candidates.length > 0 ? { source: 'github' as const } : {}),
-      complete: true,
-      queries,
-      reasons,
-    }
-  } catch (error) {
-    reasons.push(`Built-in gh discovery was unavailable: ${boundedText(errorMessage(error), 300)}`)
-    return { candidates: [], complete: false, queries, reasons }
+  reasons.push('find_dsh_plugin is not installed in the current Agent scope. Install the DSH plugin marketplace first; it syncs the curated catalog. Direct GitHub search is not used as a fallback.')
+  return {
+    candidates: [MARKETPLACE_SETUP_CANDIDATE],
+    source: 'marketplace-setup',
+    complete: true,
+    queries,
+    reasons,
   }
 }
 
-export const _testing = { boundedText, normalizeFindPluginCandidates, relevantFinderCandidates, repositoryFromUrl }
+export const _testing = {
+  boundedText,
+  normalizeFindPluginCandidates,
+  relevantFinderCandidates: relevantRemoteCandidates,
+  relevantRemoteCandidates,
+  repositoryFromUrl,
+}

@@ -30,6 +30,7 @@ Before any new definition, state the concrete capability in one sentence and cal
 | `reuse_required` | Use the available local tool or skill for the task. | Stop |
 | `review_required` | Review the indicated candidate with `plugin_review`; act on the resulting authorization. | Stop |
 | `modify_required` | Modify the reviewed partial candidate minimally, then review it again. | Stop |
+| `market_required` | Review/install `awesome-dsh-plugin/dsh-find-plugin`, restart DSH, then resolve again. That marketplace is not the requested capability. | Stop |
 | `scratch_ready` | Inspect the exact runtime contracts, then make one new definition. | Allowed once |
 
 Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed `cordis_define(kind: "new")` may retry with the same live grant; a successful one consumes it. Do not bypass a non-scratch result by changing wording, creating a same-named Plugin, or defining a static package.

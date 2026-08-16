@@ -60,9 +60,17 @@ function initialAuthorization(
   resolutionId: string,
   decision: ResolutionRecord['decision'],
   remoteDiscoveryComplete: boolean,
+  remoteCandidateSource?: ResolutionRecord['remoteCandidateSource'],
 ): ResolutionAuthorization {
   if (decision === 'use_local') {
     return { state: 'reuse_required', resolutionId, reason: 'A sufficiently relevant local capability is already available.' }
+  }
+  if (decision === 'inspect_remote' && remoteCandidateSource === 'marketplace-setup') {
+    return {
+      state: 'market_required',
+      resolutionId,
+      reason: 'Install the DSH plugin marketplace (awesome-dsh-plugin/dsh-find-plugin) first. It syncs the curated catalog. Restart DSH, then call capability_resolve again. Direct GitHub search is skipped because it drifts.',
+    }
   }
   if (decision === 'inspect_remote') {
     return { state: 'review_required', resolutionId, reason: 'Review every discovered candidate before scratch development.' }
@@ -87,6 +95,7 @@ function authorizationForResolution(
   if (resolution.decision === 'use_local') return resolution.authorization!
   if (resolution.decision === 'none') return resolution.authorization!
 
+  const marketplaceSetup = resolution.remoteCandidateSource === 'marketplace-setup'
   const latestForCandidate = resolution.remoteCandidates.map((candidate) => {
     const roots = reviews.filter((review) => review.sourceSnapshot.kind === 'github'
       && review.sourceSnapshot.repository.toLowerCase() === candidate.repository.toLowerCase())
@@ -102,7 +111,9 @@ function authorizationForResolution(
     return {
       state: 'reuse_required',
       resolutionId: resolution.id,
-      reason: 'At least one reviewed candidate is a complete reusable fit.',
+      reason: marketplaceSetup
+        ? 'Install the reviewed DSH plugin marketplace, restart DSH, then call capability_resolve again.'
+        : 'At least one reviewed candidate is a complete reusable fit.',
     }
   }
   if (latestForCandidate.some((review) => review?.recommendation === 'modify')) {
@@ -114,15 +125,19 @@ function authorizationForResolution(
   }
   if (latestForCandidate.some((review) => review === undefined)) {
     return {
-      state: 'review_required',
+      state: marketplaceSetup ? 'market_required' : 'review_required',
       resolutionId: resolution.id,
-      reason: 'Every discovered candidate must reach a terminal review before scratch development.',
+      reason: marketplaceSetup
+        ? 'Install the DSH plugin marketplace (awesome-dsh-plugin/dsh-find-plugin) first, or skip it only if the user declines. Direct GitHub search is not used as a fallback.'
+        : 'Every discovered candidate must reach a terminal review before scratch development.',
     }
   }
   return {
     state: 'scratch_ready',
     resolutionId: resolution.id,
-    reason: 'Every discovered candidate was reviewed and rejected; one new Cordis Plugin may be defined.',
+    reason: marketplaceSetup
+      ? 'The user declined the plugin marketplace; one new Cordis Plugin may be defined.'
+      : 'Every discovered candidate was reviewed and rejected; one new Cordis Plugin may be defined.',
   }
 }
 
@@ -168,7 +183,7 @@ export class CapabilityEvolutionService {
     }
     const decision: ResolutionRecord['decision'] = !local.githubShouldRun ? 'use_local' : remoteCandidates.length > 0 ? 'inspect_remote' : 'none'
     const id = newResolutionId(requirement)
-    const authorization = initialAuthorization(id, decision, remoteDiscoveryComplete)
+    const authorization = initialAuthorization(id, decision, remoteDiscoveryComplete, remoteCandidateSource)
     const record: ResolutionRecord = {
       schemaVersion: 2,
       id,

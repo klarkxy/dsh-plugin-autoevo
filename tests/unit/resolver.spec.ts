@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { capabilityQueries, capabilityTerms } from '../../src/resolver/keywords.js'
+import { capabilityQueries, capabilityTerms, isNameDropMention } from '../../src/resolver/keywords.js'
 import { resolveLocalCapabilities, _testing } from '../../src/resolver/local.js'
 
 describe('capability query generation', () => {
@@ -20,6 +20,24 @@ describe('capability query generation', () => {
 })
 
 describe('local matching', () => {
+  it('ignores laundry-list Codex name-drops and keeps a focused Codex plugin', () => {
+    const requirement = '我需要一个能在dsh里调用codex的能力。'
+    const nameDrop = [
+      'Best DeepSeek Harness Design Plugin. Claude Code / Codex / Cursor / DeepSeek Harness / OpenCode & 20+ CLIs via BYOK.',
+      'claude-code-for-design',
+      'codex-design',
+      'cursor-design',
+      'dsh-plugin',
+    ].join(' ')
+    expect(isNameDropMention(nameDrop, 'codex')).toBe(true)
+    expect(_testing.matchConfidence(requirement, 'open-design', nameDrop)).toBeLessThan(0.3)
+    expect(_testing.matchConfidence(
+      requirement,
+      'acme/dsh-codex-cli dsh-codex-cli',
+      'Call Codex CLI from the current DSH session and return the result',
+    )).toBeGreaterThanOrEqual(0.3)
+  })
+
   it('strongly matches a concrete tool and ignores unrelated names', () => {
     expect(_testing.matchConfidence('take a browser screenshot', 'browser_screenshot', 'Capture a page')).toBeGreaterThan(0.62)
     expect(_testing.matchConfidence('run a PowerShell command', 'pwsh', 'Execute a PowerShell command')).toBeGreaterThan(0.62)

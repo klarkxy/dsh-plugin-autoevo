@@ -89,6 +89,7 @@ describe('resolution authorization state', () => {
     const id = resolution().id
     expect(_testing.initialAuthorization(id, 'use_local', true).state).toBe('reuse_required')
     expect(_testing.initialAuthorization(id, 'inspect_remote', true).state).toBe('review_required')
+    expect(_testing.initialAuthorization(id, 'inspect_remote', true, 'marketplace-setup').state).toBe('market_required')
     expect(_testing.initialAuthorization(id, 'none', true).state).toBe('scratch_ready')
     expect(_testing.initialAuthorization(id, 'none', false).state).toBe('review_required')
   })
@@ -113,6 +114,31 @@ describe('resolution authorization state', () => {
     expect(_testing.authorizationForResolution(resolution(), [
       candidateReview('acme/one', 'skip', '4'),
       candidateReview('acme/two', 'skip', '5'),
+    ]).state).toBe('scratch_ready')
+  })
+
+  it('keeps marketplace setup required until the user installs or declines it', () => {
+    const record = resolution()
+    record.remoteCandidateSource = 'marketplace-setup'
+    record.remoteCandidates = [{
+      repository: 'awesome-dsh-plugin/dsh-find-plugin',
+      name: 'dsh-find-plugin',
+      description: 'marketplace',
+      stars: 0,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+    }]
+    record.authorization = {
+      state: 'market_required',
+      resolutionId: record.id,
+      reason: 'install marketplace',
+    }
+    expect(_testing.authorizationForResolution(record, []).state).toBe('market_required')
+    expect(_testing.authorizationForResolution(record, [
+      candidateReview('awesome-dsh-plugin/dsh-find-plugin', 'use', '6'),
+    ]).state).toBe('reuse_required')
+    expect(_testing.authorizationForResolution(record, [
+      candidateReview('awesome-dsh-plugin/dsh-find-plugin', 'skip', '7'),
     ]).state).toBe('scratch_ready')
   })
 })

@@ -8,6 +8,27 @@ const GENERIC_TERMS = new Set([
   '插件', '工具', '接口', '内容', '搜索', '构建', '创建', '平台',
 ])
 
+/** Peer agent/CLI names. A keyword that only appears in a list of these is a name-drop. */
+const PEER_PRODUCTS = [
+  'aider',
+  'antigravity',
+  'chatgpt',
+  'claude',
+  'claude code',
+  'claudecode',
+  'codex',
+  'copilot',
+  'cursor',
+  'gemini',
+  'grok',
+  'hermes',
+  'kiro',
+  'openclaw',
+  'opencode',
+  'trae',
+  'windsurf',
+] as const
+
 const CONCEPTS: ReadonlyArray<{ patterns: RegExp[]; queries: string[] }> = [
   {
     patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu],
@@ -83,6 +104,23 @@ export interface CapabilityAnchor {
 
 export function normalizeSearchText(value: string): string {
   return value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * True when `alias` is only one item in a laundry list of peer agents/CLIs.
+ * A focused "call Codex from DSH" mention is not a name-drop.
+ */
+export function isNameDropMention(text: string, alias: string): boolean {
+  const haystack = normalizeSearchText(text)
+  const needle = normalizeSearchText(alias)
+  if (!needle || !haystack.includes(needle)) return false
+  let peers = 0
+  for (const product of PEER_PRODUCTS) {
+    if (product === needle || needle.includes(product) || product.includes(needle)) continue
+    if (haystack.includes(product)) peers += 1
+    if (peers >= 2) return true
+  }
+  return false
 }
 
 export function capabilityQueries(requirement: string): string[] {

@@ -4,7 +4,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 import { TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
-import { capabilityAnchors, normalizeSearchText } from './keywords.js'
+import { capabilityAnchors, isNameDropMention, normalizeSearchText } from './keywords.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
@@ -23,7 +23,9 @@ export function matchConfidence(requirement: string, name: string, description: 
     for (const alias of anchor.aliases) {
       if (normalizedName === alias) strength = Math.max(strength, 1)
       else if (normalizedName.includes(alias) || alias.includes(normalizedName)) strength = Math.max(strength, 0.92)
-      if (normalizedDescription.includes(alias)) strength = Math.max(strength, 0.58)
+      if (normalizedDescription.includes(alias) && !isNameDropMention(normalizedDescription, alias)) {
+        strength = Math.max(strength, 0.58)
+      }
     }
     if (anchor.generic) {
       genericWeight += anchor.weight

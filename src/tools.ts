@@ -11,7 +11,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
   return [
     defineTool({
       name: 'capability_resolve',
-      description: 'Required before defining a new Cordis Plugin: check scoped DSH tools and skills first, then prefer find_dsh_plugin and fall back to built-in gh search only when local reuse is insufficient. Only a scratch_ready result grants one new definition.',
+      description: 'Required before defining a new Cordis Plugin: check scoped DSH tools and skills first, then prefer find_dsh_plugin. If that marketplace is missing, install awesome-dsh-plugin/dsh-find-plugin first instead of searching GitHub directly. Only a scratch_ready result grants one new definition.',
       parameters: {
         requirement: { type: 'string', required: true, description: 'Concrete capability required by the current user task.' },
       },

@@ -10,9 +10,9 @@ export const TOOL_NAMES = [
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 export type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none'
-export type AuthorizationState = 'reuse_required' | 'review_required' | 'modify_required' | 'scratch_ready'
+export type AuthorizationState = 'reuse_required' | 'review_required' | 'modify_required' | 'market_required' | 'scratch_ready'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
-export type RemoteCandidateSource = 'dsh-find-plugin' | 'github'
+export type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup'
 
 export interface ResolutionAuthorization {
   state: AuthorizationState

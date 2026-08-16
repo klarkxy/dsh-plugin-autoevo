@@ -90,7 +90,7 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(execution('call-final'))).toContain('call capability_resolve')
   })
 
-  it.each(['reuse_required', 'review_required', 'modify_required'] as const)(
+  it.each(['reuse_required', 'review_required', 'modify_required', 'market_required'] as const)(
     'keeps new definitions blocked in evolution mode for %s',
     async (state) => {
       const guard = inModeGuard()

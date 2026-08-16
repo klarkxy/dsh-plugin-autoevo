@@ -15,10 +15,14 @@ capability_resolve
    ├─ ctx.systemPrompt.assemble(scope)
    ├─ ctx.skills.list(cwd, scope)
    └─ local miss ──► find_dsh_plugin (current Agent scope)
-                         │ absent / error / no valid result
+                         │ absent
                          ▼
-                    gh api repository search
+                    offer dsh-find-plugin marketplace
+                         │ installed, no valid result
+                         ▼
+                    no reusable candidate ──► scratch_ready
                                   │
+                         finder hit
                                   ▼
                             plugin_review
                      exact commit/tree/blob + local Git snapshot
@@ -61,7 +65,7 @@ capability_resolve
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，明显无关的热门仓库不会制造永久 `review_required`。工具缺失、被拒绝、超时、失败、返回空集合或只含畸形/无关候选时，再执行自身 argv-only 的认证 `gh api` 搜索。`gh` 命中来自带能力词的仓库查询，本身作为发现证据保留，避免丢弃仅在 topics 等 GitHub 索引字段中声明能力的真实候选。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，只给出 `awesome-dsh-plugin/dsh-find-plugin` 这一条市场安装候选（`market_required`）；该市场会同步 awesome-dsh-plugin 精选目录。市场已装但没有相关命中，视为没有可复用插件。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
 
 ## 4. 数据与状态
 
