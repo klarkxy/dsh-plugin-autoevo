@@ -4,8 +4,9 @@
  * `@deepseek-ai/dsh-tool-cordis` is intentionally mounted by both the official
  * Creator preset and AutoEvo's evolution preset. rc.6 registers the same four
  * provider manifests for every standing preset mount, while the Host registry
- * rejects duplicate ids. Share only byte-equivalent first-party manifests and
- * keep their underlying registration alive until the final preset releases it.
+ * rejects duplicate ids. Share only first-party registrations with equivalent
+ * manifest and query implementations, and keep their underlying registration
+ * alive until the final preset releases it.
  */
 
 const SHAREABLE_PROVIDER_IDS = new Set(['Service', 'Event', 'Builtin', 'Tool'])
@@ -21,7 +22,7 @@ export interface CordisInspectRegistryLike {
 
 interface SharedRegistration {
   fingerprint: string
-  references: number
+  registrations: CordisInspectProviderRegistration[]
   dispose: () => void
 }
 
@@ -45,6 +46,17 @@ function stableValue(value: unknown): unknown {
 
 function manifestFingerprint(manifest: Record<string, unknown>): string {
   return JSON.stringify(stableValue(manifest))
+}
+
+function queryFingerprint(query: CordisInspectProviderRegistration['query']): string {
+  return Function.prototype.toString.call(query)
+}
+
+function registrationFingerprint(registration: CordisInspectProviderRegistration): string {
+  return JSON.stringify({
+    manifest: manifestFingerprint(registration.manifest),
+    query: queryFingerprint(registration.query),
+  })
 }
 
 function idempotent(dispose: () => void): () => void {
@@ -85,26 +97,40 @@ export function installCordisInspectCompatibility(
       return originalRegister.call(registry, registration)
     }
 
-    const fingerprint = manifestFingerprint(registration.manifest)
+    const fingerprint = registrationFingerprint(registration)
     let entry = shared.get(id)
     if (!entry) {
       entry = {
         fingerprint,
-        references: 0,
-        dispose: originalRegister.call(registry, registration),
+        registrations: [registration],
+        dispose: () => {},
       }
+      const activeEntry = entry
+      entry.dispose = originalRegister.call(registry, {
+        manifest: registration.manifest,
+        query(...args: unknown[]): unknown {
+          const activeRegistration = activeEntry.registrations[0]
+          if (!activeRegistration) {
+            throw new Error(`Cordis Inspect shared provider "${id}" has no active registration`)
+          }
+          return activeRegistration.query(...args)
+        },
+      })
       shared.set(id, entry)
     } else if (entry.fingerprint !== fingerprint) {
       // Delegate to the original strict registry so callers retain the native
       // conflict diagnostic and a changed provider cannot masquerade as shared.
       return originalRegister.call(registry, registration)
+    } else {
+      entry.registrations.push(registration)
     }
 
-    entry.references += 1
     return idempotent(() => {
       if (!entry) return
-      entry.references -= 1
-      if (entry.references !== 0) return
+      const registrationIndex = entry.registrations.indexOf(registration)
+      if (registrationIndex < 0) return
+      entry.registrations.splice(registrationIndex, 1)
+      if (entry.registrations.length !== 0) return
       shared.delete(id)
       entry.dispose()
     })
@@ -126,4 +152,4 @@ export function installCordisInspectCompatibility(
   })
 }
 
-export const _testing = { manifestFingerprint }
+export const _testing = { manifestFingerprint, queryFingerprint, registrationFingerprint }

@@ -26,8 +26,10 @@ declare const inject: readonly ["tools", "skills", "subprocess", "systemPrompt"]
 type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
 declare function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean;
+declare function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void;
 declare const _testing: {
   createIsEvolutionMode: typeof createIsEvolutionMode;
+  installCordisInspectCompatibilityWhenAvailable: typeof installCordisInspectCompatibilityWhenAvailable;
 };
 declare function apply(ctx: Context, input: Config): void;
 //#endregion

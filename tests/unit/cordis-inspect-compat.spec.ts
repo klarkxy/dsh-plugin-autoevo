@@ -5,14 +5,25 @@ import {
   type CordisInspectRegistryLike,
 } from '../../src/cordis-inspect-compat.js'
 
-function provider(id: string, description = 'same'): CordisInspectProviderRegistration {
+function provider(
+  id: string,
+  description = 'same',
+  query: CordisInspectProviderRegistration['query'] = vi.fn(),
+): CordisInspectProviderRegistration {
   return {
     manifest: {
       id,
       description,
       methods: [{ name: 'list', inputSchema: {}, outputSchema: {} }],
     },
-    query: vi.fn(),
+    query,
+  }
+}
+
+function queryWithValue(value: string, onCall: () => void): CordisInspectProviderRegistration['query'] {
+  return () => {
+    onCall()
+    return value
   }
 }
 
@@ -53,6 +64,37 @@ describe('Cordis Inspect rc.6 compatibility', () => {
 
     expect(() => registry.register(provider('Tool', 'changed'))).toThrow(/already registered/u)
     release()
+    uninstall()
+  })
+
+  it('keeps same-manifest providers with different query implementations fail-closed', () => {
+    const registry = registryFixture()
+    const uninstall = installCordisInspectCompatibility(registry)
+    const release = registry.register(provider('Service', 'same', () => 'creator'))
+
+    expect(() => registry.register(provider('Service', 'same', () => 'evolution'))).toThrow(/already registered/u)
+    release()
+    uninstall()
+  })
+
+  it('forwards shared providers to an equivalent registration that remains active', () => {
+    const registry = registryFixture()
+    const uninstall = installCordisInspectCompatibility(registry)
+    const creatorCalls = vi.fn()
+    const evolutionCalls = vi.fn()
+    const creatorQuery = queryWithValue('creator', creatorCalls)
+    const evolutionQuery = queryWithValue('evolution', evolutionCalls)
+    const releaseCreator = registry.register(provider('Service', 'same', creatorQuery))
+    const releaseEvolution = registry.register(provider('Service', 'same', evolutionQuery))
+
+    // The factory-generated mock functions have the same stable implementation
+    // fingerprint but separate closures, so the proxy must not retain Creator.
+    releaseCreator()
+    expect(registry.providers.get('Service')?.query()).toBe('evolution')
+    expect(creatorCalls).not.toHaveBeenCalled()
+    expect(evolutionCalls).toHaveBeenCalledTimes(1)
+
+    releaseEvolution()
     uninstall()
   })
 

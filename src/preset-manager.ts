@@ -6,6 +6,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rmdir,
   unlink,
@@ -44,6 +45,11 @@ export interface MaterializeEvolutionPresetOptions {
 
 export interface EvolutionPresetPaths {
   dshHome: string
+  presetsRoot: string
+  targetDir: string
+}
+
+interface PhysicalEvolutionPresetPaths {
   presetsRoot: string
   targetDir: string
 }
@@ -114,6 +120,65 @@ async function pathExists(target: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
+}
+
+/**
+ * Resolve the root only after rejecting a pre-existing linked `.agent-presets`
+ * entry. All writes below it then use the verified physical directory.
+ */
+async function resolvePhysicalPresetPaths(
+  paths: EvolutionPresetPaths,
+): Promise<{ ok: true; paths: PhysicalEvolutionPresetPaths } | { ok: false; reason: string }> {
+  await mkdir(paths.dshHome, { recursive: true })
+  const physicalHome = await realpath(paths.dshHome)
+  const physicalPresetsRoot = assertContained(
+    physicalHome,
+    path.join(physicalHome, '.agent-presets'),
+    'physical presets root',
+  )
+
+  let rootInfo: Awaited<ReturnType<typeof lstat>> | undefined
+  try {
+    rootInfo = await lstat(physicalPresetsRoot)
+  } catch (error) {
+    if (!isNotFound(error)) throw error
+  }
+
+  if (!rootInfo) {
+    try {
+      await mkdir(physicalPresetsRoot)
+    } catch (error) {
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
+        throw error
+      }
+    }
+    rootInfo = await lstat(physicalPresetsRoot)
+  }
+
+  if (rootInfo.isSymbolicLink()) {
+    return { ok: false, reason: 'existing .agent-presets root is a link; preserved without changes' }
+  }
+  if (!rootInfo.isDirectory()) {
+    return { ok: false, reason: 'existing .agent-presets root is not a directory; preserved without changes' }
+  }
+
+  const verifiedPresetsRoot = await realpath(physicalPresetsRoot)
+  assertContained(physicalHome, verifiedPresetsRoot, 'verified physical presets root')
+  return {
+    ok: true,
+    paths: {
+      presetsRoot: verifiedPresetsRoot,
+      targetDir: assertContained(
+        verifiedPresetsRoot,
+        path.join(verifiedPresetsRoot, EVOLUTION_PRESET_ID),
+        'physical evolution target',
+      ),
+    },
   }
 }
 
@@ -275,6 +340,13 @@ export async function materializeEvolutionPreset(
     }
   }
 
+  const physicalPaths = await resolvePhysicalPresetPaths(paths)
+  if (!physicalPaths.ok) {
+    options.logger?.warn?.(physicalPaths.reason)
+    return { status: 'preserved', targetDir: paths.targetDir, reason: physicalPaths.reason }
+  }
+  const { presetsRoot, targetDir } = physicalPaths.paths
+
   const templateVersion = options.templateVersion ?? EVOLUTION_PRESET_TEMPLATE_VERSION
   const renamePath = options.rename ?? rename
   const { files: contentFiles, hashes } = await readTemplateFiles(options.templateDir)
@@ -282,24 +354,22 @@ export async function materializeEvolutionPreset(
 
   let targetInfo: Awaited<ReturnType<typeof lstat>> | undefined
   try {
-    targetInfo = await lstat(paths.targetDir)
+    targetInfo = await lstat(targetDir)
   } catch (error) {
-    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+    if (!isNotFound(error)) {
       throw error
     }
   }
 
   if (!targetInfo) {
-    await mkdir(paths.presetsRoot, { recursive: true })
-    assertContained(paths.dshHome, paths.presetsRoot, 'presets root create')
     const stagingDir = assertContained(
-      paths.presetsRoot,
-      path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
+      presetsRoot,
+      path.join(presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
       'staging',
     )
     try {
       await writeStagedPreset(stagingDir, contentFiles, desiredManifest)
-      await renamePath(stagingDir, paths.targetDir)
+      await renamePath(stagingDir, targetDir)
       options.logger?.info?.(`AutoEvo installed managed preset ${EVOLUTION_PRESET_ID} at ${paths.targetDir}`)
       return {
         status: 'installed',
@@ -308,7 +378,7 @@ export async function materializeEvolutionPreset(
         templateVersion,
       }
     } catch (error) {
-      await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
+      await cleanupOwnedTree(stagingDir, presetsRoot).catch(() => undefined)
       throw error
     }
   }
@@ -321,7 +391,7 @@ export async function materializeEvolutionPreset(
     return { status: 'preserved', targetDir: paths.targetDir, reason }
   }
 
-  const installedManifest = await readInstalledManifest(paths.targetDir)
+  const installedManifest = await readInstalledManifest(targetDir)
   if (!installedManifest) {
     const reason = 'existing evolution directory has no valid AutoEvo manifest; preserved without changes'
     options.logger?.warn?.(reason)
@@ -339,7 +409,7 @@ export async function materializeEvolutionPreset(
     return { status: 'preserved', targetDir: paths.targetDir, reason }
   }
 
-  const pristine = await verifyPristine(paths.targetDir, installedManifest)
+  const pristine = await verifyPristine(targetDir, installedManifest)
   if (!pristine.ok) {
     const reason = `existing managed preset is not pristine (${pristine.reason}); preserved without changes`
     options.logger?.warn?.(reason)
@@ -356,33 +426,33 @@ export async function materializeEvolutionPreset(
   }
 
   const stagingDir = assertContained(
-    paths.presetsRoot,
-    path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
+    presetsRoot,
+    path.join(presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
     'upgrade staging',
   )
   const backupDir = assertContained(
-    paths.presetsRoot,
-    path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.backup-${randomSuffix()}`),
+    presetsRoot,
+    path.join(presetsRoot, `.${EVOLUTION_PRESET_ID}.backup-${randomSuffix()}`),
     'upgrade backup',
   )
 
   try {
     await writeStagedPreset(stagingDir, contentFiles, desiredManifest)
-    await renamePath(paths.targetDir, backupDir)
+    await renamePath(targetDir, backupDir)
     try {
-      await renamePath(stagingDir, paths.targetDir)
+      await renamePath(stagingDir, targetDir)
     } catch (error) {
       try {
-        await renamePath(backupDir, paths.targetDir)
+        await renamePath(backupDir, targetDir)
       } catch (restoreError) {
         throw new Error(
           `AutoEvo preset upgrade failed and restore also failed: ${error instanceof Error ? error.message : String(error)}; restore: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
         )
       }
-      await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
+      await cleanupOwnedTree(stagingDir, presetsRoot).catch(() => undefined)
       throw error
     }
-    await cleanupOwnedTree(backupDir, paths.presetsRoot).catch(() => undefined)
+    await cleanupOwnedTree(backupDir, presetsRoot).catch(() => undefined)
     options.logger?.info?.(`AutoEvo upgraded managed preset ${EVOLUTION_PRESET_ID} to template ${templateVersion}`)
     return {
       status: 'upgraded',
@@ -391,11 +461,11 @@ export async function materializeEvolutionPreset(
       templateVersion,
     }
   } catch (error) {
-    await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
-    if (await pathExists(backupDir) && !(await pathExists(paths.targetDir))) {
-      await renamePath(backupDir, paths.targetDir).catch(() => undefined)
-    } else if (await pathExists(backupDir) && await pathExists(paths.targetDir)) {
-      await cleanupOwnedTree(backupDir, paths.presetsRoot).catch(() => undefined)
+    await cleanupOwnedTree(stagingDir, presetsRoot).catch(() => undefined)
+    if (await pathExists(backupDir) && !(await pathExists(targetDir))) {
+      await renamePath(backupDir, targetDir).catch(() => undefined)
+    } else if (await pathExists(backupDir) && await pathExists(targetDir)) {
+      await cleanupOwnedTree(backupDir, presetsRoot).catch(() => undefined)
     }
     throw error
   }

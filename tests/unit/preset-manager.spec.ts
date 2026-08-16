@@ -86,6 +86,21 @@ describe('materializeEvolutionPreset', () => {
     expect(manifest.files['agent.cordis.yml']).toBe(sha256(Buffer.from(baseTemplate['agent.cordis.yml'])))
   })
 
+  it('allows dshHome itself to resolve through a junction to its physical root', async () => {
+    const root = await tempDir('autoevo-preset-home-link')
+    const physicalHome = path.join(root, 'physical-dsh')
+    const dshHome = path.join(root, 'dsh')
+    await mkdir(physicalHome, { recursive: true })
+    await symlink(physicalHome, dshHome, 'junction')
+    const templateDir = await writeTemplate(root, baseTemplate)
+
+    const result = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+
+    expect(result.status).toBe('installed')
+    expect(await readFile(path.join(physicalHome, '.agent-presets', 'evolution', 'preset.yml'), 'utf8'))
+      .toBe(baseTemplate['preset.yml'])
+  })
+
   it('no-ops when template version and hashes already match', async () => {
     const root = await tempDir('autoevo-preset-noop')
     const dshHome = path.join(root, 'dsh')
@@ -417,5 +432,26 @@ describe('materializeEvolutionPreset', () => {
     expect(result.reason).toMatch(/link/u)
     expect((await lstat(target)).isSymbolicLink()).toBe(true)
     expect(await readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe('keep\n')
+  })
+
+  it('preserves an .agent-presets junction before first install without touching its external target', async () => {
+    const root = await tempDir('autoevo-preset-root-container-link')
+    const dshHome = path.join(root, 'dsh')
+    const presetsRoot = resolveEvolutionPresetPaths(dshHome).presetsRoot
+    const outside = path.join(root, 'outside')
+    await mkdir(dshHome, { recursive: true })
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'keep.txt'), 'keep\n', 'utf8')
+    await symlink(outside, presetsRoot, 'junction')
+    const templateDir = await writeTemplate(root, baseTemplate)
+
+    const result = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
+
+    expect(result.status).toBe('preserved')
+    expect(result.reason).toMatch(/\.agent-presets root is a link/u)
+    expect((await lstat(presetsRoot)).isSymbolicLink()).toBe(true)
+    expect(await readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe('keep\n')
+    await expect(readFile(path.join(outside, 'evolution', 'preset.yml'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

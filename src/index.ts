@@ -59,20 +59,21 @@ function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean {
   }
 }
 
-export const _testing = { createIsEvolutionMode }
+function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void {
+  ctx.inject(['cordisInspect'], (child) => {
+    const cordisInspect = child.get('cordisInspect') as CordisInspectRegistryLike | undefined
+    if (cordisInspect && typeof cordisInspect.register === 'function') {
+      return installCordisInspectCompatibility(cordisInspect)
+    }
+  })
+}
+
+export const _testing = { createIsEvolutionMode, installCordisInspectCompatibilityWhenAvailable }
 
 export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)
   const log = ctx.logger('autoevo')
-  const cordisInspect = ctx.get('cordisInspect') as CordisInspectRegistryLike | undefined
-  if (cordisInspect && typeof cordisInspect.register === 'function') {
-    ctx.effect(
-      () => installCordisInspectCompatibility(cordisInspect),
-      'autoevo: share first-party Cordis Inspect providers across Creator and evolution presets',
-    )
-  } else {
-    log.warn('Host cordisInspect registry unavailable; Creator/evolution coexistence compatibility is inactive')
-  }
+  installCordisInspectCompatibilityWhenAvailable(ctx)
   const store = new StateStore(config.stateDir)
   const runner = new DshCommandRunner(ctx.subprocess, config)
   const creationGuard = new CreationGuard({ isEvolutionMode: createIsEvolutionMode(ctx) })
