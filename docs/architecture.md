@@ -40,7 +40,9 @@ capability_resolve
                            plugin_remove
 ```
 
-动态 Cordis 新建入口还有一条执行门禁：带 Agent 身份的 `cordis_define(kind:new)` 在 `tools/pre-execute` 预留一次性权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
+动态 Cordis 新建入口还有一条执行门禁：带 Agent 身份的 `cordis_define(kind:new)` 首先要求 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回 AutoEvo 的精确模式标记（owner `dsh-plugin-autoevo` + 协议版本）。标记只由 scoped 导出 `dsh-plugin-autoevo/evolution-mode` 在 preset isolate realm 内发布；preset id 本身不是授权依据。模式外调用被拒绝并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
+
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution` 安全物化到 `<dshHome>/.agent-presets/evolution`：首次写入 staging 后原子 rename；同版本同 hash 为 no-op；仅在已有目录具备有效 AutoEvo manifest 且文件集与 hash 完全一致时升级；用户修改、外来同名目录、缺文件或多余文件一律保留并诊断。配置为 `false` 时跳过安装/升级且永不自动删除。
 
 ## 3. DSH 接缝
 

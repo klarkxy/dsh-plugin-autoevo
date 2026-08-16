@@ -109,6 +109,34 @@ describe('local matching', () => {
     expect(result.githubShouldRun).toBe(false)
   })
 
+  it('does not mistake Creator workflow skills for an existing business capability', async () => {
+    const ctx = {
+      tools: { schemas: () => [] },
+      systemPrompt: { assemble: async () => ({ tools: [] }) },
+      skills: { list: async () => [
+        {
+          name: 'cordis-plugin-development',
+          description: 'Create and repair dynamic Cordis Plugins',
+          invocation: { modelInvocable: true },
+        },
+        {
+          name: 'autoevo-plugin-creator',
+          description: 'AutoEvo workflow for creating dynamic Cordis Plugins',
+          invocation: { modelInvocable: true },
+        },
+      ] },
+    } as unknown as Context
+
+    const result = await resolveLocalCapabilities(
+      ctx,
+      'Create a dynamic Cordis plugin for qzvm-frobulation',
+      { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+    )
+
+    expect(result.candidates).toEqual([])
+    expect(result.githubShouldRun).toBe(true)
+  })
+
   it('does not claim tool-search reachability when bridge tools are registered but outside the Agent scope', async () => {
     const ctx = {
       tools: { schemas: () => [

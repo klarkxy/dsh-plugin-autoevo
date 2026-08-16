@@ -67,6 +67,7 @@ describe('trusted verification receipt', () => {
       commandTimeoutMs: 30_000,
       forwardedCredentialEnv: [],
       verificationPatchPaths: [],
+      evolutionPreset: true,
     }
     const runner: CommandRunner = {
       async run(request) {

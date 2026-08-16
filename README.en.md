@@ -40,9 +40,17 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 `link:` is only for this trusted checkout. Third-party candidates are materialized as owned `file:...tgz` packages.
 
+## Capability Evolution mode
+
+After AutoEvo installs, it safely materializes the user agent preset **Capability Evolution** (id `evolution`, display name `能力进化`, description `先复用，再改进，最后才创建`) under `<dshHome>/.agent-presets/evolution` by default. Config `evolutionPreset` defaults to `true`. Setting it to `false` skips install/update and **never** auto-deletes an existing preset.
+
+Start or switch a blank/new session to **能力进化** for the managed dynamic-creation path. The preset mounts `dsh-plugin-autoevo/evolution-mode`, registers the `autoevo-plugin-creator` skill, and publishes the `autoevoEvolutionMode` marker behind an isolate realm. AutoEvo accepts an Agent as genuine evolution mode only when `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` returns that exact marker; the preset id alone is never authority.
+
+Official **Creator** remains for existing-plugin repair and static development. AutoEvo does **not** globally replace the shipped `cordis-plugin-development` skill.
+
 ## How it works
 
-- A `cordis_define` call with `plugin.kind = "new"` must follow `capability_resolve`. Reusable local capability, a modifiable candidate, or unfinished candidate review blocks creation. Only completed discovery and review with no viable candidate gives the current Agent one successful creation grant. Technical failures may retry, success consumes it, and a new resolution revokes an older grant.
+- Agent-bound `cordis_define` with `plugin.kind = "new"` is allowed only in genuine Capability Evolution mode, and only after `capability_resolve`. Outside that mode the call is denied with an actionable instruction to switch to 能力进化. Inside the mode, reusable local capability, a modifiable candidate, or unfinished candidate review still blocks creation. Only completed discovery and review with no viable candidate yields one successful `scratch_ready` grant. Technical failures may retry, success consumes it, and a new resolution revokes an older grant.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not guess that generic development tools are plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
 - When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. Only when it is absent, fails, or yields no valid results does AutoEvo fall back to bounded GitHub search through authenticated `gh`. Both paths discover candidates from the `dsh-plugin` topic before Agent reranking.

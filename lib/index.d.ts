@@ -14,6 +14,8 @@ interface Config$1 {
   commandTimeoutMs?: number;
   forwardedCredentialEnv?: string[];
   verificationPatchPaths?: string[];
+  /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
+  evolutionPreset?: boolean;
 }
 declare const Config$1: Schema<Config$1>;
 //#endregion

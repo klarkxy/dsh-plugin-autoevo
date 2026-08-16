@@ -40,9 +40,17 @@ pnpm exec dsh plugin --profile web add --save-exact "link:<absolute-path-to-this
 
 `link:` 只用于本仓库这份可信 checkout。第三方候选会物化为 owned `file:...tgz`。
 
+## 能力进化模式
+
+安装 AutoEvo 后，默认会把用户 Agent preset **能力进化**（id `evolution`，描述「先复用，再改进，最后才创建」）安全地物化到 `<dshHome>/.agent-presets/evolution`。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 时跳过安装/升级，但**不会**自动删除已有 preset。
+
+在空白/新会话中把 Agent 切换到 **能力进化**，即可进入受托管的动态创建路径：preset 挂载 `dsh-plugin-autoevo/evolution-mode`，注册 `autoevo-plugin-creator` 技能，并在 isolate realm 内发布 `autoevoEvolutionMode` 标记。仅当 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回该标记时，AutoEvo 才承认当前 Agent 处于真·能力进化模式；preset id 本身不是授权依据。
+
+官方 **创造模式 / Creator** 仍用于既有插件修复与静态开发；AutoEvo **不会**在全局替换 `cordis-plugin-development` 技能。
+
 ## 工作方式
 
-- `cordis_define` 的 `plugin.kind = "new"` 调用必须先经过 `capability_resolve`。本地可复用、候选可修改或候选尚未审完时都会被拒绝；只有完整发现和审查确认无可用候选后，才向当前 Agent 发放一次成功创建权限。技术性失败可重试，成功即消费；新解析会撤销旧权限。
+- 带 Agent 身份的 `cordis_define`（`plugin.kind = "new"`）只在真·能力进化模式下放行，且必须先经过 `capability_resolve`。模式外调用会收到可操作的拒绝提示，引导切换到能力进化。模式内：本地可复用、候选可修改或候选尚未审完时都会被拒绝；只有完整发现和审查确认无可用候选后，才向当前 Agent 发放一次 `scratch_ready` 成功创建权限。技术性失败可重试，成功即消费；新解析会撤销旧权限。
 - `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
 - 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)；它缺失、失败或没有有效结果时，才用已认证的 `gh` 做有界 GitHub 搜索。两条发现路径都从 `dsh-plugin` topic 取候选，再由 Agent rerank。

@@ -18,6 +18,7 @@ const config: RuntimeConfig = {
   commandTimeoutMs: 30_000,
   forwardedCredentialEnv: [],
   verificationPatchPaths: [],
+  evolutionPreset: true,
 }
 
 const exec = {

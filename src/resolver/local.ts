@@ -3,6 +3,7 @@ import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 import { TOOL_NAMES } from '../contracts.js'
+import { isWorkflowSkill } from '../creator-skill.js'
 import { capabilityAnchors, normalizeSearchText } from './keywords.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
@@ -93,7 +94,7 @@ export async function resolveLocalCapabilities(
     ? { cwd, scope, signal: exec.signal }
     : { cwd, signal: exec.signal })
   for (const skill of skills) {
-    if (!skill.invocation.modelInvocable) continue
+    if (!skill.invocation.modelInvocable || isWorkflowSkill(skill.name)) continue
     const description = [skill.description, skill.whenToUse].filter(Boolean).join(' ')
     const confidence = matchConfidence(requirement, skill.name, description)
     if (confidence < 0.3) continue

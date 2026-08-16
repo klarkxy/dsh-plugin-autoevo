@@ -14,11 +14,18 @@ describe('subprocess environment boundary', () => {
     })
   })
 
-  it('forwards only the explicit GitHub CLI credential allowlist', () => {
+  it('forwards only the explicit GitHub CLI credential allowlist and disables color', () => {
     expect(_testing.effectiveEnvironment('gh', {}, {
       GH_TOKEN: 'token',
       OTHER_SECRET: 'do-not-forward',
-    })).toEqual({ GH_TOKEN: 'token' })
+    })).toEqual({
+      GH_TOKEN: 'token',
+      NO_COLOR: '1',
+      CLICOLOR: '0',
+      CLICOLOR_FORCE: '0',
+      GH_FORCE_TTY: '0',
+      TERM: 'dumb',
+    })
   })
 })
 

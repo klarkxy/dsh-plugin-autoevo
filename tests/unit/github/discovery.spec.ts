@@ -5,7 +5,7 @@ import type { CommandRequest, CommandRunner } from '../../../src/process/runner.
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
-  maxCandidates: 2, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [],
+  maxCandidates: 2, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
 }
 
 describe('GitHub discovery', () => {
@@ -39,5 +39,24 @@ describe('GitHub discovery', () => {
     expect(requests).toHaveLength(2)
     expect(requests[0]?.argv).toEqual(['gh', 'api', '--method', 'GET', '/search/repositories', '-f', 'q=dsh plugin', '-f', 'sort=stars', '-f', 'order=desc', '-f', 'per_page=2'])
     expect(requests.every((request) => !request.argv.some((arg) => /[;&|]/.test(arg)))).toBe(true)
+  })
+
+  it('parses gh search JSON even when ANSI color codes are present', async () => {
+    const colored = '\u001b[1;37m{\u001b[m\u001b[1;34m"items"\u001b[m\u001b[1;37m:\u001b[m[\u001b[1;37m{\u001b[m'
+      + '"full_name":"org/calc","name":"calc","description":"c","stargazers_count":1,'
+      + '"updated_at":"2026-01-01T00:00:00Z","topics":["dsh-plugin"],"default_branch":"main"'
+      + '\u001b[1;37m}\u001b[m]\u001b[1;37m}\u001b[m'
+    const runner: CommandRunner = {
+      async run() {
+        return { exitCode: 0, signal: null, stdout: colored, stderr: '' }
+      },
+    }
+    const candidates = await discoverGithubCandidates({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      queries: ['calculator topic:dsh-plugin'],
+    })
+    expect(candidates.map((candidate) => candidate.repository)).toEqual(['org/calc'])
   })
 })

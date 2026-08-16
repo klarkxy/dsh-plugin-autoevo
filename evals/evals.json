@@ -1,0 +1,64 @@
+{
+  "skill_name": "autoevo-plugin-creator",
+  "evals": [
+    {
+      "id": "reuse-local-capability",
+      "prompt": "In this DSH session, add a scientific-notation calculator. A scoped calculator skill is already available. Please make it usable now.",
+      "expected_output": "Calls capability_resolve for the concrete calculator need, follows reuse_required by using the scoped calculator capability, and does not create a dynamic Cordis Plugin.",
+      "assertions": [
+        "Calls capability_resolve before proposing a new dynamic Plugin.",
+        "Does not call cordis_define with plugin.kind new when local reuse is available."
+      ]
+    },
+    {
+      "id": "scratch-authorized-host-tool",
+      "prompt": "Create a live, session-only Cordis Plugin that adds a model-callable tool returning the current UTC time. No matching local capability or acceptable reviewed candidate exists; capability_resolve has returned scratch_ready.",
+      "expected_output": "Uses only exact Host/Builtin/Tool inspection needed for the tool, performs one authorized new definition, runs the returned package, and verifies a real tool call/result.",
+      "assertions": [
+        "Uses the current scratch_ready authorization before cordis_define(kind:new).",
+        "Avoids broad inspect/list calls.",
+        "Reports a real dynamic Tool verification, not only successful definition."
+      ]
+    },
+    {
+      "id": "existing-plugin-update",
+      "prompt": "Update @weather_panel so it shows the last refresh time next to the existing status. Keep its Host implementation unchanged unless necessary.",
+      "expected_output": "Inspects the exact existing package, preserves the unaffected half, defines an immutable package with plugin.kind existing, activates it with the appropriate mode, and verifies the change without capability_resolve.",
+      "assertions": [
+        "Does not call capability_resolve for the named existing Plugin.",
+        "Does not create a second Plugin id.",
+        "Uses exact self-inspection before modification."
+      ]
+    },
+    {
+      "id": "client-slot-ui",
+      "prompt": "Create a live dynamic Cordis Plugin that adds a compact refresh button to the current conversation footer. capability_resolve has returned scratch_ready. The button should invoke the package's private Host refresh method and show the returned timestamp.",
+      "expected_output": "Performs exact inspection of the selected Client Slot and the minimum Host/Client contracts, uses private JSON RPC, defines and activates the one authorized new Plugin, and verifies an actual Client render and click interaction.",
+      "assertions": [
+        "Inspects the exact target Slot protocol and props before Client registration.",
+        "Uses an additive Slot contribution rather than a guessed global DOM selector.",
+        "Does not accept Host activation alone as UI verification."
+      ]
+    },
+    {
+      "id": "repair-and-rollback",
+      "prompt": "Repair @alerts_panel: its latest update fails because the selected event listener has the wrong parameters. If the correction still fails, roll it back to the known current package; do not make a new Plugin.",
+      "expected_output": "Reads exact failed-package diagnostics, re-inspects only the implicated Event contract, appends a corrected existing-package version and activates it; if needed explicitly runs currentPackageId to roll back. It never resolves a new capability.",
+      "assertions": [
+        "Does not call capability_resolve or cordis_define(kind:new).",
+        "Uses cordis_inspect_self for the failed package and exact Event inspection for repair.",
+        "Describes explicit rollback to currentPackageId instead of assuming failed update recovery."
+      ]
+    },
+    {
+      "id": "near-miss-static-package-release",
+      "prompt": "Package my Cordis helper as an npm module, publish it to our registry, and open a release PR with the generated changelog.",
+      "expected_output": "Does not trigger the dynamic AutoEvo Plugin workflow. It routes the static packaging/release request to the appropriate repository and publication workflow, requiring the relevant user authorization for publication.",
+      "assertions": [
+        "Calls zero AutoEvo plugin tools.",
+        "Calls zero Cordis Plugin lifecycle or inspection tools.",
+        "Does not claim a dynamic process-local Plugin satisfies a release request."
+      ]
+    }
+  ]
+}

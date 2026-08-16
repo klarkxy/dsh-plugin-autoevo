@@ -31,15 +31,28 @@ export function validateGithubRepository(value: string): string {
   return `${match.groups?.owner}/${match.groups?.name}`
 }
 
+/** Strip ANSI SGR sequences that gh may emit when color.ui is forced on. */
+function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/gu, '')
+}
+
 function asSearchResponse(stdout: string): GithubSearchResponse {
+  const cleaned = stripAnsi(stdout).trim()
   try {
-    const value: unknown = JSON.parse(stdout)
+    const value: unknown = JSON.parse(cleaned)
     if (!value || typeof value !== 'object') throw new Error('not an object')
     return value as GithubSearchResponse
   } catch (cause) {
-    throw new EvolutionError('github_unavailable', 'GitHub returned malformed repository search data', {
-      cause: cause instanceof Error ? cause.message : String(cause),
-    })
+    const preview = cleaned.replace(/\s+/gu, ' ').slice(0, 240) || '<empty>'
+    throw new EvolutionError(
+      'github_unavailable',
+      `GitHub returned malformed repository search data (${Buffer.byteLength(cleaned)} bytes): ${preview}`,
+      {
+        cause: cause instanceof Error ? cause.message : String(cause),
+        stdoutPreview: preview,
+        stdoutBytes: Buffer.byteLength(cleaned),
+      },
+    )
   }
 }
 

@@ -62,6 +62,7 @@ function config(root: string): RuntimeConfig {
     commandTimeoutMs: 30_000,
     forwardedCredentialEnv: [],
     verificationPatchPaths: [],
+    evolutionPreset: true,
   }
 }
 

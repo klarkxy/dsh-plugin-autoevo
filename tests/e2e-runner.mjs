@@ -193,14 +193,16 @@ async function runScenario() {
   assert.match(result.stdout, new RegExp(expectedMarker, 'u'))
 
   if (scenario === 'adversarial-define') {
-    assert.match(result.stdout, /AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first\./u)
+    // Headless sessions are outside Capability Evolution mode, so new defines are
+    // denied with the mode-specific message even before capability_resolve runs.
+    assert.match(result.stdout, /AutoEvo denied new Cordis plugin creation: start or switch a blank\/new session to the 能力进化 \(evolution\) agent preset/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL|E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
     assert.match(result.stdout, /"decision":"use_local"/u)
     return {
       scenario,
       marker: expectedMarker,
-      guard: 'denied cordis_define(kind:new) before capability_resolve',
-      denial: 'AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.',
+      guard: 'denied cordis_define(kind:new) outside Capability Evolution mode',
+      denial: 'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the 能力进化 (evolution) agent preset',
       resolution: 'use_local',
     }
   }

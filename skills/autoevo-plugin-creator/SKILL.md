@@ -1,0 +1,61 @@
+---
+name: autoevo-plugin-creator
+description: Create, update, repair, run, roll back, or clean up a dynamic Cordis Plugin in a DSH session. Use only when the requested outcome is a live, process-local dynamic Cordis Plugin (including Client Slot UI); apply AutoEvo reuse-before-build authorization before a new definition. Do not use for static npm/DSH packages, repository exports, releases, or ordinary Cordis questions.
+---
+
+<!-- autoevo-plugin-creator:v1 -->
+
+# AutoEvo Dynamic Cordis Plugin Creator
+
+Build the smallest live Cordis Plugin that satisfies the current task. This skill governs dynamic, process-local Cordis packages only: do not turn the work into a repository, npm package, formal export, commit, push, or release.
+
+Do not load or follow the shipped `cordis-plugin-development` skill. Use the current session's real tool schemas and this workflow instead.
+
+## 1. Classify before calling tools
+
+Use this skill only for a request to create or operate a live dynamic Cordis Plugin.
+
+- **New capability**: no existing target Plugin is named and a new `cordis_define` with `plugin.kind: "new"` would be needed.
+- **Existing update or repair**: the request names an existing Plugin (for example `@pluginId`), or diagnoses/restarts a previously defined Plugin. This branch bypasses `capability_resolve`.
+- **Near miss**: static DSH/npm plugin development, a repository export or release, documentation, or a general Cordis question. Do not call AutoEvo or Cordis Plugin tools; handle it through the capability that owns that work.
+
+Never issue a broad inventory merely to explore. Inspect only the exact runtime surface needed by the chosen design.
+
+## 2. New-capability state machine
+
+Before any new definition, state the concrete capability in one sentence and call `capability_resolve` with it. Treat its result as the sole authority for scratch creation. Read [the state details](references/autoevo-state.md) when a result is returned.
+
+| Authorization | Required next action | Scratch definition |
+| --- | --- | --- |
+| `reuse_required` | Use the available local tool or skill for the task. | Stop |
+| `review_required` | Review the indicated candidate with `plugin_review`; act on the resulting authorization. | Stop |
+| `modify_required` | Modify the reviewed partial candidate minimally, then review it again. | Stop |
+| `scratch_ready` | Inspect the exact runtime contracts, then make one new definition. | Allowed once |
+
+Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed `cordis_define(kind: "new")` may retry with the same live grant; a successful one consumes it. Do not bypass a non-scratch result by changing wording, creating a same-named Plugin, or defining a static package.
+
+## 3. Design and exact inspection
+
+Choose the smallest Host, Client, or Host-plus-Client design based on data ownership. Query only the exact Service, Event, Builtin, Tool, theme token, or Slot contract that the implementation will use; do not call a broad inspect/list operation and do not infer missing fields.
+
+Read [the runtime rules](references/cordis-runtime.md) only when selecting Host/Client boundaries, private RPC, lifecycle effects, events, tools, or version activation. For Client UI, read [the Slot rules](references/client-slots.md) only after selecting a specific UI surface.
+
+Keep dynamic code as plain JavaScript function bodies. Use only confirmed APIs, request optional services with `ctx.get`, keep live internal objects out of long-lived state/RPC, and register every side effect through the Cordis lifecycle so it has a disposer.
+
+For Client UI, inspect the exact target Slot before registration. Use its returned registration protocol, props, and additive entry point; do not guess keys, props, DOM selectors, root Slots, or global browser objects.
+
+## 4. Define, run, and verify
+
+1. Summarize the minimal design and exact inspected contracts.
+2. Define the package. For new work use `plugin.kind: "new"` only with the live `scratch_ready` grant. For a named Plugin, inspect its exact base package with `cordis_inspect_self`, preserve untouched halves, then use `plugin.kind: "existing"` with its original id.
+3. Run the returned exact package id. Use `run` for first activation/restart and `update` only to move an existing Plugin to a different package.
+4. If activation awaits approval or Client loading, report that state and wait for a later system update; do not claim success or poll in the same turn.
+5. Verify the requested observable behavior on the proper Host or Client surface, including a real invocation for dynamic Tools and an actual render/interaction for Client UI.
+
+## 5. Repair, rollback, and cleanup
+
+On a technical failure, inspect only the failed package and its exact diagnostics with `cordis_inspect_self`. Re-query only the capability implicated by that diagnostic, append a corrected package under the same Plugin, and run it with the appropriate mode. Existing update and repair work never needs `capability_resolve`.
+
+If an update must be reversed, explicitly run the recorded `currentPackageId`; a failed update does not restore a physical run by itself. Use `cordis_stop` to pause a Plugin. Use `cordis_undefine` only when the user explicitly requests permanent removal and no rollback/inspection remains necessary.
+
+Report the Plugin/package ids, activation state, verification evidence, and any approval or Client-runtime limitation. For a regression trace or skill evaluation, use [the trace expectations](references/eval-traces.md).

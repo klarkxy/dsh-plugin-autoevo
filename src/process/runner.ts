@@ -39,6 +39,13 @@ function effectiveEnvironment(
     for (const name of ['GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GH_HOST']) {
       if (env[name] === undefined && parent[name] !== undefined) env[name] = parent[name]
     }
+    // Collect-mode pipes are not TTYs, but a user/global `color.ui=always` (or
+    // force-color env) still paints gh JSON with ANSI codes and breaks JSON.parse.
+    env.NO_COLOR = '1'
+    env.CLICOLOR = '0'
+    env.CLICOLOR_FORCE = '0'
+    env.GH_FORCE_TTY = '0'
+    if (env.TERM === undefined) env.TERM = 'dumb'
   }
   if (/^git(?:\.exe)?$/iu.test(command)) {
     // The DSH subprocess seam deliberately scrubs credential-shaped *KEY*

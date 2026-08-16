@@ -1,6 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ResolutionAuthorization } from './contracts.js'
+import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
 
 type Grant =
   | { state: 'available'; resolutionId: string }
@@ -34,10 +35,21 @@ function denialReason(authorization?: ResolutionAuthorization): string {
   return `${prefix}: the scratch-build authorization has already been reserved or consumed.`
 }
 
+function outsideEvolutionModeReason(): string {
+  return OUTSIDE_EVOLUTION_MODE_DENIAL
+}
+
+export interface CreationGuardOptions {
+  /** True only when agentPresets.serviceFor(agent, 'autoevoEvolutionMode') yields exact marker. */
+  isEvolutionMode?: (agent: Agent) => boolean
+}
+
 /** Runtime-only, fail-closed authorization for one new dynamic Cordis Plugin. */
 export class CreationGuard {
   private readonly states = new WeakMap<Agent, AgentGateState>()
   private nextGeneration = 0
+
+  constructor(private readonly options: CreationGuardOptions = {}) {}
 
   beginResolution(agent?: Agent): number | undefined {
     if (!agent) return undefined
@@ -76,8 +88,15 @@ export class CreationGuard {
     }
   }
 
+  private inEvolutionMode(agent: Agent): boolean {
+    return this.options.isEvolutionMode?.(agent) === true
+  }
+
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     if (!exec.agent || !isNewCordisDefinition(exec)) return next()
+    if (!this.inEvolutionMode(exec.agent)) {
+      return Promise.resolve({ kind: 'deny', reason: outsideEvolutionModeReason() })
+    }
     const state = this.states.get(exec.agent)
     const grant = state?.grant
     if (!grant || grant.state !== 'available') {
@@ -90,6 +109,7 @@ export class CreationGuard {
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined {
     if (!exec.agent || !isNewCordisDefinition(exec)) return undefined
+    if (!this.inEvolutionMode(exec.agent)) return outsideEvolutionModeReason()
     const state = this.states.get(exec.agent)
     const grant = state?.grant
     if (grant?.state === 'reserved' && grant.callId === String(exec.callId)) return undefined
@@ -113,4 +133,4 @@ export class CreationGuard {
   }
 }
 
-export const _testing = { denialReason }
+export const _testing = { denialReason, outsideEvolutionModeReason }

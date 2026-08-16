@@ -103,7 +103,7 @@ class ScriptedAdapter extends LlmAdapter {
       const denial = pairs[0]
       const denialText = typeof denial.result === 'string' ? denial.result : JSON.stringify(denial.result)
       if (!denial.isError
-        || !denialText.includes('AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.')
+        || !denialText.includes('AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the 能力进化 (evolution) agent preset')
         || denialText.includes('UNKNOWN_TOOL')
         || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }
@@ -127,7 +127,19 @@ class ScriptedAdapter extends LlmAdapter {
     if (pairs.length === 1) {
       const resolution = pairs[0].result
       const repository = targetRepository(resolution)
-      if (!repository) return { kind: 'text', text: 'E2E_FULL_FLOW_ERROR target repository not discovered' }
+      if (!repository) {
+        return {
+          kind: 'text',
+          text: `E2E_FULL_FLOW_ERROR target repository not discovered ${JSON.stringify({
+            decision: resolution?.decision,
+            remoteCandidateSource: resolution?.remoteCandidateSource,
+            remoteDiscoveryComplete: resolution?.remoteDiscoveryComplete,
+            remoteCandidates: resolution?.remoteCandidates?.map((candidate) => candidate.repository),
+            queries: resolution?.queries,
+            reasons: resolution?.reasons,
+          })}`,
+        }
+      }
       return {
         kind: 'tool',
         name: 'plugin_review',

@@ -27,6 +27,11 @@
       "import": "./lib/index.js",
       "default": "./lib/index.js"
     },
+    "./evolution-mode": {
+      "types": "./lib/evolution-mode.d.ts",
+      "import": "./lib/evolution-mode.js",
+      "default": "./lib/evolution-mode.js"
+    },
     "./verification-observer": {
       "types": "./lib/verification-observer.d.ts",
       "import": "./lib/verification-observer.js",
@@ -35,6 +40,8 @@
   },
   "files": [
     "lib",
+    "skills",
+    "presets",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

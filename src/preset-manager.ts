@@ -1,0 +1,368 @@
+import { randomBytes } from 'node:crypto'
+import {
+  access,
+  constants,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
+import path from 'node:path'
+import {
+  EVOLUTION_PRESET_ID,
+  EVOLUTION_PRESET_MANAGED_CONTENT_FILES,
+  EVOLUTION_PRESET_MANIFEST_FILENAME,
+  EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+  EVOLUTION_PRESET_TEMPLATE_VERSION,
+  EVOLUTION_MODE_OWNER,
+  isEvolutionPresetManifest,
+  type EvolutionPresetInstallResult,
+  type EvolutionPresetManifest,
+} from './evolution-contracts.js'
+import { sha256 } from './state/hashes.js'
+
+export interface MaterializeEvolutionPresetOptions {
+  dshHome: string
+  enabled: boolean
+  /** Absolute path to bundled presets/evolution directory (content files only). */
+  templateDir: string
+  templateVersion?: string
+  logger?: { info?(msg: string): void; warn?(msg: string): void }
+  /** Test-only rename override (defaults to fs.promises.rename). */
+  rename?: (from: string, to: string) => Promise<void>
+}
+
+export interface EvolutionPresetPaths {
+  dshHome: string
+  presetsRoot: string
+  targetDir: string
+}
+
+function posixJoin(...parts: string[]): string {
+  return parts.join('/')
+}
+
+function isPathInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+function assertContained(root: string, candidate: string, label: string): string {
+  const resolvedRoot = path.resolve(root)
+  const resolvedCandidate = path.resolve(candidate)
+  if (!isPathInside(resolvedRoot, resolvedCandidate)) {
+    throw new Error(`AutoEvo preset path escaped containment (${label}): ${resolvedCandidate}`)
+  }
+  return resolvedCandidate
+}
+
+export function resolveEvolutionPresetPaths(dshHome: string): EvolutionPresetPaths {
+  const resolvedHome = path.resolve(dshHome)
+  const presetsRoot = path.join(resolvedHome, '.agent-presets')
+  const targetDir = path.join(presetsRoot, EVOLUTION_PRESET_ID)
+  assertContained(resolvedHome, presetsRoot, 'presets root')
+  assertContained(presetsRoot, targetDir, 'evolution target')
+  return { dshHome: resolvedHome, presetsRoot, targetDir }
+}
+
+export function buildManifest(
+  files: Record<string, string>,
+  templateVersion: string = EVOLUTION_PRESET_TEMPLATE_VERSION,
+): EvolutionPresetManifest {
+  const ordered: Record<string, string> = {}
+  for (const key of Object.keys(files).sort((a, b) => a.localeCompare(b))) {
+    ordered[key] = files[key]!
+  }
+  return {
+    owner: EVOLUTION_MODE_OWNER,
+    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+    templateVersion,
+    files: ordered,
+  }
+}
+
+function serializeManifest(manifest: EvolutionPresetManifest): string {
+  const files: Record<string, string> = {}
+  for (const key of Object.keys(manifest.files).sort((a, b) => a.localeCompare(b))) {
+    files[key] = manifest.files[key]!
+  }
+  return `${JSON.stringify({
+    owner: manifest.owner,
+    schemaVersion: manifest.schemaVersion,
+    templateVersion: manifest.templateVersion,
+    files,
+  }, null, 2)}\n`
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await access(target, constants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function listExactChildren(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true })
+  return entries.map((entry) => entry.name).sort((a, b) => a.localeCompare(b))
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  return sha256(await readFile(filePath))
+}
+
+async function readTemplateFiles(
+  templateDir: string,
+): Promise<{ files: Record<string, Buffer>; hashes: Record<string, string> }> {
+  const resolvedTemplate = path.resolve(templateDir)
+  const files: Record<string, Buffer> = {}
+  const hashes: Record<string, string> = {}
+  for (const relative of EVOLUTION_PRESET_MANAGED_CONTENT_FILES) {
+    const absolute = assertContained(resolvedTemplate, path.join(resolvedTemplate, relative), `template ${relative}`)
+    const bytes = await readFile(absolute)
+    files[relative] = bytes
+    hashes[relative] = sha256(bytes)
+  }
+  return { files, hashes }
+}
+
+/** Verify target is pristine against the installed manifest (content + no extras). */
+export async function verifyPristine(
+  targetDir: string,
+  manifest: EvolutionPresetManifest,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const resolvedTarget = path.resolve(targetDir)
+  const expectedNames = new Set<string>([
+    ...Object.keys(manifest.files),
+    EVOLUTION_PRESET_MANIFEST_FILENAME,
+  ])
+  let children: string[]
+  try {
+    children = await listExactChildren(resolvedTarget)
+  } catch (error) {
+    return { ok: false, reason: `cannot list target: ${error instanceof Error ? error.message : String(error)}` }
+  }
+
+  for (const name of children) {
+    if (!expectedNames.has(name)) {
+      return { ok: false, reason: `extra file present: ${name}` }
+    }
+    const childPath = path.join(resolvedTarget, name)
+    const info = await stat(childPath)
+    if (!info.isFile()) {
+      return { ok: false, reason: `unexpected non-file entry: ${name}` }
+    }
+  }
+
+  for (const relative of Object.keys(manifest.files)) {
+    const absolute = path.join(resolvedTarget, relative)
+    if (!(await pathExists(absolute))) {
+      return { ok: false, reason: `missing managed file: ${relative}` }
+    }
+    const digest = await hashFile(absolute)
+    if (digest !== manifest.files[relative]) {
+      return { ok: false, reason: `managed file modified: ${relative}` }
+    }
+  }
+
+  const manifestPath = path.join(resolvedTarget, EVOLUTION_PRESET_MANIFEST_FILENAME)
+  if (!(await pathExists(manifestPath))) {
+    return { ok: false, reason: `missing managed file: ${EVOLUTION_PRESET_MANIFEST_FILENAME}` }
+  }
+
+  return { ok: true }
+}
+
+async function writeStagedPreset(
+  stagingDir: string,
+  contentFiles: Record<string, Buffer>,
+  manifest: EvolutionPresetManifest,
+): Promise<void> {
+  await mkdir(stagingDir, { recursive: true })
+  for (const [relative, bytes] of Object.entries(contentFiles)) {
+    const target = assertContained(stagingDir, path.join(stagingDir, relative), `stage ${relative}`)
+    await writeFile(target, bytes)
+  }
+  const manifestPath = assertContained(
+    stagingDir,
+    path.join(stagingDir, EVOLUTION_PRESET_MANIFEST_FILENAME),
+    'stage manifest',
+  )
+  await writeFile(manifestPath, serializeManifest(manifest), 'utf8')
+}
+
+/** Bounded cleanup: only remove files/dirs under known temp tree after containment checks. */
+async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Promise<void> {
+  const resolvedTree = assertContained(containmentRoot, treeRoot, 'cleanup tree')
+  if (!(await pathExists(resolvedTree))) return
+
+  const stack: string[] = [resolvedTree]
+  const directories: string[] = []
+
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    assertContained(resolvedTree, current, 'cleanup walk')
+    const info = await stat(current)
+    if (info.isDirectory()) {
+      directories.push(current)
+      const entries = await readdir(current)
+      for (const entry of entries) {
+        stack.push(path.join(current, entry))
+      }
+    } else {
+      await unlink(current)
+    }
+  }
+
+  for (const directory of directories.reverse()) {
+    assertContained(resolvedTree, directory, 'cleanup rmdir')
+    await rmdir(directory)
+  }
+}
+
+async function readInstalledManifest(targetDir: string): Promise<EvolutionPresetManifest | undefined> {
+  const manifestPath = path.join(targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME)
+  if (!(await pathExists(manifestPath))) return undefined
+  try {
+    const raw = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown
+    return isEvolutionPresetManifest(raw) ? raw : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function randomSuffix(): string {
+  return randomBytes(8).toString('hex')
+}
+
+export async function materializeEvolutionPreset(
+  options: MaterializeEvolutionPresetOptions,
+): Promise<EvolutionPresetInstallResult> {
+  const paths = resolveEvolutionPresetPaths(options.dshHome)
+  if (!options.enabled) {
+    return {
+      status: 'skipped',
+      targetDir: paths.targetDir,
+      reason: 'evolutionPreset config is false; install/update skipped without deleting an existing preset',
+    }
+  }
+
+  const templateVersion = options.templateVersion ?? EVOLUTION_PRESET_TEMPLATE_VERSION
+  const renamePath = options.rename ?? rename
+  const { files: contentFiles, hashes } = await readTemplateFiles(options.templateDir)
+  const desiredManifest = buildManifest(hashes, templateVersion)
+
+  const targetExists = await pathExists(paths.targetDir)
+  if (!targetExists) {
+    await mkdir(paths.presetsRoot, { recursive: true })
+    assertContained(paths.dshHome, paths.presetsRoot, 'presets root create')
+    const stagingDir = assertContained(
+      paths.presetsRoot,
+      path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
+      'staging',
+    )
+    try {
+      await writeStagedPreset(stagingDir, contentFiles, desiredManifest)
+      await renamePath(stagingDir, paths.targetDir)
+      options.logger?.info?.(`AutoEvo installed managed preset ${EVOLUTION_PRESET_ID} at ${paths.targetDir}`)
+      return {
+        status: 'installed',
+        targetDir: paths.targetDir,
+        reason: 'first install completed',
+        templateVersion,
+      }
+    } catch (error) {
+      await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
+      throw error
+    }
+  }
+
+  const installedManifest = await readInstalledManifest(paths.targetDir)
+  if (!installedManifest) {
+    const reason = 'existing evolution directory has no valid AutoEvo manifest; preserved without changes'
+    options.logger?.warn?.(reason)
+    return { status: 'preserved', targetDir: paths.targetDir, reason }
+  }
+
+  const pristine = await verifyPristine(paths.targetDir, installedManifest)
+  if (!pristine.ok) {
+    const reason = `existing managed preset is not pristine (${pristine.reason}); preserved without changes`
+    options.logger?.warn?.(reason)
+    return { status: 'preserved', targetDir: paths.targetDir, reason }
+  }
+
+  const sameVersion = installedManifest.templateVersion === templateVersion
+  const sameHashes = EVOLUTION_PRESET_MANAGED_CONTENT_FILES.every(
+    (relative) => installedManifest.files[relative] === desiredManifest.files[relative],
+  )
+  const sameFileSet = Object.keys(installedManifest.files).length === Object.keys(desiredManifest.files).length
+    && Object.keys(desiredManifest.files).every((key) => key in installedManifest.files)
+
+  if (sameVersion && sameHashes && sameFileSet) {
+    return {
+      status: 'noop',
+      targetDir: paths.targetDir,
+      reason: 'template version and managed file hashes already match',
+      templateVersion,
+    }
+  }
+
+  const stagingDir = assertContained(
+    paths.presetsRoot,
+    path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.staging-${randomSuffix()}`),
+    'upgrade staging',
+  )
+  const backupDir = assertContained(
+    paths.presetsRoot,
+    path.join(paths.presetsRoot, `.${EVOLUTION_PRESET_ID}.backup-${randomSuffix()}`),
+    'upgrade backup',
+  )
+
+  try {
+    await writeStagedPreset(stagingDir, contentFiles, desiredManifest)
+    await renamePath(paths.targetDir, backupDir)
+    try {
+      await renamePath(stagingDir, paths.targetDir)
+    } catch (error) {
+      try {
+        await renamePath(backupDir, paths.targetDir)
+      } catch (restoreError) {
+        throw new Error(
+          `AutoEvo preset upgrade failed and restore also failed: ${error instanceof Error ? error.message : String(error)}; restore: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+        )
+      }
+      await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
+      throw error
+    }
+    await cleanupOwnedTree(backupDir, paths.presetsRoot).catch(() => undefined)
+    options.logger?.info?.(`AutoEvo upgraded managed preset ${EVOLUTION_PRESET_ID} to template ${templateVersion}`)
+    return {
+      status: 'upgraded',
+      targetDir: paths.targetDir,
+      reason: 'pristine managed preset upgraded',
+      templateVersion,
+    }
+  } catch (error) {
+    await cleanupOwnedTree(stagingDir, paths.presetsRoot).catch(() => undefined)
+    if (await pathExists(backupDir) && !(await pathExists(paths.targetDir))) {
+      await renamePath(backupDir, paths.targetDir).catch(() => undefined)
+    } else if (await pathExists(backupDir) && await pathExists(paths.targetDir)) {
+      await cleanupOwnedTree(backupDir, paths.presetsRoot).catch(() => undefined)
+    }
+    throw error
+  }
+}
+
+export const _testing = {
+  assertContained,
+  isPathInside,
+  serializeManifest,
+  cleanupOwnedTree,
+  posixJoin,
+  listExactChildren,
+}

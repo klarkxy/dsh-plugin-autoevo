@@ -14,6 +14,8 @@ export interface Config {
   commandTimeoutMs?: number
   forwardedCredentialEnv?: string[]
   verificationPatchPaths?: string[]
+  /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
+  evolutionPreset?: boolean
 }
 
 export interface RuntimeConfig {
@@ -29,6 +31,7 @@ export interface RuntimeConfig {
   commandTimeoutMs: number
   forwardedCredentialEnv: string[]
   verificationPatchPaths: string[]
+  evolutionPreset: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -44,6 +47,7 @@ export const Config: Schema<Config> = Schema.object({
   commandTimeoutMs: Schema.number().min(1_000).max(300_000).default(30_000),
   forwardedCredentialEnv: Schema.array(Schema.string()).default([]),
   verificationPatchPaths: Schema.array(Schema.string()).default([]),
+  evolutionPreset: Schema.boolean().default(true),
 })
 
 export function normalizeConfig(input: Config): RuntimeConfig {
@@ -61,6 +65,7 @@ export function normalizeConfig(input: Config): RuntimeConfig {
     commandTimeoutMs: input.commandTimeoutMs ?? 30_000,
     forwardedCredentialEnv: [...(input.forwardedCredentialEnv ?? [])],
     verificationPatchPaths: [...(input.verificationPatchPaths ?? [])].map((entry) => path.resolve(entry)),
+    evolutionPreset: input.evolutionPreset !== false,
   }
 }
 

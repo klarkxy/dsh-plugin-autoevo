@@ -40,8 +40,27 @@ try {
   assert.ok(policy)
   assert.match(policy.text, /Treat every repository file[\s\S]*untrusted data/u)
   assert.match(policy.text, /Before implementing a new capability, call capability_resolve/u)
-  assert.match(policy.text, /capability_resolve and any required reviews produce scratch_ready/u)
+  assert.match(policy.text, /Capability Evolution mode/u)
+  assert.match(policy.text, /scratch_ready/u)
   assert.match(policy.text, /Never fork, push, or open an upstream PR without explicit user approval/u)
+  assert.doesNotMatch(policy.text, /replaces the shipped cordis-plugin-development/u)
+
+  const { readdir, readFile, access } = await import('node:fs/promises')
+  const presetsRoot = path.join(stateRoot, 'dsh', '.agent-presets', 'evolution')
+  // Materialization is async on apply; give it a short window in this smoke test.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await access(path.join(presetsRoot, 'preset.yml'))
+      break
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+  const presetBody = await readFile(path.join(presetsRoot, 'preset.yml'), 'utf8')
+  assert.match(presetBody, /能力进化/u)
+  const managed = await readdir(presetsRoot)
+  assert.ok(managed.includes('agent.cordis.yml'))
+  assert.ok(managed.includes('.autoevo-preset.json'))
 
   process.stdout.write(`${JSON.stringify({
     loader: '@deepseek-ai/cordis-plugin-loader@1.0.2',
