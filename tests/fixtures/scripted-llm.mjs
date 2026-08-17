@@ -26,16 +26,10 @@ function resultPairs(messages) {
   return pairs
 }
 
-function targetRepository(resolution) {
-  const selected = resolution.selectedRepositories ?? []
-  const remotes = resolution.remoteCandidates ?? []
-  const remoteNames = remotes.map((candidate) => candidate.repository)
-  return selected.find((repository) => repository === 'omdsh-dev/dsh-tool-calculator')
-    ?? selected.find((repository) => /calculator/i.test(repository))
-    ?? remotes.find((candidate) => candidate.repository === 'omdsh-dev/dsh-tool-calculator')?.repository
-    ?? remotes.find((candidate) => /calculator/i.test(candidate.repository) || /calculator/i.test(candidate.name ?? ''))?.repository
-    ?? selected[0]
-    ?? remoteNames[0]
+export const E2E_CALCULATOR_REPOSITORY = 'omdsh-dev/dsh-tool-calculator'
+
+export function targetRepository() {
+  return E2E_CALCULATOR_REPOSITORY
 }
 
 class ScriptedAdapter extends LlmAdapter {
