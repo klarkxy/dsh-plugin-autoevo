@@ -6,7 +6,6 @@ import {
   installCordisInspectCompatibility,
   type CordisInspectRegistryLike,
 } from './cordis-inspect-compat.js'
-import { CommunityQualityService } from './community-quality.js'
 import { CreationGuard } from './creation-guard.js'
 import {
   EVOLUTION_MODE_SERVICE_KEY,
@@ -78,17 +77,7 @@ export function apply(ctx: Context, input: Config): void {
   const store = new StateStore(config.stateDir)
   const runner = new DshCommandRunner(ctx.subprocess, config)
   const creationGuard = new CreationGuard({ isEvolutionMode: createIsEvolutionMode(ctx) })
-  const quality = new CommunityQualityService(config)
-  const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard, quality)
-
-  if ((config.communityQualityFilter || config.communityReports) && !config.communityQualityEndpoint) {
-    log.warn('AutoEvo community quality is enabled but communityQualityEndpoint is empty; no community network requests will run')
-  }
-
-  void quality.flushPending().catch((error: unknown) => {
-    const detail = error instanceof Error ? error.message : String(error)
-    log.warn(`AutoEvo community report retry failed: ${detail}`)
-  })
+  const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard)
 
   void materializeEvolutionPreset({
     dshHome: config.dshHome,

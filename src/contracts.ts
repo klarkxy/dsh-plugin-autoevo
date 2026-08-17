@@ -21,7 +21,6 @@ export type AuthorizationState =
   | 'scratch_ready'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
-export type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown'
 export type DecisionPhase = 'gate1' | 'gate2'
 export type DecisionAction =
   | 'inspect'
@@ -74,29 +73,6 @@ export interface RemotePluginCandidate {
   defaultBranch?: string
   matchedTerms?: string[]
   matchReason?: string
-  communityQuality?: CommunityQualityAssessment
-}
-
-export interface CommunityQualityAssessment {
-  classification: CommunityQualityClass
-  repairability: number | null
-  evolutionValue: number | null
-  confidence: number | null
-  observationCount: number
-  reasonCodes: string[]
-  updatedAt: string | null
-}
-
-export interface CommunityQualityScreening {
-  enabled: true
-  complete: boolean
-  assessedCandidates: number
-  filtered: Array<{
-    repository: string
-    classification: 'broken' | 'junk'
-    reasonCodes: string[]
-  }>
-  reason: string
 }
 
 export interface ResolutionRecord {
@@ -113,8 +89,6 @@ export interface ResolutionRecord {
   remoteCandidateSource?: RemoteCandidateSource
   /** Whether every configured discovery fallback completed successfully. */
   remoteDiscoveryComplete?: boolean
-  /** Opt-in community quality result. Filtered repositories are retained here for audit, not selection. */
-  communityQualityScreening?: CommunityQualityScreening
   /** Present on V2 records created by the current policy. */
   authorization?: ResolutionAuthorization
   selectedRepositories?: string[]

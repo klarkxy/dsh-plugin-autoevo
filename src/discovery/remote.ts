@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
-import { CommunityQualityService } from '../community-quality.js'
-import type { CommunityQualityScreening, RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
+import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
 import { validateGithubRepository } from '../github/index.js'
 import { capabilityQueries, marketplaceSearchQueries } from '../resolver/keywords.js'
@@ -31,7 +30,6 @@ export interface RemoteDiscoveryResult {
   complete: boolean
   queries: string[]
   reasons: string[]
-  qualityScreening?: CommunityQualityScreening
 }
 
 function boundedText(value: unknown, maxLength: number): string {
@@ -128,9 +126,7 @@ async function discoverWithFindPlugin(options: {
   query: string
   exec: ToolRunContext
 }): Promise<RemotePluginCandidate[]> {
-  const poolLimit = options.config.communityQualityFilter
-    ? Math.min(20, options.config.maxCandidates * 3)
-    : options.config.maxCandidates
+  const poolLimit = options.config.maxCandidates
   const result = await options.ctx.tools.execute({
     callId: `${options.exec.callId}:autoevo-find:${randomUUID()}` as typeof options.exec.callId,
     rootCallId: options.exec.rootCallId,
@@ -159,7 +155,6 @@ export async function discoverRemoteCandidates(options: {
   config: RuntimeConfig
   requirement: string
   exec: ToolRunContext
-  quality?: CommunityQualityService
 }): Promise<RemoteDiscoveryResult> {
   const queries: string[] = []
   const reasons: string[] = []
@@ -188,25 +183,19 @@ export async function discoverRemoteCandidates(options: {
     if (succeeded === 0) {
       return { candidates: [], complete: false, queries, reasons }
     }
-    const pool = relevantRemoteCandidates(options.requirement, [...merged.values()])
+    const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
       .sort((left, right) => right.stars - left.stars || left.repository.localeCompare(right.repository))
-    const quality = options.quality ?? new CommunityQualityService(options.config)
-    const screened = await quality.screen(pool, options.exec.signal)
-    if (screened.screening) reasons.push(screened.screening.reason)
-    const candidates = screened.candidates.slice(0, options.config.maxCandidates)
+      .slice(0, options.config.maxCandidates)
     if (candidates.length === 0) {
       reasons.push('find_dsh_plugin returned no valid reusable candidates; GitHub fallback was not used.')
     }
-    const source = candidates.length > 0 || (screened.screening?.filtered.length ?? 0) > 0
-      ? 'dsh-find-plugin' as const
-      : undefined
+    const source = candidates.length > 0 ? 'dsh-find-plugin' as const : undefined
     return {
       candidates,
       ...(source ? { source } : {}),
       complete: failed === 0,
       queries,
       reasons,
-      ...(screened.screening ? { qualityScreening: screened.screening } : {}),
     }
   }
 

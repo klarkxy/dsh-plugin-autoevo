@@ -30,10 +30,6 @@ function config(root: string): RuntimeConfig {
     forwardedCredentialEnv: [],
     verificationPatchPaths: [],
     evolutionPreset: false,
-    communityQualityFilter: false,
-    communityReports: false,
-    communityQualityEndpoint: '',
-    communityQualityTimeoutMs: 2_000,
   }
 }
 

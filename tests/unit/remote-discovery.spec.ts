@@ -1,10 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CommunityQualityService } from '../../src/community-quality.js'
+import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
 
@@ -22,17 +18,7 @@ const config: RuntimeConfig = {
   forwardedCredentialEnv: [],
   verificationPatchPaths: [],
   evolutionPreset: true,
-  communityQualityFilter: false,
-  communityReports: false,
-  communityQualityEndpoint: '',
-  communityQualityTimeoutMs: 2_000,
 }
-
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
-})
 
 const exec = {
   callId: 'call-resolve',
@@ -45,53 +31,6 @@ const exec = {
 
 
 describe('remote discovery precedence', () => {
-  it('uses a larger bounded pool so quality filtering can refill the shortlist', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-quality-remote-'))
-    temporary.push(directory)
-    const qualityConfig: RuntimeConfig = {
-      ...config,
-      stateDir: directory,
-      maxCandidates: 2,
-      communityQualityFilter: true,
-      communityQualityEndpoint: 'https://quality.example',
-    }
-    const execute = vi.fn(async () => ({
-      isError: false as const,
-      value: {
-        results: [
-          { name: 'calculator-broken', url: 'https://github.com/acme/calculator-broken', description: 'calculator', stars: 30 },
-          { name: 'calculator-good', url: 'https://github.com/acme/calculator-good', description: 'calculator', stars: 20 },
-          { name: 'calculator-unknown', url: 'https://github.com/acme/calculator-unknown', description: 'calculator', stars: 10 },
-        ],
-      },
-      content: [],
-    }))
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
-      assessments: [
-        { repository: 'acme/calculator-broken', classification: 'broken', reasonCodes: ['verification_failed'] },
-        { repository: 'acme/calculator-good', classification: 'good', reasonCodes: ['verified'] },
-      ],
-    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
-    const ctx = { tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute } } as unknown as Context
-
-    const result = await discoverRemoteCandidates({
-      ctx,
-      config: qualityConfig,
-      requirement: 'calculator',
-      exec,
-      quality: new CommunityQualityService(qualityConfig, fetcher),
-    })
-
-    expect(fetcher).toHaveBeenCalledTimes(1)
-    expect(fetcher).toHaveBeenCalledWith('https://quality.example/v1/quality/assessments', expect.objectContaining({ method: 'GET' }))
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ arguments: expect.objectContaining({ limit: 6 }) }))
-    expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calculator-good', 'acme/calculator-unknown'])
-    expect(result.qualityScreening).toEqual(expect.objectContaining({
-      complete: true,
-      filtered: [{ repository: 'acme/calculator-broken', classification: 'broken', reasonCodes: ['verification_failed'] }],
-    }))
-  })
-
   it('uses a current-scope find_dsh_plugin result without calling gh', async () => {
     const execute = vi.fn(async (_request: { arguments: { query: string, lang: string } }) => ({
       isError: false as const,

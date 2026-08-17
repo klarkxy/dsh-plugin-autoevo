@@ -3,7 +3,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
-import { CommunityQualityService, type CommunityQualitySource } from './community-quality.js'
 import {
   POLICY_VERSION,
   type DecisionReceipt,
@@ -227,7 +226,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
   private readonly launcher: DshLauncher
-  private readonly quality: CommunityQualityService
   private readonly engine: WorkflowEngine
 
   constructor(
@@ -236,9 +234,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
-    quality?: CommunityQualityService,
   ) {
-    this.quality = quality ?? new CommunityQualityService(config)
     this.launcher = new DshLauncher(runner, config)
     this.installer = new PluginInstaller(
       ctx,
@@ -299,7 +295,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       config: this.config,
       requirement: resolution.requirement,
       exec: asToolExec(exec),
-      quality: this.quality,
     })
     const decision: ResolutionRecord['decision'] = discovery.source === 'marketplace-setup' || discovery.candidates.length > 0
       ? 'inspect_remote'
@@ -320,7 +315,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       remoteCandidates: discovery.candidates,
       ...(discovery.source ? { remoteCandidateSource: discovery.source } : {}),
       remoteDiscoveryComplete: discovery.complete,
-      ...(discovery.qualityScreening ? { communityQualityScreening: discovery.qualityScreening } : {}),
       authorization,
       queries: [...resolution.queries, ...discovery.queries],
       reasons: [...resolution.reasons, ...discovery.reasons],
@@ -418,15 +412,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     await this.store.put('reviews', review)
-    try {
-      await this.quality.recordReview({
-        repository: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.repository : candidate.repository,
-        commit: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.commit : '',
-        localModification: false,
-      }, review)
-    } catch {
-      // Quality reporting is optional and must never change review behavior.
-    }
     const waiting = withNextStep(this.waitingConfirmation(resolution, review))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
@@ -471,15 +456,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
     const review = local.record
     await this.store.put('reviews', review)
-    try {
-      await this.quality.recordReview({
-        repository: root.sourceSnapshot.repository,
-        commit: root.sourceSnapshot.commit,
-        localModification: true,
-      }, review)
-    } catch {
-      // Quality reporting is optional and must never change review behavior.
-    }
     const waiting = withNextStep(this.waitingConfirmation(resolution, review))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
@@ -497,12 +473,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
       ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
     }, asToolExec(exec))
-    try {
-      const source = await this.qualitySourceForReview(review)
-      if (source) await this.quality.recordInstallation(source, review, record)
-    } catch {
-      // Quality reporting is optional and must never change install behavior.
-    }
     return record
   }
 
@@ -639,23 +609,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       }
     }
     return false
-  }
-
-  private async qualitySourceForReview(review: ReviewRecord): Promise<CommunityQualitySource | undefined> {
-    if (review.sourceSnapshot.kind === 'github') {
-      return {
-        repository: review.sourceSnapshot.repository,
-        commit: review.sourceSnapshot.commit,
-        localModification: false,
-      }
-    }
-    const base = await this.store.getReview(review.sourceSnapshot.baseReviewId)
-    if (base.sourceSnapshot.kind !== 'github') return undefined
-    return {
-      repository: base.sourceSnapshot.repository,
-      commit: base.sourceSnapshot.commit,
-      localModification: true,
-    }
   }
 
   private async dshRuntimeVersion(cwd: string, signal?: AbortSignal): Promise<string | undefined> {

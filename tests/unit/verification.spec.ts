@@ -68,10 +68,6 @@ describe('trusted verification receipt', () => {
       forwardedCredentialEnv: [],
       verificationPatchPaths: [],
       evolutionPreset: true,
-      communityQualityFilter: false,
-      communityReports: false,
-      communityQualityEndpoint: '',
-      communityQualityTimeoutMs: 2_000,
     }
     const runner: CommandRunner = {
       async run(request) {

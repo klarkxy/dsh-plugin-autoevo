@@ -19,13 +19,6 @@ interface Config$1 {
   verificationPatchPaths?: string[];
   /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
   evolutionPreset?: boolean;
-  /** Archived. No public quality service is offered; leave unset. */
-  communityQualityFilter?: boolean;
-  /** Archived. No public quality service is offered; leave unset. */
-  communityReports?: boolean;
-  /** Archived. Empty disables network access. */
-  communityQualityEndpoint?: string;
-  communityQualityTimeoutMs?: number;
 }
 interface RuntimeConfig {
   dshHome: string;
@@ -41,10 +34,6 @@ interface RuntimeConfig {
   forwardedCredentialEnv: string[];
   verificationPatchPaths: string[];
   evolutionPreset: boolean;
-  communityQualityFilter: boolean;
-  communityReports: boolean;
-  communityQualityEndpoint: string;
-  communityQualityTimeoutMs: number;
 }
 declare const Config$1: Schema<Config$1>;
 //#endregion
@@ -54,7 +43,6 @@ type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'scratch_ready';
 type CandidateAvailability = 'available' | 'available_via_tool_search';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
-type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown';
 type DecisionPhase = 'gate1' | 'gate2';
 type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more' | 'resume_modify';
 type WorkflowOptionId = DecisionAction;
@@ -95,27 +83,6 @@ interface RemotePluginCandidate {
   defaultBranch?: string;
   matchedTerms?: string[];
   matchReason?: string;
-  communityQuality?: CommunityQualityAssessment;
-}
-interface CommunityQualityAssessment {
-  classification: CommunityQualityClass;
-  repairability: number | null;
-  evolutionValue: number | null;
-  confidence: number | null;
-  observationCount: number;
-  reasonCodes: string[];
-  updatedAt: string | null;
-}
-interface CommunityQualityScreening {
-  enabled: true;
-  complete: boolean;
-  assessedCandidates: number;
-  filtered: Array<{
-    repository: string;
-    classification: 'broken' | 'junk';
-    reasonCodes: string[];
-  }>;
-  reason: string;
 }
 interface ResolutionRecord {
   /** V1 records remain readable but never restore a scratch-build grant. */
@@ -131,8 +98,6 @@ interface ResolutionRecord {
   remoteCandidateSource?: RemoteCandidateSource;
   /** Whether every configured discovery fallback completed successfully. */
   remoteDiscoveryComplete?: boolean;
-  /** Opt-in community quality result. Filtered repositories are retained here for audit, not selection. */
-  communityQualityScreening?: CommunityQualityScreening;
   /** Present on V2 records created by the current policy. */
   authorization?: ResolutionAuthorization;
   selectedRepositories?: string[];
@@ -326,38 +291,6 @@ declare class CreationGuard {
   guard(exec: Readonly<ToolExecution>): string | undefined;
   result(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): void;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
-}
-//#endregion
-//#region src/community-quality.d.ts
-interface CommunityQualitySource {
-  repository: string;
-  commit: string;
-  localModification: boolean;
-}
-interface CommunityQualityResult {
-  candidates: RemotePluginCandidate[];
-  screening?: CommunityQualityScreening;
-}
-type FetchLike = typeof globalThis.fetch;
-declare class CommunityQualityService {
-  private readonly config;
-  private readonly fetcher;
-  private readonly qualityRoot;
-  private readonly observationsRoot;
-  private readonly snapshotFile;
-  private snapshot;
-  constructor(config: RuntimeConfig, fetcher?: FetchLike);
-  screen(candidates: readonly RemotePluginCandidate[], signal?: AbortSignal): Promise<CommunityQualityResult>;
-  recordReview(source: CommunityQualitySource, review: ReviewRecord): Promise<void>;
-  recordInstallation(source: CommunityQualitySource, review: ReviewRecord, record: InstallationRecord): Promise<void>;
-  flushPending(limit?: number): Promise<void>;
-  private observationBase;
-  private parseAssessments;
-  private readStoredSnapshot;
-  private loadSnapshot;
-  private persistAndSend;
-  private requestJson;
-  private atomicWrite;
 }
 //#endregion
 //#region src/workflow/contracts.d.ts
@@ -561,9 +494,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller;
   readonly remover: PluginRemover;
   private readonly launcher;
-  private readonly quality;
   private readonly engine;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, quality?: CommunityQualityService);
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard);
   start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
@@ -590,7 +522,6 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   listInstallProfiles(): Promise<string[]>;
   private waitingConfirmation;
   private revalidate;
-  private qualitySourceForReview;
   private dshRuntimeVersion;
 }
 //#endregion

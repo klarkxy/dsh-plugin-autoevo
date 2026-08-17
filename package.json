@@ -57,7 +57,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests quality/src",
+    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests",
     "test": "vitest run",
     "test:loader": "node tests/loader-smoke.mjs",
     "test:e2e:local": "node tests/e2e-runner.mjs resolve-local",
