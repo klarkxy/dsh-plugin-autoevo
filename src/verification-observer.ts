@@ -80,7 +80,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (event.type === 'assistant/message') {
-      if (!successfulSessions.has(String(session.id))) return
+      if (expected.size > 0 && !successfulSessions.has(String(session.id))) return
       const text = event.data.message.content
         .filter((block): block is Extract<(typeof event.data.message.content)[number], { type: 'text' }> => block.type === 'text')
         .map((block) => block.text)

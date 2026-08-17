@@ -8,7 +8,18 @@ import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
 import type { CommandRunner } from '../process/runner.js'
+import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
+
+/** Findings that must never become an installable or improvable recommendation. */
+export const HARD_SKIP_FINDING_CODES = new Set([
+  'prompt_injection',
+  'dynamic_evaluation',
+  'bundle_patch_path',
+  'bundle_patch_missing',
+  'bundle_patch_invalid',
+  'unsafe_package_name',
+])
 
 interface TreeEntry {
   path?: unknown
@@ -253,36 +264,46 @@ function compatibility(manifest: ManifestFacts, runtimeVersion?: string): Review
   return { status: 'compatible', reason: `Declared DSH peer ranges include the active runtime ${runtime}.`, runtimeVersion: runtime }
 }
 
-function requirementTerms(requirement: string): string[] {
-  const terms = new Set<string>()
-  const lower = requirement.toLowerCase()
-  const phrases = ['scientific notation', 'calculator', 'calculation', 'calculate', 'math', '科学计数法', '计算器', '计算']
-  for (const phrase of phrases) {
-    if (lower.includes(phrase)) terms.add(phrase)
-  }
-  for (const token of lower.match(/[a-z][a-z0-9_-]{2,}/g) ?? []) {
-    if (phrases.some((phrase) => phrase.includes(' ') && phrase.split(' ').includes(token))) continue
-    if (!new Set(['that', 'with', 'from', 'need', 'want', 'support', 'plugin', 'tool', 'does']).has(token)) terms.add(token)
-  }
-  return [...terms].sort((left, right) => right.length - left.length || left.localeCompare(right))
-}
-
 function evaluateFit(requirement: string, manifest: ManifestFacts, files: readonly ContentFile[]): { fit: ReviewRecord['fit']; missingCapabilities: string[] } {
-  const requested = requirementTerms(requirement)
-  if (requested.length === 0) return { fit: 'none', missingCapabilities: ['clear capability requirement'] }
+  const anchors = capabilityAnchors(requirement)
+  if (anchors.length === 0) return { fit: 'none', missingCapabilities: ['clear capability requirement'] }
   const readme = files.filter((file) => /(^|\/)(?:readme|skill)\.md$/i.test(file.path)).map((file) => Buffer.from(file.content).toString('utf8')).join('\n').toLowerCase()
-  const declared = [manifest.packageName ?? '', ...manifest.expectedTools].join(' ').toLowerCase()
+  const declared = [
+    manifest.packageName ?? '',
+    ...manifest.expectedTools,
+    ...files.map((file) => file.path),
+  ].join(' ').toLowerCase()
+  const haystack = `${readme}\n${declared}`
+  const requirementNorm = normalizeSearchText(requirement)
   const missing: string[] = []
   let matched = 0
-  for (const term of requested) {
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const explicitlyUnsupported = new RegExp(`(?:does\\s+not\\s+support|not\\s+supported|不支持)\\s*(?:the\\s+)?${escaped}`, 'i').test(readme)
-    const present = readme.includes(term) || declared.includes(term)
-    if (!present || explicitlyUnsupported) missing.push(term)
+  for (const anchor of anchors) {
+    const label = anchor.aliases.find((alias) => requirementNorm.includes(alias)) ?? anchor.aliases[0] ?? anchor.key
+    const present = anchor.aliases.some((alias) => alias && haystack.includes(alias))
+    const explicitlyUnsupported = anchor.aliases.some((alias) => {
+      if (!alias) return false
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return new RegExp(`(?:does\\s+not\\s+support|not\\s+supported|不支持)\\s*(?:the\\s+)?${escaped}`, 'i').test(readme)
+    })
+    if (!present || explicitlyUnsupported) missing.push(label)
     else matched += 1
   }
   if (missing.length === 0) return { fit: 'full', missingCapabilities: [] }
   return { fit: matched > 0 ? 'partial' : 'none', missingCapabilities: missing.sort() }
+}
+
+function recommendReview(input: {
+  truncated?: boolean
+  kind: ManifestFacts['kind']
+  fit: ReviewRecord['fit']
+  securityRisk: ReviewRecord['securityRisk']
+  compatible: ReviewRecord['compatibility']['status']
+  findings: readonly ReviewFinding[]
+}): ReviewRecord['recommendation'] {
+  if (input.truncated || input.kind !== 'bundle' || input.fit === 'none') return 'skip'
+  if (input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))) return 'skip'
+  if (input.fit === 'full' && input.compatible === 'compatible' && input.securityRisk !== 'high') return 'use'
+  return 'modify'
 }
 
 /** Evaluates already-bounded content without returning any third-party source text. */
@@ -312,11 +333,14 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
   const compatible = compatibility(manifest, input.runtimeVersion)
   const license = manifest.license ?? null
   const maintained = input.maintained ?? false
-  const recommendation: ReviewRecord['recommendation'] = input.truncated || manifest.kind !== 'bundle' || securityRisk === 'high' || compatible.status === 'incompatible' || fit === 'none'
-    ? 'skip'
-    : fit === 'full' && compatible.status === 'compatible'
-      ? 'use'
-      : 'modify'
+  const recommendation = recommendReview({
+    ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
+    kind: manifest.kind,
+    fit,
+    securityRisk,
+    compatible: compatible.status,
+    findings,
+  })
   return {
     schemaVersion: 1,
     id: input.id ?? `review_${hashObject({ policyVersion: POLICY_VERSION, requirement: input.requirement, sourceSnapshot: input.sourceSnapshot, inspectedFiles, manifest, compatible })}`,
@@ -522,6 +546,8 @@ export async function reviewLocalPlugin(options: {
   resolutionId: string
   requirement: string
   runtimeVersion?: string
+  /** GitHub lineage-root SHA. When omitted, HEAD is treated as the root (uncommitted-only reviews). */
+  lineageRootCommit?: string
 }): Promise<LocalReviewResult> {
   if (!/^review_[a-f0-9]{16,64}$/.test(options.baseReviewId)) throw new EvolutionError('invalid_input', 'Invalid base review id')
   const workspace = await realpath(options.workspaceRoot)
@@ -532,8 +558,24 @@ export async function reviewLocalPlugin(options: {
   if (canonicalRoot !== target || !isWithin(workspace, canonicalRoot)) {
     throw new EvolutionError('unsafe_path', 'Local review path must be a Git worktree root inside the current workspace')
   }
-  const baseCommit = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'rev-parse', 'HEAD'])
-  if (!/^[a-f0-9]{40}$/i.test(baseCommit)) throw new EvolutionError('command_failed', 'Git did not provide an exact base commit')
+  const head = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'rev-parse', 'HEAD'])
+  if (!/^[a-f0-9]{40}$/i.test(head)) throw new EvolutionError('command_failed', 'Git did not provide an exact base commit')
+  const lineageRoot = options.lineageRootCommit ?? head
+  if (!/^[a-f0-9]{40}$/i.test(lineageRoot)) throw new EvolutionError('invalid_input', 'lineageRootCommit must be a 40-character commit')
+  if (head.toLowerCase() !== lineageRoot.toLowerCase()) {
+    const ancestry = await options.runner.run({
+      argv: [options.config.gitCommand, '-C', canonicalRoot, 'merge-base', '--is-ancestor', lineageRoot, head],
+      cwd: canonicalRoot,
+      allowFailure: true,
+    })
+    if (ancestry.exitCode !== 0) {
+      throw new EvolutionError(
+        'review_rejected',
+        'The local checkout HEAD is not the reviewed upstream commit or a descendant of it',
+      )
+    }
+  }
+  const baseCommit = lineageRoot.toLowerCase()
   const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
   const snapshot = await inspectLocalDirectory(canonicalRoot, options.config)
   const statusHash = sha256(status)

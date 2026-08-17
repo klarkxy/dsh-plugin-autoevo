@@ -16,6 +16,13 @@ export interface Config {
   verificationPatchPaths?: string[]
   /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
   evolutionPreset?: boolean
+  /** Opt in to community quality lookups that hide broken and junk marketplace candidates. */
+  communityQualityFilter?: boolean
+  /** Opt in to sending anonymous, structured review/install observations. */
+  communityReports?: boolean
+  /** Base URL for the AutoEvo community quality service. Empty disables network access. */
+  communityQualityEndpoint?: string
+  communityQualityTimeoutMs?: number
 }
 
 export interface RuntimeConfig {
@@ -32,6 +39,10 @@ export interface RuntimeConfig {
   forwardedCredentialEnv: string[]
   verificationPatchPaths: string[]
   evolutionPreset: boolean
+  communityQualityFilter: boolean
+  communityReports: boolean
+  communityQualityEndpoint: string
+  communityQualityTimeoutMs: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -48,7 +59,26 @@ export const Config: Schema<Config> = Schema.object({
   forwardedCredentialEnv: Schema.array(Schema.string()).default([]),
   verificationPatchPaths: Schema.array(Schema.string()).default([]),
   evolutionPreset: Schema.boolean().default(true),
+  communityQualityFilter: Schema.boolean().default(false),
+  communityReports: Schema.boolean().default(false),
+  communityQualityEndpoint: Schema.string().default(''),
+  communityQualityTimeoutMs: Schema.number().min(250).max(10_000).default(2_000),
 })
+
+function normalizeCommunityQualityEndpoint(input: string | undefined): string {
+  const value = input?.trim() ?? ''
+  if (!value) return ''
+  const url = new URL(value)
+  const host = url.hostname
+  const localHttp = url.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]')
+  if (url.protocol !== 'https:' && !localHttp) {
+    throw new TypeError('communityQualityEndpoint must use HTTPS (HTTP is allowed only for localhost)')
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new TypeError('communityQualityEndpoint must not contain credentials, a query, or a fragment')
+  }
+  return url.toString().replace(/\/$/u, '')
+}
 
 export function normalizeConfig(input: Config): RuntimeConfig {
   const dshHome = path.resolve(input.dshHome || process.env.DSH_HOME || path.join(process.cwd(), '.dsh'))
@@ -66,6 +96,12 @@ export function normalizeConfig(input: Config): RuntimeConfig {
     forwardedCredentialEnv: [...(input.forwardedCredentialEnv ?? [])],
     verificationPatchPaths: [...(input.verificationPatchPaths ?? [])].map((entry) => path.resolve(entry)),
     evolutionPreset: input.evolutionPreset !== false,
+    communityQualityFilter: input.communityQualityFilter === true,
+    communityReports: input.communityReports === true,
+    communityQualityEndpoint: normalizeCommunityQualityEndpoint(input.communityQualityEndpoint),
+    communityQualityTimeoutMs: input.communityQualityTimeoutMs ?? 2_000,
   }
 }
+
+export const _testing = { normalizeCommunityQualityEndpoint }
 

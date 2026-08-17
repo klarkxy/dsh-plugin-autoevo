@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
+import { CommunityQualityService, type CommunityQualitySource } from './community-quality.js'
 import {
   POLICY_VERSION,
   type DecideInput,
@@ -128,6 +129,25 @@ function waitingAuthorization(
   }
 }
 
+export function lineageRootReview(base: ReviewRecord, reviews: readonly ReviewRecord[]): ReviewRecord {
+  const byId = new Map(reviews.map((item) => [item.id, item]))
+  byId.set(base.id, base)
+  const seen = new Set<string>()
+  let current = base
+  while (current.sourceSnapshot.kind === 'local') {
+    if (seen.has(current.id)) {
+      throw new EvolutionError('invalid_input', 'baseReviewId lineage is cyclic')
+    }
+    seen.add(current.id)
+    const parent = byId.get(current.sourceSnapshot.baseReviewId)
+    if (!parent) {
+      throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
+    }
+    current = parent
+  }
+  return current
+}
+
 function latestDecision(resolution: ResolutionRecord): DecisionReceipt | undefined {
   const decisions = resolution.decisions ?? []
   return decisions[decisions.length - 1]
@@ -197,6 +217,7 @@ export class CapabilityEvolutionService {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
   private readonly launcher: DshLauncher
+  private readonly quality: CommunityQualityService
 
   constructor(
     private readonly ctx: Context,
@@ -204,7 +225,9 @@ export class CapabilityEvolutionService {
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
+    quality?: CommunityQualityService,
   ) {
+    this.quality = quality ?? new CommunityQualityService(config)
     this.launcher = new DshLauncher(runner, config)
     this.installer = new PluginInstaller(
       ctx,
@@ -212,7 +235,10 @@ export class CapabilityEvolutionService {
       store,
       this.launcher,
       (review, signal) => this.revalidate(review, signal),
-      (review, exec) => this.creationGuard.assertInstallAuthorized(exec.agent, review),
+      async (review, exec) => {
+        const resolution = await this.store.getResolution(review.resolutionId)
+        this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution)
+      },
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
   }
@@ -225,6 +251,7 @@ export class CapabilityEvolutionService {
     let remoteCandidateSource: ResolutionRecord['remoteCandidateSource']
     let queries: string[] = []
     let remoteDiscoveryComplete = !local.githubShouldRun
+    let communityQualityScreening: ResolutionRecord['communityQualityScreening']
     const reasons = [...local.reasons]
     if (local.githubShouldRun) {
       const discovery = await discoverRemoteCandidates({
@@ -234,12 +261,14 @@ export class CapabilityEvolutionService {
         cwd: local.cwd,
         requirement,
         exec,
+        quality: this.quality,
       })
       remoteCandidates = discovery.candidates
       remoteCandidateSource = discovery.source
       remoteDiscoveryComplete = discovery.complete
       queries = discovery.queries
       reasons.push(...discovery.reasons)
+      communityQualityScreening = discovery.qualityScreening
       if (discovery.source === 'marketplace-setup') {
         const setup = await installMarketplace({
           ctx: this.ctx,
@@ -258,12 +287,14 @@ export class CapabilityEvolutionService {
             cwd: local.cwd,
             requirement,
             exec,
+            quality: this.quality,
           })
           remoteCandidates = again.candidates
           remoteCandidateSource = again.source
           remoteDiscoveryComplete = again.complete
           queries = [...queries, ...again.queries]
           reasons.push(...again.reasons)
+          communityQualityScreening = again.qualityScreening
         } else if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
           remoteCandidates = []
           remoteCandidateSource = undefined
@@ -290,6 +321,7 @@ export class CapabilityEvolutionService {
       remoteCandidates,
       ...(remoteCandidateSource ? { remoteCandidateSource } : {}),
       remoteDiscoveryComplete,
+      ...(communityQualityScreening ? { communityQualityScreening } : {}),
       authorization,
       queries,
       reasons,
@@ -304,6 +336,7 @@ export class CapabilityEvolutionService {
     const resolution = await this.store.getResolution(input.resolutionId)
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
+    let qualitySource: CommunityQualitySource | undefined
     if (input.sourceKind === 'github') {
       if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
       const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
@@ -331,6 +364,11 @@ export class CapabilityEvolutionService {
         ...(runtimeVersion ? { runtimeVersion } : {}),
         signal: exec.signal,
       })
+      qualitySource = {
+        repository: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.repository : candidate.repository,
+        commit: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.commit : '',
+        localModification: false,
+      }
     } else {
       if (!input.path || !input.baseReviewId) throw new EvolutionError('invalid_input', 'path and baseReviewId are required for a local review')
       const prior = await this.store.listReviews(resolution.id)
@@ -343,8 +381,10 @@ export class CapabilityEvolutionService {
         )
       }
       const base = await this.store.getReview(input.baseReviewId)
-      if (base.resolutionId !== resolution.id || base.sourceSnapshot.kind !== 'github') {
-        throw new EvolutionError('invalid_input', 'baseReviewId must be a GitHub review for the same resolution')
+      const lineage = [base, ...prior]
+      const root = lineageRootReview(base, lineage)
+      if (base.resolutionId !== resolution.id || root.resolutionId !== resolution.id || root.sourceSnapshot.kind !== 'github') {
+        throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
       }
       const local = await reviewLocalPlugin({
         runner: this.runner,
@@ -352,17 +392,30 @@ export class CapabilityEvolutionService {
         workspaceRoot: resolution.cwd,
         path: input.path,
         baseReviewId: base.id,
+        lineageRootCommit: root.sourceSnapshot.commit,
         resolutionId: resolution.id,
         requirement: resolution.requirement,
         ...(runtimeVersion ? { runtimeVersion } : {}),
       })
       if (local.record.sourceSnapshot.kind !== 'local'
-        || local.record.sourceSnapshot.baseCommit.toLowerCase() !== base.sourceSnapshot.commit.toLowerCase()) {
-        throw new EvolutionError('review_rejected', 'The local checkout HEAD does not match the reviewed upstream commit')
+        || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
+        throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
       }
       review = local.record
+      qualitySource = {
+        repository: root.sourceSnapshot.repository,
+        commit: root.sourceSnapshot.commit,
+        localModification: true,
+      }
     }
     await this.store.put('reviews', review)
+    if (qualitySource) {
+      try {
+        await this.quality.recordReview(qualitySource, review)
+      } catch {
+        // Quality reporting is optional and must never change review behavior.
+      }
+    }
     const waiting = withNextStep(this.waitingConfirmation(resolution, review))
     await this.store.put('resolutions', waiting)
     this.creationGuard.applyReviewAuthorization(exec.agent, waiting.authorization!)
@@ -503,8 +556,16 @@ export class CapabilityEvolutionService {
     return latest
   }
 
-  install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
-    return this.installer.install(input, exec)
+  async install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
+    const record = await this.installer.install(input, exec)
+    try {
+      const review = await this.store.getReview(record.reviewId)
+      const source = await this.qualitySourceForReview(review)
+      if (source) await this.quality.recordInstallation(source, review, record)
+    } catch {
+      // Quality reporting is optional and must never change install behavior.
+    }
+    return record
   }
 
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
@@ -530,12 +591,18 @@ export class CapabilityEvolutionService {
             ...(signal ? { signal } : {}),
           })
         } else {
+          const prior = await this.store.listReviews(resolution.id)
+          const root = lineageRootReview(review, prior)
+          if (root.sourceSnapshot.kind !== 'github') {
+            return false
+          }
           current = (await reviewLocalPlugin({
             runner: this.runner,
             config: this.config,
             workspaceRoot: resolution.cwd,
             path: review.sourceSnapshot.path,
             baseReviewId: review.sourceSnapshot.baseReviewId,
+            lineageRootCommit: root.sourceSnapshot.commit,
             resolutionId: resolution.id,
             requirement: resolution.requirement,
             ...(runtimeVersion ? { runtimeVersion } : {}),
@@ -547,6 +614,23 @@ export class CapabilityEvolutionService {
       }
     }
     return false
+  }
+
+  private async qualitySourceForReview(review: ReviewRecord): Promise<CommunityQualitySource | undefined> {
+    if (review.sourceSnapshot.kind === 'github') {
+      return {
+        repository: review.sourceSnapshot.repository,
+        commit: review.sourceSnapshot.commit,
+        localModification: false,
+      }
+    }
+    const base = await this.store.getReview(review.sourceSnapshot.baseReviewId)
+    if (base.sourceSnapshot.kind !== 'github') return undefined
+    return {
+      repository: base.sourceSnapshot.repository,
+      commit: base.sourceSnapshot.commit,
+      localModification: true,
+    }
   }
 
   private async dshRuntimeVersion(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -571,6 +655,7 @@ export const _testing = {
   addExplicitCandidate,
   assertRequirement,
   authorizationForResolution,
+  lineageRootReview,
   materialReviewFacts,
   reviewIdentity,
   waitingAuthorization,

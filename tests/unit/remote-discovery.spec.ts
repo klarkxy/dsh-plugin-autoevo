@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
+import { CommunityQualityService } from '../../src/community-quality.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
 import type { CommandRunner } from '../../src/process/runner.js'
@@ -19,6 +20,10 @@ const config: RuntimeConfig = {
   forwardedCredentialEnv: [],
   verificationPatchPaths: [],
   evolutionPreset: true,
+  communityQualityFilter: false,
+  communityReports: false,
+  communityQualityEndpoint: '',
+  communityQualityTimeoutMs: 2_000,
 }
 
 const exec = {
@@ -32,6 +37,51 @@ const exec = {
 
 
 describe('remote discovery precedence', () => {
+  it('uses a larger bounded pool so quality filtering can refill the shortlist', async () => {
+    const qualityConfig: RuntimeConfig = {
+      ...config,
+      maxCandidates: 2,
+      communityQualityFilter: true,
+      communityQualityEndpoint: 'https://quality.example',
+    }
+    const execute = vi.fn(async () => ({
+      isError: false as const,
+      value: {
+        results: [
+          { name: 'calculator-broken', url: 'https://github.com/acme/calculator-broken', description: 'calculator', stars: 30 },
+          { name: 'calculator-good', url: 'https://github.com/acme/calculator-good', description: 'calculator', stars: 20 },
+          { name: 'calculator-unknown', url: 'https://github.com/acme/calculator-unknown', description: 'calculator', stars: 10 },
+        ],
+      },
+      content: [],
+    }))
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      assessments: [
+        { repository: 'acme/calculator-broken', classification: 'broken', reasonCodes: ['verification_failed'] },
+        { repository: 'acme/calculator-good', classification: 'good', reasonCodes: ['verified'] },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+    const ctx = { tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute } } as unknown as Context
+    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
+
+    const result = await discoverRemoteCandidates({
+      ctx,
+      config: qualityConfig,
+      runner,
+      cwd: 'C:/workspace',
+      requirement: 'calculator',
+      exec,
+      quality: new CommunityQualityService(qualityConfig, fetcher),
+    })
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ arguments: expect.objectContaining({ limit: 6 }) }))
+    expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calculator-good', 'acme/calculator-unknown'])
+    expect(result.qualityScreening).toEqual(expect.objectContaining({
+      complete: true,
+      filtered: [{ repository: 'acme/calculator-broken', classification: 'broken', reasonCodes: ['verification_failed'] }],
+    }))
+  })
+
   it('uses a current-scope find_dsh_plugin result without calling gh', async () => {
     const execute = vi.fn(async (_request: { arguments: { query: string, lang: string } }) => ({
       isError: false as const,

@@ -1,9 +1,9 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import type { ResolutionAuthorization, ReviewRecord } from './contracts.js'
+import type { ResolutionRecord, ResolutionAuthorization, ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
-import { reviewIdentity } from './lifecycle/decide.js'
+import { assertUseThisReceipt, reviewIdentity } from './lifecycle/decide.js'
 
 type Grant =
   | { state: 'available'; resolutionId: string }
@@ -112,9 +112,17 @@ export class CreationGuard {
     }
   }
 
-  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord): void {
+  assertInstallAuthorized(
+    agent: Agent | undefined,
+    review: ReviewRecord,
+    resolution?: Pick<ResolutionRecord, 'id' | 'decisions'>,
+  ): void {
     if (!agent) {
       throw new EvolutionError('review_rejected', 'A live Agent is required to install a reviewed plugin')
+    }
+    if (resolution) {
+      assertUseThisReceipt(review, resolution)
+      return
     }
     const grant = this.states.get(agent)?.installGrant
     const identity = reviewIdentity(review)

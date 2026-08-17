@@ -17,12 +17,12 @@
 ## 安装
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.4.0
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.0
 ```
 
 安装后重启对应的 DSH 进程。bundle 在进程启动时加载。
 
-升级时把 tag 换成新版本，再执行同一条安装命令，例如 `#v0.4.0` 换成 `#v0.4.1`。
+升级时把 tag 换成新版本，再执行同一条安装命令，例如 `#v0.5.0` 换成 `#v0.5.1`。
 
 DSH 的 `plugin` 命令把依赖操作转交给 pnpm。semver、Git tag 和 exact commit 都能钉住版本，但 DSH 不会自动追踪或热加载。固定版本后需要显式升级并重启。
 
@@ -33,7 +33,7 @@ pnpm install
 pnpm build
 New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
 npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.4.0.tgz"
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.0.tgz"
 ```
 
 开发包同样使用不可变 `file:...tgz`。这也避开了 DSH rc.6 在 Windows 上转交含空格 `link:` 路径时的参数拆分问题。第三方候选也会打成 owned `file:...tgz`。
@@ -62,6 +62,26 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 - `partial` 候选先做最小修改并跑上游测试，再本地重审为 `full`，最后打成固定 tgz 安装。
 - 当前任务完成后再建议向上游贡献。fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
 
+## 社区质量筛选（可选）
+
+AutoEvo 可以在市场候选展示前查询社区质量后端。该功能默认关闭，只有用户把 `communityQualityFilter` 设为 `true` 才会发送候选仓库名：
+
+- `good`：正常保留；
+- `repairable`：保留并进入现有的最小改进链路；
+- `broken` / `junk`：从本次候选列表过滤，但在 resolution 回执中保留分类和原因码用于审计；
+- 未知仓库或后端故障：保留候选，标记筛选未完成，仍须走 exact-commit 安全审查。
+
+匿名质量上报由独立的 `communityReports` 控制，也默认关闭。开启后只上报仓库、精确 commit、AutoEvo/策略/DSH 版本、阶段、结果、质量原因码和独立的安全风险等级；不上传需求原文、prompt、回答、源码、文件路径、用户名、环境变量、凭据或验证任务。失败记录保存在 `stateDir/community-quality/observations`，后续启动会重试。
+
+```yaml
+communityQualityFilter: true
+communityReports: true
+communityQualityEndpoint: https://autoevo.example/api
+communityQualityTimeoutMs: 2000
+```
+
+`communityQualityEndpoint` 只接受 HTTPS；本地开发可用 `http://localhost`。过滤和上报可以分别开启。后端协议见 [社区质量 API](docs/community-quality-api.md)。
+
 ## 试用
 
 安装并重启后，对当前 Agent 说：
@@ -84,7 +104,7 @@ AutoEvo 新增这些高层工具，并在 DSH 工具执行边界上守卫 `cordi
 
 ## 基线
 
-维护线 `0.4.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
+维护线 `0.5.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
 
 ```powershell
 node --version

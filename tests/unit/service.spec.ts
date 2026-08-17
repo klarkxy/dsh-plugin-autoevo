@@ -84,6 +84,47 @@ function candidateReview(repository: string, recommendation: ReviewRecord['recom
   return record
 }
 
+describe('local review lineage', () => {
+  it('walks a local review back to its GitHub root and rejects a cycle', () => {
+    const github = candidateReview('acme/one', 'skip', '1')
+    const first: ReviewRecord = {
+      ...github,
+      id: `review_${'2'.repeat(64)}`,
+      sourceSnapshot: {
+        kind: 'local',
+        path: 'C:/workspace/plugin',
+        baseReviewId: github.id,
+        baseCommit: github.sourceSnapshot.kind === 'github' ? github.sourceSnapshot.commit : 'c'.repeat(40),
+        statusHash: 'a'.repeat(64),
+      },
+    }
+    const second: ReviewRecord = {
+      ...first,
+      id: `review_${'3'.repeat(64)}`,
+      sourceSnapshot: {
+        kind: 'local',
+        path: 'C:/workspace/plugin',
+        baseReviewId: first.id,
+        baseCommit: first.sourceSnapshot.kind === 'local' ? first.sourceSnapshot.baseCommit : 'c'.repeat(40),
+        statusHash: 'b'.repeat(64),
+      },
+    }
+    expect(_testing.lineageRootReview(second, [github, first, second]).id).toBe(github.id)
+
+    const cyclic: ReviewRecord = {
+      ...first,
+      sourceSnapshot: {
+        kind: 'local',
+        path: 'C:/workspace/plugin',
+        baseReviewId: first.id,
+        baseCommit: 'c'.repeat(40),
+        statusHash: 'c'.repeat(64),
+      },
+    }
+    expect(() => _testing.lineageRootReview(cyclic, [cyclic])).toThrow(/cyclic/i)
+  })
+})
+
 describe('resolution authorization state', () => {
   it('maps unfinished discovery to waiting states and never mints scratch without a decision', () => {
     const id = resolution().id

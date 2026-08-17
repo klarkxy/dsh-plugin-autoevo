@@ -19,6 +19,13 @@ interface Config$1 {
   verificationPatchPaths?: string[];
   /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
   evolutionPreset?: boolean;
+  /** Opt in to community quality lookups that hide broken and junk marketplace candidates. */
+  communityQualityFilter?: boolean;
+  /** Opt in to sending anonymous, structured review/install observations. */
+  communityReports?: boolean;
+  /** Base URL for the AutoEvo community quality service. Empty disables network access. */
+  communityQualityEndpoint?: string;
+  communityQualityTimeoutMs?: number;
 }
 interface RuntimeConfig {
   dshHome: string;
@@ -34,6 +41,10 @@ interface RuntimeConfig {
   forwardedCredentialEnv: string[];
   verificationPatchPaths: string[];
   evolutionPreset: boolean;
+  communityQualityFilter: boolean;
+  communityReports: boolean;
+  communityQualityEndpoint: string;
+  communityQualityTimeoutMs: number;
 }
 declare const Config$1: Schema<Config$1>;
 //#endregion
@@ -43,6 +54,7 @@ type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'scratch_ready';
 type CandidateAvailability = 'available' | 'available_via_tool_search';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup';
+type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown';
 type DecisionPhase = 'gate1' | 'gate2';
 type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local';
 interface DecisionReceipt {
@@ -81,6 +93,27 @@ interface RemotePluginCandidate {
   defaultBranch?: string;
   matchedTerms?: string[];
   matchReason?: string;
+  communityQuality?: CommunityQualityAssessment;
+}
+interface CommunityQualityAssessment {
+  classification: CommunityQualityClass;
+  repairability: number | null;
+  evolutionValue: number | null;
+  confidence: number | null;
+  observationCount: number;
+  reasonCodes: string[];
+  updatedAt: string | null;
+}
+interface CommunityQualityScreening {
+  enabled: true;
+  complete: boolean;
+  assessedCandidates: number;
+  filtered: Array<{
+    repository: string;
+    classification: 'broken' | 'junk';
+    reasonCodes: string[];
+  }>;
+  reason: string;
 }
 interface ResolutionRecord {
   /** V1 records remain readable but never restore a scratch-build grant. */
@@ -96,6 +129,8 @@ interface ResolutionRecord {
   remoteCandidateSource?: RemoteCandidateSource;
   /** Whether every configured discovery fallback completed successfully. */
   remoteDiscoveryComplete?: boolean;
+  /** Opt-in community quality result. Filtered repositories are retained here for audit, not selection. */
+  communityQualityScreening?: CommunityQualityScreening;
   /** Present on V2 records created by the current policy. */
   authorization?: ResolutionAuthorization;
   selectedRepositories?: string[];
@@ -265,13 +300,40 @@ declare class CreationGuard {
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
   private setAuthorization;
-  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord): void;
+  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution?: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
   private inEvolutionMode;
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined;
   result(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): void;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
+}
+//#endregion
+//#region src/community-quality.d.ts
+interface CommunityQualitySource {
+  repository: string;
+  commit: string;
+  localModification: boolean;
+}
+interface CommunityQualityResult {
+  candidates: RemotePluginCandidate[];
+  screening?: CommunityQualityScreening;
+}
+type FetchLike = typeof globalThis.fetch;
+declare class CommunityQualityService {
+  private readonly config;
+  private readonly fetcher;
+  private readonly observationsRoot;
+  constructor(config: RuntimeConfig, fetcher?: FetchLike);
+  screen(candidates: readonly RemotePluginCandidate[], signal?: AbortSignal): Promise<CommunityQualityResult>;
+  recordReview(source: CommunityQualitySource, review: ReviewRecord): Promise<void>;
+  recordInstallation(source: CommunityQualitySource, review: ReviewRecord, record: InstallationRecord): Promise<void>;
+  flushPending(limit?: number): Promise<void>;
+  private observationBase;
+  private persistAndSend;
+  private sendStored;
+  private requestJson;
+  private atomicWrite;
 }
 //#endregion
 //#region src/lifecycle/decide.d.ts
@@ -335,7 +397,7 @@ declare class DshLauncher {
 //#endregion
 //#region src/lifecycle/install.d.ts
 type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>;
-type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void;
+type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void | Promise<void>;
 declare class PluginInstaller {
   private readonly ctx;
   private readonly config;
@@ -375,7 +437,8 @@ declare class CapabilityEvolutionService {
   readonly installer: PluginInstaller;
   readonly remover: PluginRemover;
   private readonly launcher;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard);
+  private readonly quality;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, quality?: CommunityQualityService);
   resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord>;
   review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult>;
   decide(input: DecideInput, exec: ToolRunContext): Promise<ResolutionRecord>;
@@ -384,6 +447,7 @@ declare class CapabilityEvolutionService {
   install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
   private revalidate;
+  private qualitySourceForReview;
   private dshRuntimeVersion;
 }
 //#endregion

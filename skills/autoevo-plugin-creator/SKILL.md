@@ -30,8 +30,8 @@ Before any new definition, state the concrete capability in one sentence and cal
 | `reuse_local` | The user chose an existing local tool or skill. Use it. | Stop |
 | `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_decide`. Review only selected repositories. | Stop |
 | `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_decide` (use this / improve it / create new / stop). | Stop |
-| `use_review` | The user chose to use the reviewed plugin. Install it; do not create a replacement. | Stop |
-| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then review the local checkout. | Stop |
+| `use_review` | The user chose to use the reviewed plugin. Install it; do not create a replacement. Reinstall or patch again with `capability_decide` on this resolution. | Stop |
+| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then review the local checkout with `base_review_id` set to this review or the previous local review. Do not start a new `capability_resolve`. | Stop |
 | `market_required` | AutoEvo installs `dsh-find-plugin` by script after approval and hot-loads it when possible. Tell the user to approve if asked. Restart DSH only if hot-load fails. Do not review the marketplace as the requested capability. | Stop |
 | `stopped` | The user stopped. Do not install or create. | Stop |
 | `scratch_ready` | The user explicitly allowed one new plugin. This is not a mandate to start building. | Allowed once |

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
-import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
+import { CommunityQualityService } from '../community-quality.js'
+import type { CommunityQualityScreening, RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
 import { validateGithubRepository } from '../github/index.js'
 import type { CommandRunner } from '../process/runner.js'
@@ -31,6 +32,7 @@ export interface RemoteDiscoveryResult {
   complete: boolean
   queries: string[]
   reasons: string[]
+  qualityScreening?: CommunityQualityScreening
 }
 
 function boundedText(value: unknown, maxLength: number): string {
@@ -136,13 +138,16 @@ async function discoverWithFindPlugin(options: {
   query: string
   exec: ToolRunContext
 }): Promise<RemotePluginCandidate[]> {
+  const poolLimit = options.config.communityQualityFilter
+    ? Math.min(20, options.config.maxCandidates * 3)
+    : options.config.maxCandidates
   const result = await options.ctx.tools.execute({
     callId: `${options.exec.callId}:autoevo-find:${randomUUID()}` as typeof options.exec.callId,
     rootCallId: options.exec.rootCallId,
     name: FIND_PLUGIN_TOOL,
     arguments: {
       query: options.query,
-      limit: options.config.maxCandidates,
+      limit: poolLimit,
       lang: /[\p{Script=Han}]/u.test(options.requirement) ? 'zh' : 'en',
     },
     ...(options.exec.agent ? { agent: options.exec.agent } : {}),
@@ -150,7 +155,7 @@ async function discoverWithFindPlugin(options: {
     signal: options.exec.signal,
   })
   if (result.isError) throw new Error(result.error.message)
-  return normalizeFindPluginCandidates(result.value, options.config.maxCandidates)
+  return normalizeFindPluginCandidates(result.value, poolLimit)
 }
 
 /**
@@ -166,6 +171,7 @@ export async function discoverRemoteCandidates(options: {
   cwd: string
   requirement: string
   exec: ToolRunContext
+  quality?: CommunityQualityService
 }): Promise<RemoteDiscoveryResult> {
   const queries: string[] = []
   const reasons: string[] = []
@@ -194,15 +200,26 @@ export async function discoverRemoteCandidates(options: {
     if (succeeded === 0) {
       return { candidates: [], complete: false, queries, reasons }
     }
-    const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
+    const pool = relevantRemoteCandidates(options.requirement, [...merged.values()])
       .sort((left, right) => right.stars - left.stars || left.repository.localeCompare(right.repository))
-      .slice(0, options.config.maxCandidates)
+    const quality = options.quality ?? new CommunityQualityService(options.config)
+    const screened = await quality.screen(pool, options.exec.signal)
+    if (screened.screening) reasons.push(screened.screening.reason)
+    const candidates = screened.candidates.slice(0, options.config.maxCandidates)
     if (candidates.length === 0) {
       reasons.push('find_dsh_plugin returned no valid reusable candidates; GitHub fallback was not used.')
     }
-    return candidates.length > 0
-      ? { candidates, source: 'dsh-find-plugin', complete: failed === 0, queries, reasons }
-      : { candidates, complete: failed === 0, queries, reasons }
+    const source = candidates.length > 0 || (screened.screening?.filtered.length ?? 0) > 0
+      ? 'dsh-find-plugin' as const
+      : undefined
+    return {
+      candidates,
+      ...(source ? { source } : {}),
+      complete: failed === 0,
+      queries,
+      reasons,
+      ...(screened.screening ? { qualityScreening: screened.screening } : {}),
+    }
   }
 
   reasons.push('find_dsh_plugin is not installed in the current Agent scope. AutoEvo will install the DSH plugin marketplace with a one-time approval instead of searching GitHub.')

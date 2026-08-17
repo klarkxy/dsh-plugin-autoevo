@@ -12,7 +12,7 @@ import type { StateStore } from '../state/store.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 
 export type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>
-export type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void
+export type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void | Promise<void>
 
 function validateProfile(profile: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(profile)) {
@@ -179,15 +179,17 @@ export class PluginInstaller {
     const expectedText = verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
-    if (this.authorizeInstall) this.authorizeInstall(review, exec)
+    if (this.authorizeInstall) await this.authorizeInstall(review, exec)
     const installableSpec = review.installSpec ?? githubInstallSpec(review)
     const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(installableSpec)
     const userChoseUse = Boolean(this.authorizeInstall)
+    const hardSkip = review.findings.some((finding) => finding.code === 'prompt_injection' || finding.code === 'dynamic_evaluation')
     const blocked = review.manifest.kind !== 'bundle'
       || review.fit !== 'full'
       || review.compatibility.status === 'incompatible'
       || !sourceCanInstall
       || review.findings.some((finding) => finding.code === 'review_truncated')
+      || hardSkip
       || (!userChoseUse && (review.recommendation !== 'use' || review.securityRisk === 'high'))
     if (blocked) {
       throw new EvolutionError('review_rejected', 'This review does not authorize installation', {
@@ -320,14 +322,17 @@ export class PluginInstaller {
     } else {
       verification = emptyVerification(review.manifest.expectedTools)
     }
+    const expectedTools = review.manifest.expectedTools
+    const loadOnly = expectedTools.length === 0
     const loaded = verification.attempted && verification.exitCode === 0
-      && verification.expectedTools.length > 0
-      && verification.expectedTools.some((name) => verification.calledTools.includes(name))
+      && (loadOnly
+        ? verification.taskResultObserved
+        : expectedTools.some((name) => verification.calledTools.includes(name)))
     const verified = loaded && verification.taskResultObserved && verification.taskResultMatchedExpectation !== false
-      && verification.expectedTools.length > 0
-      && verification.expectedTools.every((name) => verification.calledTools.includes(name)
-        && verification.resultTools.includes(name)
-        && !verification.failedTools.includes(name))
+      && (loadOnly
+        || expectedTools.every((name) => verification.calledTools.includes(name)
+          && verification.resultTools.includes(name)
+          && !verification.failedTools.includes(name)))
     const failedTemporaryTrialRemoved = input.retention === 'temporary' && verification.attempted && !verified
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
     const contributionEligible = review.sourceSnapshot.kind === 'local' && verified && review.fit === 'full'

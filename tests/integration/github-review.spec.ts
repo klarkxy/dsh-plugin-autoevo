@@ -8,6 +8,7 @@ import { reviewLocalPlugin } from '../../src/review/review.js'
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
   maxCandidates: 5, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
+  communityQualityFilter: false, communityReports: false, communityQualityEndpoint: '', communityQualityTimeoutMs: 2_000,
 }
 
 describe('local review binding', () => {
@@ -84,6 +85,63 @@ describe('local review binding', () => {
       expect(result.record.findings).toEqual(expect.arrayContaining([
         expect.objectContaining({ code: 'review_truncated' }),
       ]))
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a descendant HEAD of the lineage root and rejects an unrelated commit', async () => {
+    const workspace = await mkdtemp(path.join(process.cwd(), 'tests', '.review-workspace-'))
+    const plugin = path.join(workspace, 'plugin')
+    await mkdir(plugin, { recursive: true })
+    await writeFile(path.join(plugin, 'package.json'), JSON.stringify({
+      name: 'local-tool',
+      dsh: { bundle: { patch: './cordis.patch.yml', tools: ['local-tool'] } },
+      peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+    }))
+    await writeFile(path.join(plugin, 'cordis.patch.yml'), '- insert:\n    - id: local-tool\n      name: local-tool\n')
+    const root = 'b'.repeat(40)
+    const descendant = 'c'.repeat(40)
+    const unrelated = 'd'.repeat(40)
+    const runnerFor = (head: string, ancestor: boolean): CommandRunner => ({
+      async run(request) {
+        const args = request.argv.slice(1)
+        if (args.includes('--show-toplevel')) return { exitCode: 0, signal: null, stdout: plugin, stderr: '' }
+        if (args.includes('--is-ancestor')) {
+          return { exitCode: ancestor ? 0 : 1, signal: null, stdout: '', stderr: '' }
+        }
+        if (args.includes('HEAD')) return { exitCode: 0, signal: null, stdout: head, stderr: '' }
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    })
+    try {
+      const accepted = await reviewLocalPlugin({
+        runner: runnerFor(descendant, true),
+        config,
+        workspaceRoot: workspace,
+        path: plugin,
+        baseReviewId: 'review_0123456789abcdef',
+        lineageRootCommit: root,
+        resolutionId: 'resolution_0123456789abcdef',
+        requirement: 'local tool',
+        runtimeVersion: '0.1.0-rc.6',
+      })
+      expect(accepted.record.sourceSnapshot).toMatchObject({
+        kind: 'local',
+        baseReviewId: 'review_0123456789abcdef',
+        baseCommit: root,
+      })
+      await expect(reviewLocalPlugin({
+        runner: runnerFor(unrelated, false),
+        config,
+        workspaceRoot: workspace,
+        path: plugin,
+        baseReviewId: 'review_0123456789abcdef',
+        lineageRootCommit: root,
+        resolutionId: 'resolution_0123456789abcdef',
+        requirement: 'local tool',
+        runtimeVersion: '0.1.0-rc.6',
+      })).rejects.toThrow(/descendant/i)
     } finally {
       await rm(workspace, { recursive: true, force: true })
     }

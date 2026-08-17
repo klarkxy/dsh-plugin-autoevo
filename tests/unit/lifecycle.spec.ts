@@ -64,6 +64,10 @@ function config(root: string): RuntimeConfig {
     forwardedCredentialEnv: [],
     verificationPatchPaths: [],
     evolutionPreset: true,
+    communityQualityFilter: false,
+    communityReports: false,
+    communityQualityEndpoint: '',
+    communityQualityTimeoutMs: 2_000,
   }
 }
 
@@ -241,6 +245,49 @@ describe('lifecycle validation', () => {
 
     expect(result).toMatchObject({ installState: 'installed', installed: true, verified: false, removed: false })
     expect(result.verification.reason).toContain('profile reconciliation found the dependency installed')
+  })
+
+  it('treats a no-tool plugin as loaded and verified after a completed child turn', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review({
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-subscription-auth',
+        bundlePatch: './cordis.patch.yml',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: { '@deepseek-ai/dsh-llm': '>=0.0.1-rc.1' },
+        expectedTools: [],
+      },
+    }))
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const loadVerification: VerificationEvidence = {
+      attempted: true,
+      exitCode: 0,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: true,
+      taskResultSha256: 'd'.repeat(64),
+      reason: 'load-only',
+    }
+    const launcher = {
+      install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
+      verify: async () => loadVerification,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'web',
+      retention: 'persistent',
+      verificationTask: 'list installed bundles',
+      verificationExpectedText: 'dsh-subscription-auth',
+    }, execution())
+    expect(result).toMatchObject({ installed: true, loaded: true, verified: true, removed: false })
   })
 
   it('marks a persistent install outcome unknown when reconciliation also fails', async () => {

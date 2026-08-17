@@ -8,19 +8,22 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据
 
 `find_dsh_plugin` 是可选的第三方发现后端，不是信任根。AutoEvo 只在它对当前 Agent registry scope 可见时经 DSH nested tool pipeline 调用；返回的 note、描述和安装命令都视为不可信数据。只有严格 GitHub 仓库 URL 会被归一化为候选标识，摘要长度受限，并且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点。市场未安装时，不降级到裸 `gh` 搜索，也不把市场仓库送进能力审查。AutoEvo 只对固定包名 `dsh-find-plugin` 申请一次性批准并用 `dsh plugin add --save-exact` 安装。市场已装后的空、畸形或明显无关结果视为没有可复用候选；执行失败则发现未完成，不能发放创建权限。保留下来的候选都不能跳过下述审查与批准门槛。
 
+社区质量服务同样不是信任根，并且默认完全关闭。只有显式开启 `communityQualityFilter` 才会发送候选仓库名；响应仅接受本次请求内的仓库、固定分类、0..1 分数、有界计数、时间和原因码。`broken`/`junk` 只影响候选展示，不能改变安全风险或安装门槛；后端不可用或响应畸形时保留候选。`communityReports` 是单独的上报同意项。上传 payload 由固定 allowlist 重建，不含本地 delivery 元数据，更不含需求、prompt、回答、源码、路径、账号、环境、凭据或验证任务。网络只允许 HTTPS（localhost 开发例外），请求有独立短超时。
+
 ## 2. 安装门槛
 
 同时满足以下条件才进入安装：
 
 1. 候选来自同一 resolution 的持久 review receipt；
 2. manifest 精确声明 `dsh.bundle.patch`，该安全相对路径存在于已审查快照且能按 Loader 方言解析，package name 通过 registry-name 校验；
-3. fit 为 `full`，recommendation 为 `use`；
-4. 风险为 `low` 或 `medium`，且与回执记录的实际 DSH runtime 兼容性为 `compatible`；
-5. GitHub 安装 spec 钉在 exact commit；本地来源绑定 base commit、status 与除 `.git`/`node_modules` 外的完整文件集合；
-6. 安装前重新审查，材料一致；
-7. live DSH approval 返回一次性的 `allowed-once`。
+3. fit 为 `full`，且与回执记录的实际 DSH runtime 兼容性为 `compatible`；
+4. 风险为 `low` 或 `medium`，或用户已对仍含可修 high（如 `process_execution`）的本地改进明确 `use_this`，批准理由带 `HIGH RISK` 前缀；
+5. 不存在 `prompt_injection` 或 `dynamic_evaluation`；
+6. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
+7. 安装前重新审查，材料一致；该 resolution 最新一条 gate2 回执必须是匹配的 `use_this`；
+8. live DSH approval 返回一次性的 `allowed-once`。
 
-symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。风险 `high`，或兼容性为 `incompatible` / `unknown` 的候选留在审查结果里，不授权安装。
+symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。`prompt_injection` / `dynamic_evaluation`、非 bundle、fit=none 仍为 skip 且不可装。可修的 high 或 peer 不兼容推荐 `modify`，不是 skip。
 
 本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；`npm pack --ignore-scripts` 生成 tgz 后再复核 snapshot，最终安装该 tgz。Windows 上 DSH rc.6 会经 shell 转发 pnpm 参数，owned artifact path 和卸载用 package name 都经过 shell 安全校验；移除前再校验一次 receipt 中的 package name。
 
@@ -55,7 +58,7 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 { "kind": "task/result", "resultSha256": "...", "matchedExpectation": true }
 ```
 
-验证器核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。仅凭 stdout 日志不算任务完成。最终回答只保存 SHA-256；如果调用方给出预期文本，observer 只额外保存匹配布尔值。
+验证器核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。没有 expected tools 的插件走 load 验证：子进程 `exit 0` 且观察到 completed-turn 最终回答即可；可选预期文本仍只保存匹配布尔值。仅凭 stdout 日志不算任务完成。最终回答只保存 SHA-256。
 
 ## 5. 删除
 
@@ -71,6 +74,6 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值与 prompt injection 信号，供安装决策使用。
-- `medium` 风险候选在理由清晰的批准后可以试用；`high` 风险停在审查阶段。
+- `medium` 风险候选在理由清晰的批准后可以试用；含 `prompt_injection` / `dynamic_evaluation` 的 high 停在审查阶段。可修 high 走 modify，用户 `use_this` 后才可带 HIGH RISK 批准安装。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
 - fork、push、commit 与 PR 走现有 Git / `gh` 能力，每一次提交单独批准。

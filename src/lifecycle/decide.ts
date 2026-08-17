@@ -67,6 +67,38 @@ export function reviewIdentity(review: ReviewRecord): string {
     : review.sourceSnapshot.statusHash.toLowerCase()
 }
 
+export function latestGate2Decision(resolution: { decisions?: DecisionReceipt[] }): DecisionReceipt | undefined {
+  const decisions = resolution.decisions ?? []
+  for (let index = decisions.length - 1; index >= 0; index -= 1) {
+    const decision = decisions[index]
+    if (decision?.phase === 'gate2') return decision
+  }
+  return undefined
+}
+
+export function assertUseThisReceipt(
+  review: ReviewRecord,
+  resolution: { id: string; decisions?: DecisionReceipt[] },
+): void {
+  if (resolution.id !== review.resolutionId) {
+    throw new EvolutionError('review_rejected', 'The user has not chosen to use this reviewed plugin', {
+      reviewId: review.id,
+    })
+  }
+  const decision = latestGate2Decision(resolution)
+  const identity = reviewIdentity(review)
+  if (
+    !decision
+    || decision.action !== 'use_this'
+    || decision.reviewId !== review.id
+    || decision.reviewIdentity !== identity
+  ) {
+    throw new EvolutionError('review_rejected', 'The user has not chosen to use this reviewed plugin', {
+      reviewId: review.id,
+    })
+  }
+}
+
 export function newDecisionReceipt(
   phase: DecisionReceipt['phase'],
   action: DecisionAction,
@@ -111,13 +143,13 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'use_review') {
     return zh
-      ? '用户选择使用这次审查的插件。去安装，不要另建一个替代品。'
-      : 'The user chose this reviewed plugin. Install it; do not create a replacement.'
+      ? '用户选择使用这次审查的插件。去安装，不要另建一个替代品。卸了重装或再改一刀时，仍用这条 resolution 再 capability_decide，不要新开 resolve。'
+      : 'The user chose this reviewed plugin. Install it; do not create a replacement. To reinstall or patch again, call capability_decide on this resolution; do not start a new resolve.'
   }
   if (authorization.state === 'modify_review') {
     return zh
-      ? '用户选择在这次审查上做最小修改，然后对本地检出再审。'
-      : 'The user chose to improve this review. Modify it minimally, then review the local checkout.'
+      ? '用户选择在这次审查上做最小修改。改完后对本地检出再审，base_review_id 用这条审查或上一刀本地审查，不要新开 capability_resolve。'
+      : 'The user chose to improve this review. Modify it minimally, then review the local checkout with base_review_id set to this review or the previous local review. Do not start a new capability_resolve.'
   }
   if (authorization.state === 'reuse_local') {
     return zh

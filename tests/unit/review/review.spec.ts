@@ -6,6 +6,7 @@ import type { CommandRequest, CommandRunner } from '../../../src/process/runner.
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
   maxCandidates: 5, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
+  communityQualityFilter: false, communityReports: false, communityQualityEndpoint: '', communityQualityTimeoutMs: 2_000,
 }
 const loaderPatch = '- insert:\n    - id: calculator\n      name: calculator\n'
 
@@ -172,9 +173,36 @@ describe('third-party review', () => {
     })
 
     expect(incompatible.compatibility).toMatchObject({ status: 'incompatible', runtimeVersion: '0.1.0-rc.7' })
+    expect(incompatible.recommendation).toBe('modify')
     expect(unknown.compatibility).toMatchObject({ status: 'unknown', runtimeVersion: null })
     expect(unknown.recommendation).toBe('modify')
     expect(unknown.installSpec).toBeNull()
+  })
+
+  it('recommends modify for repairable high-risk process execution instead of skip', () => {
+    const record = evaluatePluginContent({
+      resolutionId: 'resolution_0123456789abcdef',
+      runtimeVersion: '0.1.0-rc.6',
+      requirement: '在dsh里调用grok的能力',
+      sourceSnapshot: { kind: 'github', repository: 'acme/dsh-subscription-auth', requestedRef: 'main', commit: 'a'.repeat(40), defaultBranch: 'main' },
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({
+          name: 'dsh-subscription-auth',
+          license: 'BSD-3-Clause',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+          peerDependencies: { '@deepseek-ai/dsh-llm': '>=0.0.1-rc.1' },
+        })) },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'src/oauth.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('open', [url])") },
+        { path: 'src/channels/grok.ts', content: Buffer.from('export const grok = true') },
+        { path: 'README.md', content: Buffer.from('Grok subscription channel for DSH') },
+      ],
+    })
+    expect(record.fit).toBe('full')
+    expect(record.securityRisk).toBe('high')
+    expect(record.recommendation).toBe('modify')
+    expect(record.installSpec).toBeNull()
+    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['process_execution']))
   })
 
   it('surfaces every package lifecycle hook as at least medium install risk', () => {

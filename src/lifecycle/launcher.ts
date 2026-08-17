@@ -233,11 +233,14 @@ export class DshLauncher {
       .map((file) => file.path)
     const evidence = await readReceipt(receiptPath)
     const expected = [...new Set(expectedTools)].sort()
-    const toolRoundTrip = expected.length > 0
+    const loadOnly = expected.length === 0
+    const toolRoundTrip = !loadOnly
       && expected.every((name) => evidence.calledTools.includes(name)
         && evidence.resultTools.includes(name)
         && !evidence.failedTools.includes(name))
     const taskResultObserved = evidence.taskResultObserved
+    const loadVerified = loadOnly && result.exitCode === 0 && taskResultObserved
+      && evidence.taskResultMatchedExpectation !== false
     return {
       attempted: true,
       task,
@@ -255,13 +258,19 @@ export class DshLauncher {
         : {}),
       reason: result.exitCode !== 0
         ? `DSH child exited with code ${result.exitCode ?? 'null'}.`
-        : !toolRoundTrip
-          ? 'The child exited, but the trusted observer did not prove a successful target tool round-trip.'
-          : !taskResultObserved
-            ? 'The target tool round-trip succeeded, but no completed-turn final answer was observed.'
-            : evidence.taskResultMatchedExpectation === false
-              ? 'The child completed with a final answer, but it did not contain the required expected text.'
-              : 'The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.',
+        : loadOnly && !taskResultObserved
+          ? 'The child exited, but the trusted observer did not see a completed-turn final answer.'
+          : loadOnly && evidence.taskResultMatchedExpectation === false
+            ? 'The child completed with a final answer, but it did not contain the required expected text.'
+            : loadVerified
+              ? 'The trusted child overlay observed a completed-turn final answer for a plugin with no expected tools.'
+              : !toolRoundTrip
+                ? 'The child exited, but the trusted observer did not prove a successful target tool round-trip.'
+                : !taskResultObserved
+                  ? 'The target tool round-trip succeeded, but no completed-turn final answer was observed.'
+                  : evidence.taskResultMatchedExpectation === false
+                    ? 'The child completed with a final answer, but it did not contain the required expected text.'
+                    : 'The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.',
     }
   }
 }

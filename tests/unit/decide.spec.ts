@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RemotePluginCandidate } from '../../src/contracts.js'
-import { mentionedRepositories, resolveDecision } from '../../src/lifecycle/decide.js'
+import type { ReviewRecord } from '../../src/contracts.js'
+import { assertUseThisReceipt, mentionedRepositories, resolveDecision, reviewIdentity } from '../../src/lifecycle/decide.js'
 
 const remotes: RemotePluginCandidate[] = [
   {
@@ -64,5 +65,71 @@ describe('conversational decision parsing', () => {
       locals: [],
       phase: 'gate1',
     })).toThrow(/not mentioned/i)
+  })
+})
+
+describe('install authorization receipts', () => {
+  const reviewed: ReviewRecord = {
+    schemaVersion: 1,
+    id: `review_${'a'.repeat(64)}`,
+    policyVersion: 'v6-2026-08-17',
+    createdAt: '2026-08-17T00:00:00.000Z',
+    resolutionId: `resolution_${'b'.repeat(24)}`,
+    requirement: 'grok',
+    sourceSnapshot: {
+      kind: 'local',
+      path: 'C:/workspace/plugin',
+      baseReviewId: `review_${'c'.repeat(64)}`,
+      baseCommit: 'd'.repeat(40),
+      statusHash: 'e'.repeat(64),
+    },
+    inspectedFiles: [],
+    manifest: { kind: 'bundle', scripts: [], dependencies: [], peerDependencies: {}, expectedTools: [] },
+    fit: 'full',
+    confidence: 0.8,
+    securityRisk: 'medium',
+    maintained: true,
+    license: 'MIT',
+    compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
+    missingCapabilities: [],
+    findings: [],
+    recommendation: 'use',
+    installSpec: null,
+  }
+
+  it('accepts the latest matching use-this and rejects a later modify-this', () => {
+    const identity = reviewIdentity(reviewed)
+    expect(() => assertUseThisReceipt(reviewed, {
+      id: reviewed.resolutionId,
+      decisions: [{
+        id: 'decision_1',
+        phase: 'gate2',
+        action: 'use_this',
+        selectedRepositories: ['acme/plugin'],
+        reviewId: reviewed.id,
+        reviewIdentity: identity,
+        createdAt: '2026-08-17T00:00:00.000Z',
+      }],
+    })).not.toThrow()
+    expect(() => assertUseThisReceipt(reviewed, {
+      id: reviewed.resolutionId,
+      decisions: [{
+        id: 'decision_1',
+        phase: 'gate2',
+        action: 'use_this',
+        selectedRepositories: ['acme/plugin'],
+        reviewId: reviewed.id,
+        reviewIdentity: identity,
+        createdAt: '2026-08-17T00:00:00.000Z',
+      }, {
+        id: 'decision_2',
+        phase: 'gate2',
+        action: 'modify_this',
+        selectedRepositories: ['acme/plugin'],
+        reviewId: reviewed.id,
+        reviewIdentity: identity,
+        createdAt: '2026-08-17T00:01:00.000Z',
+      }],
+    })).toThrow(/has not chosen/i)
   })
 })

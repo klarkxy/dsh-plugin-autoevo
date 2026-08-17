@@ -23,7 +23,7 @@ export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as cons
  * Template version for the bundled `presets/evolution` tree.
  * Bump when any managed template file content changes.
  */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '2' as const
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '3' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -71,6 +71,15 @@ export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[
     templateVersion: '2',
     files: Object.freeze({
       'agent.cordis.yml': '50815c246fb23c6dedee57069541771b5d9b8934a49d5b3b5a043a7af278add9',
+      'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
+    }),
+  }),
+  Object.freeze({
+    owner: EVOLUTION_MODE_OWNER,
+    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+    templateVersion: '3',
+    files: Object.freeze({
+      'agent.cordis.yml': '488bf1f349435b969967fc4c78c56d0951082ba8519027039fabe570fdf25a3a',
       'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
     }),
   }),

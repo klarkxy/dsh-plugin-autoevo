@@ -35,6 +35,10 @@ const config = {
   forwardedCredentialEnv: [],
   verificationPatchPaths: [],
   evolutionPreset: true,
+  communityQualityFilter: false,
+  communityReports: false,
+  communityQualityEndpoint: '',
+  communityQualityTimeoutMs: 2_000,
 } as RuntimeConfig
 
 const exec = {

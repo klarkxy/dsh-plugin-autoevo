@@ -7,8 +7,8 @@
 | `reuse_local` | The user chose a scoped local tool or skill. | Reuse it; do not define a Cordis Plugin unless they later choose create new. |
 | `selection_required` | Discovery finished or is waiting. No action grant yet. | Present each candidate in chat. Do not call `ask_user`. After the user replies, call `capability_decide`. Review only selected repositories. |
 | `confirmation_required` | A selected candidate was reviewed. | Explain fit, risk, and findings in chat. Do not call `ask_user`. After the user replies, call `capability_decide`. |
-| `use_review` | The user chose this exact review. | Install that review; do not create a replacement. |
-| `modify_review` | The user chose to improve this review. | Modify minimally, then review the local checkout. |
+| `use_review` | The user chose this exact review. | Install that review; do not create a replacement. Reinstall or patch again with `capability_decide` on the same resolution. |
+| `modify_review` | The user chose to improve this review. | Modify minimally, then `plugin_review` the local checkout. `base_review_id` may be this review or the previous local review. Do not start a new `capability_resolve`. |
 | `market_required` | `find_dsh_plugin` is not installed. AutoEvo installs `dsh-find-plugin` by script after one-time approval. | Approve if asked, restart DSH, then call `capability_resolve` again. Do not review the marketplace as the requested capability and do not create a replacement plugin. |
 | `stopped` | The user stopped or cancelled. | Do not install or create. |
 | `scratch_ready` | The user explicitly allowed one new plugin. | Inspect Cordis contracts and make one new definition only if that is still what they want. |
