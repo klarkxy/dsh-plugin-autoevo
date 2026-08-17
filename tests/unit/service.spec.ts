@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
-import { githubQueries } from '../../src/discovery/remote.js'
 import { _testing } from '../../src/service.js'
 import { hashObject } from '../../src/state/hashes.js'
 
@@ -37,15 +36,6 @@ describe('review revalidation identity', () => {
   })
 })
 
-describe('GitHub query plan', () => {
-  it('uses one dsh-plugin topic query and bounded capability queries', () => {
-    const queries = githubQueries('calculator with scientific notation')
-    expect(queries[0]).toContain('topic:dsh-plugin')
-    expect(queries).toContain('scientific notation dsh')
-    expect(queries.length).toBeLessThanOrEqual(5)
-  })
-})
-
 function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
   const id = `resolution_${'b'.repeat(24)}`
   return {
@@ -61,7 +51,7 @@ function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
       { repository: 'acme/one', name: 'one', description: '', stars: 1, updatedAt: null, topics: [] },
       { repository: 'acme/two', name: 'two', description: '', stars: 1, updatedAt: null, topics: [] },
     ],
-    remoteCandidateSource: 'github',
+    remoteCandidateSource: 'dsh-find-plugin',
     remoteDiscoveryComplete: true,
     ...(schemaVersion === 2
       ? { authorization: { state: 'selection_required' as const, resolutionId: id, reason: 'review candidates' } }

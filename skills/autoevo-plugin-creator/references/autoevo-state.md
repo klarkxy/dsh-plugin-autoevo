@@ -5,7 +5,7 @@
 | Result | Meaning | Safe next step |
 | --- | --- | --- |
 | `reuse_local` | The user chose a scoped local tool or skill. | Reuse it; do not define a Cordis Plugin unless they later choose create new. |
-| `selection_required` | Discovery finished or is waiting. No action grant yet. | Present each candidate in chat. Do not call `ask_user`. After the user replies, call `capability_workflow_resume`. Review only selected repositories. |
+| `selection_required` | Discovery finished or is waiting. No action grant yet. | Present each candidate in chat. Do not call `ask_user`. After the user replies, call `capability_workflow_resume`. Inspect exactly one selected repository at a time. |
 | `confirmation_required` | A selected candidate was reviewed. | Explain fit, risk, and findings in chat. Do not call `ask_user`. After the user replies, call `capability_workflow_resume`. |
 | `use_review` | The user chose this exact review. | The workflow installs that review; do not create a replacement. Reinstall or patch again on the same workflow. |
 | `modify_review` | The user chose to improve this review. | Modify minimally, then resume with the local checkout path. The workflow derives `base_review_id`. |

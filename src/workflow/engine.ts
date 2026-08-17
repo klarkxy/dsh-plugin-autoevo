@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { POLICY_VERSION, type ResumeInput } from '../contracts.js'
+import { POLICY_VERSION, type ResolutionAuthorization, type ResumeInput } from '../contracts.js'
 import type { CreationGuard } from '../creation-guard.js'
 import { EvolutionError } from '../errors.js'
 import { nextStepForAuthorization } from '../lifecycle/decide.js'
@@ -56,47 +56,48 @@ export class WorkflowEngine {
   }
 
   async resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
-    const workflow = await this.store.getWorkflow(input.workflowId)
-    if (workflow.policyVersion !== POLICY_VERSION) {
-      throw new EvolutionError('invalid_input', 'This workflow predates the current policy; start capability_workflow again')
-    }
-    if (workflow.status !== 'interrupted' || !workflow.interrupt || !INTERRUPT_NODES.has(workflow.cursor)) {
-      throw new EvolutionError('invalid_input', 'This workflow is not waiting for a user decision', {
-        status: workflow.status,
-        cursor: workflow.cursor,
+    return await this.withLock(input.workflowId, async () => {
+      const workflow = await this.store.getWorkflow(input.workflowId)
+      if (workflow.policyVersion !== POLICY_VERSION) {
+        throw new EvolutionError('invalid_input', 'This workflow predates the current policy; start capability_workflow again')
+      }
+      if (workflow.status !== 'interrupted' || !workflow.interrupt || !INTERRUPT_NODES.has(workflow.cursor)) {
+        throw new EvolutionError('invalid_input', 'This workflow is not waiting for a user decision', {
+          status: workflow.status,
+          cursor: workflow.cursor,
+        })
+      }
+      if (!isWorkflowOptionId(input.optionId)) {
+        throw new EvolutionError('invalid_input', 'option_id is not a known workflow option', { optionId: input.optionId })
+      }
+      if (!workflow.resolutionId) {
+        throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
+      }
+      const resolution = await this.host.getResolution(workflow.resolutionId)
+      const resume = validateResume({
+        guard: this.creationGuard,
+        agent: exec.agent,
+        interrupt: workflow.interrupt,
+        userMessage: input.userMessage,
+        optionId: input.optionId,
+        remotes: resolution.remoteCandidates,
+        ...(input.repositories !== undefined ? { repositories: input.repositories } : {}),
+        ...(input.path !== undefined ? { path: input.path } : {}),
+        ...(input.ref !== undefined ? { ref: input.ref } : {}),
+        ...(input.reviewId !== undefined ? { reviewId: input.reviewId } : {}),
+        ...(input.targetProfile !== undefined ? { targetProfile: input.targetProfile } : {}),
+        ...(input.retention !== undefined ? { retention: input.retention } : {}),
+        ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
+        ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
       })
-    }
-    if (!isWorkflowOptionId(input.optionId)) {
-      throw new EvolutionError('invalid_input', 'option_id is not a known workflow option', { optionId: input.optionId })
-    }
-    if (!workflow.resolutionId) {
-      throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
-    }
-    const resolution = await this.host.getResolution(workflow.resolutionId)
-    const resume = validateResume({
-      guard: this.creationGuard,
-      agent: exec.agent,
-      interrupt: workflow.interrupt,
-      userMessage: input.userMessage,
-      optionId: input.optionId,
-      remotes: resolution.remoteCandidates,
-      ...(input.repositories !== undefined ? { repositories: input.repositories } : {}),
-      ...(input.path !== undefined ? { path: input.path } : {}),
-      ...(input.ref !== undefined ? { ref: input.ref } : {}),
-      ...(input.reviewId !== undefined ? { reviewId: input.reviewId } : {}),
-      ...(input.targetProfile !== undefined ? { targetProfile: input.targetProfile } : {}),
-      ...(input.retention !== undefined ? { retention: input.retention } : {}),
-      ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
-      ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
-    })
 
-    return await this.withLock(workflow.id, async () => {
       const latest = await this.store.getWorkflow(workflow.id)
       if (latest.generation !== workflow.generation || latest.status !== 'interrupted') {
         throw new EvolutionError('invalid_input', 'This workflow is already running or has moved on')
       }
       latest.generation += 1
       latest.status = 'running'
+      delete latest.lastFailure
       latest.pendingRepositories = resume.repositories
       if (resume.ref) latest.pendingRef = resume.ref
       else delete latest.pendingRef
@@ -156,7 +157,13 @@ export class WorkflowEngine {
             ? await this.host.getReview(workflow.lastReviewId)
             : undefined
           workflow.status = 'interrupted'
-          workflow.interrupt = interruptPayload(workflow.cursor, resolution, review)
+          const installProfiles = workflow.cursor === 'await_confirmation'
+            ? await this.host.listInstallProfiles?.() ?? []
+            : []
+          workflow.interrupt = interruptPayload(workflow.cursor, resolution, review, {
+            ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
+            ...(installProfiles.length > 0 ? { installProfiles } : {}),
+          })
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           return await this.view(workflow, resolution)
@@ -214,14 +221,14 @@ export class WorkflowEngine {
     workflow: WorkflowRecord,
     exec: ToolRunContext,
     guardGeneration: number | undefined,
-    resolution?: { authorization?: { state: string; resolutionId: string; reason: string } },
+    resolution?: { authorization?: ResolutionAuthorization },
   ): void {
-    const authorization = resolution && 'authorization' in resolution ? resolution.authorization : undefined
+    const authorization = resolution?.authorization
     if (authorization && exec.agent) {
       if (guardGeneration !== undefined) {
-        this.creationGuard.applyResolutionAuthorization(exec.agent, authorization as never, guardGeneration)
+        this.creationGuard.applyResolutionAuthorization(exec.agent, authorization, guardGeneration)
       } else {
-        this.creationGuard.applyReviewAuthorization(exec.agent, authorization as never)
+        this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
       }
     }
     this.creationGuard.setWaiting(exec.agent, isInterruptKind(workflow.cursor) ? workflow.cursor : undefined)
@@ -233,9 +240,14 @@ export class WorkflowEngine {
     const installation = workflow.lastInstallationId
       ? await this.host.getInstallation(workflow.lastInstallationId)
       : undefined
-    const nextStep = current?.authorization
+    const baseNextStep = current?.authorization
       ? nextStepForAuthorization(workflow.requirement, current.authorization)
       : current?.nextStep
+    const nextStep = workflow.lastFailure
+      ? [baseNextStep, `Previous install failed (${workflow.lastFailure.code}): ${workflow.lastFailure.message}`]
+        .filter(Boolean)
+        .join(' ')
+      : baseNextStep
     return JSON.parse(JSON.stringify({
       workflow,
       ...(current ? { resolution: current } : {}),

@@ -44,7 +44,9 @@ describe('resume validation', () => {
   it('accepts option_id as the decision and keeps claimed repositories in the candidate set', () => {
     expect(resolveResumeRepositories(['omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
       .toEqual(['omdsh-dev/dsh-tool-calculator'])
-    expect(() => resolveResumeRepositories([], remotes, 'inspect')).toThrow(/at least one repository/i)
+    expect(() => resolveResumeRepositories([], remotes, 'inspect')).toThrow(/exactly one repository/i)
+    expect(() => resolveResumeRepositories(['MirDie/dsh-xai', 'omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
+      .toThrow(/exactly one repository/i)
     expect(() => resolveResumeRepositories(['acme/one'], remotes, 'stop')).toThrow(/only valid when inspecting/i)
   })
 

@@ -6,7 +6,6 @@ import { CommunityQualityService } from '../community-quality.js'
 import type { CommunityQualityScreening, RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
 import { validateGithubRepository } from '../github/index.js'
-import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries, marketplaceSearchQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
 
@@ -122,15 +121,6 @@ export function findPluginQuery(requirement: string): string {
   return (marketplaceSearchQueries(requirement)[0] ?? capabilityQueries(requirement)[0] ?? requirement).slice(0, 256)
 }
 
-export function githubQueries(requirement: string): string[] {
-  const capabilities = capabilityQueries(requirement)
-  if (capabilities.length === 0) return []
-  return [
-    `${capabilities[0]} topic:dsh-plugin`,
-    ...capabilities.slice(0, 4).map((query) => `${query} dsh`),
-  ]
-}
-
 async function discoverWithFindPlugin(options: {
   ctx: Context
   config: RuntimeConfig
@@ -167,8 +157,6 @@ async function discoverWithFindPlugin(options: {
 export async function discoverRemoteCandidates(options: {
   ctx: Context
   config: RuntimeConfig
-  runner: CommandRunner
-  cwd: string
   requirement: string
   exec: ToolRunContext
   quality?: CommunityQualityService

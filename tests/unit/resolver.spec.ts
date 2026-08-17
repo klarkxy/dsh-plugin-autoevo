@@ -168,7 +168,7 @@ describe('local matching', () => {
     expect(result.candidates.filter((candidate) => candidate.confidence >= 0.62)).toEqual([
       expect.objectContaining({ name: 'zhihu-search', availability: 'available' }),
     ])
-    expect(result.githubShouldRun).toBe(false)
+    expect(result.shouldDiscoverRemote).toBe(false)
   })
 
   it('distinguishes scoped tools, tool-search-reachable tools, and model-invocable skills', async () => {
@@ -209,7 +209,7 @@ describe('local matching', () => {
     expect(result.candidates).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'browser_screenshot' }),
     ]))
-    expect(result.githubShouldRun).toBe(false)
+    expect(result.shouldDiscoverRemote).toBe(false)
   })
 
   it('does not mistake Creator workflow skills for an existing business capability', async () => {
@@ -237,7 +237,7 @@ describe('local matching', () => {
     )
 
     expect(result.candidates).toEqual([])
-    expect(result.githubShouldRun).toBe(true)
+    expect(result.shouldDiscoverRemote).toBe(true)
   })
 
   it('does not claim tool-search reachability when bridge tools are registered but outside the Agent scope', async () => {
@@ -261,6 +261,6 @@ describe('local matching', () => {
     expect(result.candidates).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'telegram_send' }),
     ]))
-    expect(result.githubShouldRun).toBe(true)
+    expect(result.shouldDiscoverRemote).toBe(true)
   })
 })

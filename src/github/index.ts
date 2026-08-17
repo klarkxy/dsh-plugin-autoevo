@@ -1,1 +1,1 @@
-export { discoverGithubCandidates, validateGithubRepository } from './discovery.js'
+export { validateGithubRepository } from './discovery.js'

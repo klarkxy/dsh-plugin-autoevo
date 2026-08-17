@@ -161,13 +161,15 @@ describe('workflow graph nodes', () => {
         throw new Error('verify failed')
       },
     } as unknown as WorkflowHost
+    const record = workflow('install_verify')
     const result = await executeNode('install_verify', {
       host,
-      workflow: workflow('install_verify'),
+      workflow: record,
       exec: {},
       resolution: current,
     })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
+    expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'verify failed' })
   })
 
   it('loops search_more back through remote discovery', async () => {

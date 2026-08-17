@@ -53,7 +53,7 @@ type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'scratch_ready';
 type CandidateAvailability = 'available' | 'available_via_tool_search';
-type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup';
+type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
 type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown';
 type DecisionPhase = 'gate1' | 'gate2';
 type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more' | 'resume_modify';
@@ -290,17 +290,11 @@ type Grant = {
   resolutionId: string;
   callId: string;
 };
-interface InstallGrant {
-  resolutionId: string;
-  reviewId: string;
-  reviewIdentity: string;
-}
 interface AgentGateState {
   generation: number;
   activeResolutionId?: string;
   authorization?: ResolutionAuthorization;
   grant?: Grant;
-  installGrant?: InstallGrant;
   lastUserMessage?: string;
   waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work';
 }
@@ -324,7 +318,7 @@ declare class CreationGuard {
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
   private setAuthorization;
-  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution?: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
+  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
   private inEvolutionMode;
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
@@ -407,6 +401,10 @@ interface WorkflowRecord {
   pendingRef?: string;
   pendingPath?: string;
   pendingInstall?: WorkflowPendingInstall;
+  lastFailure?: {
+    code: string;
+    message: string;
+  };
   error?: {
     code: string;
     message: string;
@@ -453,6 +451,7 @@ interface WorkflowHost {
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
+  listInstallProfiles?(): Promise<string[]>;
 }
 interface WorkflowExec {
   agent?: import('@deepseek-ai/dsh-agent').Agent;
@@ -588,6 +587,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
+  listInstallProfiles(): Promise<string[]>;
   private waitingConfirmation;
   private revalidate;
   private qualitySourceForReview;

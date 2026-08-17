@@ -20,7 +20,7 @@ export type AuthorizationState =
   | 'modify_review'
   | 'scratch_ready'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
-export type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup'
+export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
 export type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown'
 export type DecisionPhase = 'gate1' | 'gate2'
 export type DecisionAction =

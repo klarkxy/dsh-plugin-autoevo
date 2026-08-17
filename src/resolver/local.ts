@@ -55,7 +55,7 @@ export function matchConfidence(requirement: string, name: string, description: 
 export interface LocalResolution {
   cwd: string
   candidates: LocalCapabilityCandidate[]
-  githubShouldRun: boolean
+  shouldDiscoverRemote: boolean
   reasons: string[]
 }
 
@@ -123,7 +123,7 @@ export async function resolveLocalCapabilities(
   return {
     cwd,
     candidates: candidates.slice(0, 8),
-    githubShouldRun: !useful,
+    shouldDiscoverRemote: !useful,
     reasons: useful
       ? ['A sufficiently relevant local capability is already available; remote search was skipped.']
       : ['No sufficiently relevant local capability was found; remote discovery is allowed.'],

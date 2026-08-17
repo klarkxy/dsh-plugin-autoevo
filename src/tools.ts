@@ -35,7 +35,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
         repositories: {
           type: 'array',
           items: { type: 'string' },
-          description: 'owner/repo list when inspecting or confirming a review.',
+          description: 'Exactly one owner/repo when inspecting. Optional when confirming a review.',
         },
         path: { type: 'string', description: 'Local Git worktree root after improve-this work is done.' },
         ref: { type: 'string', description: 'Optional Git ref; resolved to an exact commit before review.' },

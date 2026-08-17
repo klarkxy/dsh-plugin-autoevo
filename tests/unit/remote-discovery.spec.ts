@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CommunityQualityService } from '../../src/community-quality.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
-import type { CommandRunner } from '../../src/process/runner.js'
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh',
@@ -74,13 +73,10 @@ describe('remote discovery precedence', () => {
       ],
     }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
     const ctx = { tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute } } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config: qualityConfig,
-      runner,
-      cwd: 'C:/workspace',
       requirement: 'calculator',
       exec,
       quality: new CommunityQualityService(qualityConfig, fetcher),
@@ -113,9 +109,8 @@ describe('remote discovery precedence', () => {
     }))
     const get = vi.fn(() => ({ name: FIND_PLUGIN_TOOL }))
     const ctx = { tools: { get, execute } } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: '科学计数法计算器', exec })
+    const result = await discoverRemoteCandidates({ ctx, config, requirement: '科学计数法计算器', exec })
 
     expect(get).toHaveBeenCalledWith(FIND_PLUGIN_TOOL, exec.agent)
     const queries = execute.mock.calls.map((call) => (call[0] as { arguments: { query: string, lang: string } }).arguments)
@@ -128,7 +123,6 @@ describe('remote discovery precedence', () => {
       parent: exec.token,
       rootCallId: exec.rootCallId,
     }))
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.source).toBe('dsh-find-plugin')
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([expect.objectContaining({
@@ -140,18 +134,14 @@ describe('remote discovery precedence', () => {
 
   it('offers the plugin marketplace instead of searching GitHub when find_dsh_plugin is absent', async () => {
     const ctx = { tools: { get: vi.fn(() => undefined) } } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config,
-      runner,
-      cwd: 'C:/workspace',
       requirement: '我需要一个能在dsh里调用codex的能力。',
       exec,
     })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.source).toBe('marketplace-setup')
     expect(result.candidates).toEqual([])
@@ -175,18 +165,14 @@ describe('remote discovery precedence', () => {
         execute,
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config,
-      runner,
-      cwd: 'C:/workspace',
       requirement: '我需要一个能在dsh里调用codex的能力。',
       exec,
     })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
     expect(result.reasons.join(' ')).toContain('GitHub fallback was not used')
@@ -200,11 +186,9 @@ describe('remote discovery precedence', () => {
         execute: vi.fn(async () => ({ isError: false as const, value: { results: [] }, content: [] })),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
   })
@@ -216,11 +200,9 @@ describe('remote discovery precedence', () => {
         execute: vi.fn(async () => ({ isError: true as const, error: { message: 'rate limited' }, content: [] })),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(false)
     expect(result.candidates).toEqual([])
   })
@@ -236,11 +218,9 @@ describe('remote discovery precedence', () => {
         })),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.candidates.some((candidate) => candidate.repository === 'acme/plugin')).toBe(false)
   })
 
@@ -260,18 +240,14 @@ describe('remote discovery precedence', () => {
         })),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config,
-      runner,
-      cwd: 'C:/workspace',
       requirement: 'frobulate-qzvm Q7V9M2X4 R3K8N5P1',
       exec,
     })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
   })
@@ -323,18 +299,14 @@ describe('remote discovery precedence', () => {
     const ctx = {
       tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config,
-      runner,
-      cwd: 'C:/workspace',
       requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
       exec,
     })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(execute.mock.calls.length).toBeGreaterThan(1)
     expect(result.source).toBe('dsh-find-plugin')
     expect(result.candidates).toEqual([expect.objectContaining({
@@ -349,11 +321,9 @@ describe('remote discovery precedence', () => {
         execute: vi.fn(async () => { throw new Error('offline') }),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
-    const result = await discoverRemoteCandidates({ ctx, config, runner, cwd: 'C:/workspace', requirement: 'calculator', exec })
+    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
 
-    expect(runner.run).not.toHaveBeenCalled()
     expect(result.candidates).toEqual([])
     expect(result.complete).toBe(false)
     expect(result.reasons.join(' ')).toContain('unavailable')
@@ -371,13 +341,10 @@ describe('remote discovery precedence', () => {
         }),
       },
     } as unknown as Context
-    const runner = { run: vi.fn(async () => { throw new Error('gh must not run') }) } as CommandRunner
 
     const result = await discoverRemoteCandidates({
       ctx,
       config,
-      runner,
-      cwd: 'C:/workspace',
       requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
       exec,
     })

@@ -12,20 +12,7 @@ import type {
 import { EvolutionError } from '../errors.js'
 import { hashObject } from '../state/hashes.js'
 import type { CreationGuard } from '../creation-guard.js'
-import { WORKFLOW_OPTIONS, type InterruptPayload, type ValidatedResume } from '../workflow/contracts.js'
-
-export const LABEL_CREATE_NEW = WORKFLOW_OPTIONS.create_new.labelEn
-export const LABEL_CREATE_NEW_ZH = WORKFLOW_OPTIONS.create_new.labelZh
-export const LABEL_STOP = WORKFLOW_OPTIONS.stop.labelEn
-export const LABEL_STOP_ZH = WORKFLOW_OPTIONS.stop.labelZh
-export const LABEL_USE_LOCAL = WORKFLOW_OPTIONS.use_local.labelEn
-export const LABEL_USE_LOCAL_ZH = WORKFLOW_OPTIONS.use_local.labelZh
-export const LABEL_SEARCH_MORE = WORKFLOW_OPTIONS.search_more.labelEn
-export const LABEL_SEARCH_MORE_ZH = WORKFLOW_OPTIONS.search_more.labelZh
-export const LABEL_USE_THIS = WORKFLOW_OPTIONS.use_this.labelEn
-export const LABEL_USE_THIS_ZH = WORKFLOW_OPTIONS.use_this.labelZh
-export const LABEL_MODIFY_THIS = WORKFLOW_OPTIONS.modify_this.labelEn
-export const LABEL_MODIFY_THIS_ZH = WORKFLOW_OPTIONS.modify_this.labelZh
+import type { InterruptPayload, ValidatedResume } from '../workflow/contracts.js'
 
 const CREATE_NEW_RE = /新建|从零|自己写|自己做|create new|from scratch|没有合适|都不行|都不想用|都不合适/iu
 const STOP_RE = /先停|停下|停止|取消|算了|stop for now|\bstop\b|\bcancel\b/iu
@@ -261,8 +248,8 @@ export function resolveResumeRepositories(
   if (optionId !== 'inspect' && optionId !== 'use_this' && optionId !== 'modify_this' && requested.length > 0) {
     throw new EvolutionError('invalid_input', 'repositories are only valid when inspecting or confirming a review')
   }
-  if (optionId === 'inspect' && requested.length === 0) {
-    throw new EvolutionError('invalid_input', 'inspect requires at least one repository')
+  if (optionId === 'inspect' && requested.length !== 1) {
+    throw new EvolutionError('invalid_input', 'inspect requires exactly one repository')
   }
   return requested.map((repository) => {
     const known = remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())

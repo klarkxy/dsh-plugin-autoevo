@@ -51,7 +51,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 ## 工作方式
 
 - 带 Agent 身份的 `cordis_define`（`plugin.kind = "new"`）只在真正的能力进化模式下放行，且必须先经过 `capability_workflow` 并得到 `scratch_ready`。模式外调用会被拒绝，并提示切换到 **能力进化**。
-- 模式内：发现结束后先问用户看哪个、新建还是先停；只深审用户选中的仓库；审完再问用这个还是新建。`scratch_ready` 只表示用户允许自建一次，不是开工令。取消就是停，不会变成自建。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
+- 模式内：发现结束后先问用户看哪个、新建还是先停；一次只深审一个选中的仓库；审完再问用这个、在这个上改、新建还是先停。`scratch_ready` 只表示用户允许自建一次，不是开工令。取消就是停，不会变成自建。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
 - `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
 - 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)。若市场未安装，AutoEvo 在一次性批准后用脚本安装 `dsh-find-plugin` 并尽量热加载到当前进程；热加载失败才需要重启。不要审查市场插件，也不要直接用 `gh` 搜索。市场已装但没有相关候选时，视为没有可复用插件。

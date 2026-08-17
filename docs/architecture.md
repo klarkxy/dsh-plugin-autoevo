@@ -91,7 +91,7 @@ stateDir/
 
 `StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
 
-V3 resolution receipt 记录 `authorization` 与远端发现是否完整。远端候选按仓库归组，以该 GitHub review 及其本地改进 lineage 的最新结果为准：任一 `use` 要求复用，任一 `modify` 要求继续修改，存在未审候选则继续审查，只有全部为 `skip` 才可从零创建。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
+V2 resolution receipt 记录 `authorization` 与远端发现是否完整。创建、安装和改进由工作流 interrupt 上的用户选项决定；`inspect` 一次只审一个仓库，`create_new` 必须由用户原话匹配的 resume 发放，不会因为审查全是 skip 自动授权。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
 
 Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash、material manifest facts，以及实际 DSH runtime 版本和兼容性。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容、manifest 或 runtime 兼容性变化会使凭据过期。
 
@@ -120,8 +120,8 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，A
 
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
 - [src/creation-guard.ts](../src/creation-guard.ts)：动态 Cordis 新建调用的一次性运行时授权与并发预留。
-- [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 优先与内置 `gh` 回退编排、候选归一化和来源记录。
-- [src/github/discovery.ts](../src/github/discovery.ts)：有界 GitHub 候选搜索。
+- [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
+- [src/github/discovery.ts](../src/github/discovery.ts)：严格 `owner/repository` 标识校验。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。
 - [src/workflow/engine.ts](../src/workflow/engine.ts)：固定图工作流引擎、interrupt/resume、checkpoint。
 - [src/lifecycle/install.ts](../src/lifecycle/install.ts)：批准、重验证、状态机和失败清理。

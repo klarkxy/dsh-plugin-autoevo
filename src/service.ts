@@ -29,7 +29,7 @@ import {
 } from './lifecycle/decide.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
-import { installMarketplace } from './lifecycle/marketplace.js'
+import { installMarketplace, profilesWithAutoEvo } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
@@ -270,9 +270,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
     const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec))
-    const decision: ResolutionRecord['decision'] = local.githubShouldRun ? 'none' : 'use_local'
+    const decision: ResolutionRecord['decision'] = local.shouldDiscoverRemote ? 'none' : 'use_local'
     const id = newResolutionId(requirement)
-    const authorization = waitingAuthorization(id, decision, !local.githubShouldRun)
+    const authorization = waitingAuthorization(id, decision, !local.shouldDiscoverRemote)
     const record: ResolutionRecord = {
       schemaVersion: 2,
       id,
@@ -283,7 +283,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       decision,
       localCandidates: local.candidates,
       remoteCandidates: [],
-      remoteDiscoveryComplete: !local.githubShouldRun,
+      remoteDiscoveryComplete: !local.shouldDiscoverRemote,
       authorization,
       queries: [],
       reasons: [...local.reasons],
@@ -297,8 +297,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const discovery = await discoverRemoteCandidates({
       ctx: this.ctx,
       config: this.config,
-      runner: this.runner,
-      cwd: resolution.cwd,
       requirement: resolution.requirement,
       exec: asToolExec(exec),
       quality: this.quality,
@@ -574,6 +572,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   getInstallation(id: string): Promise<InstallationRecord> {
     return this.store.getInstallation(id)
+  }
+
+  listInstallProfiles(): Promise<string[]> {
+    return profilesWithAutoEvo(this.launcher, this.config.dshHome)
   }
 
   private waitingConfirmation(resolution: ResolutionRecord, review: ReviewRecord): ResolutionRecord {

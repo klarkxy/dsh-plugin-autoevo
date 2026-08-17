@@ -66,6 +66,7 @@ export function interruptPayload(
   cursor: WorkflowNodeId,
   resolution: ResolutionRecord,
   review?: ReviewRecord,
+  extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
 ): InterruptPayload {
   if (cursor === 'await_selection') {
     return {
@@ -81,7 +82,7 @@ export function interruptPayload(
     return {
       kind: 'await_confirmation',
       options: optionsFor('await_confirmation', resolution),
-      facts: confirmationFacts(resolution, review),
+      facts: confirmationFacts(resolution, review, extras),
     }
   }
   if (cursor === 'await_modify_work') {
@@ -150,10 +151,10 @@ async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResu
   const selected = ctx.workflow.pendingRepositories?.length
     ? ctx.workflow.pendingRepositories
     : current.selectedRepositories ?? []
-  const repository = selected[0]
-  if (!repository) {
-    throw new EvolutionError('invalid_input', 'inspect requires a repository')
+  if (selected.length !== 1 || !selected[0]) {
+    throw new EvolutionError('invalid_input', 'inspect requires exactly one repository')
   }
+  const repository = selected[0]
   const { resolution, review } = await ctx.host.reviewGithub(
     current,
     repository,
@@ -184,11 +185,16 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
   if (!review || !install) {
     throw new EvolutionError('invalid_input', 'Install requires a review and target profile')
   }
+  delete ctx.workflow.lastFailure
   try {
     const installation = await ctx.host.installReviewed(review, install, ctx.exec)
     return { kind: 'done', node: 'installed', resolution: current, review, installation }
   } catch (error) {
     if (error instanceof EvolutionError && error.code === 'invalid_input') throw error
+    ctx.workflow.lastFailure = {
+      code: error instanceof EvolutionError ? error.code : 'command_failed',
+      message: error instanceof Error ? error.message : String(error),
+    }
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }
   }
 }

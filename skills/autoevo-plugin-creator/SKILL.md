@@ -28,7 +28,7 @@ Before any new definition, state the concrete capability in one sentence and cal
 | Authorization | Required next action | Scratch definition |
 | --- | --- | --- |
 | `reuse_local` | The user chose an existing local tool or skill. Use it. | Stop |
-| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_workflow_resume`. Review only selected repositories. | Stop |
+| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_workflow_resume`. Inspect exactly one selected repository at a time. | Stop |
 | `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_workflow_resume` (use this / improve it / create new / stop). | Stop |
 | `use_review` | The user chose to use the reviewed plugin. The workflow installs it; do not create a replacement. Reinstall or patch again on the same workflow. | Stop |
 | `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then resume with the local checkout path. The workflow derives `base_review_id`. | Stop |

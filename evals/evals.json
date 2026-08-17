@@ -4,7 +4,7 @@
     {
       "id": "reuse-local-capability",
       "prompt": "In this DSH session, add a scientific-notation calculator. A scoped calculator skill is already available. Please make it usable now.",
-      "expected_output": "Calls capability_workflow for the concrete calculator need, follows reuse_required by using the scoped calculator capability, and does not create a dynamic Cordis Plugin.",
+      "expected_output": "Calls capability_workflow for the concrete calculator need, follows reuse_local by using the scoped calculator capability, and does not create a dynamic Cordis Plugin.",
       "assertions": [
         "Calls capability_workflow before proposing a new dynamic Plugin.",
         "Does not call cordis_define with plugin.kind new when local reuse is available."

@@ -69,6 +69,7 @@ export interface WorkflowRecord {
   pendingRef?: string
   pendingPath?: string
   pendingInstall?: WorkflowPendingInstall
+  lastFailure?: { code: string; message: string }
   error?: { code: string; message: string }
 }
 
@@ -128,6 +129,7 @@ export interface WorkflowHost {
   getResolution(id: string): Promise<ResolutionRecord>
   getReview(id: string): Promise<ReviewRecord>
   getInstallation(id: string): Promise<InstallationRecord>
+  listInstallProfiles?(): Promise<string[]>
 }
 
 export interface WorkflowExec {
@@ -151,7 +153,7 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
 ])
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
-  inspect: { id: 'inspect', labelEn: 'Inspect selected repositories', labelZh: '审查选中的仓库' },
+  inspect: { id: 'inspect', labelEn: 'Inspect this repository', labelZh: '审查这个仓库' },
   search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件' },
   use_local: { id: 'use_local', labelEn: 'Use existing local capability', labelZh: '用已有的本地能力' },
   create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建' },
@@ -180,7 +182,11 @@ export function selectionFacts(resolution: ResolutionRecord): Record<string, unk
   }
 }
 
-export function confirmationFacts(resolution: ResolutionRecord, review: ReviewRecord): Record<string, unknown> {
+export function confirmationFacts(
+  resolution: ResolutionRecord,
+  review: ReviewRecord,
+  extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
+): Record<string, unknown> {
   return {
     reviewId: review.id,
     fit: review.fit,
@@ -192,6 +198,10 @@ export function confirmationFacts(resolution: ResolutionRecord, review: ReviewRe
     selectedRepositories: resolution.selectedRepositories ?? [],
     license: review.license,
     compatibility: review.compatibility,
+    ...(extras.lastFailure ? { lastFailure: extras.lastFailure } : {}),
+    ...(extras.installProfiles && extras.installProfiles.length > 0
+      ? { installProfiles: extras.installProfiles }
+      : {}),
   }
 }
 
