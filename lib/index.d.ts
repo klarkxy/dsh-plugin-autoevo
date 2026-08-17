@@ -286,6 +286,9 @@ interface RemoveInput {
 }
 //#endregion
 //#region src/creation-guard.d.ts
+interface UserFacingMessage {
+  content?: readonly unknown[];
+}
 interface CreationGuardOptions {
   /** True only when agentPresets.serviceFor(agent, 'autoevoEvolutionMode') yields exact marker. */
   isEvolutionMode?: (agent: Agent) => boolean;
@@ -297,11 +300,14 @@ declare class CreationGuard {
   private nextGeneration;
   constructor(options?: CreationGuardOptions);
   beginResolution(agent?: Agent): number | undefined;
+  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
+  lastUserMessage(agent: Agent | undefined): string | undefined;
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
   private setAuthorization;
   assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution?: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
   private inEvolutionMode;
+  protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined;
@@ -448,6 +454,8 @@ declare class CapabilityEvolutionService {
   review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult>;
   decide(input: DecideInput, exec: ToolRunContext): Promise<ResolutionRecord>;
   private waitingConfirmation;
+  private ensureInspectFromLastMessage;
+  private ensureUseThisFromLastMessage;
   private reviewForDecision;
   install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;

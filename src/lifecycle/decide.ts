@@ -26,12 +26,19 @@ export const LABEL_MODIFY_THIS_ZH = '在这个上改'
 const CREATE_NEW_RE = /新建|从零|自己写|自己做|create new|from scratch|没有合适|都不行|都不想用|都不合适/iu
 const STOP_RE = /先停|停下|停止|取消|算了|stop for now|\bstop\b|\bcancel\b/iu
 const USE_THIS_RE = /用这个|就用这个|用它吧|安装这个|use this/iu
+const INSTALL_RE = /你帮我(?:安装|装)|帮我安装|帮我装|直接给我装|给我装|你来装|直接装|please install|install it/iu
+const THIS_RE = /这个插件|该插件|这个|this plugin|this one/iu
 const MODIFY_RE = /在这个上改|改这个|改进这个|improve this|modify this/iu
 const USE_LOCAL_RE = /用已有|本地就有|用现成|use existing local/iu
 const SEARCH_MORE_RE = /继续找|再搜|search for plugins|search more/iu
 const ALL_RE = /都看看|全都|全部审|all of them|review all/iu
 const OWNER_REPO_RE = /(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?![A-Za-z0-9_.-])/gu
-const INDEX_RE = /(?:选\s*|第|#)([一二两三四五六七八九十]|[1-9]\d*)(?:个|号)?/gu
+const SELECT_PREFIX = String.raw`具体看看|看一下|看下|看看|审查一下|审一下|审下|候选|方案|选\s*|第|#`
+const INDEX_RE = new RegExp(`(?:${SELECT_PREFIX})([一二两三四五六七八九十]|[1-9]\\d*)(?:个|号)?`, 'gu')
+const INDEX_LIST_RE = new RegExp(
+  `(?:${SELECT_PREFIX})((?:[一二两三四五六七八九十1-9])(?:\\s*[和、,，]\\s*(?:[一二两三四五六七八九十1-9]))+)`,
+  'gu',
+)
 const FIND_PLUGIN = 'awesome-dsh-plugin/dsh-find-plugin'
 
 const CHINESE_INDEX: Record<string, number> = {
@@ -170,9 +177,32 @@ function parseIndexToken(token: string): number | undefined {
   return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
 }
 
+function addIndexToken(
+  found: Set<string>,
+  token: string,
+  remotes: readonly RemotePluginCandidate[],
+): void {
+  const index = parseIndexToken(token)
+  if (index === undefined) return
+  const candidate = remotes[index - 1]
+  if (candidate) {
+    found.add(candidate.repository)
+    return
+  }
+  if (!/^[1-9]{2,}$/u.test(token) || index <= remotes.length) return
+  const digits = [...token].map((digit) => Number(digit))
+  const max = Math.min(9, remotes.length)
+  if (!digits.every((digit) => digit >= 1 && digit <= max)) return
+  for (const digit of digits) {
+    const item = remotes[digit - 1]
+    if (item) found.add(item.repository)
+  }
+}
+
 export function mentionedRepositories(
   message: string,
   remotes: readonly RemotePluginCandidate[],
+  previouslySelected: readonly string[] = [],
 ): string[] {
   const found = new Set<string>()
   if (ALL_RE.test(message)) {
@@ -187,13 +217,16 @@ export function mentionedRepositories(
     }
   }
 
+  for (const match of message.matchAll(INDEX_LIST_RE)) {
+    const list = match[1]
+    if (!list) continue
+    for (const token of list.split(/[和、,，\s]+/u).filter(Boolean)) addIndexToken(found, token, remotes)
+  }
+
   for (const match of message.matchAll(INDEX_RE)) {
-    const token = match[1] ?? match[2]
+    const token = match[1]
     if (!token) continue
-    const index = parseIndexToken(token)
-    if (index === undefined) continue
-    const candidate = remotes[index - 1]
-    if (candidate) found.add(candidate.repository)
+    addIndexToken(found, token, remotes)
   }
 
   for (const match of message.matchAll(OWNER_REPO_RE)) {
@@ -203,7 +236,19 @@ export function mentionedRepositories(
     found.add(known?.repository ?? repository)
   }
 
+  if (found.size === 0 && (THIS_RE.test(message) || INSTALL_RE.test(message))) {
+    if (previouslySelected.length > 0) {
+      for (const repository of previouslySelected) found.add(repository)
+    } else if (remotes.length === 1) {
+      found.add(remotes[0]!.repository)
+    }
+  }
+
   return [...found]
+}
+
+function wantsUseThis(message: string): boolean {
+  return USE_THIS_RE.test(message) || INSTALL_RE.test(message)
 }
 
 function actionKeywordMatches(action: ClaimedDecisionAction, message: string): boolean {
@@ -212,8 +257,8 @@ function actionKeywordMatches(action: ClaimedDecisionAction, message: string): b
   if (action === 'search_more') return SEARCH_MORE_RE.test(message)
   if (action === 'use_local') return USE_LOCAL_RE.test(message)
   if (action === 'modify_this') return MODIFY_RE.test(message)
-  if (action === 'use_this') return USE_THIS_RE.test(message)
-  return ALL_RE.test(message)
+  if (action === 'use_this') return wantsUseThis(message)
+  return ALL_RE.test(message) || THIS_RE.test(message)
 }
 
 function inferAction(
@@ -221,8 +266,9 @@ function inferAction(
   remotes: readonly RemotePluginCandidate[],
   locals: readonly LocalCapabilityCandidate[],
   phase: DecisionPhase,
+  previouslySelected: readonly string[],
 ): { action?: ClaimedDecisionAction, selectedRepositories: string[] } {
-  const selected = mentionedRepositories(message, remotes)
+  const selected = mentionedRepositories(message, remotes, previouslySelected)
   if (STOP_RE.test(message)) return { action: 'stop', selectedRepositories: [] }
   if (CREATE_NEW_RE.test(message)) return { action: 'create_new', selectedRepositories: [] }
   if (SEARCH_MORE_RE.test(message)) return { action: 'search_more', selectedRepositories: [] }
@@ -234,7 +280,7 @@ function inferAction(
   if (phase === 'gate2' && MODIFY_RE.test(message)) {
     return { action: 'modify_this', selectedRepositories: selected }
   }
-  if (phase === 'gate2' && USE_THIS_RE.test(message)) {
+  if (phase === 'gate2' && wantsUseThis(message)) {
     return { action: 'use_this', selectedRepositories: selected }
   }
   if (selected.length > 0) return { action: 'inspect', selectedRepositories: selected }
@@ -248,13 +294,20 @@ export function resolveDecision(input: {
   remotes: readonly RemotePluginCandidate[]
   locals: readonly LocalCapabilityCandidate[]
   phase: DecisionPhase
+  previouslySelected?: readonly string[]
 }): ResolvedDecision {
   const userMessage = input.userMessage.normalize('NFKC').trim()
   if (!userMessage || userMessage.length > 2_000) {
     throw new EvolutionError('invalid_input', 'user_message must contain 1 to 2000 characters')
   }
 
-  const inferred = inferAction(userMessage, input.remotes, input.locals, input.phase)
+  const inferred = inferAction(
+    userMessage,
+    input.remotes,
+    input.locals,
+    input.phase,
+    input.previouslySelected ?? [],
+  )
   if (input.claimedAction && inferred.action && input.claimedAction !== inferred.action) {
     throw new EvolutionError(
       'invalid_input',

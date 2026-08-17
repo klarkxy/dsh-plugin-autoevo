@@ -40,6 +40,68 @@ describe('conversational decision parsing', () => {
     })
   })
 
+  const four: RemotePluginCandidate[] = [
+    ...remotes,
+    {
+      repository: 'paicat1/dsh-screenshot',
+      name: 'dsh-screenshot',
+      description: 'screen capture',
+      stars: 1,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+    },
+    {
+      repository: 'XEsx630/dsh-screenshot',
+      name: 'dsh-screenshot-region',
+      description: 'region capture',
+      stars: 0,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+    },
+  ]
+
+  it('maps spoken inspect phrases and split indexes without treating a bare menu number as a pick', () => {
+    expect(mentionedRepositories('看下3', four)).toEqual(['paicat1/dsh-screenshot'])
+    expect(mentionedRepositories('具体看看3', four)).toEqual(['paicat1/dsh-screenshot'])
+    expect(mentionedRepositories('看下3和4', four)).toEqual(['paicat1/dsh-screenshot', 'XEsx630/dsh-screenshot'])
+    expect(mentionedRepositories('看下34', four)).toEqual(['paicat1/dsh-screenshot', 'XEsx630/dsh-screenshot'])
+    expect(mentionedRepositories('选10', four)).toEqual([])
+    expect(mentionedRepositories('1，安装', four)).toEqual([])
+    expect(resolveDecision({
+      userMessage: '具体看看3',
+      remotes: four,
+      locals: [],
+      phase: 'gate1',
+    }).action).toBe('inspect')
+    expect(() => resolveDecision({
+      userMessage: '1，安装',
+      remotes: four,
+      locals: [],
+      phase: 'gate1',
+    })).toThrow(/could not read a decision/i)
+  })
+
+  it('resolves this-plugin and install-for-me from prior selection or a single remote', () => {
+    expect(mentionedRepositories('审查一下这个插件', four, ['paicat1/dsh-screenshot']))
+      .toEqual(['paicat1/dsh-screenshot'])
+    expect(mentionedRepositories('审查一下这个插件', four)).toEqual([])
+    expect(mentionedRepositories('审查一下这个插件', [four[2]!])).toEqual(['paicat1/dsh-screenshot'])
+    expect(resolveDecision({
+      userMessage: '你帮我安装',
+      remotes: four,
+      locals: [],
+      phase: 'gate1',
+      previouslySelected: ['paicat1/dsh-screenshot'],
+    })).toMatchObject({ action: 'inspect', selectedRepositories: ['paicat1/dsh-screenshot'] })
+    expect(resolveDecision({
+      userMessage: '你帮我安装',
+      remotes: four,
+      locals: [],
+      phase: 'gate2',
+      previouslySelected: ['paicat1/dsh-screenshot'],
+    }).action).toBe('use_this')
+  })
+
   it('requires create-new wording and rejects a mismatched claimed action', () => {
     expect(resolveDecision({
       userMessage: '没有合适的，新建一个',

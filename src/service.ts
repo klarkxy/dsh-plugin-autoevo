@@ -333,12 +333,13 @@ export class CapabilityEvolutionService {
   }
 
   async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult> {
-    const resolution = await this.store.getResolution(input.resolutionId)
+    let resolution = await this.store.getResolution(input.resolutionId)
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
     let qualitySource: CommunityQualitySource | undefined
     if (input.sourceKind === 'github') {
       if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
+      resolution = await this.ensureInspectFromLastMessage(resolution, input.repository, exec)
       const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
       if (!selected.includes(input.repository.toLowerCase())) {
         throw new EvolutionError(
@@ -448,6 +449,7 @@ export class CapabilityEvolutionService {
       remotes: resolution.remoteCandidates,
       locals: resolution.localCandidates,
       phase,
+      previouslySelected: resolution.selectedRepositories ?? [],
       ...(input.action !== undefined ? { claimedAction: input.action } : {}),
       ...(input.repositories !== undefined ? { claimedRepositories: input.repositories } : {}),
     })
@@ -537,6 +539,44 @@ export class CapabilityEvolutionService {
     }
   }
 
+  private async ensureInspectFromLastMessage(
+    resolution: ResolutionRecord,
+    repository: string,
+    exec: ToolRunContext,
+  ): Promise<ResolutionRecord> {
+    const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
+    if (selected.includes(repository.toLowerCase())) return resolution
+    const userMessage = this.creationGuard.lastUserMessage(exec.agent)
+    if (!userMessage) return resolution
+    try {
+      return await this.decide({ resolutionId: resolution.id, userMessage }, exec)
+    } catch {
+      return resolution
+    }
+  }
+
+  private async ensureUseThisFromLastMessage(review: ReviewRecord, exec: ToolRunContext): Promise<void> {
+    const resolution = await this.store.getResolution(review.resolutionId)
+    try {
+      this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution)
+      return
+    } catch (error) {
+      const userMessage = this.creationGuard.lastUserMessage(exec.agent)
+      if (!userMessage) throw error
+      try {
+        await this.decide({
+          resolutionId: resolution.id,
+          userMessage,
+          reviewId: review.id,
+        }, exec)
+      } catch {
+        throw error
+      }
+      const updated = await this.store.getResolution(review.resolutionId)
+      this.creationGuard.assertInstallAuthorized(exec.agent, review, updated)
+    }
+  }
+
   private async reviewForDecision(
     resolutionId: string,
     reviewId: string | undefined,
@@ -557,6 +597,8 @@ export class CapabilityEvolutionService {
   }
 
   async install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
+    const review = await this.store.getReview(input.reviewId)
+    await this.ensureUseThisFromLastMessage(review, exec)
     const record = await this.installer.install(input, exec)
     try {
       const review = await this.store.getReview(record.reviewId)

@@ -210,3 +210,89 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(exec)).toBeUndefined()
   })
 })
+
+describe('evolution protocol automaton', () => {
+  function tool(name: string, args: Record<string, unknown> = {}, extra: Partial<ToolExecution> = {}): ToolExecution {
+    return {
+      ...execution(`call-${name}`, 'new', name),
+      arguments: args,
+      ...extra,
+    } as unknown as ToolExecution
+  }
+
+  it('denies a model-direct find_dsh_plugin and allows a nested parent call', async () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('selection_required'))
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    const direct = tool('find_dsh_plugin', { query: 'screenshot' })
+    await expect(guard.preExecute(direct, next)).resolves.toEqual({
+      kind: 'deny',
+      reason: expect.stringContaining('capability_decide'),
+    })
+    expect(guard.guard(direct)).toContain('plugin_review')
+    expect(next).not.toHaveBeenCalled()
+
+    const nested = {
+      ...tool('find_dsh_plugin', { query: 'screenshot' }),
+      parent: Symbol('parent'),
+    } as unknown as ToolExecution
+    await expect(guard.preExecute(nested, next)).resolves.toEqual({ kind: 'allow' })
+    expect(guard.guard(nested)).toBeUndefined()
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not intercept find_dsh_plugin outside evolution mode', async () => {
+    const guard = outsideModeGuard()
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    await expect(guard.preExecute(tool('find_dsh_plugin'), next)).resolves.toEqual({ kind: 'allow' })
+    expect(guard.guard(tool('find_dsh_plugin'))).toBeUndefined()
+  })
+
+  it('denies web_search only while waiting for a user choice', async () => {
+    const guard = inModeGuard()
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    await expect(guard.preExecute(tool('web_search'), next)).resolves.toEqual({ kind: 'allow' })
+
+    resolveAs(guard, authorization('selection_required'))
+    await expect(guard.preExecute(tool('web_search'), next)).resolves.toMatchObject({ kind: 'deny' })
+    expect(guard.guard(tool('web_search'))).toContain('Discovery is finished')
+
+    resolveAs(guard, authorization('use_review'))
+    await expect(guard.preExecute(tool('web_search'), next)).resolves.toEqual({ kind: 'allow' })
+  })
+
+  it('denies dsh plugin add in the shell and leaves ordinary commands alone', async () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('selection_required'))
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    await expect(guard.preExecute(tool('pwsh', {
+      command: 'dsh plugin --profile web add github:Yts1919/dsh-vision-complete',
+    }), next)).resolves.toEqual({
+      kind: 'deny',
+      reason: 'Install only via plugin_install after review.',
+    })
+    await expect(guard.preExecute(tool('pwsh', { command: 'Get-ChildItem' }), next)).resolves.toEqual({ kind: 'allow' })
+    expect(_testing.isDshPluginAddCommand('dsh plugin add foo')).toBe(true)
+    expect(_testing.isDshPluginAddCommand('Get-ChildItem')).toBe(false)
+  })
+
+  it('remembers the user-facing turn text and ignores runtime-context injections', () => {
+    const guard = inModeGuard()
+    guard.rememberUserMessage(agent, {
+      content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.' }],
+    })
+    expect(guard.lastUserMessage(agent)).toBeUndefined()
+    guard.rememberUserMessage(agent, {
+      content: [
+        { type: 'text', text: '<system-reminder>\nA skill is available\n' },
+        { type: 'text', text: '具体看看3，我希望右键生成长图。' },
+      ],
+    })
+    expect(guard.lastUserMessage(agent)).toBe('具体看看3,我希望右键生成长图。')
+    resolveAs(guard, authorization('selection_required'))
+    expect(guard.lastUserMessage(agent)).toBe('具体看看3,我希望右键生成长图。')
+    expect(_testing.extractUserFacingText({
+      content: [{ type: 'text', text: '<system-reminder>hidden' }],
+    })).toBe('')
+  })
+})

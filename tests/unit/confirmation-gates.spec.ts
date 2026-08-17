@@ -363,4 +363,70 @@ describe('conversational confirmation gates', () => {
     expect(() => useGuard.assertInstallAuthorized(agent, reviewed)).not.toThrow()
     expect(() => useGuard.assertInstallAuthorized(agent, { ...reviewed, id: `review_${'f'.repeat(64)}` })).toThrow(/has not chosen/i)
   })
+
+  it('reviews from last user message without an explicit capability_decide', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-autodecide-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const service = new CapabilityEvolutionService(
+      marketplaceCtx([
+        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
+        { name: 'dsh-grok-tui', url: 'https://github.com/acme/dsh-grok-tui', description: 'grok tui', stars: 2 },
+        { name: 'dsh-grok-screenshot', url: 'https://github.com/paicat1/dsh-grok-screenshot', description: 'grok screenshot', stars: 1 },
+      ]),
+      config(root),
+      ghRunner(grokBundle),
+      store,
+      guard,
+    )
+    const turn = exec()
+    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
+    expect(resolution.remoteCandidates.map((item) => item.repository)).toEqual([
+      'MirDie/dsh-xai',
+      'acme/dsh-grok-tui',
+      'paicat1/dsh-grok-screenshot',
+    ])
+
+    await expect(service.review({
+      resolutionId: resolution.id,
+      sourceKind: 'github',
+      repository: 'paicat1/dsh-grok-screenshot',
+    }, turn)).rejects.toThrow(/not selected/i)
+
+    guard.rememberUserMessage(turn.agent, {
+      content: [{ type: 'text', text: '随便看看' }],
+    })
+    await expect(service.review({
+      resolutionId: resolution.id,
+      sourceKind: 'github',
+      repository: 'paicat1/dsh-grok-screenshot',
+    }, turn)).rejects.toThrow(/not selected/i)
+
+    guard.rememberUserMessage(turn.agent, {
+      content: [{ type: 'text', text: '具体看看3' }],
+    })
+    const reviewed = await service.review({
+      resolutionId: resolution.id,
+      sourceKind: 'github',
+      repository: 'paicat1/dsh-grok-screenshot',
+    }, turn)
+    expect(reviewed.sourceSnapshot.kind === 'github' && reviewed.sourceSnapshot.repository)
+      .toBe('paicat1/dsh-grok-screenshot')
+    const stored = await store.getResolution(resolution.id)
+    expect(stored.selectedRepositories).toEqual(['paicat1/dsh-grok-screenshot'])
+    expect(stored.decisions?.some((item) => item.action === 'inspect')).toBe(true)
+
+    guard.rememberUserMessage(turn.agent, {
+      content: [{ type: 'text', text: '你帮我安装' }],
+    })
+    await expect(service.install({
+      reviewId: reviewed.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, turn)).rejects.toThrow()
+    const afterInstall = await store.getResolution(resolution.id)
+    expect(afterInstall.decisions?.some((item) => item.action === 'use_this')).toBe(true)
+    expect(() => guard.assertInstallAuthorized(turn.agent, reviewed, afterInstall)).not.toThrow()
+  })
 })

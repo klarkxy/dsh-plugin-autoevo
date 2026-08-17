@@ -37,6 +37,8 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 
 这不是通用代码意图分类器：普通编辑、命令、测试、Git 操作、AutoEvo 自身安装流程、无 Agent 的内部工具调用与 `cordis_define(kind:existing)` 不在门禁范围内。官方 Creator 技能不被全局禁用。权限仅驻留内存；持久 V1/V2 旧记录不会在重启后恢复创建能力。
 
+进化模式里，模型直调 `find_dsh_plugin`（无 nested `parent`）会被拒绝；`selection_required` / `confirmation_required` 期间拒绝 `web_search`；对已有 live resolution 的 `pwsh`/`bash` 若参数匹配 `dsh plugin add` 也会拒绝。AutoEvo 经 nested dispatch 调用市场搜索不受影响。审查与安装仍要求 review 回执、`use_this` 与 `allowed-once`。
+
 ## 3. 进程与凭据
 
 - 进程请求以 argv 数组发出。传给 Windows 上 DSH rc.6 pnpm 边界的安装 spec 只含通过元字符校验的值。

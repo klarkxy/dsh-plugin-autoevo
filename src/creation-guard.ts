@@ -21,6 +21,41 @@ interface AgentGateState {
   authorization?: ResolutionAuthorization
   grant?: Grant
   installGrant?: InstallGrant
+  lastUserMessage?: string
+}
+
+const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
+const WEB_SEARCH_TOOL = 'web_search'
+const SHELL_TOOLS = new Set(['pwsh', 'bash'])
+const DSH_PLUGIN_ADD = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\badd\b/iu
+const SKIP_USER_TEXT = /^(?:Current runtime context\.|<system-reminder>)/u
+
+export interface UserFacingMessage {
+  content?: readonly unknown[]
+}
+
+export function extractUserFacingText(message: UserFacingMessage): string {
+  const parts: string[] = []
+  for (const block of message.content ?? []) {
+    if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') continue
+    const text = block.text.normalize('NFKC').trim()
+    if (!text || SKIP_USER_TEXT.test(text)) continue
+    parts.push(text)
+  }
+  return parts.join('\n').trim()
+}
+
+export function isDshPluginAddCommand(value: string): boolean {
+  return DSH_PLUGIN_ADD.test(value)
+}
+
+function shellCommandText(args: unknown): string {
+  if (!isRecord(args)) return ''
+  for (const key of ['command', 'cmd', 'script']) {
+    const value = args[key]
+    if (typeof value === 'string') return value
+  }
+  return ''
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,8 +104,29 @@ export class CreationGuard {
   beginResolution(agent?: Agent): number | undefined {
     if (!agent) return undefined
     const generation = ++this.nextGeneration
-    this.states.set(agent, { generation })
+    const prior = this.states.get(agent)
+    this.states.set(agent, {
+      generation,
+      ...(prior?.lastUserMessage ? { lastUserMessage: prior.lastUserMessage } : {}),
+    })
     return generation
+  }
+
+  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void {
+    if (!agent) return
+    const text = extractUserFacingText(message)
+    if (!text) return
+    const state = this.states.get(agent)
+    if (state) {
+      state.lastUserMessage = text
+      return
+    }
+    this.states.set(agent, { generation: 0, lastUserMessage: text })
+  }
+
+  lastUserMessage(agent: Agent | undefined): string | undefined {
+    if (!agent) return undefined
+    return this.states.get(agent)?.lastUserMessage
   }
 
   applyResolutionAuthorization(
@@ -139,7 +195,26 @@ export class CreationGuard {
     return this.options.isEvolutionMode?.(agent) === true
   }
 
+  protocolDenial(exec: Readonly<ToolExecution>): string | undefined {
+    if (!exec.agent || !this.inEvolutionMode(exec.agent)) return undefined
+    const state = this.states.get(exec.agent)
+    const waiting = state?.authorization?.state === 'selection_required'
+      || state?.authorization?.state === 'confirmation_required'
+    if (exec.name === FIND_PLUGIN_TOOL && exec.parent === undefined) {
+      return 'Use the shortlist from capability_resolve. Call capability_decide or plugin_review; do not search again.'
+    }
+    if (exec.name === WEB_SEARCH_TOOL && waiting) {
+      return 'Discovery is finished. Call capability_decide with the user\'s latest message.'
+    }
+    if (SHELL_TOOLS.has(exec.name) && state?.authorization && isDshPluginAddCommand(shellCommandText(exec.arguments))) {
+      return 'Install only via plugin_install after review.'
+    }
+    return undefined
+  }
+
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
+    const protocol = this.protocolDenial(exec)
+    if (protocol) return Promise.resolve({ kind: 'deny', reason: protocol })
     if (!exec.agent || !isNewCordisDefinition(exec)) return next()
     if (!this.inEvolutionMode(exec.agent)) {
       return Promise.resolve({ kind: 'deny', reason: outsideEvolutionModeReason() })
@@ -155,6 +230,8 @@ export class CreationGuard {
 
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined {
+    const protocol = this.protocolDenial(exec)
+    if (protocol) return protocol
     if (!exec.agent || !isNewCordisDefinition(exec)) return undefined
     if (!this.inEvolutionMode(exec.agent)) return outsideEvolutionModeReason()
     const state = this.states.get(exec.agent)
@@ -180,4 +257,9 @@ export class CreationGuard {
   }
 }
 
-export const _testing = { denialReason, outsideEvolutionModeReason }
+export const _testing = {
+  denialReason,
+  extractUserFacingText,
+  isDshPluginAddCommand,
+  outsideEvolutionModeReason,
+}
