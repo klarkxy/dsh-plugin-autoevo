@@ -187,8 +187,13 @@ async function listExactChildren(directory: string): Promise<string[]> {
   return entries.map((entry) => entry.name).sort((a, b) => a.localeCompare(b))
 }
 
+/** Managed preset files are text. Hash and write LF so Windows autocrlf checkouts stay upgradeable. */
+function normalizeManagedText(bytes: Uint8Array): Buffer {
+  return Buffer.from(Buffer.from(bytes).toString('utf8').replace(/\r\n/gu, '\n'), 'utf8')
+}
+
 async function hashFile(filePath: string): Promise<string> {
-  return sha256(await readFile(filePath))
+  return sha256(normalizeManagedText(await readFile(filePath)))
 }
 
 async function readTemplateFiles(
@@ -199,7 +204,7 @@ async function readTemplateFiles(
   const hashes: Record<string, string> = {}
   for (const relative of EVOLUTION_PRESET_MANAGED_CONTENT_FILES) {
     const absolute = assertContained(resolvedTemplate, path.join(resolvedTemplate, relative), `template ${relative}`)
-    const bytes = await readFile(absolute)
+    const bytes = normalizeManagedText(await readFile(absolute))
     files[relative] = bytes
     hashes[relative] = sha256(bytes)
   }

@@ -153,6 +153,32 @@ describe('materializeEvolutionPreset', () => {
     expect(result.status).toBe('upgraded')
   })
 
+  it('upgrades a CRLF checkout of the shipped template through the built-in allowlist', async () => {
+    const root = await tempDir('autoevo-preset-crlf-checkout')
+    const dshHome = path.join(root, 'dsh')
+    const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
+    const crlfTemplate = path.join(root, 'crlf-template')
+    await mkdir(crlfTemplate, { recursive: true })
+    for (const name of ['preset.yml', 'agent.cordis.yml'] as const) {
+      const body = await readFile(path.join(packageTemplate, name), 'utf8')
+      await writeFile(path.join(crlfTemplate, name), body.replace(/\n/gu, '\r\n'), 'utf8')
+    }
+    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir: crlfTemplate })
+
+    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
+      ...baseTemplate,
+      'preset.yml': 'name: next package version\n',
+    })
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: nextTemplate,
+      templateVersion: '2',
+    })
+
+    expect(result.status).toBe('upgraded')
+  })
+
   it('preserves user-modified managed files', async () => {
     const root = await tempDir('autoevo-preset-modified')
     const dshHome = path.join(root, 'dsh')
