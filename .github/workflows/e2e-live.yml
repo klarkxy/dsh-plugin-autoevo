@@ -1,19 +1,23 @@
-name: CI
+name: Live E2E
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * *'
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
 
 jobs:
-  fast-gate:
+  live-e2e:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CI: 'true'
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/action-setup@v6.0.10
@@ -25,5 +29,5 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-      - run: pnpm pack:dry-run
+      - run: pnpm build
+      - run: pnpm test:e2e:live

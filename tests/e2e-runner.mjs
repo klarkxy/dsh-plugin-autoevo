@@ -14,6 +14,7 @@ const dshBin = path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'li
 const scriptedPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'scripted-llm.mjs')).href
 const approvalPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'approval-allow-once.mjs')).href
 const cordisDefineProbe = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'cordis-define-probe.mjs')).href
+const findPluginStub = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'find-plugin-stub.mjs')).href
 const root = await mkdtemp(path.join(os.tmpdir(), `capability-evolution-${scenario}-`))
 const dshHome = path.join(root, 'dsh-home')
 const stateDir = path.join(dshHome, 'autoevo')
@@ -192,6 +193,9 @@ async function runScenario() {
     } },
     ...(scenario === 'adversarial-define'
       ? [{ insert: [{ id: 'capability-evolution-e2e-cordis-define-probe', name: cordisDefineProbe }] }]
+      : []),
+    ...(scenario === 'full-flow' || scenario === 'partial-flow'
+      ? [{ insert: [{ id: 'capability-evolution-e2e-find-plugin-stub', name: findPluginStub }] }]
       : []),
     { insert: [{ id: 'capability-evolution-e2e-approval', name: approvalPlugin }] },
   ]

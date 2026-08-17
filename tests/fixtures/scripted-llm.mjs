@@ -26,6 +26,7 @@ function resultPairs(messages) {
   return pairs
 }
 
+// full-flow / partial-flow review this repo. Live marketplace ranking is marketplace-flow.
 export const E2E_CALCULATOR_REPOSITORY = 'omdsh-dev/dsh-tool-calculator'
 
 export function targetRepository() {

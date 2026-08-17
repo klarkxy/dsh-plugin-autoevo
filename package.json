@@ -65,10 +65,12 @@
     "test:e2e:marketplace": "node tests/e2e-runner.mjs marketplace-flow",
     "test:e2e:full": "node tests/e2e-runner.mjs full-flow",
     "test:e2e:partial": "node tests/e2e-runner.mjs partial-flow",
-    "test:e2e": "pnpm test:e2e:local && pnpm test:e2e:adversarial && pnpm test:e2e:marketplace && pnpm test:e2e:full && pnpm test:e2e:partial",
+    "test:e2e:offline": "pnpm test:e2e:local && pnpm test:e2e:adversarial",
+    "test:e2e:live": "pnpm test:e2e:marketplace && pnpm test:e2e:full && pnpm test:e2e:partial",
+    "test:e2e": "pnpm test:e2e:offline && pnpm test:e2e:live",
     "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader",
-    "check": "pnpm check:fast && pnpm test:e2e",
-    "check:release": "pnpm check && pnpm pack:dry-run",
+    "check": "pnpm check:fast && pnpm test:e2e:offline",
+    "check:release": "pnpm check && pnpm test:e2e:live && pnpm pack:dry-run",
     "pack:dry-run": "pnpm pack --dry-run"
   },
   "dependencies": {

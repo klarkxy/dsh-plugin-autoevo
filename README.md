@@ -90,8 +90,8 @@ AutoEvo 新增这些高层工具，并在 DSH 工具执行边界上守卫 `cordi
 node --version
 pnpm --version
 gh auth status
-pnpm check         # 完整门：静态检查、单测、Loader、local/adversarial/full/partial E2E
-pnpm check:release # 完整门 + pack dry-run；发布前必须通过
+pnpm check         # 日常门：静态检查、单测、Loader、local/adversarial E2E
+pnpm check:release # 日常门 + 市场/full/partial live E2E + pack dry-run；发布前必须通过
 ```
 
 设计见 [架构说明](docs/architecture.md)，安全门槛见 [安全模型](docs/security.md)。

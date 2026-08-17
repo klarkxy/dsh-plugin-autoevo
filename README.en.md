@@ -90,8 +90,8 @@ Maintenance line `0.5.1`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node
 node --version
 pnpm --version
 gh auth status
-pnpm check         # full gate: static checks, unit tests, Loader, local/adversarial/full/partial E2E
-pnpm check:release # full gate + pack dry-run; required before release
+pnpm check         # daily gate: static checks, unit tests, Loader, local/adversarial E2E
+pnpm check:release # daily gate + marketplace/full/partial live E2E + pack dry-run; required before release
 ```
 
 Design: [architecture](docs/architecture.md). Safety gates: [security](docs/security.md).
