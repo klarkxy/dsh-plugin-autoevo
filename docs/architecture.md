@@ -20,11 +20,6 @@ capability_resolve
                     script-install dsh-find-plugin (approval)
                          │ installed, no valid result
                          ▼
-                    candidate pool
-                         │ opt-in community quality lookup
-                         ├─ broken/junk ──► audit-only filter receipt
-                         └─ good/repairable/unknown
-                                  │
                     shortlist ──► Agent explains in chat
                          │ user replies
                          ▼
@@ -92,8 +87,6 @@ capability_resolve
 
 远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_decide` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 `capability_decide` 记入回执的仓库才进入同一套 `plugin_review` exact-commit 门禁。不要用 `ask_user` 在搜完后立刻弹窗。
 
-`communityQualityFilter` 是远端发现后的独立可选层。开启后，AutoEvo 会扩大有界候选池并批量查询质量后端；`broken`/`junk` 在进入 shortlist 前剔除，`good`/`repairable`/未知继续保留，最多仍返回 `maxCandidates`。服务失效时 fail-open 保留候选，并用独立的 `communityQualityScreening.complete=false` 说明质量筛选未完成，不把它混成市场发现失败。质量分类不授予安装权限，也不覆盖 `securityRisk` 或 exact-commit review。
-
 ## 4. 数据与状态
 
 持久状态在配置的 `stateDir`：
@@ -103,7 +96,6 @@ stateDir/
 ├─ resolutions/<id>.json
 ├─ reviews/<id>.json
 ├─ installations/<id>.json
-├─ community-quality/observations/<id>.json
 ├─ trials/<installation-id>/dsh-home/
 └─ verifications/<uuid>/
    ├─ observer.cordis.yml
@@ -111,8 +103,6 @@ stateDir/
 ```
 
 `StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
-
-`communityReports` 是与筛选分离的第二个 opt-in。开启后，review、install 和 verification 生成只含 allowlist 字段的匿名 observation；发送失败保留 `pending`，启动时有界重试。后端负责跨客户端聚合为 Good/Repairable/Broken/Junk；客户端 observation 不直接把一次失败升级成 Junk。
 
 V3 resolution receipt 记录 `authorization` 与远端发现是否完整。远端候选按仓库归组，以该 GitHub review 及其本地改进 lineage 的最新结果为准：任一 `use` 要求复用，任一 `modify` 要求继续修改，存在未审候选则继续审查，只有全部为 `skip` 才可从零创建。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
 
@@ -142,7 +132,6 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，A
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
 - [src/creation-guard.ts](../src/creation-guard.ts)：动态 Cordis 新建调用的一次性运行时授权与并发预留。
 - [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 优先与内置 `gh` 回退编排、候选归一化和来源记录。
-- [src/community-quality.ts](../src/community-quality.ts)：可选的社区质量查询、broken/junk 过滤与匿名 observation 上报。
 - [src/github/discovery.ts](../src/github/discovery.ts)：有界 GitHub 候选搜索。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。
 - [src/lifecycle/install.ts](../src/lifecycle/install.ts)：批准、重验证、状态机和失败清理。

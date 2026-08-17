@@ -1,6 +1,9 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CommunityQualityService } from '../../src/community-quality.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
@@ -26,6 +29,12 @@ const config: RuntimeConfig = {
   communityQualityTimeoutMs: 2_000,
 }
 
+const temporary: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporary.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
+})
+
 const exec = {
   callId: 'call-resolve',
   rootCallId: 'call-resolve',
@@ -38,8 +47,11 @@ const exec = {
 
 describe('remote discovery precedence', () => {
   it('uses a larger bounded pool so quality filtering can refill the shortlist', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-quality-remote-'))
+    temporary.push(directory)
     const qualityConfig: RuntimeConfig = {
       ...config,
+      stateDir: directory,
       maxCandidates: 2,
       communityQualityFilter: true,
       communityQualityEndpoint: 'https://quality.example',
@@ -74,6 +86,8 @@ describe('remote discovery precedence', () => {
       quality: new CommunityQualityService(qualityConfig, fetcher),
     })
 
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(fetcher).toHaveBeenCalledWith('https://quality.example/v1/quality/assessments', expect.objectContaining({ method: 'GET' }))
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ arguments: expect.objectContaining({ limit: 6 }) }))
     expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calculator-good', 'acme/calculator-unknown'])
     expect(result.qualityScreening).toEqual(expect.objectContaining({

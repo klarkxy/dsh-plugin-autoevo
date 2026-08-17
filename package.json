@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-autoevo",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DSH capability reuse and safe evolution layer. Evolution continues.",
   "license": "SATA",
   "repository": {
@@ -57,7 +57,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests",
+    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests quality/src",
     "test": "vitest run",
     "test:loader": "node tests/loader-smoke.mjs",
     "test:e2e:local": "node tests/e2e-runner.mjs resolve-local",

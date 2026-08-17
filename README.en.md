@@ -17,7 +17,7 @@ English | [Chinese](README.md)
 ## Install
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.0
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
 ```
 
 Restart the corresponding DSH process afterward. Bundles load at process start.
@@ -33,7 +33,7 @@ pnpm install
 pnpm build
 New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
 npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.0.tgz"
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.1.tgz"
 ```
 
 The development install also uses an immutable `file:...tgz`. This avoids DSH rc.6 splitting a Windows `link:` argument whose path contains spaces. Third-party candidates likewise become owned `file:...tgz` packages.
@@ -62,26 +62,6 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 - `partial` candidates get a minimal patch, upstream tests, a local re-review to `full`, then an immutable tgz.
 - After the current task is done, generic improvements can be suggested as a contribution. Fork, push, and PR still use `git` / `gh` after another explicit approval.
 
-## Community quality filtering (optional)
-
-AutoEvo can query a community quality service before marketplace candidates are shown. It is off by default and sends repository names only after `communityQualityFilter` is explicitly set to `true`:
-
-- `good`: retained;
-- `repairable`: retained for the existing minimal-improvement flow;
-- `broken` / `junk`: removed from the current shortlist, with classification and reason codes retained in the resolution receipt for audit;
-- unknown or service failure: retained and marked as unscreened; exact-commit security review still applies.
-
-Anonymous reporting is controlled separately by `communityReports` and is also off by default. Reports contain only repository, exact commit, AutoEvo/policy/DSH versions, stage, outcome, quality reason codes, and a separate security-risk field. They never contain the requirement, prompts, answers, source, paths, usernames, environment variables, credentials, or verification tasks. Failed deliveries remain under `stateDir/community-quality/observations` and are retried on a later start.
-
-```yaml
-communityQualityFilter: true
-communityReports: true
-communityQualityEndpoint: https://autoevo.example/api
-communityQualityTimeoutMs: 2000
-```
-
-`communityQualityEndpoint` requires HTTPS; `http://localhost` is accepted for local development. Filtering and reporting can be enabled independently. See the [community quality API](docs/community-quality-api.md).
-
 ## Try it
 
 After install and restart, tell the current Agent:
@@ -104,7 +84,7 @@ AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH'
 
 ## Baseline
 
-Maintenance line `0.5.0`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
+Maintenance line `0.5.1`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
 
 ```powershell
 node --version

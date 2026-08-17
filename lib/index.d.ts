@@ -19,11 +19,11 @@ interface Config$1 {
   verificationPatchPaths?: string[];
   /** When true (default), materialize/upgrade the managed evolution user preset. Never auto-deletes. */
   evolutionPreset?: boolean;
-  /** Opt in to community quality lookups that hide broken and junk marketplace candidates. */
+  /** Archived. No public quality service is offered; leave unset. */
   communityQualityFilter?: boolean;
-  /** Opt in to sending anonymous, structured review/install observations. */
+  /** Archived. No public quality service is offered; leave unset. */
   communityReports?: boolean;
-  /** Base URL for the AutoEvo community quality service. Empty disables network access. */
+  /** Archived. Empty disables network access. */
   communityQualityEndpoint?: string;
   communityQualityTimeoutMs?: number;
 }
@@ -323,15 +323,20 @@ type FetchLike = typeof globalThis.fetch;
 declare class CommunityQualityService {
   private readonly config;
   private readonly fetcher;
+  private readonly qualityRoot;
   private readonly observationsRoot;
+  private readonly snapshotFile;
+  private snapshot;
   constructor(config: RuntimeConfig, fetcher?: FetchLike);
   screen(candidates: readonly RemotePluginCandidate[], signal?: AbortSignal): Promise<CommunityQualityResult>;
   recordReview(source: CommunityQualitySource, review: ReviewRecord): Promise<void>;
   recordInstallation(source: CommunityQualitySource, review: ReviewRecord, record: InstallationRecord): Promise<void>;
   flushPending(limit?: number): Promise<void>;
   private observationBase;
+  private parseAssessments;
+  private readStoredSnapshot;
+  private loadSnapshot;
   private persistAndSend;
-  private sendStored;
   private requestJson;
   private atomicWrite;
 }

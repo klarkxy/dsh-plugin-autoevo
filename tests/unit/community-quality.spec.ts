@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CommunityQualityService } from '../../src/community-quality.js'
 import { _testing as configTesting, normalizeConfig, type RuntimeConfig } from '../../src/config.js'
-import type { RemotePluginCandidate, ReviewRecord } from '../../src/contracts.js'
+import type { InstallationRecord, RemotePluginCandidate, ReviewRecord } from '../../src/contracts.js'
 
 const temporary: string[] = []
 
@@ -43,6 +43,36 @@ function candidate(repository: string): RemotePluginCandidate {
     stars: 1,
     updatedAt: null,
     topics: ['dsh-plugin'],
+  }
+}
+
+function installation(): InstallationRecord {
+  return {
+    schemaVersion: 1,
+    id: `install_${'e'.repeat(24)}`,
+    createdAt: '2026-08-17T00:00:01.000Z',
+    reviewId: `review_${'a'.repeat(24)}`,
+    targetProfile: 'web',
+    retention: 'temporary',
+    dshHome: 'C:/dsh',
+    packageName: null,
+    installSpec: `github:acme/repairable#${'c'.repeat(40)}`,
+    installState: 'installed',
+    installed: true,
+    loaded: true,
+    verified: true,
+    restartRequired: false,
+    removed: false,
+    verification: {
+      attempted: true,
+      expectedTools: ['calculator'],
+      calledTools: ['calculator'],
+      resultTools: ['calculator'],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: true,
+      reason: 'ok',
+    },
   }
 }
 
@@ -98,13 +128,13 @@ describe('community quality filtering', () => {
     expect(result).toEqual({ candidates })
   })
 
-  it('filters broken and junk while retaining good, repairable, and unknown candidates', async () => {
-    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const request = JSON.parse(String(init?.body)) as { schemaVersion: number, repositories: string[] }
-      expect(request).toEqual({
-        schemaVersion: 1,
-        repositories: ['acme/good', 'acme/repairable', 'acme/broken', 'acme/junk', 'acme/unknown'],
-      })
+  it('filters from one daily GET snapshot and reuses the on-disk copy after restart', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-quality-snap-'))
+    temporary.push(directory)
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method ?? 'GET').toBe('GET')
+      expect(String(url)).toBe('https://quality.example/api/v1/quality/assessments')
+      expect(init?.body).toBeUndefined()
       return new Response(JSON.stringify({
         assessments: [
           { repository: 'acme/good', classification: 'good', repairability: 1, evolutionValue: 0.4, confidence: 0.9, observationCount: 8, reasonCodes: ['verified'], updatedAt: '2026-08-17T00:00:00.000Z' },
@@ -115,14 +145,20 @@ describe('community quality filtering', () => {
         ],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }) as unknown as typeof fetch
-    const service = new CommunityQualityService(config({
+    const qualityConfig = config({
+      stateDir: directory,
       communityQualityFilter: true,
       communityQualityEndpoint: 'https://quality.example/api',
-    }), fetcher)
+    })
+    const service = new CommunityQualityService(qualityConfig, fetcher)
     const candidates = ['good', 'repairable', 'broken', 'junk', 'unknown'].map((name) => candidate(`acme/${name}`))
 
     const result = await service.screen(candidates)
+    await service.screen(candidates)
+    const restarted = new CommunityQualityService(qualityConfig, fetcher)
+    await restarted.screen(candidates)
 
+    expect(fetcher).toHaveBeenCalledTimes(1)
     expect(result.candidates.map((item) => item.repository)).toEqual(['acme/good', 'acme/repairable', 'acme/unknown'])
     expect(result.candidates[1]?.communityQuality).toEqual(expect.objectContaining({
       classification: 'repairable',
@@ -140,8 +176,11 @@ describe('community quality filtering', () => {
   })
 
   it('keeps candidates when the quality service is unavailable', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-quality-offline-'))
+    temporary.push(directory)
     const fetcher = vi.fn(async () => { throw new Error('offline') }) as unknown as typeof fetch
     const service = new CommunityQualityService(config({
+      stateDir: directory,
       communityQualityFilter: true,
       communityQualityEndpoint: 'https://quality.example',
     }), fetcher)
@@ -155,11 +194,13 @@ describe('community quality filtering', () => {
 })
 
 describe('anonymous community observations', () => {
-  it('uploads only the allowlisted structured review fields and keeps a local delivery receipt', async () => {
+  it('keeps review local and uploads one batched POST after install', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-quality-'))
     temporary.push(directory)
     const uploaded: unknown[] = []
-    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method).toBe('POST')
+      expect(String(url)).toBe('https://quality.example/v1/quality/observations')
       uploaded.push(JSON.parse(String(init?.body)))
       return new Response(null, { status: 204 })
     }) as unknown as typeof fetch
@@ -168,20 +209,34 @@ describe('anonymous community observations', () => {
       communityReports: true,
       communityQualityEndpoint: 'https://quality.example',
     }), fetcher)
+    const source = { repository: 'acme/repairable', commit: 'c'.repeat(40), localModification: false }
 
-    await service.recordReview({ repository: 'acme/repairable', commit: 'c'.repeat(40), localModification: false }, review())
+    await service.recordReview(source, review())
+    expect(fetcher).not.toHaveBeenCalled()
+    const root = path.join(directory, 'community-quality', 'observations')
+    const pending = await readdir(root)
+    expect(pending).toHaveLength(1)
+    expect(JSON.parse(await readFile(path.join(root, pending[0]!), 'utf8'))).toMatchObject({ delivery: { status: 'pending' } })
 
+    await service.recordInstallation(source, review(), installation())
+
+    expect(fetcher).toHaveBeenCalledTimes(1)
     expect(uploaded).toHaveLength(1)
-    const serialized = JSON.stringify(uploaded[0])
+    const batch = uploaded[0] as { schemaVersion: number, observations: Array<Record<string, unknown>> }
+    expect(batch.schemaVersion).toBe(1)
+    expect(batch.observations).toHaveLength(3)
+    expect(batch.observations.map((item) => item.stage)).toEqual(['review', 'install', 'verification'])
+    const serialized = JSON.stringify(batch)
     expect(serialized).toContain('acme/repairable')
     expect(serialized).toContain('missing_capability')
     expect(serialized).not.toContain('PRIVATE')
     expect(serialized).not.toContain('secret-package')
-    expect(uploaded[0]).toEqual(expect.objectContaining({
+    expect(serialized).not.toContain('delivery')
+    expect(batch.observations[0]).toEqual(expect.objectContaining({
       schemaVersion: 1,
       repository: 'acme/repairable',
       commit: 'c'.repeat(40),
-      autoevoVersion: '0.5.0',
+      autoevoVersion: '0.5.1',
       dshVersion: '0.1.0-rc.6',
       stage: 'review',
       outcome: 'repairable',
@@ -189,13 +244,9 @@ describe('anonymous community observations', () => {
       evolutionValue: 'high',
       securityRisk: 'low',
     }))
-    expect(uploaded[0]).not.toHaveProperty('delivery')
-
-    const root = path.join(directory, 'community-quality', 'observations')
-    const entries = await readdir(root)
-    expect(entries).toHaveLength(1)
-    const stored = JSON.parse(await readFile(path.join(root, entries[0]!), 'utf8')) as { delivery: { status: string } }
-    expect(stored.delivery.status).toBe('sent')
+    const stored = await Promise.all((await readdir(root)).map(async (name) => JSON.parse(await readFile(path.join(root, name), 'utf8')) as { delivery: { status: string } }))
+    expect(stored).toHaveLength(3)
+    expect(stored.every((item) => item.delivery.status === 'sent')).toBe(true)
   })
 
   it('does not persist or upload observations without report opt-in', async () => {

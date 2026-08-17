@@ -15,7 +15,7 @@ import {
 } from './contracts.js'
 
 const AUTOEVO_VERSION = createRequire(import.meta.url)('../package.json').version as string
-const MAX_RESPONSE_BYTES = 262_144
+const MAX_RESPONSE_BYTES = 1_048_576
 const QUALITY_CLASSES = new Set<CommunityQualityClass>(['good', 'repairable', 'broken', 'junk', 'unknown'])
 const REASON_CODE = /^[a-z0-9][a-z0-9._-]{0,79}$/u
 
@@ -71,6 +71,11 @@ interface QualityResponse {
   assessments?: unknown
 }
 
+interface StoredSnapshot {
+  fetchedAt: string
+  assessments: Array<CommunityQualityAssessment & { repository: string }>
+}
+
 type FetchLike = typeof globalThis.fetch
 
 function serviceUrl(base: string, relative: string): string {
@@ -95,6 +100,12 @@ function boundedCount(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
     ? Math.min(value, 1_000_000)
     : 0
+}
+
+function utcDay(value: number | string): string {
+  const time = typeof value === 'number' ? value : Date.parse(value)
+  if (!Number.isFinite(time)) return ''
+  return new Date(time).toISOString().slice(0, 10)
 }
 
 function boundedTimestamp(value: unknown): string | null {
@@ -193,13 +204,18 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 }
 
 export class CommunityQualityService {
+  private readonly qualityRoot: string
   private readonly observationsRoot: string
+  private readonly snapshotFile: string
+  private snapshot: { fetchedAt: string, assessments: Map<string, CommunityQualityAssessment> } | undefined
 
   constructor(
     private readonly config: RuntimeConfig,
     private readonly fetcher: FetchLike = globalThis.fetch,
   ) {
-    this.observationsRoot = path.join(config.stateDir, 'community-quality', 'observations')
+    this.qualityRoot = path.join(config.stateDir, 'community-quality')
+    this.observationsRoot = path.join(this.qualityRoot, 'observations')
+    this.snapshotFile = path.join(this.qualityRoot, 'assessments.json')
   }
 
   async screen(candidates: readonly RemotePluginCandidate[], signal?: AbortSignal): Promise<CommunityQualityResult> {
@@ -229,27 +245,20 @@ export class CommunityQualityService {
       }
     }
 
-    const repositories = [...new Set(candidates.map((candidate) => candidate.repository))].slice(0, 60)
-    const requested = new Set(repositories.map((repository) => repository.toLowerCase()))
+    const requested = new Set(candidates.map((candidate) => candidate.repository.toLowerCase()))
     try {
-      const value = await this.requestJson('v1/quality/query', {
-        schemaVersion: 1,
-        repositories,
-      }, signal) as QualityResponse
-      if (!value || typeof value !== 'object' || !Array.isArray(value.assessments)) {
-        throw new TypeError('invalid community quality response')
-      }
-      const rawAssessments = value.assessments.slice(0, repositories.length)
+      const snapshot = await this.loadSnapshot(signal)
       const assessments = new Map<string, CommunityQualityAssessment>()
-      for (const raw of rawAssessments) {
-        const parsed = assessmentFromResponse(raw, requested)
-        if (parsed) assessments.set(parsed.repository.toLowerCase(), parsed.assessment)
-      }
       const filtered: CommunityQualityScreening['filtered'] = []
       const kept: RemotePluginCandidate[] = []
       for (const candidate of candidates) {
-        const assessment = assessments.get(candidate.repository.toLowerCase())
-        if (assessment?.classification === 'broken' || assessment?.classification === 'junk') {
+        const assessment = snapshot.get(candidate.repository.toLowerCase())
+        if (!assessment || !requested.has(candidate.repository.toLowerCase())) {
+          kept.push(candidate)
+          continue
+        }
+        assessments.set(candidate.repository.toLowerCase(), assessment)
+        if (assessment.classification === 'broken' || assessment.classification === 'junk') {
           filtered.push({
             repository: candidate.repository,
             classification: assessment.classification,
@@ -257,7 +266,7 @@ export class CommunityQualityService {
           })
           continue
         }
-        kept.push(assessment ? { ...candidate, communityQuality: assessment } : candidate)
+        kept.push({ ...candidate, communityQuality: assessment })
       }
       return {
         candidates: kept,
@@ -324,6 +333,7 @@ export class CommunityQualityService {
       repairability: null,
       evolutionValue: null,
     })
+    await this.flushPending()
   }
 
   async flushPending(limit = 20): Promise<void> {
@@ -335,14 +345,30 @@ export class CommunityQualityService {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
     }
-    for (const entry of entries.filter((name) => /^quality_[a-f0-9]{32}\.json$/u.test(name)).sort().slice(0, limit)) {
+    const pending: Array<{ file: string, record: StoredQualityObservation }> = []
+    for (const entry of entries.filter((name) => /^quality_[a-f0-9]{32}\.json$/u.test(name)).sort()) {
+      if (pending.length >= limit) break
       try {
         const file = path.join(this.observationsRoot, entry)
         const record = JSON.parse(await readFile(file, 'utf8')) as StoredQualityObservation
-        if (record.delivery?.status === 'pending') await this.sendStored(file, record)
+        if (record.delivery?.status === 'pending') pending.push({ file, record })
       } catch {
-        // A corrupt or temporarily unreadable local record must not affect AutoEvo workflows.
+        // A corrupt local record must not block the rest of the batch.
       }
+    }
+    if (pending.length === 0) return
+    pending.sort((left, right) => left.record.createdAt.localeCompare(right.record.createdAt) || left.record.id.localeCompare(right.record.id))
+    const attemptedAt = new Date().toISOString()
+    await this.requestJson('POST', 'v1/quality/observations', {
+      schemaVersion: 1,
+      observations: pending.map((item) => uploadPayload(item.record)),
+    })
+    const sentAt = new Date().toISOString()
+    for (const item of pending) {
+      await this.atomicWrite(item.file, {
+        ...item.record,
+        delivery: { status: 'sent', attemptedAt, sentAt },
+      })
     }
   }
 
@@ -361,29 +387,77 @@ export class CommunityQualityService {
     }
   }
 
+  private parseAssessments(raw: readonly unknown[]): {
+    list: StoredSnapshot['assessments']
+    map: Map<string, CommunityQualityAssessment>
+  } {
+    const list: StoredSnapshot['assessments'] = []
+    const map = new Map<string, CommunityQualityAssessment>()
+    for (const item of raw.slice(0, 4_000)) {
+      if (!item || typeof item !== 'object') continue
+      const repository = (item as QualityResponseItem).repository
+      if (typeof repository !== 'string') continue
+      const parsed = assessmentFromResponse({ ...item, repository }, new Set([repository.normalize('NFKC').trim().toLowerCase()]))
+      if (!parsed) continue
+      list.push({ repository: parsed.repository, ...parsed.assessment })
+      map.set(parsed.repository.toLowerCase(), parsed.assessment)
+    }
+    return { list, map }
+  }
+
+  private async readStoredSnapshot(): Promise<{ fetchedAt: string, assessments: Map<string, CommunityQualityAssessment> } | undefined> {
+    try {
+      const stored = JSON.parse(await readFile(this.snapshotFile, 'utf8')) as Partial<StoredSnapshot>
+      if (typeof stored.fetchedAt !== 'string' || !Array.isArray(stored.assessments)) return undefined
+      const parsed = this.parseAssessments(stored.assessments)
+      return { fetchedAt: stored.fetchedAt, assessments: parsed.map }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      return undefined
+    }
+  }
+
+  private async loadSnapshot(signal?: AbortSignal): Promise<Map<string, CommunityQualityAssessment>> {
+    const today = utcDay(Date.now())
+    if (this.snapshot && utcDay(this.snapshot.fetchedAt) === today) return this.snapshot.assessments
+    const stored = await this.readStoredSnapshot()
+    if (stored && utcDay(stored.fetchedAt) === today) {
+      this.snapshot = stored
+      return stored.assessments
+    }
+    try {
+      const value = await this.requestJson('GET', 'v1/quality/assessments', undefined, signal) as QualityResponse
+      if (!value || typeof value !== 'object' || !Array.isArray(value.assessments)) {
+        throw new TypeError('invalid community quality snapshot')
+      }
+      const parsed = this.parseAssessments(value.assessments)
+      const fetchedAt = new Date().toISOString()
+      this.snapshot = { fetchedAt, assessments: parsed.map }
+      await mkdir(this.qualityRoot, { recursive: true })
+      await this.atomicWrite(this.snapshotFile, { fetchedAt, assessments: parsed.list } satisfies StoredSnapshot)
+      return parsed.map
+    } catch (error) {
+      if (stored) {
+        this.snapshot = stored
+        return stored.assessments
+      }
+      throw error
+    }
+  }
+
   private async persistAndSend(payload: QualityObservationPayload): Promise<void> {
     const record: StoredQualityObservation = { ...payload, delivery: { status: 'pending' } }
     await mkdir(this.observationsRoot, { recursive: true })
     const file = path.join(this.observationsRoot, `${payload.id}.json`)
     await this.atomicWrite(file, record)
-    if (!this.config.communityQualityEndpoint) return
-    try {
-      await this.sendStored(file, record)
-    } catch {
-      // The pending, allowlisted record remains available for a later retry.
-    }
   }
 
-  private async sendStored(file: string, record: StoredQualityObservation): Promise<void> {
-    const attemptedAt = new Date().toISOString()
-    await this.requestJson('v1/quality/observations', uploadPayload(record))
-    await this.atomicWrite(file, {
-      ...record,
-      delivery: { status: 'sent', attemptedAt, sentAt: new Date().toISOString() },
-    })
-  }
-
-  private async requestJson(relative: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+  private async requestJson(
+    method: 'GET' | 'POST',
+    relative: string,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const controller = new AbortController()
     const onAbort = () => controller.abort(signal?.reason)
     if (signal?.aborted) controller.abort(signal.reason)
@@ -391,9 +465,10 @@ export class CommunityQualityService {
     const timeout = setTimeout(() => controller.abort(new Error('community quality request timed out')), this.config.communityQualityTimeoutMs)
     try {
       const response = await this.fetcher(serviceUrl(this.config.communityQualityEndpoint, relative), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        method,
+        ...(body === undefined
+          ? {}
+          : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
         signal: controller.signal,
       })
       if (!response.ok) throw new Error(`community quality service returned ${response.status}`)
@@ -405,7 +480,7 @@ export class CommunityQualityService {
     }
   }
 
-  private async atomicWrite(file: string, value: StoredQualityObservation): Promise<void> {
+  private async atomicWrite(file: string, value: unknown): Promise<void> {
     const temporary = `${file}.${randomUUID()}.tmp`
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
     await rename(temporary, file)

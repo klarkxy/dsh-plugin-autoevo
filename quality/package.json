@@ -1,0 +1,14 @@
+{
+  "name": "autoevo-quality",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create autoevo-quality",
+    "db:schema": "wrangler d1 execute autoevo-quality --remote --file=schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}

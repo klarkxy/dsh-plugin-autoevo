@@ -8,8 +8,6 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据
 
 `find_dsh_plugin` 是可选的第三方发现后端，不是信任根。AutoEvo 只在它对当前 Agent registry scope 可见时经 DSH nested tool pipeline 调用；返回的 note、描述和安装命令都视为不可信数据。只有严格 GitHub 仓库 URL 会被归一化为候选标识，摘要长度受限，并且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点。市场未安装时，不降级到裸 `gh` 搜索，也不把市场仓库送进能力审查。AutoEvo 只对固定包名 `dsh-find-plugin` 申请一次性批准并用 `dsh plugin add --save-exact` 安装。市场已装后的空、畸形或明显无关结果视为没有可复用候选；执行失败则发现未完成，不能发放创建权限。保留下来的候选都不能跳过下述审查与批准门槛。
 
-社区质量服务同样不是信任根，并且默认完全关闭。只有显式开启 `communityQualityFilter` 才会发送候选仓库名；响应仅接受本次请求内的仓库、固定分类、0..1 分数、有界计数、时间和原因码。`broken`/`junk` 只影响候选展示，不能改变安全风险或安装门槛；后端不可用或响应畸形时保留候选。`communityReports` 是单独的上报同意项。上传 payload 由固定 allowlist 重建，不含本地 delivery 元数据，更不含需求、prompt、回答、源码、路径、账号、环境、凭据或验证任务。网络只允许 HTTPS（localhost 开发例外），请求有独立短超时。
-
 ## 2. 安装门槛
 
 同时满足以下条件才进入安装：
