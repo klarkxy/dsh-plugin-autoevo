@@ -49,7 +49,7 @@ async function requestApproval(
   }
   const outcome = await approval.request({
     agent: exec.agent,
-    toolName: 'capability_resolve',
+    toolName: 'capability_workflow',
     callId: exec.callId,
     reason,
     signal: exec.signal,
@@ -192,8 +192,8 @@ export async function installMarketplace(options: {
       profiles,
       reason: copy(
         requirement,
-        'dsh-find-plugin is already a profile dependency, but this process could not hot-load it. Restart DSH, then call capability_resolve again.',
-        'dsh-find-plugin 已经写进 profile，但当前进程热加载失败。请重启 DSH，再调用 capability_resolve。',
+        'dsh-find-plugin is already a profile dependency, but this process could not hot-load it. Restart DSH, then call capability_workflow again.',
+        'dsh-find-plugin 已经写进 profile，但当前进程热加载失败。请重启 DSH，再调用 capability_workflow。',
       ),
     }
   }
@@ -268,8 +268,8 @@ export async function installMarketplace(options: {
       profiles: installed,
       reason: copy(
         requirement,
-        `Installed ${FIND_PLUGIN_PACKAGE} into profile ${installed.join(', ')}. This process could not hot-load it; restart DSH, then call capability_resolve again.`,
-        `已将 ${FIND_PLUGIN_PACKAGE} 安装到 profile ${installed.join('、')}，但当前进程热加载失败。请重启 DSH，再调用 capability_resolve。`,
+        `Installed ${FIND_PLUGIN_PACKAGE} into profile ${installed.join(', ')}. This process could not hot-load it; restart DSH, then call capability_workflow again.`,
+        `已将 ${FIND_PLUGIN_PACKAGE} 安装到 profile ${installed.join('、')}，但当前进程热加载失败。请重启 DSH，再调用 capability_workflow。`,
       ),
     }
   }

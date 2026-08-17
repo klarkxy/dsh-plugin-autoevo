@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { RemotePluginCandidate } from '../../src/contracts.js'
-import type { ReviewRecord } from '../../src/contracts.js'
-import { assertUseThisReceipt, mentionedRepositories, resolveDecision, reviewIdentity } from '../../src/lifecycle/decide.js'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { POLICY_VERSION, type RemotePluginCandidate, type ReviewRecord } from '../../src/contracts.js'
+import { CreationGuard } from '../../src/creation-guard.js'
+import {
+  assertResumeContradiction,
+  assertUseThisReceipt,
+  resolveResumeRepositories,
+  reviewIdentity,
+  validateResume,
+} from '../../src/lifecycle/decide.js'
+import { WORKFLOW_OPTIONS } from '../../src/workflow/contracts.js'
 
 const remotes: RemotePluginCandidate[] = [
   {
@@ -22,111 +30,82 @@ const remotes: RemotePluginCandidate[] = [
   },
 ]
 
-describe('conversational decision parsing', () => {
-  it('maps a named repository or 1-based index to inspect', () => {
-    expect(mentionedRepositories('先看第一个', remotes)).toEqual(['MirDie/dsh-xai'])
-    expect(mentionedRepositories('选 2 审一下', remotes)).toEqual(['omdsh-dev/dsh-tool-calculator'])
-    expect(mentionedRepositories('审查 omdsh-dev/dsh-tool-calculator', remotes))
+const agent = {} as Agent
+
+function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>) {
+  return {
+    kind: 'await_selection' as const,
+    options: ids.map((id) => WORKFLOW_OPTIONS[id]),
+    facts: {},
+  }
+}
+
+describe('resume validation', () => {
+  it('accepts option_id as the decision and keeps claimed repositories in the candidate set', () => {
+    expect(resolveResumeRepositories(['omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
       .toEqual(['omdsh-dev/dsh-tool-calculator'])
-    expect(resolveDecision({
-      userMessage: '看第二个',
+    expect(() => resolveResumeRepositories([], remotes, 'inspect')).toThrow(/at least one repository/i)
+    expect(() => resolveResumeRepositories(['acme/one'], remotes, 'stop')).toThrow(/only valid when inspecting/i)
+  })
+
+  it('rejects a create-new option that the user message does not support', () => {
+    expect(() => assertResumeContradiction('这个看起来不错', 'create_new')).toThrow(/contradict/i)
+    expect(() => assertResumeContradiction('没有合适的，新建一个', 'use_this')).toThrow(/contradict/i)
+    expect(() => assertResumeContradiction('先停', 'inspect')).toThrow(/contradict/i)
+    expect(() => assertResumeContradiction('没有合适的，新建一个', 'create_new')).not.toThrow()
+  })
+
+  it('requires the live user turn to match user_message when a turn was claimed', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    expect(validateResume({
+      guard,
+      agent,
+      interrupt: interrupt(['inspect', 'stop']),
+      userMessage: '审查 MirDie/dsh-xai',
+      optionId: 'inspect',
       remotes,
-      locals: [],
-      phase: 'gate1',
+      repositories: ['MirDie/dsh-xai'],
     })).toMatchObject({
-      action: 'inspect',
-      selectedRepositories: ['omdsh-dev/dsh-tool-calculator'],
-      searchMore: false,
+      optionId: 'inspect',
+      repositories: ['MirDie/dsh-xai'],
     })
-  })
 
-  const four: RemotePluginCandidate[] = [
-    ...remotes,
-    {
-      repository: 'paicat1/dsh-screenshot',
-      name: 'dsh-screenshot',
-      description: 'screen capture',
-      stars: 1,
-      updatedAt: null,
-      topics: ['dsh-plugin'],
-    },
-    {
-      repository: 'XEsx630/dsh-screenshot',
-      name: 'dsh-screenshot-region',
-      description: 'region capture',
-      stars: 0,
-      updatedAt: null,
-      topics: ['dsh-plugin'],
-    },
-  ]
-
-  it('maps spoken inspect phrases and split indexes without treating a bare menu number as a pick', () => {
-    expect(mentionedRepositories('看下3', four)).toEqual(['paicat1/dsh-screenshot'])
-    expect(mentionedRepositories('具体看看3', four)).toEqual(['paicat1/dsh-screenshot'])
-    expect(mentionedRepositories('看下3和4', four)).toEqual(['paicat1/dsh-screenshot', 'XEsx630/dsh-screenshot'])
-    expect(mentionedRepositories('看下34', four)).toEqual(['paicat1/dsh-screenshot', 'XEsx630/dsh-screenshot'])
-    expect(mentionedRepositories('选10', four)).toEqual([])
-    expect(mentionedRepositories('1，安装', four)).toEqual([])
-    expect(resolveDecision({
-      userMessage: '具体看看3',
-      remotes: four,
-      locals: [],
-      phase: 'gate1',
-    }).action).toBe('inspect')
-    expect(() => resolveDecision({
-      userMessage: '1，安装',
-      remotes: four,
-      locals: [],
-      phase: 'gate1',
-    })).toThrow(/could not read a decision/i)
-  })
-
-  it('resolves this-plugin and install-for-me from prior selection or a single remote', () => {
-    expect(mentionedRepositories('审查一下这个插件', four, ['paicat1/dsh-screenshot']))
-      .toEqual(['paicat1/dsh-screenshot'])
-    expect(mentionedRepositories('审查一下这个插件', four)).toEqual([])
-    expect(mentionedRepositories('审查一下这个插件', [four[2]!])).toEqual(['paicat1/dsh-screenshot'])
-    expect(resolveDecision({
-      userMessage: '你帮我安装',
-      remotes: four,
-      locals: [],
-      phase: 'gate1',
-      previouslySelected: ['paicat1/dsh-screenshot'],
-    })).toMatchObject({ action: 'inspect', selectedRepositories: ['paicat1/dsh-screenshot'] })
-    expect(resolveDecision({
-      userMessage: '你帮我安装',
-      remotes: four,
-      locals: [],
-      phase: 'gate2',
-      previouslySelected: ['paicat1/dsh-screenshot'],
-    }).action).toBe('use_this')
-  })
-
-  it('requires create-new wording and rejects a mismatched claimed action', () => {
-    expect(resolveDecision({
-      userMessage: '没有合适的，新建一个',
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '审查 MirDie/dsh-xai' }] })
+    expect(validateResume({
+      guard,
+      agent,
+      interrupt: interrupt(['inspect', 'stop']),
+      userMessage: '审查 MirDie/dsh-xai',
+      optionId: 'inspect',
       remotes,
-      locals: [],
-      phase: 'gate1',
-    }).action).toBe('create_new')
-    expect(() => resolveDecision({
-      userMessage: '这个看起来不错',
-      claimedAction: 'create_new',
+      repositories: ['MirDie/dsh-xai'],
+    })).toMatchObject({
+      optionId: 'inspect',
+      repositories: ['MirDie/dsh-xai'],
+    })
+
+    expect(() => validateResume({
+      guard,
+      agent,
+      interrupt: interrupt(['inspect', 'stop']),
+      userMessage: '先看第二个',
+      optionId: 'inspect',
       remotes,
-      locals: [],
-      phase: 'gate1',
-    })).toThrow(/does not match/i)
+      repositories: ['MirDie/dsh-xai'],
+    })).toThrow(/does not match the latest user turn/i)
   })
 
-  it('rejects a claimed repository that the user did not mention', () => {
-    expect(() => resolveDecision({
-      userMessage: '先看第一个',
-      claimedAction: 'inspect',
-      claimedRepositories: ['omdsh-dev/dsh-tool-calculator'],
+  it('rejects an option that is not in the current interrupt', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    expect(() => validateResume({
+      guard,
+      agent,
+      interrupt: interrupt(['inspect', 'stop']),
+      userMessage: '用这个',
+      optionId: 'use_this',
       remotes,
-      locals: [],
-      phase: 'gate1',
-    })).toThrow(/not mentioned/i)
+    })).toThrow(/not available/i)
   })
 })
 
@@ -134,7 +113,7 @@ describe('install authorization receipts', () => {
   const reviewed: ReviewRecord = {
     schemaVersion: 1,
     id: `review_${'a'.repeat(64)}`,
-    policyVersion: 'v6-2026-08-17',
+    policyVersion: POLICY_VERSION,
     createdAt: '2026-08-17T00:00:00.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
     requirement: 'grok',
@@ -170,6 +149,7 @@ describe('install authorization receipts', () => {
         selectedRepositories: ['acme/plugin'],
         reviewId: reviewed.id,
         reviewIdentity: identity,
+        optionId: 'use_this',
         createdAt: '2026-08-17T00:00:00.000Z',
       }],
     })).not.toThrow()

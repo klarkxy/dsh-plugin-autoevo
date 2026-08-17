@@ -1,0 +1,221 @@
+import type {
+  InstallationRecord,
+  InstallationRetention,
+  LocalCapabilityCandidate,
+  RemotePluginCandidate,
+  ResolutionRecord,
+  ReviewRecord,
+  WorkflowOptionId,
+} from '../contracts.js'
+
+export type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed'
+
+export type WorkflowNodeId =
+  | 'resolve_local'
+  | 'discover_remote'
+  | 'ensure_market'
+  | 'await_selection'
+  | 'review_github'
+  | 'await_confirmation'
+  | 'await_modify_work'
+  | 'review_local'
+  | 'install_verify'
+  | 'grant_scratch'
+  | 'reuse_local'
+  | 'stopped'
+  | 'market_restart_required'
+  | 'installed'
+  | 'scratch_ready'
+
+export type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work'
+
+export interface WorkflowOption {
+  id: WorkflowOptionId
+  labelEn: string
+  labelZh: string
+}
+
+export interface InterruptPayload {
+  kind: InterruptKind
+  options: WorkflowOption[]
+  facts: Record<string, unknown>
+}
+
+export interface WorkflowPendingInstall {
+  targetProfile: string
+  retention: InstallationRetention
+  verificationTask?: string
+  verificationExpectedText?: string
+}
+
+export interface WorkflowRecord {
+  schemaVersion: 1
+  id: string
+  policyVersion: string
+  createdAt: string
+  updatedAt: string
+  requirement: string
+  cwd?: string
+  resolutionId?: string
+  status: WorkflowStatus
+  cursor: WorkflowNodeId
+  generation: number
+  interrupt?: InterruptPayload
+  lineageTipReviewId?: string
+  lastReviewId?: string
+  lastInstallationId?: string
+  forceRemoteDiscovery?: boolean
+  pendingRepositories?: string[]
+  pendingRef?: string
+  pendingPath?: string
+  pendingInstall?: WorkflowPendingInstall
+  error?: { code: string; message: string }
+}
+
+export interface WorkflowView {
+  workflow: WorkflowRecord
+  resolution?: ResolutionRecord
+  review?: ReviewRecord
+  installation?: InstallationRecord
+  nextStep?: string
+}
+
+export interface ValidatedResume {
+  optionId: WorkflowOptionId
+  userMessage: string
+  repositories: string[]
+  path?: string
+  ref?: string
+  reviewId?: string
+  install?: WorkflowPendingInstall
+}
+
+export interface MarketplaceStepResult {
+  status: 'loaded' | 'restart' | 'empty'
+  reason: string
+}
+
+export interface WorkflowHost {
+  bootstrapResolution(requirement: string, exec: WorkflowExec): Promise<ResolutionRecord>
+  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>
+  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord
+    market: MarketplaceStepResult
+  }>
+  reviewGithub(
+    resolution: ResolutionRecord,
+    repository: string,
+    ref: string | undefined,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
+  reviewLocal(
+    resolution: ResolutionRecord,
+    path: string,
+    baseReviewId: string,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
+  installReviewed(
+    review: ReviewRecord,
+    input: WorkflowPendingInstall,
+    exec: WorkflowExec,
+  ): Promise<InstallationRecord>
+  applyDecision(
+    resolution: ResolutionRecord,
+    resume: ValidatedResume,
+    review?: ReviewRecord,
+  ): Promise<ResolutionRecord>
+  latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>
+  getResolution(id: string): Promise<ResolutionRecord>
+  getReview(id: string): Promise<ReviewRecord>
+  getInstallation(id: string): Promise<InstallationRecord>
+}
+
+export interface WorkflowExec {
+  agent?: import('@deepseek-ai/dsh-agent').Agent
+  signal?: AbortSignal
+  callId?: string
+}
+
+export const INTERRUPT_NODES: ReadonlySet<WorkflowNodeId> = new Set([
+  'await_selection',
+  'await_confirmation',
+  'await_modify_work',
+])
+
+export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
+  'reuse_local',
+  'stopped',
+  'market_restart_required',
+  'installed',
+  'scratch_ready',
+])
+
+export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
+  inspect: { id: 'inspect', labelEn: 'Inspect selected repositories', labelZh: '审查选中的仓库' },
+  search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件' },
+  use_local: { id: 'use_local', labelEn: 'Use existing local capability', labelZh: '用已有的本地能力' },
+  create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建' },
+  stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停' },
+  use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个' },
+  modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改' },
+  resume_modify: { id: 'resume_modify', labelEn: 'Review the local checkout', labelZh: '改完了，再审本地检出' },
+}
+
+export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
+  return Object.hasOwn(WORKFLOW_OPTIONS, value)
+}
+
+export function isInterruptKind(value: string | undefined): value is InterruptKind {
+  return value === 'await_selection' || value === 'await_confirmation' || value === 'await_modify_work'
+}
+
+export function selectionFacts(resolution: ResolutionRecord): Record<string, unknown> {
+  return {
+    localCandidates: resolution.localCandidates,
+    remoteCandidates: resolution.remoteCandidates,
+    reasons: resolution.reasons,
+    queries: resolution.queries,
+    remoteDiscoveryComplete: resolution.remoteDiscoveryComplete,
+    ...(resolution.remoteCandidateSource ? { remoteCandidateSource: resolution.remoteCandidateSource } : {}),
+  }
+}
+
+export function confirmationFacts(resolution: ResolutionRecord, review: ReviewRecord): Record<string, unknown> {
+  return {
+    reviewId: review.id,
+    fit: review.fit,
+    securityRisk: review.securityRisk,
+    recommendation: review.recommendation,
+    missingCapabilities: review.missingCapabilities,
+    findings: review.findings,
+    sourceSnapshot: review.sourceSnapshot,
+    selectedRepositories: resolution.selectedRepositories ?? [],
+    license: review.license,
+    compatibility: review.compatibility,
+  }
+}
+
+export function modifyWorkFacts(review: ReviewRecord): Record<string, unknown> {
+  const source = review.sourceSnapshot
+  return {
+    reviewId: review.id,
+    commit: source.kind === 'github' ? source.commit : source.baseCommit,
+    instruction: 'Check out the exact reviewed commit, make a minimal patch, run the upstream tests, then resume with the local checkout path. The workflow derives base_review_id from this lineage.',
+    ...(source.kind === 'github' ? { repository: source.repository } : { path: source.path }),
+  }
+}
+
+export function optionsFor(kind: InterruptKind, resolution: ResolutionRecord): WorkflowOption[] {
+  if (kind === 'await_modify_work') {
+    return [WORKFLOW_OPTIONS.resume_modify, WORKFLOW_OPTIONS.stop]
+  }
+  const options: WorkflowOption[] = []
+  if (kind === 'await_selection' && resolution.remoteCandidates.length > 0) options.push(WORKFLOW_OPTIONS.inspect)
+  if (kind === 'await_confirmation') {
+    options.push(WORKFLOW_OPTIONS.use_this, WORKFLOW_OPTIONS.modify_this)
+    if (resolution.remoteCandidates.length > 0) options.push(WORKFLOW_OPTIONS.inspect)
+  }
+  if (resolution.localCandidates.length > 0) options.push(WORKFLOW_OPTIONS.use_local)
+  options.push(WORKFLOW_OPTIONS.search_more, WORKFLOW_OPTIONS.create_new, WORKFLOW_OPTIONS.stop)
+  return options
+}

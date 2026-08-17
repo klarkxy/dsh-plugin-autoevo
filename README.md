@@ -40,7 +40,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 ## 能力进化模式
 
-安装后，AutoEvo 默认会安装用户 Agent preset **能力进化**（id `evolution`）。它基于创造模式：具备创造模式的全部能力，并提供社区插件复用、审查安装和受控的动态 Cordis 插件创建。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装与升级，**不会**删除已有 preset。
+安装后，AutoEvo 默认会安装用户 Agent preset **能力进化**（id `evolution`）。它基于创造模式：具备创造模式的全部能力，并提供社区插件复用、审查安装、已有能力升级和受控的动态 Cordis 插件创建；改进过的插件可在明确批准后贡献回上游。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装与升级，**不会**删除已有 preset。
 
 它出现在 DSH 的用户 preset 列表里（界面标记为自定义），不是内置系统模式。首次安装或升级后需要重启对应的 DSH 进程。AutoEvo 只升级自己管理且未被改过的版本；用户改过的文件、或同名的外来目录一律保留。
 
@@ -50,7 +50,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 ## 工作方式
 
-- 带 Agent 身份的 `cordis_define`（`plugin.kind = "new"`）只在真正的能力进化模式下放行，且必须先经过 `capability_resolve`。模式外调用会被拒绝，并提示切换到 **能力进化**。
+- 带 Agent 身份的 `cordis_define`（`plugin.kind = "new"`）只在真正的能力进化模式下放行，且必须先经过 `capability_workflow` 并得到 `scratch_ready`。模式外调用会被拒绝，并提示切换到 **能力进化**。
 - 模式内：发现结束后先问用户看哪个、新建还是先停；只深审用户选中的仓库；审完再问用这个还是新建。`scratch_ready` 只表示用户允许自建一次，不是开工令。取消就是停，不会变成自建。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
 - `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
@@ -60,7 +60,8 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 - 安装和移除都需要 DSH 一次性批准 `allowed-once`。
 - 临时试用在隔离 DSH home 中进行。验证需要真实的 `tool/call`、匹配的成功 `tool/result`，以及以 `turn/end: completed` 收口的最终回答；还可要求回答含精确预期文本。
 - `partial` 候选先做最小修改并跑上游测试，再本地重审为 `full`，最后打成固定 tgz 安装。
-- 当前任务完成后再建议向上游贡献。fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
+- 对已装社区插件不满时，升级走同一套门禁：安装回执经 `reviewId` 指回上游 repository 与 exact commit，用户选中该来源后按审查 → 在这个上改 → 本地重审 → 固定 tgz 重装执行，最后按旧回执精确移除。从零创建或静态本地插件按普通修复工作升级。
+- 当前任务完成后再建议向上游贡献。安装回执的 `contributionAdvice` 记录是否具备建议资格；fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
 
 ## 试用
 
@@ -68,16 +69,14 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-它应先调用 `capability_resolve`，再在对话里说明搜到的仓库是干什么的，等你回话后才调用 `capability_decide`。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
+它应先调用 `capability_workflow`，再在对话里说明搜到的仓库是干什么的，等你回话后才调用 `capability_workflow_resume`。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
 
 ## Agent 工具
 
 | 工具 | 作用 | 环境 |
 |---|---|---|
-| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`；没有市场则申请批准并用脚本安装。只返回候选，不弹窗 | 只读 / 装市场时需批准 |
-| `capability_decide` | 把用户在对话里的选择记成回执（审哪些 / 新建 / 用这个 / 先停） | 只读 |
-| `plugin_review` | 审查用户已选的 GitHub exact commit，或 improve-this 之后的本地 Git 修改 | 只读 |
-| `plugin_install` | 复核审查凭据、请求批准、安装已审查的包并做真实任务验证 | 需批准 |
+| `capability_workflow` | 启动固定工作流：检查本地能力，需要时复用 `find_dsh_plugin`，没有市场则申请批准并用脚本安装。返回 interrupt 与结构化选项 | 只读 / 装市场时需批准 |
+| `capability_workflow_resume` | 用用户原话和 `option_id` 恢复工作流（审查 / 新建 / 用这个 / 在这个上改 / 安装 / 先停） | 审查只读；安装需批准 |
 | `plugin_remove` | 按 installation receipt 精确移除 | 需批准 |
 
 AutoEvo 新增这些高层工具，并在 DSH 工具执行边界上守卫 `cordis_define(kind:new)`；当前 Profile 的其余工具仍由其 Agent scope 决定。

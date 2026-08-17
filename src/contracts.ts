@@ -1,10 +1,8 @@
-export const POLICY_VERSION = 'v6-2026-08-17'
+export const POLICY_VERSION = '1'
 
 export const TOOL_NAMES = [
-  'capability_resolve',
-  'capability_decide',
-  'plugin_review',
-  'plugin_install',
+  'capability_workflow',
+  'capability_workflow_resume',
   'plugin_remove',
 ] as const
 
@@ -25,7 +23,16 @@ export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup'
 export type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown'
 export type DecisionPhase = 'gate1' | 'gate2'
-export type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local'
+export type DecisionAction =
+  | 'inspect'
+  | 'create_new'
+  | 'stop'
+  | 'use_this'
+  | 'modify_this'
+  | 'use_local'
+  | 'search_more'
+  | 'resume_modify'
+export type WorkflowOptionId = DecisionAction
 
 export interface DecisionReceipt {
   id: string
@@ -35,6 +42,7 @@ export interface DecisionReceipt {
   reviewId?: string
   reviewIdentity?: string
   userMessage?: string
+  optionId?: WorkflowOptionId
   createdAt: string
 }
 
@@ -113,7 +121,7 @@ export interface ResolutionRecord {
   decisions?: DecisionReceipt[]
   queries: string[]
   reasons: string[]
-  /** Instruction for the Agent: present in chat, then call capability_decide. */
+  /** Instruction for the Agent: present in chat, then call capability_workflow_resume. */
   nextStep?: string
 }
 
@@ -248,27 +256,6 @@ export interface InstallationRecord {
   }
 }
 
-export interface ResolveInput {
-  requirement: string
-}
-
-export interface DecideInput {
-  resolutionId: string
-  userMessage: string
-  action?: DecisionAction | 'search_more'
-  repositories?: string[]
-  reviewId?: string
-}
-
-export interface ReviewInput {
-  resolutionId: string
-  sourceKind: 'github' | 'local'
-  repository?: string
-  ref?: string
-  path?: string
-  baseReviewId?: string
-}
-
 export interface InstallInput {
   reviewId: string
   targetProfile: string
@@ -279,4 +266,18 @@ export interface InstallInput {
 
 export interface RemoveInput {
   installationId: string
+}
+
+export interface ResumeInput {
+  workflowId: string
+  userMessage: string
+  optionId: WorkflowOptionId
+  repositories?: string[]
+  path?: string
+  ref?: string
+  reviewId?: string
+  targetProfile?: string
+  retention?: InstallationRetention
+  verificationTask?: string
+  verificationExpectedText?: string
 }

@@ -33,6 +33,22 @@ export function targetRepository() {
   return E2E_CALCULATOR_REPOSITORY
 }
 
+const E2E_TASKS = {
+  'resolve-local': 'Resolve a capability that is already local and report the decision.',
+  'adversarial-define': 'Resolve a capability that is already local and report the decision.',
+  'marketplace-flow': 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.',
+  'full-flow': 'Exercise the approved capability reuse workflow and report only after cleanup.',
+  'partial-flow': 'Exercise the approved capability reuse workflow and report only after cleanup.',
+}
+
+function viewResolution(value) {
+  return value?.resolution ?? value
+}
+
+function viewWorkflowId(value) {
+  return value?.workflow?.id
+}
+
 class ScriptedAdapter extends LlmAdapter {
   constructor(config) {
     super()
@@ -76,7 +92,7 @@ class ScriptedAdapter extends LlmAdapter {
 
     if (this.config.scenario === 'resolve-local') {
       if (pairs.length === 0) {
-        return { kind: 'tool', name: 'capability_resolve', arguments: { requirement: 'run a PowerShell command' } }
+        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
       }
       return { kind: 'text', text: `E2E_RESOLVE_LOCAL_OK ${JSON.stringify(pairs.at(-1)?.result)}` }
     }
@@ -112,10 +128,10 @@ class ScriptedAdapter extends LlmAdapter {
         || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }
       }
-      return { kind: 'tool', name: 'capability_resolve', arguments: { requirement: 'run a PowerShell command' } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
     }
 
-    const resolution = pairs.at(-1)?.result
+    const resolution = viewResolution(pairs.at(-1)?.result)
     return resolution?.decision === 'use_local'
       ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} local=${JSON.stringify(resolution)}` }
       : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected use_local ${JSON.stringify(resolution)}` }
@@ -125,7 +141,7 @@ class ScriptedAdapter extends LlmAdapter {
     if (pairs.length === 0) {
       return {
         kind: 'tool',
-        name: 'capability_resolve',
+        name: 'capability_workflow',
         arguments: { requirement: '在 DSH 会话中调用 xAI Grok Build 的能力' },
       }
     }
@@ -133,7 +149,7 @@ class ScriptedAdapter extends LlmAdapter {
     if (last?.isError) {
       return { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(last.result)}` }
     }
-    const resolution = last?.result
+    const resolution = viewResolution(last?.result)
     const repositories = resolution?.remoteCandidates?.map((candidate) => candidate.repository) ?? []
     const passed = resolution?.remoteCandidateSource === 'dsh-find-plugin'
       && resolution?.authorization?.state === 'selection_required'
@@ -148,16 +164,19 @@ class ScriptedAdapter extends LlmAdapter {
   }
 
   fullFlow(pairs) {
+    const userMessage = E2E_TASKS['full-flow']
     if (pairs.length === 0) {
-      return { kind: 'tool', name: 'capability_resolve', arguments: { requirement: 'calculator' } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'calculator' } }
     }
     if (pairs.some((pair) => pair.isError)) {
       return { kind: 'text', text: `E2E_FULL_FLOW_ERROR ${JSON.stringify(pairs.at(-1)?.result)}` }
     }
     if (pairs.length === 1) {
-      const resolution = pairs[0].result
-      const repository = targetRepository(resolution)
-      if (!repository) {
+      const started = pairs[0].result
+      const resolution = viewResolution(started)
+      const repository = targetRepository()
+      const discovered = resolution?.remoteCandidates?.some((candidate) => candidate.repository === repository)
+      if (!discovered) {
         return {
           kind: 'text',
           text: `E2E_FULL_FLOW_ERROR target repository not discovered ${JSON.stringify({
@@ -173,58 +192,29 @@ class ScriptedAdapter extends LlmAdapter {
       }
       return {
         kind: 'tool',
-        name: 'capability_decide',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: resolution.id,
-          user_message: `审查 ${repository}`,
-          action: 'inspect',
+          workflow_id: viewWorkflowId(started),
+          user_message: userMessage,
+          option_id: 'inspect',
           repositories: [repository],
-        },
-      }
-    }
-    if (pairs.length === 2) {
-      const decided = pairs[1].result
-      const repository = targetRepository(decided)
-      if (!repository || !(decided?.selectedRepositories ?? []).includes(repository)) {
-        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR decide did not select ${JSON.stringify(decided)}` }
-      }
-      return {
-        kind: 'tool',
-        name: 'plugin_review',
-        arguments: {
-          resolution_id: decided.id,
-          source_kind: 'github',
-          repository,
           ...(this.config.baseCommit ? { ref: this.config.baseCommit } : {}),
         },
       }
     }
-    if (pairs.length === 3) {
-      const review = pairs[2].result
-      if (review.fit !== 'full' || review.recommendation !== 'use') {
-        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR unexpected review ${JSON.stringify(review)}` }
+    if (pairs.length === 2) {
+      const reviewed = pairs[1].result
+      const review = reviewed.review
+      if (review?.fit !== 'full' || review?.recommendation !== 'use') {
+        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR unexpected review ${JSON.stringify(reviewed)}` }
       }
       return {
         kind: 'tool',
-        name: 'capability_decide',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: review.resolutionId,
-          user_message: '用这个',
-          action: 'use_this',
-          review_id: review.id,
-        },
-      }
-    }
-    if (pairs.length === 4) {
-      const decided = pairs[3].result
-      const review = pairs[2].result
-      if (decided?.authorization?.state !== 'use_review') {
-        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR expected use_review ${JSON.stringify(decided)}` }
-      }
-      return {
-        kind: 'tool',
-        name: 'plugin_install',
-        arguments: {
+          workflow_id: viewWorkflowId(reviewed),
+          user_message: userMessage,
+          option_id: 'use_this',
           review_id: review.id,
           target_profile: 'headless',
           retention: 'temporary',
@@ -233,34 +223,37 @@ class ScriptedAdapter extends LlmAdapter {
         },
       }
     }
-    if (pairs.length === 5) {
-      const installation = pairs[4].result
-      if (!installation.installed || !installation.loaded || !installation.verified) {
-        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR unverified install ${JSON.stringify(installation)}` }
+    if (pairs.length === 3) {
+      const installed = pairs[2].result.installation ?? pairs[2].result
+      if (!installed.installed || !installed.loaded || !installed.verified) {
+        return { kind: 'text', text: `E2E_FULL_FLOW_ERROR unverified install ${JSON.stringify(pairs[2].result)}` }
       }
       return {
         kind: 'tool',
         name: 'plugin_remove',
-        arguments: { installation_id: installation.id },
+        arguments: { installation_id: installed.id },
       }
     }
-    const removal = pairs[5].result
+    const removal = pairs[3].result
     return removal.removed
       ? { kind: 'text', text: 'E2E_FULL_FLOW_OK search review install tool-call tool-result task-result cleanup' }
       : { kind: 'text', text: `E2E_FULL_FLOW_ERROR cleanup ${JSON.stringify(removal)}` }
   }
 
   partialFlow(pairs) {
+    const userMessage = E2E_TASKS['partial-flow']
     if (pairs.length === 0) {
-      return { kind: 'tool', name: 'capability_resolve', arguments: { requirement: 'scientific notation calculator' } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'scientific notation calculator' } }
     }
     if (pairs.some((pair) => pair.isError)) {
       return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR ${JSON.stringify(pairs.at(-1)?.result)}` }
     }
     if (pairs.length === 1) {
-      const resolution = pairs[0].result
-      const repository = targetRepository(resolution)
-      if (!repository) {
+      const started = pairs[0].result
+      const resolution = viewResolution(started)
+      const repository = targetRepository()
+      const discovered = resolution?.remoteCandidates?.some((candidate) => candidate.repository === repository)
+      if (!discovered) {
         return {
           kind: 'text',
           text: `E2E_PARTIAL_FLOW_ERROR target repository not discovered ${JSON.stringify({
@@ -276,89 +269,62 @@ class ScriptedAdapter extends LlmAdapter {
       }
       return {
         kind: 'tool',
-        name: 'capability_decide',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: resolution.id,
-          user_message: `审查 ${repository}`,
-          action: 'inspect',
+          workflow_id: viewWorkflowId(started),
+          user_message: userMessage,
+          option_id: 'inspect',
           repositories: [repository],
-        },
-      }
-    }
-    if (pairs.length === 2) {
-      const decided = pairs[1].result
-      const repository = targetRepository(decided)
-      if (!repository) return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR decide missed repo ${JSON.stringify(decided)}` }
-      return {
-        kind: 'tool',
-        name: 'plugin_review',
-        arguments: {
-          resolution_id: decided.id,
-          source_kind: 'github',
-          repository,
           ...(this.config.baseCommit ? { ref: this.config.baseCommit } : {}),
         },
       }
     }
-    if (pairs.length === 3) {
-      const review = pairs[2].result
-      if (review.fit !== 'partial' || review.recommendation !== 'modify') {
-        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR expected partial review ${JSON.stringify(review)}` }
+    if (pairs.length === 2) {
+      const reviewed = pairs[1].result
+      const review = reviewed.review
+      if (review?.fit !== 'partial' || review?.recommendation !== 'modify') {
+        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR expected partial review ${JSON.stringify(reviewed)}` }
       }
       return {
         kind: 'tool',
-        name: 'capability_decide',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: review.resolutionId,
-          user_message: '在这个上改',
-          action: 'modify_this',
+          workflow_id: viewWorkflowId(reviewed),
+          user_message: userMessage,
+          option_id: 'modify_this',
           review_id: review.id,
         },
       }
     }
-    if (pairs.length === 4) {
-      const decided = pairs[3].result
-      const review = pairs[2].result
-      if (decided?.authorization?.state !== 'modify_review') {
-        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR expected modify_review ${JSON.stringify(decided)}` }
+    if (pairs.length === 3) {
+      const decided = pairs[2].result
+      if (decided?.resolution?.authorization?.state !== 'modify_review' && decided?.workflow?.cursor !== 'await_modify_work') {
+        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR expected modify work ${JSON.stringify(decided)}` }
       }
       return {
         kind: 'tool',
-        name: 'plugin_review',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: review.resolutionId,
-          source_kind: 'local',
+          workflow_id: viewWorkflowId(decided),
+          user_message: userMessage,
+          option_id: 'resume_modify',
           path: this.config.localPath,
-          base_review_id: review.id,
         },
       }
     }
-    if (pairs.length === 5) {
-      const localReview = pairs[4].result
-      if (localReview.fit !== 'full' || localReview.recommendation !== 'use') {
-        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR local review ${JSON.stringify(localReview)}` }
+    if (pairs.length === 4) {
+      const local = pairs[3].result
+      const localReview = local.review
+      if (localReview?.fit !== 'full' || localReview?.recommendation !== 'use') {
+        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR local review ${JSON.stringify(local)}` }
       }
       return {
         kind: 'tool',
-        name: 'capability_decide',
+        name: 'capability_workflow_resume',
         arguments: {
-          resolution_id: localReview.resolutionId,
-          user_message: '用这个',
-          action: 'use_this',
-          review_id: localReview.id,
-        },
-      }
-    }
-    if (pairs.length === 6) {
-      const decided = pairs[5].result
-      const localReview = pairs[4].result
-      if (decided?.authorization?.state !== 'use_review') {
-        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR expected use_review ${JSON.stringify(decided)}` }
-      }
-      return {
-        kind: 'tool',
-        name: 'plugin_install',
-        arguments: {
+          workflow_id: viewWorkflowId(local),
+          user_message: userMessage,
+          option_id: 'use_this',
           review_id: localReview.id,
           target_profile: 'headless',
           retention: 'temporary',
@@ -367,16 +333,16 @@ class ScriptedAdapter extends LlmAdapter {
         },
       }
     }
-    if (pairs.length === 7) {
-      const installation = pairs[6].result
+    if (pairs.length === 5) {
+      const installation = pairs[4].result.installation ?? pairs[4].result
       if (!installation.verified || installation.contributionAdvice?.eligible !== true
         || !installation.installSpec?.startsWith('file:') || installation.installSpec.startsWith('link:')
         || !/^[a-f0-9]{64}$/u.test(installation.artifactSha256 ?? '')) {
-        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR verification or contribution ${JSON.stringify(installation)}` }
+        return { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR verification or contribution ${JSON.stringify(pairs[4].result)}` }
       }
       return { kind: 'tool', name: 'plugin_remove', arguments: { installation_id: installation.id } }
     }
-    const removal = pairs[7].result
+    const removal = pairs[5].result
     return removal.removed
       ? { kind: 'text', text: 'E2E_PARTIAL_FLOW_OK partial modify re-review install scientific-notation verify cleanup suggest-pr-with-approval' }
       : { kind: 'text', text: `E2E_PARTIAL_FLOW_ERROR cleanup ${JSON.stringify(removal)}` }

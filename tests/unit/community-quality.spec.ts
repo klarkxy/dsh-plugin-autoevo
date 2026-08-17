@@ -80,7 +80,7 @@ function review(): ReviewRecord {
   return {
     schemaVersion: 1,
     id: `review_${'a'.repeat(24)}`,
-    policyVersion: 'v6-2026-08-17',
+    policyVersion: '1',
     createdAt: '2026-08-17T00:00:00.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
     requirement: 'PRIVATE USER REQUIREMENT',

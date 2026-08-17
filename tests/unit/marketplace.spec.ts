@@ -109,7 +109,7 @@ describe('marketplace bootstrap', () => {
     })
 
     expect(request).toHaveBeenCalledWith(expect.objectContaining({
-      toolName: 'capability_resolve',
+      toolName: 'capability_workflow',
       reason: expect.stringContaining('插件市场'),
     }))
     expect(launcher.install).toHaveBeenCalledWith(dshHome, 'web', FIND_PLUGIN_INSTALL_SPEC, dshHome, exec.signal)

@@ -7,9 +7,10 @@ import { resolveLocalCapabilities, _testing } from '../../src/resolver/local.js'
 describe('capability query generation', () => {
   it('expands bilingual browser requirements without copying only the user phrase', () => {
     expect(capabilityQueries('让 Agent 操作网页并截图')).toEqual([
+      'screenshot',
+      'screen capture',
       'browser automation',
       'playwright',
-      'screenshot',
       'web testing',
     ])
   })
@@ -27,6 +28,40 @@ describe('capability query generation', () => {
     ])
     expect(marketplaceSearchQueries('通过 xAI API 调用 Grok chat completions，发送消息并返回回复')).toEqual([
       'xai grok',
+    ])
+  })
+
+  it('keeps screenshot queries when DOM/PNG tokens crowd the marketplace slots', () => {
+    // Real requirement from resolution_1ca8f345649e81f66c9a3a46: the ad-hoc
+    // English tokens previously evicted "screenshot" and the shortlist
+    // degraded to external-browser drivers.
+    const requirement = '把当前 DSH 浏览器页面的"对话消息列表 DOM 节点"原样截成单张拼接长图 PNG 并下载到本地;触发方式是 DSH 内一个按钮;不依赖外部浏览器接管,不重排版,保留原 DSH 气泡样式。能力形态最好是动态 Cordis 插件,其次是 DSH 内 npm 包 / Skill。'
+    expect(marketplaceSearchQueries(requirement)).toEqual([
+      'screenshot',
+      'browser automation',
+      'dom png cordis npm',
+      'dom png',
+      'png cordis',
+    ])
+  })
+
+  it('keeps screenshot first for the PNG/JPG conversation-capture wording', () => {
+    // Real requirement from resolution_409cec426df715be5d4d7cfc.
+    expect(marketplaceSearchQueries('把当前 DSH 对话记录(用户与助手的多轮消息)截图为图片文件(PNG/JPG),可以保存到本地工作区或下载到浏览器')).toEqual([
+      'screenshot',
+      'browser automation',
+      'image',
+      'png jpg',
+      'screen capture',
+    ])
+  })
+
+  it('drops the CJK fallback once a concept matched', () => {
+    // Real requirement from resolution_19e41a12877ab2e4c9bd35d7, which used
+    // to emit the truncated garbage query "我需要一个能把整".
+    expect(marketplaceSearchQueries('我需要一个能把整个对话记录做成截图的能力')).toEqual([
+      'screenshot',
+      'screen capture',
     ])
   })
 
@@ -51,6 +86,20 @@ describe('capability query generation', () => {
       requirement,
       'edison7009/EchoBird',
       'Claude Code, Codex CLI, Grok Build, xAI, DeepSeek Harness, Kimi Code, Qwen Code, Aider, OpenCode',
+    )).toBeLessThan(0.3)
+  })
+
+  it('accepts screenshot repos for 截成/长图 wording and filters search-only browser tools', () => {
+    const requirement = '把当前 DSH 浏览器页面的对话消息列表 DOM 节点原样截成单张拼接长图 PNG 并下载到本地'
+    expect(_testing.matchConfidence(
+      requirement,
+      'paicat1/dsh-screenshot dsh-screenshot',
+      'Standalone screen capture for DeepSeek Harness (dsh): browser hotkeys plus an agent-facing capture+read tool.',
+    )).toBeGreaterThanOrEqual(0.3)
+    expect(_testing.matchConfidence(
+      requirement,
+      'anweat/dsh-web-search-pro dsh-web-search-pro',
+      '增强型、可持久化的网页搜索:多引擎路由、SQLite+LRU 缓存、userscript 风格抽取、Playwright 渲染。',
     )).toBeLessThan(0.3)
   })
 })

@@ -40,7 +40,7 @@ The development install also uses an immutable `file:...tgz`. This avoids DSH rc
 
 ## Capability Evolution mode
 
-After install, AutoEvo adds the **Capability Evolution** user preset (id `evolution`) by default. It is based on Creator mode: the full Creator toolset, plus community-plugin reuse, review, install, and controlled dynamic Cordis creation. Config `evolutionPreset` defaults to `true`; `false` skips install/update and never deletes an existing preset.
+After install, AutoEvo adds the **Capability Evolution** user preset (id `evolution`) by default. It is based on Creator mode: the full Creator toolset, plus community-plugin reuse, review, install, upgrade of existing capabilities, and controlled dynamic Cordis creation; an improved plugin can be contributed upstream after explicit approval. Config `evolutionPreset` defaults to `true`; `false` skips install/update and never deletes an existing preset.
 
 The preset appears in DSH's user preset list as Custom, not as a built-in system mode. Restart the corresponding DSH process after first install or upgrade. AutoEvo upgrades only managed copies that have not been edited; user-edited files and a same-name foreign directory are left untouched.
 
@@ -50,7 +50,7 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 
 ## How it works
 
-- Agent-bound `cordis_define` with `plugin.kind = "new"` is allowed only in genuine Capability Evolution mode, and only after `capability_resolve`. Outside that mode the call is denied, with an instruction to switch to Capability Evolution.
+- Agent-bound `cordis_define` with `plugin.kind = "new"` is allowed only in genuine Capability Evolution mode, and only after `capability_workflow` returns `scratch_ready`. Outside that mode the call is denied, with an instruction to switch to Capability Evolution.
 - Inside the mode, AutoEvo pauses after discovery so the user can pick candidates, create new, or stop. Only selected repositories are reviewed. After review it pauses again for use this / create new / stop. `scratch_ready` means the user allowed one new plugin, not “start building”. Cancel is stop, never scratch. Technical failures may retry; success consumes the grant; a new resolution revokes an older one.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not treat generic development tools as plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
@@ -60,7 +60,8 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 - Install and remove both require a one-time DSH `allowed-once` approval.
 - Temporary trials run in an isolated DSH home. Verification needs a real `tool/call`, a matching successful `tool/result`, and a final answer closed by `turn/end: completed`; callers may also require exact expected text in that answer.
 - `partial` candidates get a minimal patch, upstream tests, a local re-review to `full`, then an immutable tgz.
-- After the current task is done, generic improvements can be suggested as a contribution. Fork, push, and PR still use `git` / `gh` after another explicit approval.
+- Dissatisfaction with an installed community plugin goes through the same gates: the installation receipt's `reviewId` points at the upstream repository and exact commit; after the user selects that origin, review → improve-this → local re-review → pinned tgz reinstall, then remove the old installation by its receipt. Scratch-created or static local plugins are upgraded as ordinary repair work.
+- After the current task is done, generic improvements can be suggested as a contribution. The installation receipt's `contributionAdvice` records eligibility; fork, push, and PR still use `git` / `gh` after another explicit approval.
 
 ## Try it
 
@@ -68,16 +69,14 @@ After install and restart, tell the current Agent:
 
 > I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 
-It should call `capability_resolve` first, explain what each candidate repo is for in chat, then call `capability_decide` after you reply. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
+It should call `capability_workflow` first, explain what each candidate repo is for in chat, then call `capability_workflow_resume` after you reply. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
 
 ## Agent tools
 
 | Tool | Role | Surface |
 |---|---|---|
-| `capability_resolve` | Check local capabilities; prefer `find_dsh_plugin`; if the marketplace is missing, approve a script install. Returns a shortlist; does not pop a form | read-only / approval when installing marketplace |
-| `capability_decide` | Record the user's chat choice (inspect / create new / use this / stop) | read-only |
-| `plugin_review` | Review a user-selected GitHub exact commit or a local Git checkout after improve-this | read-only |
-| `plugin_install` | Revalidate the review, request approval, install the reviewed package, verify a real task | approval |
+| `capability_workflow` | Start the fixed workflow: check local capabilities, prefer `find_dsh_plugin`, and approve a script install if the marketplace is missing. Returns an interrupt with structured options | read-only / approval when installing marketplace |
+| `capability_workflow_resume` | Resume with the user's verbatim reply and `option_id` (inspect / create new / use this / improve this / install / stop) | read-only for review; approval for install |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |
 
 AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.

@@ -50,7 +50,7 @@
       "repository": "owner/plugin-a",
       "commit": "<exact upstream commit>",
       "localModification": false,
-      "policyVersion": "v6-2026-08-17",
+      "policyVersion": "1",
       "autoevoVersion": "0.5.0",
       "dshVersion": "0.1.0-rc.6",
       "stage": "review",

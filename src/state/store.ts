@@ -3,9 +3,10 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { InstallationRecord, ResolutionRecord, ReviewRecord } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import type { WorkflowRecord } from '../workflow/contracts.js'
 
-type RecordKind = 'resolutions' | 'reviews' | 'installations'
-type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord
+type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows'
+type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord
 
 function assertRecordId(id: string): void {
   if (!/^[a-z]+_[a-f0-9]{16,64}$/.test(id)) {
@@ -41,6 +42,10 @@ export class StateStore {
 
   async getInstallation(id: string): Promise<InstallationRecord> {
     return this.get('installations', id) as Promise<InstallationRecord>
+  }
+
+  async getWorkflow(id: string): Promise<WorkflowRecord> {
+    return this.get('workflows', id) as Promise<WorkflowRecord>
   }
 
   async listReviews(resolutionId: string): Promise<ReviewRecord[]> {

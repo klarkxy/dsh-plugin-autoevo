@@ -41,8 +41,15 @@ const CONCEPTS: ReadonlyArray<{ patterns: RegExp[]; queries: string[] }> = [
     queries: ['powershell', 'pwsh', 'shell', 'command'],
   },
   {
-    patterns: [/浏览器/u, /网页/u, /截图/u, /chrome/iu, /browser/iu, /screenshot/iu, /playwright/iu],
-    queries: ['browser automation', 'playwright', 'screenshot', 'web testing'],
+    // Capturing an image of something. Kept separate from the browser
+    // concept so DOM/PNG-heavy wording cannot evict "screenshot", and so
+    // "截 DSH 自己的 DOM" does not get routed to external-browser drivers.
+    patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu],
+    queries: ['screenshot', 'screen capture'],
+  },
+  {
+    patterns: [/浏览器/u, /网页/u, /chrome/iu, /browser/iu, /playwright/iu],
+    queries: ['browser automation', 'playwright', 'web testing'],
   },
   {
     patterns: [/telegram/iu, /电报/u, /forum topic/iu],
@@ -90,7 +97,7 @@ const ANCHOR_DEFINITIONS: ReadonlyArray<CapabilityAnchorDefinition> = [
   { key: 'codex', patterns: [/\bopenai\s+codex\b/iu, /\bcodex(?:\s+cli)?\b/iu], aliases: ['openai codex', 'codex'], weight: 1.4 },
   { key: 'powershell', patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu], aliases: ['powershell', 'pwsh', '命令行', 'shell command'], weight: 0.9 },
   { key: 'browser', patterns: [/浏览器/u, /网页/u, /chrome/iu, /browser/iu, /playwright/iu], aliases: ['浏览器', '网页', 'chrome', 'browser', 'playwright', 'browser automation', 'web testing'], weight: 0.65 },
-  { key: 'screenshot', patterns: [/截图/u, /screenshot/iu], aliases: ['截图', 'screenshot'], weight: 0.7 },
+  { key: 'screenshot', patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu], aliases: ['截图', '截屏', '长图', '长截图', 'screenshot', 'screen capture'], weight: 0.7 },
   { key: 'telegram', patterns: [/telegram/iu, /电报/u, /forum topic/iu], aliases: ['telegram', '电报', 'forum topic', 'messaging'], weight: 0.9 },
   { key: 'calculation', patterns: [/计算/u, /算式/u, /calculator/iu, /calculation/iu, /math/iu], aliases: ['计算', '算式', 'calculator', 'calculation', 'math'], weight: 0.85 },
   { key: 'scientific-notation', patterns: [/科学计数法/u, /scientific notation/iu, /exponential notation/iu], aliases: ['科学计数法', 'scientific notation', 'exponential notation'], weight: 0.95 },
@@ -159,12 +166,21 @@ const MARKETPLACE_QUERY_LIMIT = 5
 /**
  * Phrase queries for find_dsh_plugin. Keep word order from the requirement so
  * GitHub search can rank "grok build"; do not reduce the intent to one token.
+ *
+ * Slot allocation: one representative query per matched concept comes first,
+ * then the requirement's own English phrases, then remaining concept queries.
+ * Ad-hoc tokens (DOM/PNG/npm) must not evict curated domain terms — a
+ * screenshot requirement once lost its "screenshot" query this way and the
+ * shortlist degraded to external-browser drivers.
  */
 export function marketplaceSearchQueries(requirement: string): string[] {
   const normalized = normalizeSearchText(requirement)
-  const queries: string[] = []
+  const matchedConcepts = CONCEPTS.filter((concept) => concept.patterns.some((pattern) => pattern.test(normalized)))
   const english = (normalized.match(/[a-z][a-z0-9.+]{2,}/g) ?? [])
     .filter((token) => !STOP_WORDS.has(token) && !HOST_GENERIC_TERMS.has(token))
+
+  const queries: string[] = []
+  for (const concept of matchedConcepts) queries.push(concept.queries[0]!)
 
   if (english.length >= 2) {
     queries.push(english.slice(0, 4).join(' '))
@@ -174,11 +190,9 @@ export function marketplaceSearchQueries(requirement: string): string[] {
     queries.push(english[0]!)
   }
 
-  for (const concept of CONCEPTS) {
-    if (concept.patterns.some((pattern) => pattern.test(normalized))) queries.push(...concept.queries)
-  }
+  for (const concept of matchedConcepts) queries.push(...concept.queries.slice(1))
 
-  if (english.length === 0) {
+  if (english.length === 0 && matchedConcepts.length === 0) {
     const cjk = (normalized.match(/[\p{Script=Han}]{2,8}/gu) ?? [])
       .filter((phrase) => !STOP_WORDS.has(phrase) && !HOST_GENERIC_TERMS.has(phrase) && !GENERIC_TERMS.has(phrase))
     queries.push(...cjk.slice(0, 2))

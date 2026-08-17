@@ -22,6 +22,7 @@ interface AgentGateState {
   grant?: Grant
   installGrant?: InstallGrant
   lastUserMessage?: string
+  waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work'
 }
 
 const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
@@ -70,17 +71,17 @@ export function isNewCordisDefinition(exec: Pick<ToolExecution, 'name' | 'argume
 
 function denialReason(authorization?: ResolutionAuthorization): string {
   if (!authorization) {
-    return 'AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.'
+    return 'AutoEvo denied new Cordis plugin creation: call capability_workflow for the current capability requirement first.'
   }
   const prefix = `AutoEvo denied new Cordis plugin creation for ${authorization.resolutionId}`
   if (authorization.state === 'reuse_local') return `${prefix}: reuse the existing local capability the user chose. ${authorization.reason}`
   if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin the user chose instead of building from scratch. ${authorization.reason}`
   if (authorization.state === 'use_review') return `${prefix}: the user chose to use a reviewed plugin, not create a new one. ${authorization.reason}`
-  if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_decide. ${authorization.reason}`
-  if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_decide. ${authorization.reason}`
+    if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
+    if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
   if (authorization.state === 'stopped') return `${prefix}: the user stopped. ${authorization.reason}`
   if (authorization.state === 'market_required') {
-    return `${prefix}: wait for the DSH plugin marketplace script install and a DSH restart, then call capability_resolve again. Do not create a plugin. ${authorization.reason}`
+      return `${prefix}: wait for the DSH plugin marketplace script install and a DSH restart, then call capability_workflow again. Do not create a plugin. ${authorization.reason}`
   }
   return `${prefix}: the scratch-build authorization has already been reserved or consumed.`
 }
@@ -127,6 +128,18 @@ export class CreationGuard {
   lastUserMessage(agent: Agent | undefined): string | undefined {
     if (!agent) return undefined
     return this.states.get(agent)?.lastUserMessage
+  }
+
+  setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void {
+    if (!agent) return
+    const state = this.states.get(agent)
+    if (!state) {
+      if (!kind) return
+      this.states.set(agent, { generation: 0, waitingKind: kind })
+      return
+    }
+    if (kind) state.waitingKind = kind
+    else delete state.waitingKind
   }
 
   applyResolutionAuthorization(
@@ -198,16 +211,20 @@ export class CreationGuard {
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined {
     if (!exec.agent || !this.inEvolutionMode(exec.agent)) return undefined
     const state = this.states.get(exec.agent)
-    const waiting = state?.authorization?.state === 'selection_required'
-      || state?.authorization?.state === 'confirmation_required'
+    const waiting = state?.waitingKind === 'await_selection'
+      || state?.waitingKind === 'await_confirmation'
+      || (!state?.waitingKind && (
+        state?.authorization?.state === 'selection_required'
+        || state?.authorization?.state === 'confirmation_required'
+      ))
     if (exec.name === FIND_PLUGIN_TOOL && exec.parent === undefined) {
-      return 'Use the shortlist from capability_resolve. Call capability_decide or plugin_review; do not search again.'
+      return 'Use the shortlist from capability_workflow. Call capability_workflow_resume; do not search again.'
     }
     if (exec.name === WEB_SEARCH_TOOL && waiting) {
-      return 'Discovery is finished. Call capability_decide with the user\'s latest message.'
+      return 'Discovery is finished. Call capability_workflow_resume with the user\'s latest message.'
     }
     if (SHELL_TOOLS.has(exec.name) && state?.authorization && isDshPluginAddCommand(shellCommandText(exec.arguments))) {
-      return 'Install only via plugin_install after review.'
+      return 'Install only via the capability workflow after review.'
     }
     return undefined
   }

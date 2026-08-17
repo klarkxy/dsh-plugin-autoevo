@@ -201,7 +201,7 @@ export class PluginInstaller {
       })
     }
     if (!await this.revalidate(review, exec.signal)) {
-      throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; run plugin_review again')
+      throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; resume the capability workflow to review again')
     }
     const scripts = review.manifest.scripts.length > 0 ? review.manifest.scripts.join(', ') : 'none'
     const riskFindings = review.findings
@@ -218,7 +218,7 @@ export class PluginInstaller {
       this.ctx,
       exec,
       `${riskPrefix}Install reviewed ${packageName} into profile ${input.targetProfile} (${input.retention}). Review: fit=${review.fit}, risk=${review.securityRisk}, compatibility=${review.compatibility.status}, lifecycleScripts=${scripts}, findings=${findings}.`,
-      'plugin_install',
+      'capability_workflow_resume',
     )
 
     const id = `installation_${hashObject({ reviewId: review.id, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`

@@ -55,6 +55,10 @@ function commandResult(stdout = ''): { exitCode: number, signal: null, stdout: s
   return { exitCode: 0, signal: null, stdout, stderr: '' }
 }
 
+function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: string): void {
+  guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
+}
+
 function localCtx(): Context {
   return {
     tools: {
@@ -152,15 +156,17 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const turn = exec()
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
-    expect(resolution.authorization?.state).toBe('selection_required')
-    expect(resolution.nextStep).toMatch(/对话|chat|ask_user/u)
-    const stopped = await service.decide({
-      resolutionId: resolution.id,
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    expect(started.resolution?.authorization?.state).toBe('selection_required')
+    expect(started.workflow.cursor).toBe('await_selection')
+    expect(started.nextStep).toMatch(/对话|chat|ask_user/u)
+    remember(guard, turn.agent, '先停')
+    const stopped = await service.resume({
+      workflowId: started.workflow.id,
       userMessage: '先停',
-      action: 'stop',
+      optionId: 'stop',
     }, turn)
-    expect(stopped.authorization?.state).toBe('stopped')
+    expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-1',
       name: 'cordis_define',
@@ -169,7 +175,7 @@ describe('conversational confirmation gates', () => {
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
-  it('does not mint scratch from resolve itself', async () => {
+  it('does not mint scratch from start itself', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-resolve-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -180,13 +186,13 @@ describe('conversational confirmation gates', () => {
       new StateStore(root),
       guard,
     )
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', exec())
-    expect(resolution.authorization?.state).toBe('selection_required')
-    expect(resolution.authorization?.state).not.toBe('scratch_ready')
-    expect(resolution.selectedRepositories ?? []).toEqual([])
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', exec())
+    expect(started.resolution?.authorization?.state).toBe('selection_required')
+    expect(started.resolution?.authorization?.state).not.toBe('scratch_ready')
+    expect(started.resolution?.selectedRepositories ?? []).toEqual([])
   })
 
-  it('rejects review of a repository the user did not select', async () => {
+  it('reviews only after an inspect resume names the repository', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-unselected-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -198,33 +204,27 @@ describe('conversational confirmation gates', () => {
         stars: 2,
       }]),
       config(root),
-      { run: async () => commandResult('0.1.0-rc.6\n') },
+      ghRunner(grokBundle),
       new StateStore(root),
       guard,
     )
     const turn = exec()
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
-    expect(resolution.selectedRepositories ?? []).toEqual([])
-    await expect(service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'MirDie/dsh-xai',
-    }, turn)).rejects.toThrow(/not selected/i)
-    const decided = await service.decide({
-      resolutionId: resolution.id,
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    expect(started.resolution?.selectedRepositories ?? []).toEqual([])
+    remember(guard, turn.agent, '先看 MirDie/dsh-xai')
+    const reviewed = await service.resume({
+      workflowId: started.workflow.id,
       userMessage: '先看 MirDie/dsh-xai',
-      action: 'inspect',
+      optionId: 'inspect',
       repositories: ['MirDie/dsh-xai'],
     }, turn)
-    expect(decided.selectedRepositories).toEqual(['MirDie/dsh-xai'])
-    await expect(service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'acme/other',
-    }, turn)).rejects.toThrow(/not selected/i)
+    expect(reviewed.resolution?.selectedRepositories).toEqual(['MirDie/dsh-xai'])
+    expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
+      .toBe('MirDie/dsh-xai')
+    expect(reviewed.workflow.cursor).toBe('await_confirmation')
   })
 
-  it('presents full+high at gate 2 instead of auto-scratch, and stop stays stopped', async () => {
+  it('presents full+high at confirmation instead of auto-scratch, and stop stays stopped', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-high-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -241,29 +241,25 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const turn = exec()
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
-    await service.decide({
-      resolutionId: resolution.id,
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    remember(guard, turn.agent, '审查 MirDie/dsh-xai')
+    const reviewed = await service.resume({
+      workflowId: started.workflow.id,
       userMessage: '审查 MirDie/dsh-xai',
-      action: 'inspect',
+      optionId: 'inspect',
       repositories: ['MirDie/dsh-xai'],
     }, turn)
-    const reviewed = await service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'MirDie/dsh-xai',
-    }, turn)
-    expect(reviewed.fit).toBe('full')
-    expect(reviewed.securityRisk).toBe('high')
-    expect(reviewed.authorization.state).toBe('confirmation_required')
+    expect(reviewed.review?.fit).toBe('full')
+    expect(reviewed.review?.securityRisk).toBe('high')
+    expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
     expect(reviewed.nextStep).toMatch(/对话|chat|ask_user/u)
-    const stopped = await service.decide({
-      resolutionId: resolution.id,
+    remember(guard, turn.agent, '先停')
+    const stopped = await service.resume({
+      workflowId: started.workflow.id,
       userMessage: '先停',
-      action: 'stop',
-      reviewId: reviewed.id,
+      optionId: 'stop',
     }, turn)
-    expect(stopped.authorization?.state).toBe('stopped')
+    expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-high',
       name: 'cordis_define',
@@ -284,18 +280,21 @@ describe('conversational confirmation gates', () => {
       new StateStore(root),
       guard,
     )
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
-    await expect(service.decide({
-      resolutionId: resolution.id,
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    remember(guard, turn.agent, '这个仓库看起来不错')
+    await expect(service.resume({
+      workflowId: started.workflow.id,
       userMessage: '这个仓库看起来不错',
-      action: 'create_new',
-    }, turn)).rejects.toThrow(/does not match/i)
-    const decided = await service.decide({
-      resolutionId: resolution.id,
+      optionId: 'create_new',
+    }, turn)).rejects.toThrow(/contradict/i)
+    remember(guard, turn.agent, '没有合适的，新建一个')
+    const decided = await service.resume({
+      workflowId: started.workflow.id,
       userMessage: '没有合适的，新建一个',
-      action: 'create_new',
+      optionId: 'create_new',
     }, turn)
-    expect(decided.authorization?.state).toBe('scratch_ready')
+    expect(decided.resolution?.authorization?.state).toBe('scratch_ready')
+    expect(decided.workflow.cursor).toBe('scratch_ready')
     await expect(guard.preExecute({
       callId: 'define-ok',
       name: 'cordis_define',
@@ -316,17 +315,19 @@ describe('conversational confirmation gates', () => {
       new StateStore(root),
       guard,
     )
-    const created = await localService.resolve('run a PowerShell command', { ...exec(), agent })
-    expect(created.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
-    expect(created.authorization?.state).toBe('selection_required')
-    const allowed = await localService.decide({
-      resolutionId: created.id,
+    const created = await localService.start('run a PowerShell command', { ...exec(), agent })
+    expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
+    expect(created.resolution?.authorization?.state).toBe('selection_required')
+    remember(guard, agent, 'Create new')
+    const allowed = await localService.resume({
+      workflowId: created.workflow.id,
       userMessage: 'Create new',
-      action: 'create_new',
+      optionId: 'create_new',
     }, { ...exec(), agent })
-    expect(allowed.authorization?.state).toBe('scratch_ready')
+    expect(allowed.resolution?.authorization?.state).toBe('scratch_ready')
 
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
+    const store = new StateStore(root)
     const useService = new CapabilityEvolutionService(
       marketplaceCtx([{
         name: 'dsh-xai',
@@ -336,36 +337,36 @@ describe('conversational confirmation gates', () => {
       }]),
       config(root),
       ghRunner(grokBundle),
-      new StateStore(root),
+      store,
       useGuard,
     )
-    const resolved = await useService.resolve('我需要一个能在dsh里调用grok的能力。', { ...exec(), agent })
-    await useService.decide({
-      resolutionId: resolved.id,
+    const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', { ...exec(), agent })
+    remember(useGuard, agent, '审查 MirDie/dsh-xai')
+    const reviewed = await useService.resume({
+      workflowId: resolved.workflow.id,
       userMessage: '审查 MirDie/dsh-xai',
-      action: 'inspect',
+      optionId: 'inspect',
       repositories: ['MirDie/dsh-xai'],
     }, { ...exec(), agent })
-    const reviewed = await useService.review({
-      resolutionId: resolved.id,
-      sourceKind: 'github',
-      repository: 'MirDie/dsh-xai',
-    }, { ...exec(), agent })
-    expect(reviewed.authorization.state).toBe('confirmation_required')
-    const confirmed = await useService.decide({
-      resolutionId: resolved.id,
+    expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
+    remember(useGuard, agent, '用这个')
+    const confirmed = await useService.resume({
+      workflowId: resolved.workflow.id,
       userMessage: '用这个',
-      action: 'use_this',
-      reviewId: reviewed.id,
+      optionId: 'use_this',
+      ...(reviewed.review?.id ? { reviewId: reviewed.review.id } : {}),
+      targetProfile: 'web',
+      retention: 'persistent',
     }, { ...exec(), agent })
-    expect(confirmed.authorization?.state).toBe('use_review')
-    expect(confirmed.authorization?.reviewId).toBe(reviewed.id)
-    expect(() => useGuard.assertInstallAuthorized(agent, reviewed)).not.toThrow()
-    expect(() => useGuard.assertInstallAuthorized(agent, { ...reviewed, id: `review_${'f'.repeat(64)}` })).toThrow(/has not chosen/i)
+    const stored = await store.getResolution(resolved.resolution!.id)
+    expect(stored.decisions?.some((item) => item.action === 'use_this')).toBe(true)
+    expect(() => useGuard.assertInstallAuthorized(agent, reviewed.review!, stored)).not.toThrow()
+    expect(() => useGuard.assertInstallAuthorized(agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/has not chosen/i)
+    expect(confirmed.workflow.cursor === 'installed' || confirmed.workflow.cursor === 'await_confirmation').toBe(true)
   })
 
-  it('reviews from last user message without an explicit capability_decide', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-autodecide-'))
+  it('rejects a forged resume that does not match the latest user turn', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-auth-'))
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -381,52 +382,32 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const turn = exec()
-    const resolution = await service.resolve('我需要一个能在dsh里调用grok的能力。', turn)
-    expect(resolution.remoteCandidates.map((item) => item.repository)).toEqual([
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    expect(started.resolution?.remoteCandidates.map((item) => item.repository)).toEqual([
       'MirDie/dsh-xai',
       'acme/dsh-grok-tui',
       'paicat1/dsh-grok-screenshot',
     ])
 
-    await expect(service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'paicat1/dsh-grok-screenshot',
-    }, turn)).rejects.toThrow(/not selected/i)
+    remember(guard, turn.agent, '随便看看')
+    await expect(service.resume({
+      workflowId: started.workflow.id,
+      userMessage: '具体看看3',
+      optionId: 'inspect',
+      repositories: ['paicat1/dsh-grok-screenshot'],
+    }, turn)).rejects.toThrow(/does not match the latest user turn/i)
 
-    guard.rememberUserMessage(turn.agent, {
-      content: [{ type: 'text', text: '随便看看' }],
-    })
-    await expect(service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'paicat1/dsh-grok-screenshot',
-    }, turn)).rejects.toThrow(/not selected/i)
-
-    guard.rememberUserMessage(turn.agent, {
-      content: [{ type: 'text', text: '具体看看3' }],
-    })
-    const reviewed = await service.review({
-      resolutionId: resolution.id,
-      sourceKind: 'github',
-      repository: 'paicat1/dsh-grok-screenshot',
+    remember(guard, turn.agent, '具体看看3')
+    const reviewed = await service.resume({
+      workflowId: started.workflow.id,
+      userMessage: '具体看看3',
+      optionId: 'inspect',
+      repositories: ['paicat1/dsh-grok-screenshot'],
     }, turn)
-    expect(reviewed.sourceSnapshot.kind === 'github' && reviewed.sourceSnapshot.repository)
+    expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('paicat1/dsh-grok-screenshot')
-    const stored = await store.getResolution(resolution.id)
+    const stored = await store.getResolution(started.resolution!.id)
     expect(stored.selectedRepositories).toEqual(['paicat1/dsh-grok-screenshot'])
     expect(stored.decisions?.some((item) => item.action === 'inspect')).toBe(true)
-
-    guard.rememberUserMessage(turn.agent, {
-      content: [{ type: 'text', text: '你帮我安装' }],
-    })
-    await expect(service.install({
-      reviewId: reviewed.id,
-      targetProfile: 'web',
-      retention: 'persistent',
-    }, turn)).rejects.toThrow()
-    const afterInstall = await store.getResolution(resolution.id)
-    expect(afterInstall.decisions?.some((item) => item.action === 'use_this')).toBe(true)
-    expect(() => guard.assertInstallAuthorized(turn.agent, reviewed, afterInstall)).not.toThrow()
   })
 })

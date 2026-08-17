@@ -1,71 +1,41 @@
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
   DecisionAction,
   DecisionPhase,
   DecisionReceipt,
-  LocalCapabilityCandidate,
+  InstallationRetention,
   RemotePluginCandidate,
   ResolutionAuthorization,
   ReviewRecord,
+  WorkflowOptionId,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { hashObject } from '../state/hashes.js'
+import type { CreationGuard } from '../creation-guard.js'
+import { WORKFLOW_OPTIONS, type InterruptPayload, type ValidatedResume } from '../workflow/contracts.js'
 
-export const LABEL_CREATE_NEW = 'Create new'
-export const LABEL_CREATE_NEW_ZH = '新建'
-export const LABEL_STOP = 'Stop for now'
-export const LABEL_STOP_ZH = '先停'
-export const LABEL_USE_LOCAL = 'Use existing local capability'
-export const LABEL_USE_LOCAL_ZH = '用已有的本地能力'
-export const LABEL_SEARCH_MORE = 'Search for plugins anyway'
-export const LABEL_SEARCH_MORE_ZH = '继续找插件'
-export const LABEL_USE_THIS = 'Use this plugin'
-export const LABEL_USE_THIS_ZH = '用这个'
-export const LABEL_MODIFY_THIS = 'Improve this plugin'
-export const LABEL_MODIFY_THIS_ZH = '在这个上改'
+export const LABEL_CREATE_NEW = WORKFLOW_OPTIONS.create_new.labelEn
+export const LABEL_CREATE_NEW_ZH = WORKFLOW_OPTIONS.create_new.labelZh
+export const LABEL_STOP = WORKFLOW_OPTIONS.stop.labelEn
+export const LABEL_STOP_ZH = WORKFLOW_OPTIONS.stop.labelZh
+export const LABEL_USE_LOCAL = WORKFLOW_OPTIONS.use_local.labelEn
+export const LABEL_USE_LOCAL_ZH = WORKFLOW_OPTIONS.use_local.labelZh
+export const LABEL_SEARCH_MORE = WORKFLOW_OPTIONS.search_more.labelEn
+export const LABEL_SEARCH_MORE_ZH = WORKFLOW_OPTIONS.search_more.labelZh
+export const LABEL_USE_THIS = WORKFLOW_OPTIONS.use_this.labelEn
+export const LABEL_USE_THIS_ZH = WORKFLOW_OPTIONS.use_this.labelZh
+export const LABEL_MODIFY_THIS = WORKFLOW_OPTIONS.modify_this.labelEn
+export const LABEL_MODIFY_THIS_ZH = WORKFLOW_OPTIONS.modify_this.labelZh
 
 const CREATE_NEW_RE = /新建|从零|自己写|自己做|create new|from scratch|没有合适|都不行|都不想用|都不合适/iu
 const STOP_RE = /先停|停下|停止|取消|算了|stop for now|\bstop\b|\bcancel\b/iu
-const USE_THIS_RE = /用这个|就用这个|用它吧|安装这个|use this/iu
-const INSTALL_RE = /你帮我(?:安装|装)|帮我安装|帮我装|直接给我装|给我装|你来装|直接装|please install|install it/iu
-const THIS_RE = /这个插件|该插件|这个|this plugin|this one/iu
-const MODIFY_RE = /在这个上改|改这个|改进这个|improve this|modify this/iu
-const USE_LOCAL_RE = /用已有|本地就有|用现成|use existing local/iu
-const SEARCH_MORE_RE = /继续找|再搜|search for plugins|search more/iu
-const ALL_RE = /都看看|全都|全部审|all of them|review all/iu
-const OWNER_REPO_RE = /(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?![A-Za-z0-9_.-])/gu
-const SELECT_PREFIX = String.raw`具体看看|看一下|看下|看看|审查一下|审一下|审下|候选|方案|选\s*|第|#`
-const INDEX_RE = new RegExp(`(?:${SELECT_PREFIX})([一二两三四五六七八九十]|[1-9]\\d*)(?:个|号)?`, 'gu')
-const INDEX_LIST_RE = new RegExp(
-  `(?:${SELECT_PREFIX})((?:[一二两三四五六七八九十1-9])(?:\\s*[和、,，]\\s*(?:[一二两三四五六七八九十1-9]))+)`,
-  'gu',
-)
-const FIND_PLUGIN = 'awesome-dsh-plugin/dsh-find-plugin'
-
-const CHINESE_INDEX: Record<string, number> = {
-  一: 1,
-  二: 2,
-  两: 2,
-  三: 3,
-  四: 4,
-  五: 5,
-  六: 6,
-  七: 7,
-  八: 8,
-  九: 9,
-  十: 10,
-}
-
-export type ClaimedDecisionAction = DecisionAction | 'search_more'
-
-export interface ResolvedDecision {
-  phase: DecisionPhase
-  action: DecisionAction
-  selectedRepositories: string[]
-  searchMore: boolean
-}
 
 export function prefersChinese(text: string): boolean {
   return /[\p{Script=Han}]/u.test(text)
+}
+
+export function normalizeDecisionText(value: string): string {
+  return value.normalize('NFKC').trim()
 }
 
 export function reviewIdentity(review: ReviewRecord): string {
@@ -110,7 +80,7 @@ export function newDecisionReceipt(
   phase: DecisionReceipt['phase'],
   action: DecisionAction,
   selectedRepositories: string[],
-  extras: Partial<Pick<DecisionReceipt, 'reviewId' | 'reviewIdentity' | 'userMessage'>> = {},
+  extras: Partial<Pick<DecisionReceipt, 'reviewId' | 'reviewIdentity' | 'userMessage' | 'optionId'>> = {},
 ): DecisionReceipt {
   const createdAt = new Date().toISOString()
   return {
@@ -130,18 +100,18 @@ export function nextStepForAuthorization(
   const zh = prefersChinese(requirement)
   if (authorization.state === 'market_required') {
     return zh
-      ? '市场插件还在安装。批准后等热加载，不要把 dsh-find-plugin 当成这次要的能力。'
-      : 'The marketplace plugin is still installing. Approve if asked, then wait for hot-load. Do not treat dsh-find-plugin as the requested capability.'
+      ? '市场插件还在安装或需要重启。批准后等热加载；热加载失败就重启 DSH，再调用 capability_workflow。'
+      : 'The marketplace plugin is still installing or needs a restart. Approve if asked, then wait for hot-load. Restart DSH only if hot-load fails, then call capability_workflow again.'
   }
   if (authorization.state === 'selection_required') {
     return zh
-      ? '先在对话里说明每个候选：仓库名、它是干什么的、为何被搜到、星数。不要调用 ask_user。等用户回话后，再调用 capability_decide 记录要审哪些仓库、新建或先停。'
-      : 'Present each candidate in chat (repository, what it does, why it matched, stars). Do not call ask_user. After the user replies, call capability_decide to record inspect / create new / stop.'
+      ? '先在对话里说明每个候选：仓库名、它是干什么的、为何被搜到、星数。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume，带上原话和 option_id。'
+      : 'Present each candidate in chat (repository, what it does, why it matched, stars). Do not call ask_user. After the user replies, call capability_workflow_resume with their verbatim message and option_id.'
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '先在对话里讲清这次审查：匹配程度、风险、缺什么、主要发现。不要调用 ask_user。等用户回话后，再调用 capability_decide（用这个 / 在这个上改 / 新建 / 先停）。'
-      : 'Explain the review in chat (fit, risk, missing pieces, findings). Do not call ask_user. After the user replies, call capability_decide (use this / improve this / create new / stop).'
+      ? '先在对话里讲清这次审查：匹配程度、风险、缺什么、主要发现。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume（用这个 / 在这个上改 / 新建 / 先停）。'
+      : 'Explain the review in chat (fit, risk, missing pieces, findings). Do not call ask_user. After the user replies, call capability_workflow_resume (use this / improve this / create new / stop).'
   }
   if (authorization.state === 'scratch_ready') {
     return zh
@@ -150,13 +120,13 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'use_review') {
     return zh
-      ? '用户选择使用这次审查的插件。去安装，不要另建一个替代品。卸了重装或再改一刀时，仍用这条 resolution 再 capability_decide，不要新开 resolve。'
-      : 'The user chose this reviewed plugin. Install it; do not create a replacement. To reinstall or patch again, call capability_decide on this resolution; do not start a new resolve.'
+      ? '用户选择使用这次审查的插件。工作流会安装它；不要另建一个替代品。卸了重装或再改一刀时，仍在同一条 workflow 上 resume。'
+      : 'The user chose this reviewed plugin. The workflow will install it; do not create a replacement. To reinstall or patch again, resume this workflow.'
   }
   if (authorization.state === 'modify_review') {
     return zh
-      ? '用户选择在这次审查上做最小修改。改完后对本地检出再审，base_review_id 用这条审查或上一刀本地审查，不要新开 capability_resolve。'
-      : 'The user chose to improve this review. Modify it minimally, then review the local checkout with base_review_id set to this review or the previous local review. Do not start a new capability_resolve.'
+      ? '用户选择在这次审查上做最小修改。按工单改完后，用本地检出路径 resume；base_review_id 由工作流从 lineage 推导。'
+      : 'The user chose to improve this review. Follow the work order, then resume with the local checkout path. The workflow derives base_review_id from the lineage.'
   }
   if (authorization.state === 'reuse_local') {
     return zh
@@ -169,213 +139,6 @@ export function nextStepForAuthorization(
       : 'The user stopped. Do not install or create.'
   }
   return authorization.reason
-}
-
-function parseIndexToken(token: string): number | undefined {
-  if (CHINESE_INDEX[token] !== undefined) return CHINESE_INDEX[token]
-  const numeric = Number(token)
-  return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
-}
-
-function addIndexToken(
-  found: Set<string>,
-  token: string,
-  remotes: readonly RemotePluginCandidate[],
-): void {
-  const index = parseIndexToken(token)
-  if (index === undefined) return
-  const candidate = remotes[index - 1]
-  if (candidate) {
-    found.add(candidate.repository)
-    return
-  }
-  if (!/^[1-9]{2,}$/u.test(token) || index <= remotes.length) return
-  const digits = [...token].map((digit) => Number(digit))
-  const max = Math.min(9, remotes.length)
-  if (!digits.every((digit) => digit >= 1 && digit <= max)) return
-  for (const digit of digits) {
-    const item = remotes[digit - 1]
-    if (item) found.add(item.repository)
-  }
-}
-
-export function mentionedRepositories(
-  message: string,
-  remotes: readonly RemotePluginCandidate[],
-  previouslySelected: readonly string[] = [],
-): string[] {
-  const found = new Set<string>()
-  if (ALL_RE.test(message)) {
-    for (const candidate of remotes) found.add(candidate.repository)
-    return [...found]
-  }
-
-  for (const candidate of remotes) {
-    const haystacks = [candidate.repository, candidate.name, candidate.repository.split('/')[1] ?? '']
-    if (haystacks.some((part) => part && message.toLowerCase().includes(part.toLowerCase()))) {
-      found.add(candidate.repository)
-    }
-  }
-
-  for (const match of message.matchAll(INDEX_LIST_RE)) {
-    const list = match[1]
-    if (!list) continue
-    for (const token of list.split(/[和、,，\s]+/u).filter(Boolean)) addIndexToken(found, token, remotes)
-  }
-
-  for (const match of message.matchAll(INDEX_RE)) {
-    const token = match[1]
-    if (!token) continue
-    addIndexToken(found, token, remotes)
-  }
-
-  for (const match of message.matchAll(OWNER_REPO_RE)) {
-    const repository = match[0]
-    if (repository.toLowerCase() === FIND_PLUGIN) continue
-    const known = remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-    found.add(known?.repository ?? repository)
-  }
-
-  if (found.size === 0 && (THIS_RE.test(message) || INSTALL_RE.test(message))) {
-    if (previouslySelected.length > 0) {
-      for (const repository of previouslySelected) found.add(repository)
-    } else if (remotes.length === 1) {
-      found.add(remotes[0]!.repository)
-    }
-  }
-
-  return [...found]
-}
-
-function wantsUseThis(message: string): boolean {
-  return USE_THIS_RE.test(message) || INSTALL_RE.test(message)
-}
-
-function actionKeywordMatches(action: ClaimedDecisionAction, message: string): boolean {
-  if (action === 'stop') return STOP_RE.test(message)
-  if (action === 'create_new') return CREATE_NEW_RE.test(message)
-  if (action === 'search_more') return SEARCH_MORE_RE.test(message)
-  if (action === 'use_local') return USE_LOCAL_RE.test(message)
-  if (action === 'modify_this') return MODIFY_RE.test(message)
-  if (action === 'use_this') return wantsUseThis(message)
-  return ALL_RE.test(message) || THIS_RE.test(message)
-}
-
-function inferAction(
-  message: string,
-  remotes: readonly RemotePluginCandidate[],
-  locals: readonly LocalCapabilityCandidate[],
-  phase: DecisionPhase,
-  previouslySelected: readonly string[],
-): { action?: ClaimedDecisionAction, selectedRepositories: string[] } {
-  const selected = mentionedRepositories(message, remotes, previouslySelected)
-  if (STOP_RE.test(message)) return { action: 'stop', selectedRepositories: [] }
-  if (CREATE_NEW_RE.test(message)) return { action: 'create_new', selectedRepositories: [] }
-  if (SEARCH_MORE_RE.test(message)) return { action: 'search_more', selectedRepositories: [] }
-  if (USE_LOCAL_RE.test(message)) {
-    return locals.length > 0
-      ? { action: 'use_local', selectedRepositories: [] }
-      : { selectedRepositories: [] }
-  }
-  if (phase === 'gate2' && MODIFY_RE.test(message)) {
-    return { action: 'modify_this', selectedRepositories: selected }
-  }
-  if (phase === 'gate2' && wantsUseThis(message)) {
-    return { action: 'use_this', selectedRepositories: selected }
-  }
-  if (selected.length > 0) return { action: 'inspect', selectedRepositories: selected }
-  return { selectedRepositories: [] }
-}
-
-export function resolveDecision(input: {
-  userMessage: string
-  claimedAction?: ClaimedDecisionAction
-  claimedRepositories?: string[]
-  remotes: readonly RemotePluginCandidate[]
-  locals: readonly LocalCapabilityCandidate[]
-  phase: DecisionPhase
-  previouslySelected?: readonly string[]
-}): ResolvedDecision {
-  const userMessage = input.userMessage.normalize('NFKC').trim()
-  if (!userMessage || userMessage.length > 2_000) {
-    throw new EvolutionError('invalid_input', 'user_message must contain 1 to 2000 characters')
-  }
-
-  const inferred = inferAction(
-    userMessage,
-    input.remotes,
-    input.locals,
-    input.phase,
-    input.previouslySelected ?? [],
-  )
-  if (input.claimedAction && inferred.action && input.claimedAction !== inferred.action) {
-    throw new EvolutionError(
-      'invalid_input',
-      'The claimed action does not match the user message',
-      { claimedAction: input.claimedAction, inferredAction: inferred.action },
-    )
-  }
-  if (input.claimedAction && !inferred.action && !actionKeywordMatches(input.claimedAction, userMessage)) {
-    throw new EvolutionError(
-      'invalid_input',
-      'The claimed action does not match the user message',
-      { claimedAction: input.claimedAction },
-    )
-  }
-  const action = input.claimedAction ?? inferred.action
-  if (!action) {
-    throw new EvolutionError(
-      'invalid_input',
-      'Could not read a decision from the user message. Ask them which repository to inspect, or to create new / stop.',
-      { userMessage: userMessage.slice(0, 200) },
-    )
-  }
-  if (action === 'use_local' && input.locals.length === 0) {
-    throw new EvolutionError('invalid_input', 'There is no local capability on this resolution to reuse')
-  }
-  if ((action === 'use_this' || action === 'modify_this') && input.phase !== 'gate2') {
-    throw new EvolutionError(
-      'invalid_input',
-      'Name the repository to inspect first; use-this and improve-this are only valid after a review',
-    )
-  }
-
-  if (action === 'search_more') {
-    return { phase: 'gate1', action: 'inspect', selectedRepositories: [], searchMore: true }
-  }
-
-  let selectedRepositories = inferred.selectedRepositories
-  if (input.claimedRepositories && input.claimedRepositories.length > 0) {
-    const claimed = input.claimedRepositories.map((item) => item.trim()).filter(Boolean)
-    if (action !== 'inspect' && action !== 'use_this' && action !== 'modify_this') {
-      throw new EvolutionError('invalid_input', 'repositories are only valid when inspecting or confirming a review')
-    }
-    for (const repository of claimed) {
-      const known = input.remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-      const normalized = known?.repository ?? repository
-      if (!selectedRepositories.some((item) => item.toLowerCase() === normalized.toLowerCase())
-        && !ALL_RE.test(userMessage)) {
-        throw new EvolutionError(
-          'invalid_input',
-          'A claimed repository was not mentioned in the user message',
-          { repository: normalized },
-        )
-      }
-    }
-    selectedRepositories = claimed.map((repository) => {
-      const known = input.remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-      return known?.repository ?? repository
-    })
-  }
-
-  const phase: DecisionPhase = action === 'use_this' || action === 'modify_this' ? 'gate2' : 'gate1'
-
-  return {
-    phase,
-    action,
-    selectedRepositories,
-    searchMore: false,
-  }
 }
 
 export function authorizationFromDecision(
@@ -396,6 +159,23 @@ export function authorizationFromDecision(
   }
   if (action === 'use_local') {
     return { state: 'reuse_local', resolutionId, reason: 'The user chose the existing local capability.' }
+  }
+  if (action === 'search_more') {
+    return {
+      state: 'selection_required',
+      resolutionId,
+      reason: 'The user asked to search for plugins again.',
+    }
+  }
+  if (action === 'resume_modify' && review) {
+    return {
+      state: 'modify_review',
+      resolutionId,
+      reason: 'The user submitted a local checkout for re-review.',
+      reviewId: review.id,
+      reviewIdentity: reviewIdentity(review),
+      selectedRepositories,
+    }
   }
   if (action === 'use_this' && review) {
     return {
@@ -425,4 +205,136 @@ export function authorizationFromDecision(
       : 'Waiting for the user to choose a candidate, create new, or stop.',
     selectedRepositories,
   }
+}
+
+export function assertAuthenticUserMessage(
+  guard: CreationGuard,
+  agent: Agent | undefined,
+  userMessage: string,
+): string {
+  const normalized = normalizeDecisionText(userMessage)
+  if (!normalized || normalized.length > 2_000) {
+    throw new EvolutionError('invalid_input', 'user_message must contain 1 to 2000 characters')
+  }
+  const last = guard.lastUserMessage(agent)
+  if (last && normalizeDecisionText(last) !== normalized) {
+    throw new EvolutionError('invalid_input', 'user_message does not match the latest user turn')
+  }
+  return normalized
+}
+
+export function assertOptionAllowed(interrupt: InterruptPayload, optionId: WorkflowOptionId): void {
+  if (!interrupt.options.some((option) => option.id === optionId)) {
+    throw new EvolutionError('invalid_input', 'option_id is not available at this workflow interrupt', {
+      optionId,
+      allowed: interrupt.options.map((option) => option.id),
+    })
+  }
+}
+
+export function assertResumeContradiction(userMessage: string, optionId: WorkflowOptionId): void {
+  if (STOP_RE.test(userMessage) && optionId !== 'stop') {
+    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
+      optionId,
+      inferredAction: 'stop',
+    })
+  }
+  if (CREATE_NEW_RE.test(userMessage) && optionId !== 'create_new') {
+    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
+      optionId,
+      inferredAction: 'create_new',
+    })
+  }
+  if (optionId === 'create_new' && !CREATE_NEW_RE.test(userMessage)) {
+    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
+      optionId,
+    })
+  }
+}
+
+export function resolveResumeRepositories(
+  claimed: readonly string[] | undefined,
+  remotes: readonly RemotePluginCandidate[],
+  optionId: WorkflowOptionId,
+): string[] {
+  const requested = (claimed ?? []).map((item) => item.trim()).filter(Boolean)
+  if (optionId !== 'inspect' && optionId !== 'use_this' && optionId !== 'modify_this' && requested.length > 0) {
+    throw new EvolutionError('invalid_input', 'repositories are only valid when inspecting or confirming a review')
+  }
+  if (optionId === 'inspect' && requested.length === 0) {
+    throw new EvolutionError('invalid_input', 'inspect requires at least one repository')
+  }
+  return requested.map((repository) => {
+    const known = remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
+    return known?.repository ?? repository
+  })
+}
+
+export function phaseForOption(optionId: WorkflowOptionId): DecisionPhase {
+  return optionId === 'use_this' || optionId === 'modify_this' || optionId === 'resume_modify'
+    ? 'gate2'
+    : 'gate1'
+}
+
+export function validateResume(input: {
+  guard: CreationGuard
+  agent: Agent | undefined
+  interrupt: InterruptPayload
+  userMessage: string
+  optionId: WorkflowOptionId
+  remotes: readonly RemotePluginCandidate[]
+  repositories?: string[]
+  path?: string
+  ref?: string
+  reviewId?: string
+  targetProfile?: string
+  retention?: InstallationRetention
+  verificationTask?: string
+  verificationExpectedText?: string
+}): ValidatedResume {
+  const userMessage = assertAuthenticUserMessage(input.guard, input.agent, input.userMessage)
+  assertOptionAllowed(input.interrupt, input.optionId)
+  assertResumeContradiction(userMessage, input.optionId)
+  const repositories = resolveResumeRepositories(input.repositories, input.remotes, input.optionId)
+
+  if (input.optionId === 'resume_modify') {
+    const path = input.path?.normalize('NFKC').trim()
+    if (!path) throw new EvolutionError('invalid_input', 'resume_modify requires a local checkout path')
+    return { optionId: input.optionId, userMessage, repositories, path }
+  }
+
+  if (input.optionId === 'use_this') {
+    const targetProfile = input.targetProfile?.trim()
+    const retention = input.retention
+    if (!targetProfile || !retention) {
+      throw new EvolutionError('invalid_input', 'use_this requires target_profile and retention')
+    }
+    return {
+      optionId: input.optionId,
+      userMessage,
+      repositories,
+      ...(input.ref ? { ref: input.ref } : {}),
+      ...(input.reviewId ? { reviewId: input.reviewId } : {}),
+      install: {
+        targetProfile,
+        retention,
+        ...(input.verificationTask ? { verificationTask: input.verificationTask } : {}),
+        ...(input.verificationExpectedText ? { verificationExpectedText: input.verificationExpectedText } : {}),
+      },
+    }
+  }
+
+  return {
+    optionId: input.optionId,
+    userMessage,
+    repositories,
+    ...(input.path ? { path: input.path } : {}),
+    ...(input.ref ? { ref: input.ref } : {}),
+    ...(input.reviewId ? { reviewId: input.reviewId } : {}),
+  }
+}
+
+export const _testing = {
+  CREATE_NEW_RE,
+  STOP_RE,
 }

@@ -16,27 +16,27 @@ Do not load or follow the shipped `cordis-plugin-development` skill. Use the cur
 Use this skill only for a request to create or operate a live dynamic Cordis Plugin.
 
 - **New capability**: no existing target Plugin is named and a new `cordis_define` with `plugin.kind: "new"` would be needed.
-- **Existing update or repair**: the request names an existing Plugin (for example `@pluginId`), or diagnoses/restarts a previously defined Plugin. This branch skips `capability_resolve`.
+- **Existing update or repair**: the request names an existing Plugin (for example `@pluginId`), or diagnoses/restarts a previously defined Plugin. This branch skips `capability_workflow`.
 - **Near miss**: static DSH/npm plugin development, a repository export or release, documentation, or a general Cordis question. Do not call AutoEvo or Cordis Plugin tools; handle it through the capability that owns that work.
 
 Never issue a broad inventory merely to explore. Inspect only the exact runtime surface needed by the chosen design.
 
 ## 2. New-capability state machine
 
-Before any new definition, state the concrete capability in one sentence and call `capability_resolve` with it. Treat its result as the sole authority for scratch creation. Read [the state details](references/autoevo-state.md) when a result is returned.
+Before any new definition, state the concrete capability in one sentence and call `capability_workflow` with it. Treat its interrupt or terminal state as the sole authority for scratch creation. Read [the state details](references/autoevo-state.md) when a result is returned.
 
 | Authorization | Required next action | Scratch definition |
 | --- | --- | --- |
 | `reuse_local` | The user chose an existing local tool or skill. Use it. | Stop |
-| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_decide`. Review only selected repositories. | Stop |
-| `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_decide` (use this / improve it / create new / stop). | Stop |
-| `use_review` | The user chose to use the reviewed plugin. Install it; do not create a replacement. Reinstall or patch again with `capability_decide` on this resolution. | Stop |
-| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then review the local checkout with `base_review_id` set to this review or the previous local review. Do not start a new `capability_resolve`. | Stop |
+| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_workflow_resume`. Review only selected repositories. | Stop |
+| `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_workflow_resume` (use this / improve it / create new / stop). | Stop |
+| `use_review` | The user chose to use the reviewed plugin. The workflow installs it; do not create a replacement. Reinstall or patch again on the same workflow. | Stop |
+| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then resume with the local checkout path. The workflow derives `base_review_id`. | Stop |
 | `market_required` | AutoEvo installs `dsh-find-plugin` by script after approval and hot-loads it when possible. Tell the user to approve if asked. Restart DSH only if hot-load fails. Do not review the marketplace as the requested capability. | Stop |
 | `stopped` | The user stopped. Do not install or create. | Stop |
 | `scratch_ready` | The user explicitly allowed one new plugin. This is not a mandate to start building. | Allowed once |
 
-After `capability_resolve` or `plugin_review`, write a conversational summary and wait for the next user message. Then call `capability_decide` with that message verbatim. Do not pop `ask_user`.
+After `capability_workflow` parks on an interrupt, write a conversational summary and wait for the next user message. Then call `capability_workflow_resume` with that message verbatim and the matching `option_id`. Do not pop `ask_user`.
 
 Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed `cordis_define(kind: "new")` may retry with the same live grant; a successful one consumes it. Do not bypass a non-scratch result by changing wording, creating a same-named Plugin, or defining a static package.
 
@@ -60,7 +60,7 @@ For Client UI, inspect the exact target Slot before registration. Use its return
 
 ## 5. Repair, rollback, and cleanup
 
-On a technical failure, inspect only the failed package and its exact diagnostics with `cordis_inspect_self`. Re-query only the capability implicated by that diagnostic, append a corrected package under the same Plugin, and run it with the appropriate mode. Existing update and repair work never needs `capability_resolve`.
+On a technical failure, inspect only the failed package and its exact diagnostics with `cordis_inspect_self`. Re-query only the capability implicated by that diagnostic, append a corrected package under the same Plugin, and run it with the appropriate mode. Existing update and repair work never needs `capability_workflow`.
 
 If an update must be reversed, explicitly run the recorded `currentPackageId`; a failed update does not restore a physical run by itself. Use `cordis_stop` to pause a Plugin. Use `cordis_undefine` only when the user explicitly requests permanent removal and no rollback/inspection remains necessary.
 

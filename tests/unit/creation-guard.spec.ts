@@ -84,10 +84,10 @@ describe('new Cordis Plugin creation guard', () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     await expect(guard.preExecute(execution('call-1'), next)).resolves.toEqual({
       kind: 'deny',
-      reason: expect.stringContaining('call capability_resolve'),
+      reason: expect.stringContaining('call capability_workflow'),
     })
     expect(next).not.toHaveBeenCalled()
-    expect(guard.guard(execution('call-final'))).toContain('call capability_resolve')
+    expect(guard.guard(execution('call-final'))).toContain('call capability_workflow')
   })
 
   it.each(['reuse_local', 'selection_required', 'confirmation_required', 'modify_review', 'use_review', 'market_required', 'stopped'] as const)(
@@ -227,9 +227,9 @@ describe('evolution protocol automaton', () => {
     const direct = tool('find_dsh_plugin', { query: 'screenshot' })
     await expect(guard.preExecute(direct, next)).resolves.toEqual({
       kind: 'deny',
-      reason: expect.stringContaining('capability_decide'),
+      reason: expect.stringContaining('capability_workflow_resume'),
     })
-    expect(guard.guard(direct)).toContain('plugin_review')
+    expect(guard.guard(direct)).toContain('capability_workflow_resume')
     expect(next).not.toHaveBeenCalled()
 
     const nested = {
@@ -269,7 +269,7 @@ describe('evolution protocol automaton', () => {
       command: 'dsh plugin --profile web add github:Yts1919/dsh-vision-complete',
     }), next)).resolves.toEqual({
       kind: 'deny',
-      reason: 'Install only via plugin_install after review.',
+      reason: 'Install only via the capability workflow after review.',
     })
     await expect(guard.preExecute(tool('pwsh', { command: 'Get-ChildItem' }), next)).resolves.toEqual({ kind: 'allow' })
     expect(_testing.isDshPluginAddCommand('dsh plugin add foo')).toBe(true)

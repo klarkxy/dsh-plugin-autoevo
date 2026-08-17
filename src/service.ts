@@ -6,17 +6,14 @@ import type { RuntimeConfig } from './config.js'
 import { CommunityQualityService, type CommunityQualitySource } from './community-quality.js'
 import {
   POLICY_VERSION,
-  type DecideInput,
   type DecisionReceipt,
-  type InstallInput,
   type InstallationRecord,
   type RemotePluginCandidate,
   type RemoveInput,
   type ResolutionAuthorization,
   type ResolutionRecord,
-  type ReviewInput,
+  type ResumeInput,
   type ReviewRecord,
-  type ReviewResult,
 } from './contracts.js'
 import type { CreationGuard } from './creation-guard.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY } from './discovery/remote.js'
@@ -26,8 +23,8 @@ import {
   authorizationFromDecision,
   newDecisionReceipt,
   nextStepForAuthorization,
+  phaseForOption,
   prefersChinese,
-  resolveDecision,
   reviewIdentity,
 } from './lifecycle/decide.js'
 import { PluginInstaller } from './lifecycle/install.js'
@@ -39,6 +36,15 @@ import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
+import { WorkflowEngine } from './workflow/engine.js'
+import type {
+  MarketplaceStepResult,
+  ValidatedResume,
+  WorkflowExec,
+  WorkflowHost,
+  WorkflowPendingInstall,
+  WorkflowView,
+} from './workflow/contracts.js'
 
 export function addExplicitCandidate(
   resolution: ResolutionRecord,
@@ -119,7 +125,7 @@ function waitingAuthorization(
     return {
       state: 'selection_required',
       resolutionId,
-      reason: 'Remote discovery did not finish. Retry capability_resolve; nothing will be created until the user chooses.',
+      reason: 'Remote discovery did not finish. Retry capability_workflow; nothing will be created until the user chooses.',
     }
   }
   return {
@@ -162,12 +168,12 @@ function authorizationForResolution(
     return {
       state: 'selection_required',
       resolutionId: resolution.id,
-      reason: 'This resolution predates the current user-choice policy; run capability_resolve again.',
+      reason: 'This resolution predates the current user-choice policy; run capability_workflow again.',
     }
   }
 
   const decision = latestDecision(resolution)
-  if (decision && decision.action !== 'inspect') {
+  if (decision && decision.action !== 'inspect' && decision.action !== 'search_more') {
     const review = decision.reviewId
       ? reviews.find((item) => item.id === decision.reviewId)
       : undefined
@@ -213,11 +219,16 @@ function withNextStep(record: ResolutionRecord): ResolutionRecord {
   return { ...record, nextStep: nextStepForAuthorization(record.requirement, authorization) }
 }
 
-export class CapabilityEvolutionService {
+function asToolExec(exec: WorkflowExec): ToolRunContext {
+  return exec as ToolRunContext
+}
+
+export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
   private readonly launcher: DshLauncher
   private readonly quality: CommunityQualityService
+  private readonly engine: WorkflowEngine
 
   constructor(
     private readonly ctx: Context,
@@ -241,74 +252,27 @@ export class CapabilityEvolutionService {
       },
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
+    this.engine = new WorkflowEngine(store, creationGuard, this)
   }
 
-  async resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord> {
+  start(requirement: string, exec: ToolRunContext): Promise<WorkflowView> {
+    return this.engine.start(requirement, exec)
+  }
+
+  resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
+    return this.engine.resume(input, exec)
+  }
+
+  remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
+    return this.remover.remove(input, exec)
+  }
+
+  async bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
-    const guardGeneration = this.creationGuard.beginResolution(exec.agent)
-    const local = await resolveLocalCapabilities(this.ctx, requirement, exec)
-    let remoteCandidates: ResolutionRecord['remoteCandidates'] = []
-    let remoteCandidateSource: ResolutionRecord['remoteCandidateSource']
-    let queries: string[] = []
-    let remoteDiscoveryComplete = !local.githubShouldRun
-    let communityQualityScreening: ResolutionRecord['communityQualityScreening']
-    const reasons = [...local.reasons]
-    if (local.githubShouldRun) {
-      const discovery = await discoverRemoteCandidates({
-        ctx: this.ctx,
-        config: this.config,
-        runner: this.runner,
-        cwd: local.cwd,
-        requirement,
-        exec,
-        quality: this.quality,
-      })
-      remoteCandidates = discovery.candidates
-      remoteCandidateSource = discovery.source
-      remoteDiscoveryComplete = discovery.complete
-      queries = discovery.queries
-      reasons.push(...discovery.reasons)
-      communityQualityScreening = discovery.qualityScreening
-      if (discovery.source === 'marketplace-setup') {
-        const setup = await installMarketplace({
-          ctx: this.ctx,
-          config: this.config,
-          launcher: this.launcher,
-          cwd: local.cwd,
-          exec,
-          requirement,
-        })
-        reasons.push(setup.reason)
-        if (setup.status === 'loaded') {
-          const again = await discoverRemoteCandidates({
-            ctx: this.ctx,
-            config: this.config,
-            runner: this.runner,
-            cwd: local.cwd,
-            requirement,
-            exec,
-            quality: this.quality,
-          })
-          remoteCandidates = again.candidates
-          remoteCandidateSource = again.source
-          remoteDiscoveryComplete = again.complete
-          queries = [...queries, ...again.queries]
-          reasons.push(...again.reasons)
-          communityQualityScreening = again.qualityScreening
-        } else if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
-          remoteCandidates = []
-          remoteCandidateSource = undefined
-          remoteDiscoveryComplete = true
-        }
-      }
-    }
-    const decision: ResolutionRecord['decision'] = !local.githubShouldRun
-      ? 'use_local'
-      : remoteCandidateSource === 'marketplace-setup' || remoteCandidates.length > 0
-        ? 'inspect_remote'
-        : 'none'
+    const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec))
+    const decision: ResolutionRecord['decision'] = local.githubShouldRun ? 'none' : 'use_local'
     const id = newResolutionId(requirement)
-    let authorization = waitingAuthorization(id, decision, remoteDiscoveryComplete, remoteCandidateSource)
+    const authorization = waitingAuthorization(id, decision, !local.githubShouldRun)
     const record: ResolutionRecord = {
       schemaVersion: 2,
       id,
@@ -318,206 +282,298 @@ export class CapabilityEvolutionService {
       cwd: local.cwd,
       decision,
       localCandidates: local.candidates,
-      remoteCandidates,
-      ...(remoteCandidateSource ? { remoteCandidateSource } : {}),
-      remoteDiscoveryComplete,
-      ...(communityQualityScreening ? { communityQualityScreening } : {}),
+      remoteCandidates: [],
+      remoteDiscoveryComplete: !local.githubShouldRun,
       authorization,
-      queries,
-      reasons,
+      queries: [],
+      reasons: [...local.reasons],
     }
     const waiting = withNextStep(record)
     await this.store.put('resolutions', waiting)
-    this.creationGuard.applyResolutionAuthorization(exec.agent, waiting.authorization!, guardGeneration)
     return waiting
   }
 
-  async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult> {
-    let resolution = await this.store.getResolution(input.resolutionId)
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
-    let review: ReviewRecord
-    let qualitySource: CommunityQualitySource | undefined
-    if (input.sourceKind === 'github') {
-      if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
-      resolution = await this.ensureInspectFromLastMessage(resolution, input.repository, exec)
-      const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
-      if (!selected.includes(input.repository.toLowerCase())) {
-        throw new EvolutionError(
-          'invalid_input',
-          'This repository was not selected by the user for this resolution',
-          { repository: input.repository },
-        )
-      }
-      const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === input.repository?.toLowerCase())
-      if (!candidate) {
-        throw new EvolutionError('invalid_input', 'The repository is not a candidate from this resolution', {
-          repository: input.repository,
-        })
-      }
-      review = await reviewGithubPlugin({
-        runner: this.runner,
-        config: this.config,
-        cwd: resolution.cwd,
-        repository: candidate.repository,
-        ref: input.ref ?? candidate.defaultBranch ?? 'HEAD',
-        resolutionId: resolution.id,
-        requirement: resolution.requirement,
-        ...(runtimeVersion ? { runtimeVersion } : {}),
-        signal: exec.signal,
+  async discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord> {
+    const discovery = await discoverRemoteCandidates({
+      ctx: this.ctx,
+      config: this.config,
+      runner: this.runner,
+      cwd: resolution.cwd,
+      requirement: resolution.requirement,
+      exec: asToolExec(exec),
+      quality: this.quality,
+    })
+    const decision: ResolutionRecord['decision'] = discovery.source === 'marketplace-setup' || discovery.candidates.length > 0
+      ? 'inspect_remote'
+      : resolution.decision === 'use_local'
+        ? 'use_local'
+        : 'none'
+    const authorization = waitingAuthorization(
+      resolution.id,
+      decision,
+      discovery.complete,
+      discovery.source,
+    )
+    const { remoteCandidateSource: _ignoredSource, ...withoutSource } = resolution
+    void _ignoredSource
+    const next = withNextStep({
+      ...withoutSource,
+      decision,
+      remoteCandidates: discovery.candidates,
+      ...(discovery.source ? { remoteCandidateSource: discovery.source } : {}),
+      remoteDiscoveryComplete: discovery.complete,
+      ...(discovery.qualityScreening ? { communityQualityScreening: discovery.qualityScreening } : {}),
+      authorization,
+      queries: [...resolution.queries, ...discovery.queries],
+      reasons: [...resolution.reasons, ...discovery.reasons],
+    })
+    await this.store.put('resolutions', next)
+    return next
+  }
+
+  async ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord
+    market: MarketplaceStepResult
+  }> {
+    const setup = await installMarketplace({
+      ctx: this.ctx,
+      config: this.config,
+      launcher: this.launcher,
+      cwd: resolution.cwd,
+      exec: asToolExec(exec),
+      requirement: resolution.requirement,
+    })
+    const reasons = [...resolution.reasons, setup.reason]
+    if (setup.status === 'loaded') {
+      const { remoteCandidateSource: _ignored, ...withoutSource } = resolution
+      void _ignored
+      const next = withNextStep({
+        ...withoutSource,
+        reasons,
+        remoteDiscoveryComplete: false,
+        authorization: waitingAuthorization(resolution.id, 'inspect_remote', false),
       })
-      qualitySource = {
+      await this.store.put('resolutions', next)
+      return { resolution: next, market: { status: 'loaded', reason: setup.reason } }
+    }
+    if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
+      const authorization = waitingAuthorization(resolution.id, 'none', true)
+      const { remoteCandidateSource: _ignoredSource, ...withoutSource } = resolution
+      void _ignoredSource
+      const next = withNextStep({
+        ...withoutSource,
+        decision: 'none',
+        remoteCandidates: [],
+        remoteDiscoveryComplete: true,
+        authorization,
+        reasons,
+      })
+      await this.store.put('resolutions', next)
+      return { resolution: next, market: { status: 'empty', reason: setup.reason } }
+    }
+    const authorization: ResolutionAuthorization = {
+      state: 'market_required',
+      resolutionId: resolution.id,
+      reason: prefersChinese(resolution.requirement)
+        ? '市场插件已写入 profile，但当前进程热加载失败。请重启 DSH，再调用 capability_workflow。'
+        : 'The marketplace plugin is a profile dependency, but this process could not hot-load it. Restart DSH, then call capability_workflow again.',
+    }
+    const next = withNextStep({
+      ...resolution,
+      authorization,
+      reasons,
+    })
+    await this.store.put('resolutions', next)
+    return { resolution: next, market: { status: 'restart', reason: setup.reason } }
+  }
+
+  async reviewGithub(
+    resolution: ResolutionRecord,
+    repository: string,
+    ref: string | undefined,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+    const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
+    if (!selected.includes(repository.toLowerCase())) {
+      throw new EvolutionError(
+        'invalid_input',
+        'This repository was not selected by the user for this resolution',
+        { repository },
+      )
+    }
+    const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
+    if (!candidate) {
+      throw new EvolutionError('invalid_input', 'The repository is not a candidate from this resolution', {
+        repository,
+      })
+    }
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const review = await reviewGithubPlugin({
+      runner: this.runner,
+      config: this.config,
+      cwd: resolution.cwd,
+      repository: candidate.repository,
+      ref: ref ?? candidate.defaultBranch ?? 'HEAD',
+      resolutionId: resolution.id,
+      requirement: resolution.requirement,
+      ...(runtimeVersion ? { runtimeVersion } : {}),
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    await this.store.put('reviews', review)
+    try {
+      await this.quality.recordReview({
         repository: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.repository : candidate.repository,
         commit: review.sourceSnapshot.kind === 'github' ? review.sourceSnapshot.commit : '',
         localModification: false,
-      }
-    } else {
-      if (!input.path || !input.baseReviewId) throw new EvolutionError('invalid_input', 'path and baseReviewId are required for a local review')
-      const prior = await this.store.listReviews(resolution.id)
-      const current = authorizationForResolution(resolution, prior)
-      if (current.state !== 'modify_review') {
-        throw new EvolutionError(
-          'invalid_input',
-          'A local modification review requires the user to choose improve-this first',
-          { state: current.state },
-        )
-      }
-      const base = await this.store.getReview(input.baseReviewId)
-      const lineage = [base, ...prior]
-      const root = lineageRootReview(base, lineage)
-      if (base.resolutionId !== resolution.id || root.resolutionId !== resolution.id || root.sourceSnapshot.kind !== 'github') {
-        throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
-      }
-      const local = await reviewLocalPlugin({
-        runner: this.runner,
-        config: this.config,
-        workspaceRoot: resolution.cwd,
-        path: input.path,
-        baseReviewId: base.id,
-        lineageRootCommit: root.sourceSnapshot.commit,
-        resolutionId: resolution.id,
-        requirement: resolution.requirement,
-        ...(runtimeVersion ? { runtimeVersion } : {}),
-      })
-      if (local.record.sourceSnapshot.kind !== 'local'
-        || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
-        throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
-      }
-      review = local.record
-      qualitySource = {
-        repository: root.sourceSnapshot.repository,
-        commit: root.sourceSnapshot.commit,
-        localModification: true,
-      }
-    }
-    await this.store.put('reviews', review)
-    if (qualitySource) {
-      try {
-        await this.quality.recordReview(qualitySource, review)
-      } catch {
-        // Quality reporting is optional and must never change review behavior.
-      }
+      }, review)
+    } catch {
+      // Quality reporting is optional and must never change review behavior.
     }
     const waiting = withNextStep(this.waitingConfirmation(resolution, review))
     await this.store.put('resolutions', waiting)
-    this.creationGuard.applyReviewAuthorization(exec.agent, waiting.authorization!)
-    return {
-      ...review,
-      authorization: waiting.authorization!,
-      ...(waiting.nextStep !== undefined ? { nextStep: waiting.nextStep } : {}),
-    }
+    return { resolution: waiting, review }
   }
 
-  async decide(input: DecideInput, exec: ToolRunContext): Promise<ResolutionRecord> {
-    const resolution = await this.store.getResolution(input.resolutionId)
+  async reviewLocal(
+    resolution: ResolutionRecord,
+    path: string,
+    baseReviewId: string,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+    const prior = await this.store.listReviews(resolution.id)
+    const current = authorizationForResolution(resolution, prior)
+    if (current.state !== 'modify_review') {
+      throw new EvolutionError(
+        'invalid_input',
+        'A local modification review requires the user to choose improve-this first',
+        { state: current.state },
+      )
+    }
+    const base = await this.store.getReview(baseReviewId)
+    const lineage = [base, ...prior]
+    const root = lineageRootReview(base, lineage)
+    if (base.resolutionId !== resolution.id || root.resolutionId !== resolution.id || root.sourceSnapshot.kind !== 'github') {
+      throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
+    }
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const local = await reviewLocalPlugin({
+      runner: this.runner,
+      config: this.config,
+      workspaceRoot: resolution.cwd,
+      path,
+      baseReviewId: base.id,
+      lineageRootCommit: root.sourceSnapshot.commit,
+      resolutionId: resolution.id,
+      requirement: resolution.requirement,
+      ...(runtimeVersion ? { runtimeVersion } : {}),
+    })
+    if (local.record.sourceSnapshot.kind !== 'local'
+      || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
+      throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
+    }
+    const review = local.record
+    await this.store.put('reviews', review)
+    try {
+      await this.quality.recordReview({
+        repository: root.sourceSnapshot.repository,
+        commit: root.sourceSnapshot.commit,
+        localModification: true,
+      }, review)
+    } catch {
+      // Quality reporting is optional and must never change review behavior.
+    }
+    const waiting = withNextStep(this.waitingConfirmation(resolution, review))
+    await this.store.put('resolutions', waiting)
+    return { resolution: waiting, review }
+  }
+
+  async installReviewed(
+    review: ReviewRecord,
+    input: WorkflowPendingInstall,
+    exec: WorkflowExec,
+  ): Promise<InstallationRecord> {
+    const record = await this.installer.install({
+      reviewId: review.id,
+      targetProfile: input.targetProfile,
+      retention: input.retention,
+      ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
+      ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
+    }, asToolExec(exec))
+    try {
+      const source = await this.qualitySourceForReview(review)
+      if (source) await this.quality.recordInstallation(source, review, record)
+    } catch {
+      // Quality reporting is optional and must never change install behavior.
+    }
+    return record
+  }
+
+  async applyDecision(
+    resolution: ResolutionRecord,
+    resume: ValidatedResume,
+    review?: ReviewRecord,
+  ): Promise<ResolutionRecord> {
     if (resolution.authorization?.state === 'market_required') {
       throw new EvolutionError(
         'invalid_input',
-        'Finish marketplace setup and call capability_resolve again before recording a decision',
+        'Finish marketplace setup and call capability_workflow again before recording a decision',
       )
     }
-    const reviews = await this.store.listReviews(resolution.id)
-    const current = authorizationForResolution(resolution, reviews)
-    const phase = current.state === 'confirmation_required'
-      || current.state === 'use_review'
-      || current.state === 'modify_review'
-      || reviews.length > 0
-      || Boolean(input.reviewId)
-      ? 'gate2'
-      : 'gate1'
-    const parsed = resolveDecision({
-      userMessage: input.userMessage,
-      remotes: resolution.remoteCandidates,
-      locals: resolution.localCandidates,
-      phase,
-      previouslySelected: resolution.selectedRepositories ?? [],
-      ...(input.action !== undefined ? { claimedAction: input.action } : {}),
-      ...(input.repositories !== undefined ? { claimedRepositories: input.repositories } : {}),
-    })
-
-    const chinese = prefersChinese(resolution.requirement)
-    if (parsed.searchMore) {
-      const authorization: ResolutionAuthorization = {
-        state: 'selection_required',
-        resolutionId: resolution.id,
-        reason: chinese
-          ? '你选择继续找插件。请再调用 capability_resolve 做一次远程发现。'
-          : 'The user asked to search for plugins. Call capability_resolve again so remote discovery can run.',
-      }
-      const next = withNextStep({
-        ...resolution,
-        authorization,
-        reasons: [...resolution.reasons, authorization.reason],
-      })
-      await this.store.put('resolutions', next)
-      this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
-      return next
-    }
-
-    if (parsed.action === 'use_this' || parsed.action === 'modify_this') {
-      const review = await this.reviewForDecision(resolution.id, input.reviewId, reviews)
-      const selected = resolution.selectedRepositories ?? parsed.selectedRepositories
-      const receipt = newDecisionReceipt('gate2', parsed.action, selected, {
-        reviewId: review.id,
-        reviewIdentity: reviewIdentity(review),
-        userMessage: input.userMessage,
-      })
-      const authorization = authorizationFromDecision(resolution.id, parsed.action, selected, review)
-      const next = withNextStep({
-        ...resolution,
-        authorization,
-        selectedRepositories: selected,
-        decisions: [...(resolution.decisions ?? []), receipt],
-        reasons: [...resolution.reasons, authorization.reason],
-      })
-      await this.store.put('resolutions', next)
-      this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
-      return next
-    }
-
     let nextRecord = resolution
-    const selected = [...parsed.selectedRepositories]
+    const selected = resume.optionId === 'inspect'
+      ? [...resume.repositories]
+      : resume.repositories.length > 0
+        ? [...resume.repositories]
+        : [...(resolution.selectedRepositories ?? [])]
     for (const repository of selected) {
       if (!nextRecord.remoteCandidates.some((item) => item.repository.toLowerCase() === repository.toLowerCase())) {
         nextRecord = addExplicitCandidate(nextRecord, repository).resolution
       }
     }
-    const receipt = newDecisionReceipt('gate1', parsed.action, selected, { userMessage: input.userMessage })
-    const authorization = authorizationFromDecision(nextRecord.id, parsed.action, selected)
+    const receipt = newDecisionReceipt(phaseForOption(resume.optionId), resume.optionId, selected, {
+      userMessage: resume.userMessage,
+      optionId: resume.optionId,
+      ...(review ? { reviewId: review.id, reviewIdentity: reviewIdentity(review) } : {}),
+    })
+    const authorization = authorizationFromDecision(nextRecord.id, resume.optionId, selected, review)
     const next = withNextStep({
       ...nextRecord,
       authorization,
       selectedRepositories: selected,
       decisions: [...(nextRecord.decisions ?? []), receipt],
       reasons: [...nextRecord.reasons, authorization.reason],
-      decision: parsed.action === 'inspect' && selected.length > 0
+      decision: resume.optionId === 'inspect' && selected.length > 0
         ? 'inspect_remote'
-        : parsed.action === 'use_local'
+        : resume.optionId === 'use_local'
           ? 'use_local'
           : nextRecord.decision,
     })
     await this.store.put('resolutions', next)
-    this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
     return next
+  }
+
+  async latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined> {
+    if (reviewId) {
+      const review = await this.store.getReview(reviewId)
+      if (review.resolutionId !== resolutionId) {
+        throw new EvolutionError('invalid_input', 'review_id does not belong to this resolution', { reviewId })
+      }
+      return review
+    }
+    const reviews = await this.store.listReviews(resolutionId)
+    return [...reviews].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1)
+  }
+
+  getResolution(id: string): Promise<ResolutionRecord> {
+    return this.store.getResolution(id)
+  }
+
+  getReview(id: string): Promise<ReviewRecord> {
+    return this.store.getReview(id)
+  }
+
+  getInstallation(id: string): Promise<InstallationRecord> {
+    return this.store.getInstallation(id)
   }
 
   private waitingConfirmation(resolution: ResolutionRecord, review: ReviewRecord): ResolutionRecord {
@@ -537,81 +593,6 @@ export class CapabilityEvolutionService {
       authorization,
       reasons: [...resolution.reasons, authorization.reason],
     }
-  }
-
-  private async ensureInspectFromLastMessage(
-    resolution: ResolutionRecord,
-    repository: string,
-    exec: ToolRunContext,
-  ): Promise<ResolutionRecord> {
-    const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
-    if (selected.includes(repository.toLowerCase())) return resolution
-    const userMessage = this.creationGuard.lastUserMessage(exec.agent)
-    if (!userMessage) return resolution
-    try {
-      return await this.decide({ resolutionId: resolution.id, userMessage }, exec)
-    } catch {
-      return resolution
-    }
-  }
-
-  private async ensureUseThisFromLastMessage(review: ReviewRecord, exec: ToolRunContext): Promise<void> {
-    const resolution = await this.store.getResolution(review.resolutionId)
-    try {
-      this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution)
-      return
-    } catch (error) {
-      const userMessage = this.creationGuard.lastUserMessage(exec.agent)
-      if (!userMessage) throw error
-      try {
-        await this.decide({
-          resolutionId: resolution.id,
-          userMessage,
-          reviewId: review.id,
-        }, exec)
-      } catch {
-        throw error
-      }
-      const updated = await this.store.getResolution(review.resolutionId)
-      this.creationGuard.assertInstallAuthorized(exec.agent, review, updated)
-    }
-  }
-
-  private async reviewForDecision(
-    resolutionId: string,
-    reviewId: string | undefined,
-    reviews: readonly ReviewRecord[],
-  ): Promise<ReviewRecord> {
-    if (reviewId) {
-      const review = await this.store.getReview(reviewId)
-      if (review.resolutionId !== resolutionId) {
-        throw new EvolutionError('invalid_input', 'review_id does not belong to this resolution', { reviewId })
-      }
-      return review
-    }
-    const latest = [...reviews].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1)
-    if (!latest) {
-      throw new EvolutionError('invalid_input', 'A review is required before use-this or improve-this')
-    }
-    return latest
-  }
-
-  async install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
-    const review = await this.store.getReview(input.reviewId)
-    await this.ensureUseThisFromLastMessage(review, exec)
-    const record = await this.installer.install(input, exec)
-    try {
-      const review = await this.store.getReview(record.reviewId)
-      const source = await this.qualitySourceForReview(review)
-      if (source) await this.quality.recordInstallation(source, review, record)
-    } catch {
-      // Quality reporting is optional and must never change install behavior.
-    }
-    return record
-  }
-
-  remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
-    return this.remover.remove(input, exec)
   }
 
   private async revalidate(review: ReviewRecord, signal?: AbortSignal): Promise<boolean> {

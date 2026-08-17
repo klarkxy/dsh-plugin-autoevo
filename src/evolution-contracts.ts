@@ -5,7 +5,7 @@
 
 export const EVOLUTION_PRESET_ID = 'evolution' as const
 export const EVOLUTION_PRESET_DISPLAY_NAME = '能力进化' as const
-export const EVOLUTION_PRESET_DESCRIPTION = '用于按需创造新能力：具备创造模式的全部能力，并提供社区插件复用、审查安装和受控的动态 Cordis 插件创建。' as const
+export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：具备创造模式的全部能力，并提供社区插件复用、审查安装、已有能力升级和受控的动态 Cordis 插件创建；改进过的插件可在明确批准后贡献回上游。' as const
 
 /** Scoped Cordis service key published only behind a preset isolate realm. */
 export const EVOLUTION_MODE_SERVICE_KEY = 'autoevoEvolutionMode' as const
@@ -19,11 +19,8 @@ export const EVOLUTION_MODE_PROTOCOL_VERSION = 1 as const
 /** Managed user-preset manifest filename under the evolution preset directory. */
 export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as const
 
-/**
- * Template version for the bundled `presets/evolution` tree.
- * Bump when any managed template file content changes.
- */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '3' as const
+/** Template version for the bundled `presets/evolution` tree. */
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '1' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -61,26 +58,8 @@ export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[
     schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
     templateVersion: '1',
     files: Object.freeze({
-      'agent.cordis.yml': '1998d90fcb17ab3ca0a43e831ade6fe1f4e9513fe9efbe6777e00c417963edb5',
-      'preset.yml': '6a571f49983f3c3bdde1b70c4500a0594ecea5f67dad7a893895d2952dbda751',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '2',
-    files: Object.freeze({
-      'agent.cordis.yml': '50815c246fb23c6dedee57069541771b5d9b8934a49d5b3b5a043a7af278add9',
-      'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '3',
-    files: Object.freeze({
-      'agent.cordis.yml': '488bf1f349435b969967fc4c78c56d0951082ba8519027039fabe570fdf25a3a',
-      'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
+      'agent.cordis.yml': '9dfcbafa4f20267473c88c8a854f6ff0d400bf7a7a55f9cac3f5e35faa136f0f',
+      'preset.yml': '4e7c85c66dd5b22a46023b85f0f8d730ab9bb2933c31cee4b60246537488fc82',
     }),
   }),
 ])

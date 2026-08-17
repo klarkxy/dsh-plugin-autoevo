@@ -50,8 +50,17 @@ describe('evolution preset template', () => {
     const composition = readFileSync(join(presetRoot, 'agent.cordis.yml'), 'utf8')
     expect(composition).toContain('Capability Evolution')
     expect(composition).toContain('reuse first')
-    expect(composition).toContain('capability_resolve')
+    expect(composition).toContain('capability_workflow')
     expect(composition).toContain('autoevo-plugin-creator')
     expect(composition).toContain('Ordinary coding tools remain available')
+  })
+
+  it('persona covers upgrading existing capabilities and upstream contribution', () => {
+    const composition = readFileSync(join(presetRoot, 'agent.cordis.yml'), 'utf8')
+    expect(composition).toContain('upgrade it in place instead of replacing it')
+    expect(composition).toContain('origin repository and exact commit')
+    expect(composition).toContain('remove the outdated installation by its receipt')
+    expect(composition).toContain('contribute the improvement upstream')
+    expect(composition).toContain('only after the user approves that specific step')
   })
 })

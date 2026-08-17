@@ -10,50 +10,36 @@ AutoEvo 是 DSH Agent 工作流里的 `Capability Reuse Layer`。它把本地解
 User task
    │
    ▼
-capability_resolve
-   ├─ ctx.tools.schemas(scope)
-   ├─ ctx.systemPrompt.assemble(scope)
-   ├─ ctx.skills.list(cwd, scope)
-   └─ local miss ──► find_dsh_plugin (current Agent scope)
-                         │ absent
-                         ▼
-                    script-install dsh-find-plugin (approval)
-                         │ installed, no valid result
-                         ▼
-                    shortlist ──► Agent explains in chat
+capability_workflow
+   ├─ resolve_local
+   ├─ discover_remote / ensure_market
+   └─ INTERRUPT await_selection ──► Agent explains in chat
                          │ user replies
                          ▼
-                    capability_decide (inspect / create / stop)
+           capability_workflow_resume (option_id)
+                         │
+          inspect / search_more / use_local / create_new / stop
                          │ inspect
                          ▼
-                    plugin_review (selected only)
+                    review_github (selected only)
                          │
                          ▼
-                    Agent explains review in chat
+           INTERRUPT await_confirmation ──► Agent explains review
                          │ user replies
                          ▼
-                    capability_decide (use / improve / create / stop)
-                         │ create
-                         ▼
-                    scratch_ready
-                                  │
-                         finder hit
-                                  ▼
-                            plugin_review
-                     exact commit/tree/blob + local Git snapshot
-                                  │
+           capability_workflow_resume (use_this / modify_this / ...)
+                         │
                     full/use ─────┴───── modify (partial, incompat, repairable high)
                        │                       │
                        ▼                       ▼
-                 plugin_install          Agent edits/tests
-                       │                       │
-                 approval once          local re-review
-                       │                       │  HEAD = upstream or descendant
-                       │                       │  base = GitHub or previous local
+                 install_verify          INTERRUPT await_modify_work
+                       │                       │ Agent edits/tests
+                 approval once          resume_modify(path)
+                       │                       │ local re-review, lineage auto
                        │                       │
                        └─────────── use_this ──┘
                                   │
-                    still patching / reinstall ──► same resolution, capability_decide
+                    still patching / reinstall ──► same workflow resume
                                   │
                                   ▼
                       isolated DSH child Agent
@@ -76,7 +62,7 @@ capability_resolve
 
 入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。四个 required services：
 
-- `tools`：枚举能力并注册五个高层工具；
+- `tools`：枚举能力并注册三个高层工具（`capability_workflow`、`capability_workflow_resume`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
@@ -85,7 +71,7 @@ capability_resolve
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_decide` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 `capability_decide` 记入回执的仓库才进入同一套 `plugin_review` exact-commit 门禁。不要用 `ask_user` 在搜完后立刻弹窗。
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 resume 记入回执的仓库才进入同一套 exact-commit 审查门禁。不要用 `ask_user` 在搜完后立刻弹窗。
 
 ## 4. 数据与状态
 
@@ -93,6 +79,7 @@ capability_resolve
 
 ```text
 stateDir/
+├─ workflows/<id>.json
 ├─ resolutions/<id>.json
 ├─ reviews/<id>.json
 ├─ installations/<id>.json
@@ -125,6 +112,8 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，A
 
 本地快照成为 `full` 且用户 `use_this` 之后才能安装。批准后，安装器把已审查字节复制到 owned snapshot，比较完整路径/hash/size，再用 `npm pack --ignore-scripts` 生成 tgz，复核 snapshot 后交给 DSH 的是 owned `file:...tgz`。temporary artifact 随 trial 清理；persistent artifact 随 receipt 驱动的 remove 清理。同一需求的第二刀补丁必须留在这条 resolution：`base_review_id` 可以是上一刀本地 review，HEAD 可以是 lineage root 的后代提交。安装授权看该 resolution 最新一条匹配的 `use_this` 回执，不依赖当前进程里另一次 resolve。
 
+对已装能力的升级复用同一条链路。安装回执（`installations/<id>.json`）经 `reviewId` 指回上游 repository 与 exact commit；Agent 在新的 resolve 里向用户指出该来源，用户选中后按 exact-commit 审查、improve-this、本地重审与固定 tgz 重装，最后按旧回执 `plugin_remove`。从零创建或静态本地插件按普通修复工作升级，不经过新建门禁。
+
 只有当本地修改具备许可证、fit 为 `full` 且已 `verified` 时，贡献建议才会标为可建议。实际提交前先完成当前任务、检查 diff 里的用户特定内容，并取得这一次 fork/push/PR 的明确批准。
 
 ## 7. 实现入口
@@ -134,6 +123,7 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，A
 - [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 优先与内置 `gh` 回退编排、候选归一化和来源记录。
 - [src/github/discovery.ts](../src/github/discovery.ts)：有界 GitHub 候选搜索。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。
+- [src/workflow/engine.ts](../src/workflow/engine.ts)：固定图工作流引擎、interrupt/resume、checkpoint。
 - [src/lifecycle/install.ts](../src/lifecycle/install.ts)：批准、重验证、状态机和失败清理。
 - [src/lifecycle/snapshot.ts](../src/lifecycle/snapshot.ts)：完整本地文件绑定、owned snapshot 与固定 tgz。
 - [src/lifecycle/launcher.ts](../src/lifecycle/launcher.ts)：DSH CLI 与隔离验证进程。

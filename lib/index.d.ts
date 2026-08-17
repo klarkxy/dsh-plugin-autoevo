@@ -56,7 +56,8 @@ type CandidateAvailability = 'available' | 'available_via_tool_search';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup';
 type CommunityQualityClass = 'good' | 'repairable' | 'broken' | 'junk' | 'unknown';
 type DecisionPhase = 'gate1' | 'gate2';
-type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local';
+type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more' | 'resume_modify';
+type WorkflowOptionId = DecisionAction;
 interface DecisionReceipt {
   id: string;
   phase: DecisionPhase;
@@ -65,6 +66,7 @@ interface DecisionReceipt {
   reviewId?: string;
   reviewIdentity?: string;
   userMessage?: string;
+  optionId?: WorkflowOptionId;
   createdAt: string;
 }
 interface ResolutionAuthorization {
@@ -137,7 +139,7 @@ interface ResolutionRecord {
   decisions?: DecisionReceipt[];
   queries: string[];
   reasons: string[];
-  /** Instruction for the Agent: present in chat, then call capability_decide. */
+  /** Instruction for the Agent: present in chat, then call capability_workflow_resume. */
   nextStep?: string;
 }
 type ReviewFit = 'full' | 'partial' | 'none';
@@ -206,10 +208,6 @@ interface ReviewRecord {
   recommendation: ReviewRecommendation;
   installSpec: string | null;
 }
-interface ReviewResult extends ReviewRecord {
-  authorization: ResolutionAuthorization;
-  nextStep?: string;
-}
 type InstallationRetention = 'temporary' | 'persistent';
 type InstallationState = 'installed' | 'not_installed' | 'unknown';
 interface VerificationEvidence {
@@ -259,21 +257,6 @@ interface InstallationRecord {
     reason: string;
   };
 }
-interface DecideInput {
-  resolutionId: string;
-  userMessage: string;
-  action?: DecisionAction | 'search_more';
-  repositories?: string[];
-  reviewId?: string;
-}
-interface ReviewInput {
-  resolutionId: string;
-  sourceKind: 'github' | 'local';
-  repository?: string;
-  ref?: string;
-  path?: string;
-  baseReviewId?: string;
-}
 interface InstallInput {
   reviewId: string;
   targetProfile: string;
@@ -284,8 +267,43 @@ interface InstallInput {
 interface RemoveInput {
   installationId: string;
 }
+interface ResumeInput {
+  workflowId: string;
+  userMessage: string;
+  optionId: WorkflowOptionId;
+  repositories?: string[];
+  path?: string;
+  ref?: string;
+  reviewId?: string;
+  targetProfile?: string;
+  retention?: InstallationRetention;
+  verificationTask?: string;
+  verificationExpectedText?: string;
+}
 //#endregion
 //#region src/creation-guard.d.ts
+type Grant = {
+  state: 'available';
+  resolutionId: string;
+} | {
+  state: 'reserved';
+  resolutionId: string;
+  callId: string;
+};
+interface InstallGrant {
+  resolutionId: string;
+  reviewId: string;
+  reviewIdentity: string;
+}
+interface AgentGateState {
+  generation: number;
+  activeResolutionId?: string;
+  authorization?: ResolutionAuthorization;
+  grant?: Grant;
+  installGrant?: InstallGrant;
+  lastUserMessage?: string;
+  waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work';
+}
 interface UserFacingMessage {
   content?: readonly unknown[];
 }
@@ -302,6 +320,7 @@ declare class CreationGuard {
   beginResolution(agent?: Agent): number | undefined;
   rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
   lastUserMessage(agent: Agent | undefined): string | undefined;
+  setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void;
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
   private setAuthorization;
@@ -347,12 +366,106 @@ declare class CommunityQualityService {
   private atomicWrite;
 }
 //#endregion
+//#region src/workflow/contracts.d.ts
+type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'await_modify_work' | 'review_local' | 'install_verify' | 'grant_scratch' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'scratch_ready';
+type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work';
+interface WorkflowOption {
+  id: WorkflowOptionId;
+  labelEn: string;
+  labelZh: string;
+}
+interface InterruptPayload {
+  kind: InterruptKind;
+  options: WorkflowOption[];
+  facts: Record<string, unknown>;
+}
+interface WorkflowPendingInstall {
+  targetProfile: string;
+  retention: InstallationRetention;
+  verificationTask?: string;
+  verificationExpectedText?: string;
+}
+interface WorkflowRecord {
+  schemaVersion: 1;
+  id: string;
+  policyVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  requirement: string;
+  cwd?: string;
+  resolutionId?: string;
+  status: WorkflowStatus;
+  cursor: WorkflowNodeId;
+  generation: number;
+  interrupt?: InterruptPayload;
+  lineageTipReviewId?: string;
+  lastReviewId?: string;
+  lastInstallationId?: string;
+  forceRemoteDiscovery?: boolean;
+  pendingRepositories?: string[];
+  pendingRef?: string;
+  pendingPath?: string;
+  pendingInstall?: WorkflowPendingInstall;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+interface WorkflowView {
+  workflow: WorkflowRecord;
+  resolution?: ResolutionRecord;
+  review?: ReviewRecord;
+  installation?: InstallationRecord;
+  nextStep?: string;
+}
+interface ValidatedResume {
+  optionId: WorkflowOptionId;
+  userMessage: string;
+  repositories: string[];
+  path?: string;
+  ref?: string;
+  reviewId?: string;
+  install?: WorkflowPendingInstall;
+}
+interface MarketplaceStepResult {
+  status: 'loaded' | 'restart' | 'empty';
+  reason: string;
+}
+interface WorkflowHost {
+  bootstrapResolution(requirement: string, exec: WorkflowExec): Promise<ResolutionRecord>;
+  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
+  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    market: MarketplaceStepResult;
+  }>;
+  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
+  latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
+  getResolution(id: string): Promise<ResolutionRecord>;
+  getReview(id: string): Promise<ReviewRecord>;
+  getInstallation(id: string): Promise<InstallationRecord>;
+}
+interface WorkflowExec {
+  agent?: import('@deepseek-ai/dsh-agent').Agent;
+  signal?: AbortSignal;
+  callId?: string;
+}
+//#endregion
 //#region src/lifecycle/decide.d.ts
 declare function reviewIdentity(review: ReviewRecord): string;
 //#endregion
 //#region src/state/store.d.ts
-type RecordKind = 'resolutions' | 'reviews' | 'installations';
-type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord;
+type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
+type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord;
 declare class StateStore {
   readonly root: string;
   constructor(root: string);
@@ -361,6 +474,7 @@ declare class StateStore {
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
+  getWorkflow(id: string): Promise<WorkflowRecord>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private get;
 }
@@ -439,7 +553,7 @@ declare class PluginRemover {
 }
 //#endregion
 //#region src/service.d.ts
-declare class CapabilityEvolutionService {
+declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly ctx;
   private readonly config;
   private readonly runner;
@@ -449,16 +563,32 @@ declare class CapabilityEvolutionService {
   readonly remover: PluginRemover;
   private readonly launcher;
   private readonly quality;
+  private readonly engine;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, quality?: CommunityQualityService);
-  resolve(requirementInput: string, exec: ToolRunContext): Promise<ResolutionRecord>;
-  review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult>;
-  decide(input: DecideInput, exec: ToolRunContext): Promise<ResolutionRecord>;
-  private waitingConfirmation;
-  private ensureInspectFromLastMessage;
-  private ensureUseThisFromLastMessage;
-  private reviewForDecision;
-  install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord>;
+  start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
+  resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
+  bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord>;
+  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
+  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    market: MarketplaceStepResult;
+  }>;
+  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
+  latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
+  getResolution(id: string): Promise<ResolutionRecord>;
+  getReview(id: string): Promise<ReviewRecord>;
+  getInstallation(id: string): Promise<InstallationRecord>;
+  private waitingConfirmation;
   private revalidate;
   private qualitySourceForReview;
   private dshRuntimeVersion;
