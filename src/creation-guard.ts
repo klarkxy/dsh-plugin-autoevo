@@ -1,17 +1,26 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import type { ResolutionAuthorization } from './contracts.js'
+import type { ResolutionAuthorization, ReviewRecord } from './contracts.js'
+import { EvolutionError } from './errors.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
+import { reviewIdentity } from './lifecycle/decide.js'
 
 type Grant =
   | { state: 'available'; resolutionId: string }
   | { state: 'reserved'; resolutionId: string; callId: string }
+
+interface InstallGrant {
+  resolutionId: string
+  reviewId: string
+  reviewIdentity: string
+}
 
 interface AgentGateState {
   generation: number
   activeResolutionId?: string
   authorization?: ResolutionAuthorization
   grant?: Grant
+  installGrant?: InstallGrant
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -29,9 +38,12 @@ function denialReason(authorization?: ResolutionAuthorization): string {
     return 'AutoEvo denied new Cordis plugin creation: call capability_resolve for the current capability requirement first.'
   }
   const prefix = `AutoEvo denied new Cordis plugin creation for ${authorization.resolutionId}`
-  if (authorization.state === 'reuse_required') return `${prefix}: reuse the available local or reviewed capability. ${authorization.reason}`
-  if (authorization.state === 'modify_required') return `${prefix}: improve the reviewed partial candidate instead of building from scratch. ${authorization.reason}`
-  if (authorization.state === 'review_required') return `${prefix}: finish or retry candidate discovery and review first. ${authorization.reason}`
+  if (authorization.state === 'reuse_local') return `${prefix}: reuse the existing local capability the user chose. ${authorization.reason}`
+  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin the user chose instead of building from scratch. ${authorization.reason}`
+  if (authorization.state === 'use_review') return `${prefix}: the user chose to use a reviewed plugin, not create a new one. ${authorization.reason}`
+  if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_decide. ${authorization.reason}`
+  if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_decide. ${authorization.reason}`
+  if (authorization.state === 'stopped') return `${prefix}: the user stopped. ${authorization.reason}`
   if (authorization.state === 'market_required') {
     return `${prefix}: wait for the DSH plugin marketplace script install and a DSH restart, then call capability_resolve again. Do not create a plugin. ${authorization.reason}`
   }
@@ -88,6 +100,30 @@ export class CreationGuard {
       state.grant = { state: 'available', resolutionId: authorization.resolutionId }
     } else {
       delete state.grant
+    }
+    if (authorization.state === 'use_review' && authorization.reviewId && authorization.reviewIdentity) {
+      state.installGrant = {
+        resolutionId: authorization.resolutionId,
+        reviewId: authorization.reviewId,
+        reviewIdentity: authorization.reviewIdentity,
+      }
+    } else {
+      delete state.installGrant
+    }
+  }
+
+  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord): void {
+    if (!agent) {
+      throw new EvolutionError('review_rejected', 'A live Agent is required to install a reviewed plugin')
+    }
+    const grant = this.states.get(agent)?.installGrant
+    const identity = reviewIdentity(review)
+    if (!grant || grant.reviewId !== review.id || grant.reviewIdentity !== identity) {
+      throw new EvolutionError(
+        'review_rejected',
+        'The user has not chosen to use this reviewed plugin',
+        { reviewId: review.id },
+      )
     }
   }
 

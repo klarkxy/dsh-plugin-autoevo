@@ -31,7 +31,7 @@ try {
   }
   await root.loader.await()
 
-  const expected = ['capability_resolve', 'plugin_install', 'plugin_remove', 'plugin_review']
+  const expected = ['capability_decide', 'capability_resolve', 'plugin_install', 'plugin_remove', 'plugin_review']
   const registered = root.tools.schemas().map((tool) => tool.name).sort()
   assert.deepEqual(registered, expected)
   const assembly = await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) })

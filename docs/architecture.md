@@ -20,7 +20,22 @@ capability_resolve
                     script-install dsh-find-plugin (approval)
                          │ installed, no valid result
                          ▼
-                    no reusable candidate ──► scratch_ready
+                    shortlist ──► Agent explains in chat
+                         │ user replies
+                         ▼
+                    capability_decide (inspect / create / stop)
+                         │ inspect
+                         ▼
+                    plugin_review (selected only)
+                         │
+                         ▼
+                    Agent explains review in chat
+                         │ user replies
+                         ▼
+                    capability_decide (use / improve / create / stop)
+                         │ create
+                         ▼
+                    scratch_ready
                                   │
                          finder hit
                                   ▼
@@ -46,7 +61,7 @@ capability_resolve
 
 动态 Cordis 新建入口还有一条执行门禁。带 Agent 身份的 `cordis_define(kind:new)` 首先要求 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回 AutoEvo 的精确模式标记（owner `dsh-plugin-autoevo` + 协议版本）。标记只由 scoped 导出 `dsh-plugin-autoevo/evolution-mode` 在 preset isolate realm 内发布；preset id 本身不是授权依据。
 
-模式外调用会被拒绝，并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限，并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。状态优先级固定为 `reuse_required > modify_required > review_required > scratch_ready`。
+模式外调用会被拒绝，并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限（仅当用户明确选择新建），并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。空搜索或全部 skip 不会发放创建权限。
 
 权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
 
@@ -56,7 +71,7 @@ capability_resolve
 
 入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。四个 required services：
 
-- `tools`：枚举能力并注册四个高层工具；
+- `tools`：枚举能力并注册五个高层工具；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
@@ -65,7 +80,7 @@ capability_resolve
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件。无论候选来自哪一层，保留下来的候选都必须经过同一套 `plugin_review` exact-commit 门禁。
+远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_decide` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 `capability_decide` 记入回执的仓库才进入同一套 `plugin_review` exact-commit 门禁。不要用 `ask_user` 在搜完后立刻弹窗。
 
 ## 4. 数据与状态
 

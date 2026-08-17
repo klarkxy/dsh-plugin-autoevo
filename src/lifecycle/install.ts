@@ -12,6 +12,7 @@ import type { StateStore } from '../state/store.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 
 export type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>
+export type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void
 
 function validateProfile(profile: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(profile)) {
@@ -147,6 +148,11 @@ async function requestApproval(
   }
 }
 
+function githubInstallSpec(review: ReviewRecord): string | null {
+  if (review.sourceSnapshot.kind !== 'github' || !review.manifest.packageName) return null
+  return `github:${review.sourceSnapshot.repository}#${review.sourceSnapshot.commit}`
+}
+
 export class PluginInstaller {
   constructor(
     private readonly ctx: Context,
@@ -154,6 +160,7 @@ export class PluginInstaller {
     private readonly store: StateStore,
     private readonly launcher: DshLauncher,
     private readonly revalidate: ReviewRevalidator,
+    private readonly authorizeInstall?: InstallAuthorizer,
   ) {}
 
   private async removeOwnedDirectory(candidate: string, ownedRoot: string): Promise<void> {
@@ -172,10 +179,17 @@ export class PluginInstaller {
     const expectedText = verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
-    const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(review.installSpec)
-    if (review.manifest.kind !== 'bundle' || review.fit !== 'full' || review.recommendation !== 'use' || review.securityRisk === 'high'
-      || review.compatibility.status === 'incompatible' || !sourceCanInstall
-      || review.findings.some((finding) => finding.code === 'review_truncated')) {
+    if (this.authorizeInstall) this.authorizeInstall(review, exec)
+    const installableSpec = review.installSpec ?? githubInstallSpec(review)
+    const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(installableSpec)
+    const userChoseUse = Boolean(this.authorizeInstall)
+    const blocked = review.manifest.kind !== 'bundle'
+      || review.fit !== 'full'
+      || review.compatibility.status === 'incompatible'
+      || !sourceCanInstall
+      || review.findings.some((finding) => finding.code === 'review_truncated')
+      || (!userChoseUse && (review.recommendation !== 'use' || review.securityRisk === 'high'))
+    if (blocked) {
       throw new EvolutionError('review_rejected', 'This review does not authorize installation', {
         recommendation: review.recommendation,
         securityRisk: review.securityRisk,
@@ -188,13 +202,20 @@ export class PluginInstaller {
       throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; run plugin_review again')
     }
     const scripts = review.manifest.scripts.length > 0 ? review.manifest.scripts.join(', ') : 'none'
+    const riskFindings = review.findings
+      .filter((finding) => finding.severity === 'block' || review.securityRisk === 'high')
+      .slice(0, 8)
+      .map((finding) => `${finding.code}:${finding.severity}`)
     const findings = review.findings.length > 0
       ? review.findings.slice(0, 8).map((finding) => `${finding.code}:${finding.severity}`).join(', ')
       : 'none'
+    const riskPrefix = review.securityRisk === 'high'
+      ? `HIGH RISK (${riskFindings.join(', ') || review.securityRisk}). `
+      : ''
     await requestApproval(
       this.ctx,
       exec,
-      `Install reviewed ${packageName} into profile ${input.targetProfile} (${input.retention}). Review: fit=${review.fit}, risk=${review.securityRisk}, compatibility=${review.compatibility.status}, lifecycleScripts=${scripts}, findings=${findings}.`,
+      `${riskPrefix}Install reviewed ${packageName} into profile ${input.targetProfile} (${input.retention}). Review: fit=${review.fit}, risk=${review.securityRisk}, compatibility=${review.compatibility.status}, lifecycleScripts=${scripts}, findings=${findings}.`,
       'plugin_install',
     )
 
@@ -207,7 +228,7 @@ export class PluginInstaller {
     if (input.retention === 'temporary') await mkdir(dshHome, { recursive: true })
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
 
-    let installSpec = review.installSpec
+    let installSpec = review.installSpec ?? installableSpec
     let ownedArtifactRoot: string | undefined
     let artifactSha256: string | undefined
     if (review.sourceSnapshot.kind === 'local') {

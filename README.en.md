@@ -51,7 +51,7 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 ## How it works
 
 - Agent-bound `cordis_define` with `plugin.kind = "new"` is allowed only in genuine Capability Evolution mode, and only after `capability_resolve`. Outside that mode the call is denied, with an instruction to switch to Capability Evolution.
-- Inside the mode, reusable local capability, a modifiable candidate, or unfinished review still blocks creation. Only after discovery and review confirm there is no viable candidate does AutoEvo issue one `scratch_ready` grant. Technical failures may retry; success consumes the grant; a new resolution revokes an older one.
+- Inside the mode, AutoEvo pauses after discovery so the user can pick candidates, create new, or stop. Only selected repositories are reviewed. After review it pauses again for use this / create new / stop. `scratch_ready` means the user allowed one new plugin, not “start building”. Cancel is stop, never scratch. Technical failures may retry; success consumes the grant; a new resolution revokes an older one.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not treat generic development tools as plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
 - When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. If that marketplace is missing, AutoEvo installs `dsh-find-plugin` by script after one-time approval and hot-loads it when the host allows. Restart only if hot-load fails. Do not review the marketplace as the requested capability, and do not search GitHub directly. An installed marketplace with no relevant hit means there is no reusable plugin.
@@ -68,18 +68,19 @@ After install and restart, tell the current Agent:
 
 > I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 
-It should call `capability_resolve` first. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
+It should call `capability_resolve` first, explain what each candidate repo is for in chat, then call `capability_decide` after you reply. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
 
 ## Agent tools
 
 | Tool | Role | Surface |
 |---|---|---|
-| `capability_resolve` | Check local capabilities; prefer `find_dsh_plugin`; if the marketplace is missing, approve a script install | read-only / approval when installing marketplace |
-| `plugin_review` | Review a GitHub exact commit or a local Git checkout | read-only |
+| `capability_resolve` | Check local capabilities; prefer `find_dsh_plugin`; if the marketplace is missing, approve a script install. Returns a shortlist; does not pop a form | read-only / approval when installing marketplace |
+| `capability_decide` | Record the user's chat choice (inspect / create new / use this / stop) | read-only |
+| `plugin_review` | Review a user-selected GitHub exact commit or a local Git checkout after improve-this | read-only |
 | `plugin_install` | Revalidate the review, request approval, install the reviewed package, verify a real task | approval |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |
 
-AutoEvo adds these four high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.
+AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.
 
 ## Baseline
 

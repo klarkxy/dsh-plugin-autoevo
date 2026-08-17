@@ -51,7 +51,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 ## 工作方式
 
 - 带 Agent 身份的 `cordis_define`（`plugin.kind = "new"`）只在真正的能力进化模式下放行，且必须先经过 `capability_resolve`。模式外调用会被拒绝，并提示切换到 **能力进化**。
-- 模式内：本地可复用、候选可修改、或候选尚未审完时同样拒绝创建。只有发现和审查都确认没有可用候选后，才发放一次 `scratch_ready`。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
+- 模式内：发现结束后先问用户看哪个、新建还是先停；只深审用户选中的仓库；审完再问用这个还是新建。`scratch_ready` 只表示用户允许自建一次，不是开工令。取消就是停，不会变成自建。技术性失败可重试，成功即消费；新的解析会撤销旧权限。
 - `plugin.kind = "existing"`、普通文件编辑、命令、测试和既有插件修复不受这道门禁影响。门禁不把通用开发工具误判为插件创建。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
 - 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)。若市场未安装，AutoEvo 在一次性批准后用脚本安装 `dsh-find-plugin` 并尽量热加载到当前进程；热加载失败才需要重启。不要审查市场插件，也不要直接用 `gh` 搜索。市场已装但没有相关候选时，视为没有可复用插件。
@@ -68,18 +68,19 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-它应先调用 `capability_resolve`。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
+它应先调用 `capability_resolve`，再在对话里说明搜到的仓库是干什么的，等你回话后才调用 `capability_decide`。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
 
 ## Agent 工具
 
 | 工具 | 作用 | 环境 |
 |---|---|---|
-| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`；没有市场则申请批准并用脚本安装 | 只读 / 装市场时需批准 |
-| `plugin_review` | 审查 GitHub exact commit 或 workspace 内的本地 Git 修改 | 只读 |
+| `capability_resolve` | 检查本地能力；需要时先复用 `find_dsh_plugin`；没有市场则申请批准并用脚本安装。只返回候选，不弹窗 | 只读 / 装市场时需批准 |
+| `capability_decide` | 把用户在对话里的选择记成回执（审哪些 / 新建 / 用这个 / 先停） | 只读 |
+| `plugin_review` | 审查用户已选的 GitHub exact commit，或 improve-this 之后的本地 Git 修改 | 只读 |
 | `plugin_install` | 复核审查凭据、请求批准、安装已审查的包并做真实任务验证 | 需批准 |
 | `plugin_remove` | 按 installation receipt 精确移除 | 需批准 |
 
-AutoEvo 新增这四个高层工具，并在 DSH 工具执行边界上守卫 `cordis_define(kind:new)`；当前 Profile 的其余工具仍由其 Agent scope 决定。
+AutoEvo 新增这些高层工具，并在 DSH 工具执行边界上守卫 `cordis_define(kind:new)`；当前 Profile 的其余工具仍由其 Agent scope 决定。
 
 ## 基线
 

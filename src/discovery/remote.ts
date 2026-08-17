@@ -81,15 +81,39 @@ function normalizeFindPluginCandidates(value: unknown, limit: number): RemotePlu
     .slice(0, limit)
 }
 
+export function annotateRemoteCandidate(
+  requirement: string,
+  candidate: RemotePluginCandidate,
+): RemotePluginCandidate {
+  const haystack = `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''} ${candidate.description} ${candidate.topics.join(' ')}`
+    .toLowerCase()
+  const matchedTerms = [...new Set([
+    ...marketplaceSearchQueries(requirement),
+    ...capabilityQueries(requirement),
+  ])]
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2 && haystack.includes(term.toLowerCase()))
+    .slice(0, 6)
+  return {
+    ...candidate,
+    ...(matchedTerms.length > 0 ? { matchedTerms } : {}),
+    matchReason: matchedTerms.length > 0
+      ? `matched ${matchedTerms.join(', ')}`
+      : 'marketplace summary matched the request',
+  }
+}
+
 function relevantRemoteCandidates(
   requirement: string,
   candidates: readonly RemotePluginCandidate[],
 ): RemotePluginCandidate[] {
-  return candidates.filter((candidate) => matchConfidence(
-    requirement,
-    `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
-    `${candidate.description} ${candidate.topics.join(' ')}`,
-  ) >= 0.3)
+  return candidates
+    .filter((candidate) => matchConfidence(
+      requirement,
+      `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
+      `${candidate.description} ${candidate.topics.join(' ')}`,
+    ) >= 0.3)
+    .map((candidate) => annotateRemoteCandidate(requirement, candidate))
 }
 
 export function findPluginQuery(requirement: string): string {
@@ -192,6 +216,7 @@ export async function discoverRemoteCandidates(options: {
 }
 
 export const _testing = {
+  annotateRemoteCandidate,
   boundedText,
   normalizeFindPluginCandidates,
   relevantFinderCandidates: relevantRemoteCandidates,

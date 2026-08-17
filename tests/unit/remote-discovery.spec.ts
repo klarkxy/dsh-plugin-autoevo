@@ -222,7 +222,13 @@ describe('remote discovery precedence', () => {
       topics: ['dsh-plugin', 'frobulate'],
       packageName: 'dsh-plugin-frobulate',
     }
-    expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([candidate])
+    expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([
+      expect.objectContaining({
+        ...candidate,
+        matchedTerms: expect.arrayContaining(['frobulate']),
+        matchReason: expect.stringContaining('frobulate'),
+      }),
+    ])
   })
 
   it('runs every marketplace phrase and keeps GitHub hits that match the requirement', async () => {

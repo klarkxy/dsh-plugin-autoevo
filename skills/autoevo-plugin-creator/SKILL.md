@@ -27,11 +27,16 @@ Before any new definition, state the concrete capability in one sentence and cal
 
 | Authorization | Required next action | Scratch definition |
 | --- | --- | --- |
-| `reuse_required` | Use the available local tool or skill for the task. | Stop |
-| `review_required` | Review each indicated candidate with `plugin_review`; act on the resulting authorization. | Stop |
-| `modify_required` | Modify the reviewed partial candidate minimally, then review it again. | Stop |
+| `reuse_local` | The user chose an existing local tool or skill. Use it. | Stop |
+| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_decide`. Review only selected repositories. | Stop |
+| `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_decide` (use this / improve it / create new / stop). | Stop |
+| `use_review` | The user chose to use the reviewed plugin. Install it; do not create a replacement. | Stop |
+| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then review the local checkout. | Stop |
 | `market_required` | AutoEvo installs `dsh-find-plugin` by script after approval and hot-loads it when possible. Tell the user to approve if asked. Restart DSH only if hot-load fails. Do not review the marketplace as the requested capability. | Stop |
-| `scratch_ready` | Only after discovery and review found nothing reusable. If you found a GitHub DSH plugin yourself, call `plugin_review` on that `owner/repo` first instead of recreating it. | Allowed once, and only if no unreviewed GitHub plugin remains |
+| `stopped` | The user stopped. Do not install or create. | Stop |
+| `scratch_ready` | The user explicitly allowed one new plugin. This is not a mandate to start building. | Allowed once |
+
+After `capability_resolve` or `plugin_review`, write a conversational summary and wait for the next user message. Then call `capability_decide` with that message verbatim. Do not pop `ask_user`.
 
 Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed `cordis_define(kind: "new")` may retry with the same live grant; a successful one consumes it. Do not bypass a non-scratch result by changing wording, creating a same-named Plugin, or defining a static package.
 

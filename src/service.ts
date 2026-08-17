@@ -5,6 +5,8 @@ import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
 import {
   POLICY_VERSION,
+  type DecideInput,
+  type DecisionReceipt,
   type InstallInput,
   type InstallationRecord,
   type RemotePluginCandidate,
@@ -19,6 +21,14 @@ import type { CreationGuard } from './creation-guard.js'
 import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY } from './discovery/remote.js'
 import { EvolutionError } from './errors.js'
 import { validateGithubRepository } from './github/index.js'
+import {
+  authorizationFromDecision,
+  newDecisionReceipt,
+  nextStepForAuthorization,
+  prefersChinese,
+  resolveDecision,
+  reviewIdentity,
+} from './lifecycle/decide.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { installMarketplace } from './lifecycle/marketplace.js'
@@ -29,11 +39,7 @@ import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 
-function prefersChinese(text: string): boolean {
-  return /[\p{Script=Han}]/u.test(text)
-}
-
-export function adoptGithubCandidate(
+export function addExplicitCandidate(
   resolution: ResolutionRecord,
   repositoryInput: string,
 ): { resolution: ResolutionRecord, candidate: RemotePluginCandidate } {
@@ -56,25 +62,11 @@ export function adoptGithubCandidate(
     updatedAt: null,
     topics: ['dsh-plugin'],
   }
-  const reason = prefersChinese(resolution.requirement)
-    ? `已把 ${repository} 纳入审查。先看现成插件怎么写，不要直接自建。`
-    : `Adopted ${repository} for review. Inspect the existing plugin before creating one.`
-  const authorization: ResolutionAuthorization = {
-    state: 'review_required',
-    resolutionId: resolution.id,
-    reason,
-  }
   return {
     candidate,
     resolution: {
       ...resolution,
-      decision: 'inspect_remote',
       remoteCandidates: [...resolution.remoteCandidates, candidate],
-      remoteCandidateSource: resolution.remoteCandidateSource === 'marketplace-setup' || !resolution.remoteCandidateSource
-        ? 'github'
-        : resolution.remoteCandidateSource,
-      authorization,
-      reasons: [...resolution.reasons, reason],
     },
   }
 }
@@ -109,89 +101,96 @@ function assertRequirement(requirement: string): string {
   return value
 }
 
-function initialAuthorization(
+function waitingAuthorization(
   resolutionId: string,
   decision: ResolutionRecord['decision'],
   remoteDiscoveryComplete: boolean,
   remoteCandidateSource?: ResolutionRecord['remoteCandidateSource'],
 ): ResolutionAuthorization {
-  if (decision === 'use_local') {
-    return { state: 'reuse_required', resolutionId, reason: 'A sufficiently relevant local capability is already available.' }
-  }
   if (decision === 'inspect_remote' && remoteCandidateSource === 'marketplace-setup') {
     return {
       state: 'market_required',
       resolutionId,
-      reason: 'The DSH plugin marketplace (dsh-find-plugin) must finish installing and loading before capability search. Restart is required only when current-process loading fails. It is infrastructure, not the requested capability.',
+      reason: 'The DSH plugin marketplace still needs to finish installing. That is search infrastructure, not permission to create a plugin.',
     }
   }
-  if (decision === 'inspect_remote') {
-    return { state: 'review_required', resolutionId, reason: 'Review every discovered candidate before scratch development.' }
+  if (!remoteDiscoveryComplete && decision !== 'use_local') {
+    return {
+      state: 'selection_required',
+      resolutionId,
+      reason: 'Remote discovery did not finish. Retry capability_resolve; nothing will be created until the user chooses.',
+    }
   }
-  return remoteDiscoveryComplete
-    ? { state: 'scratch_ready', resolutionId, reason: 'Local and remote discovery completed without a reusable candidate; one new Cordis Plugin may be defined.' }
-    : { state: 'review_required', resolutionId, reason: 'Remote discovery did not complete; retry capability_resolve before scratch development.' }
+  return {
+    state: 'selection_required',
+    resolutionId,
+    reason: 'Waiting for the user to choose a candidate, create new, or stop.',
+  }
+}
+
+function latestDecision(resolution: ResolutionRecord): DecisionReceipt | undefined {
+  const decisions = resolution.decisions ?? []
+  return decisions[decisions.length - 1]
 }
 
 function authorizationForResolution(
   resolution: ResolutionRecord,
-  reviews: readonly ReviewRecord[],
+  reviews: readonly ReviewRecord[] = [],
 ): ResolutionAuthorization {
   const legacy = resolution.schemaVersion !== 2 || resolution.policyVersion !== POLICY_VERSION || !resolution.authorization
   if (legacy) {
     return {
-      state: 'review_required',
+      state: 'selection_required',
       resolutionId: resolution.id,
-      reason: 'This resolution predates the current fail-closed policy; run capability_resolve again.',
+      reason: 'This resolution predates the current user-choice policy; run capability_resolve again.',
     }
   }
-  if (resolution.decision === 'use_local') return resolution.authorization!
-  if (resolution.decision === 'none') return resolution.authorization!
 
-  const marketplaceSetup = resolution.remoteCandidateSource === 'marketplace-setup'
-  const latestForCandidate = resolution.remoteCandidates.map((candidate) => {
-    const roots = reviews.filter((review) => review.sourceSnapshot.kind === 'github'
-      && review.sourceSnapshot.repository.toLowerCase() === candidate.repository.toLowerCase())
-    const lineage = roots.flatMap((root) => [
-      root,
-      ...reviews.filter((review) => review.sourceSnapshot.kind === 'local'
-        && review.sourceSnapshot.baseReviewId === root.id),
-    ])
-    return lineage.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0]
-  })
+  const decision = latestDecision(resolution)
+  if (decision && decision.action !== 'inspect') {
+    const review = decision.reviewId
+      ? reviews.find((item) => item.id === decision.reviewId)
+      : undefined
+    return authorizationFromDecision(
+      resolution.id,
+      decision.action,
+      decision.selectedRepositories,
+      review,
+    )
+  }
 
-  if (latestForCandidate.some((review) => review?.recommendation === 'use')) {
+  if (resolution.remoteCandidateSource === 'marketplace-setup' && resolution.decision === 'inspect_remote') {
+    return resolution.authorization?.state === 'market_required'
+      ? resolution.authorization
+      : waitingAuthorization(resolution.id, resolution.decision, Boolean(resolution.remoteDiscoveryComplete), resolution.remoteCandidateSource)
+  }
+
+  const selected = resolution.selectedRepositories ?? []
+  if (selected.length > 0) {
+    const reviewed = selected.some((repository) => reviews.some((review) => review.sourceSnapshot.kind === 'github'
+      && review.sourceSnapshot.repository.toLowerCase() === repository.toLowerCase()))
     return {
-      state: 'reuse_required',
+      state: reviewed ? 'confirmation_required' : 'selection_required',
       resolutionId: resolution.id,
-      reason: marketplaceSetup
-        ? 'Install the reviewed DSH plugin marketplace, restart DSH, then call capability_resolve again.'
-        : 'At least one reviewed candidate is a complete reusable fit.',
+      reason: reviewed
+        ? 'A selected plugin was reviewed. The user must choose use this, create new, or stop.'
+        : 'Review only the repositories the user selected.',
+      selectedRepositories: selected,
     }
   }
-  if (latestForCandidate.some((review) => review?.recommendation === 'modify')) {
-    return {
-      state: 'modify_required',
-      resolutionId: resolution.id,
-      reason: 'At least one reviewed candidate can be improved instead of replaced.',
-    }
-  }
-  if (latestForCandidate.some((review) => review === undefined)) {
-    return {
-      state: marketplaceSetup ? 'market_required' : 'review_required',
-      resolutionId: resolution.id,
-      reason: marketplaceSetup
-        ? 'Install the DSH plugin marketplace (awesome-dsh-plugin/dsh-find-plugin) first, or skip it only if the user declines. Direct GitHub search is not used as a fallback.'
-        : 'Every discovered candidate must reach a terminal review before scratch development.',
-    }
-  }
-  return {
-    state: 'scratch_ready',
-    resolutionId: resolution.id,
-    reason: marketplaceSetup
-      ? 'The user declined the plugin marketplace; one new Cordis Plugin may be defined.'
-      : 'Every discovered candidate was reviewed and rejected; one new Cordis Plugin may be defined.',
-  }
+
+  return resolution.authorization ?? waitingAuthorization(
+    resolution.id,
+    resolution.decision,
+    Boolean(resolution.remoteDiscoveryComplete),
+    resolution.remoteCandidateSource,
+  )
+}
+
+function withNextStep(record: ResolutionRecord): ResolutionRecord {
+  const authorization = record.authorization
+  if (!authorization) return record
+  return { ...record, nextStep: nextStepForAuthorization(record.requirement, authorization) }
 }
 
 export class CapabilityEvolutionService {
@@ -207,7 +206,14 @@ export class CapabilityEvolutionService {
     private readonly creationGuard: CreationGuard,
   ) {
     this.launcher = new DshLauncher(runner, config)
-    this.installer = new PluginInstaller(ctx, config, store, this.launcher, (review, signal) => this.revalidate(review, signal))
+    this.installer = new PluginInstaller(
+      ctx,
+      config,
+      store,
+      this.launcher,
+      (review, signal) => this.revalidate(review, signal),
+      (review, exec) => this.creationGuard.assertInstallAuthorized(exec.agent, review),
+    )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
   }
 
@@ -258,6 +264,10 @@ export class CapabilityEvolutionService {
           remoteDiscoveryComplete = again.complete
           queries = [...queries, ...again.queries]
           reasons.push(...again.reasons)
+        } else if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
+          remoteCandidates = []
+          remoteCandidateSource = undefined
+          remoteDiscoveryComplete = true
         }
       }
     }
@@ -267,7 +277,7 @@ export class CapabilityEvolutionService {
         ? 'inspect_remote'
         : 'none'
     const id = newResolutionId(requirement)
-    const authorization = initialAuthorization(id, decision, remoteDiscoveryComplete, remoteCandidateSource)
+    let authorization = waitingAuthorization(id, decision, remoteDiscoveryComplete, remoteCandidateSource)
     const record: ResolutionRecord = {
       schemaVersion: 2,
       id,
@@ -284,24 +294,31 @@ export class CapabilityEvolutionService {
       queries,
       reasons,
     }
-    await this.store.put('resolutions', record)
-    this.creationGuard.applyResolutionAuthorization(exec.agent, authorization, guardGeneration)
-    return record
+    const waiting = withNextStep(record)
+    await this.store.put('resolutions', waiting)
+    this.creationGuard.applyResolutionAuthorization(exec.agent, waiting.authorization!, guardGeneration)
+    return waiting
   }
 
   async review(input: ReviewInput, exec: ToolRunContext): Promise<ReviewResult> {
-    let resolution = await this.store.getResolution(input.resolutionId)
+    const resolution = await this.store.getResolution(input.resolutionId)
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     let review: ReviewRecord
     if (input.sourceKind === 'github') {
       if (!input.repository) throw new EvolutionError('invalid_input', 'repository is required for a GitHub review')
-      let candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === input.repository?.toLowerCase())
+      const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
+      if (!selected.includes(input.repository.toLowerCase())) {
+        throw new EvolutionError(
+          'invalid_input',
+          'This repository was not selected by the user for this resolution',
+          { repository: input.repository },
+        )
+      }
+      const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === input.repository?.toLowerCase())
       if (!candidate) {
-        const adopted = adoptGithubCandidate(resolution, input.repository)
-        resolution = adopted.resolution
-        candidate = adopted.candidate
-        await this.store.put('resolutions', resolution)
-        this.creationGuard.applyReviewAuthorization(exec.agent, resolution.authorization!)
+        throw new EvolutionError('invalid_input', 'The repository is not a candidate from this resolution', {
+          repository: input.repository,
+        })
       }
       review = await reviewGithubPlugin({
         runner: this.runner,
@@ -316,6 +333,15 @@ export class CapabilityEvolutionService {
       })
     } else {
       if (!input.path || !input.baseReviewId) throw new EvolutionError('invalid_input', 'path and baseReviewId are required for a local review')
+      const prior = await this.store.listReviews(resolution.id)
+      const current = authorizationForResolution(resolution, prior)
+      if (current.state !== 'modify_review') {
+        throw new EvolutionError(
+          'invalid_input',
+          'A local modification review requires the user to choose improve-this first',
+          { state: current.state },
+        )
+      }
       const base = await this.store.getReview(input.baseReviewId)
       if (base.resolutionId !== resolution.id || base.sourceSnapshot.kind !== 'github') {
         throw new EvolutionError('invalid_input', 'baseReviewId must be a GitHub review for the same resolution')
@@ -337,9 +363,144 @@ export class CapabilityEvolutionService {
       review = local.record
     }
     await this.store.put('reviews', review)
-    const authorization = authorizationForResolution(resolution, await this.store.listReviews(resolution.id))
+    const waiting = withNextStep(this.waitingConfirmation(resolution, review))
+    await this.store.put('resolutions', waiting)
+    this.creationGuard.applyReviewAuthorization(exec.agent, waiting.authorization!)
+    return {
+      ...review,
+      authorization: waiting.authorization!,
+      ...(waiting.nextStep !== undefined ? { nextStep: waiting.nextStep } : {}),
+    }
+  }
+
+  async decide(input: DecideInput, exec: ToolRunContext): Promise<ResolutionRecord> {
+    const resolution = await this.store.getResolution(input.resolutionId)
+    if (resolution.authorization?.state === 'market_required') {
+      throw new EvolutionError(
+        'invalid_input',
+        'Finish marketplace setup and call capability_resolve again before recording a decision',
+      )
+    }
+    const reviews = await this.store.listReviews(resolution.id)
+    const current = authorizationForResolution(resolution, reviews)
+    const phase = current.state === 'confirmation_required'
+      || current.state === 'use_review'
+      || current.state === 'modify_review'
+      || reviews.length > 0
+      || Boolean(input.reviewId)
+      ? 'gate2'
+      : 'gate1'
+    const parsed = resolveDecision({
+      userMessage: input.userMessage,
+      remotes: resolution.remoteCandidates,
+      locals: resolution.localCandidates,
+      phase,
+      ...(input.action !== undefined ? { claimedAction: input.action } : {}),
+      ...(input.repositories !== undefined ? { claimedRepositories: input.repositories } : {}),
+    })
+
+    const chinese = prefersChinese(resolution.requirement)
+    if (parsed.searchMore) {
+      const authorization: ResolutionAuthorization = {
+        state: 'selection_required',
+        resolutionId: resolution.id,
+        reason: chinese
+          ? '你选择继续找插件。请再调用 capability_resolve 做一次远程发现。'
+          : 'The user asked to search for plugins. Call capability_resolve again so remote discovery can run.',
+      }
+      const next = withNextStep({
+        ...resolution,
+        authorization,
+        reasons: [...resolution.reasons, authorization.reason],
+      })
+      await this.store.put('resolutions', next)
+      this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
+      return next
+    }
+
+    if (parsed.action === 'use_this' || parsed.action === 'modify_this') {
+      const review = await this.reviewForDecision(resolution.id, input.reviewId, reviews)
+      const selected = resolution.selectedRepositories ?? parsed.selectedRepositories
+      const receipt = newDecisionReceipt('gate2', parsed.action, selected, {
+        reviewId: review.id,
+        reviewIdentity: reviewIdentity(review),
+        userMessage: input.userMessage,
+      })
+      const authorization = authorizationFromDecision(resolution.id, parsed.action, selected, review)
+      const next = withNextStep({
+        ...resolution,
+        authorization,
+        selectedRepositories: selected,
+        decisions: [...(resolution.decisions ?? []), receipt],
+        reasons: [...resolution.reasons, authorization.reason],
+      })
+      await this.store.put('resolutions', next)
+      this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
+      return next
+    }
+
+    let nextRecord = resolution
+    const selected = [...parsed.selectedRepositories]
+    for (const repository of selected) {
+      if (!nextRecord.remoteCandidates.some((item) => item.repository.toLowerCase() === repository.toLowerCase())) {
+        nextRecord = addExplicitCandidate(nextRecord, repository).resolution
+      }
+    }
+    const receipt = newDecisionReceipt('gate1', parsed.action, selected, { userMessage: input.userMessage })
+    const authorization = authorizationFromDecision(nextRecord.id, parsed.action, selected)
+    const next = withNextStep({
+      ...nextRecord,
+      authorization,
+      selectedRepositories: selected,
+      decisions: [...(nextRecord.decisions ?? []), receipt],
+      reasons: [...nextRecord.reasons, authorization.reason],
+      decision: parsed.action === 'inspect' && selected.length > 0
+        ? 'inspect_remote'
+        : parsed.action === 'use_local'
+          ? 'use_local'
+          : nextRecord.decision,
+    })
+    await this.store.put('resolutions', next)
     this.creationGuard.applyReviewAuthorization(exec.agent, authorization)
-    return { ...review, authorization }
+    return next
+  }
+
+  private waitingConfirmation(resolution: ResolutionRecord, review: ReviewRecord): ResolutionRecord {
+    const chinese = prefersChinese(resolution.requirement)
+    const authorization: ResolutionAuthorization = {
+      state: 'confirmation_required',
+      resolutionId: resolution.id,
+      reason: chinese
+        ? '审查已完成。先在对话里讲清结果，再等用户选择用这个、在这个上改、新建或先停。'
+        : 'Review finished. Explain it in chat, then wait for the user to choose use this, improve it, create new, or stop.',
+      selectedRepositories: resolution.selectedRepositories ?? [],
+      reviewId: review.id,
+      reviewIdentity: reviewIdentity(review),
+    }
+    return {
+      ...resolution,
+      authorization,
+      reasons: [...resolution.reasons, authorization.reason],
+    }
+  }
+
+  private async reviewForDecision(
+    resolutionId: string,
+    reviewId: string | undefined,
+    reviews: readonly ReviewRecord[],
+  ): Promise<ReviewRecord> {
+    if (reviewId) {
+      const review = await this.store.getReview(reviewId)
+      if (review.resolutionId !== resolutionId) {
+        throw new EvolutionError('invalid_input', 'review_id does not belong to this resolution', { reviewId })
+      }
+      return review
+    }
+    const latest = [...reviews].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1)
+    if (!latest) {
+      throw new EvolutionError('invalid_input', 'A review is required before use-this or improve-this')
+    }
+    return latest
   }
 
   install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
@@ -407,9 +568,10 @@ export class CapabilityEvolutionService {
 }
 
 export const _testing = {
-  adoptGithubCandidate,
+  addExplicitCandidate,
   assertRequirement,
   authorizationForResolution,
-  initialAuthorization,
   materialReviewFacts,
+  reviewIdentity,
+  waitingAuthorization,
 }

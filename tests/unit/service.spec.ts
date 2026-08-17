@@ -64,7 +64,7 @@ function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
     remoteCandidateSource: 'github',
     remoteDiscoveryComplete: true,
     ...(schemaVersion === 2
-      ? { authorization: { state: 'review_required' as const, resolutionId: id, reason: 'review candidates' } }
+      ? { authorization: { state: 'selection_required' as const, resolutionId: id, reason: 'review candidates' } }
       : {}),
     queries: [],
     reasons: [],
@@ -85,78 +85,78 @@ function candidateReview(repository: string, recommendation: ReviewRecord['recom
 }
 
 describe('resolution authorization state', () => {
-  it('maps initial resolution outcomes and fails closed on incomplete discovery', () => {
+  it('maps unfinished discovery to waiting states and never mints scratch without a decision', () => {
     const id = resolution().id
-    expect(_testing.initialAuthorization(id, 'use_local', true).state).toBe('reuse_required')
-    expect(_testing.initialAuthorization(id, 'inspect_remote', true).state).toBe('review_required')
-    expect(_testing.initialAuthorization(id, 'inspect_remote', true, 'marketplace-setup').state).toBe('market_required')
-    expect(_testing.initialAuthorization(id, 'none', true).state).toBe('scratch_ready')
-    expect(_testing.initialAuthorization(id, 'none', false).state).toBe('review_required')
+    expect(_testing.waitingAuthorization(id, 'use_local', true).state).toBe('selection_required')
+    expect(_testing.waitingAuthorization(id, 'inspect_remote', true).state).toBe('selection_required')
+    expect(_testing.waitingAuthorization(id, 'inspect_remote', true, 'marketplace-setup').state).toBe('market_required')
+    expect(_testing.waitingAuthorization(id, 'none', true).state).toBe('selection_required')
+    expect(_testing.waitingAuthorization(id, 'none', false).state).toBe('selection_required')
   })
 
   it('fails closed for legacy resolutions', () => {
-    expect(_testing.authorizationForResolution(resolution(1), []).state).toBe('review_required')
+    expect(_testing.authorizationForResolution(resolution(1), []).state).toBe('selection_required')
   })
 
-  it('prioritizes reuse and modify over incomplete reviews', () => {
-    expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'use', '1')]).state)
-      .toBe('reuse_required')
-    expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'modify', '2')]).state)
-      .toBe('modify_required')
-  })
-
-  it('keeps review required while any candidate is unreviewed', () => {
+  it('does not turn skip or empty review lists into scratch', () => {
     expect(_testing.authorizationForResolution(resolution(), [candidateReview('acme/one', 'skip', '3')]).state)
-      .toBe('review_required')
+      .toBe('selection_required')
+    expect(_testing.authorizationForResolution(resolution(), [
+      candidateReview('acme/one', 'skip', '4'),
+      candidateReview('acme/two', 'skip', '5'),
+    ]).state).toBe('selection_required')
   })
 
-  it('adopts an explicit GitHub plugin so review can run instead of scratch', () => {
+  it('adds an explicit GitHub plugin only as a candidate, not as a review grant', () => {
     const record = resolution()
     record.decision = 'none'
     record.remoteCandidates = []
     delete record.remoteCandidateSource
     record.authorization = {
-      state: 'scratch_ready',
+      state: 'selection_required',
       resolutionId: record.id,
       reason: 'no candidates',
     }
-    const adopted = _testing.adoptGithubCandidate(record, 'toolazytoname/dsh-plugin-grok')
-    expect(adopted.candidate.repository).toBe('toolazytoname/dsh-plugin-grok')
-    expect(adopted.resolution.decision).toBe('inspect_remote')
-    expect(adopted.resolution.authorization?.state).toBe('review_required')
-    expect(adopted.resolution.remoteCandidates.map((item) => item.repository)).toEqual(['toolazytoname/dsh-plugin-grok'])
-    expect(() => _testing.adoptGithubCandidate(record, 'awesome-dsh-plugin/dsh-find-plugin')).toThrow(/marketplace infrastructure/)
+    const added = _testing.addExplicitCandidate(record, 'toolazytoname/dsh-plugin-grok')
+    expect(added.candidate.repository).toBe('toolazytoname/dsh-plugin-grok')
+    expect(added.resolution.remoteCandidates.map((item) => item.repository)).toEqual(['toolazytoname/dsh-plugin-grok'])
+    expect(added.resolution.authorization?.state).toBe('selection_required')
+    expect(() => _testing.addExplicitCandidate(record, 'awesome-dsh-plugin/dsh-find-plugin')).toThrow(/marketplace infrastructure/)
   })
 
-  it('authorizes scratch only after every candidate is rejected', () => {
-    expect(_testing.authorizationForResolution(resolution(), [
-      candidateReview('acme/one', 'skip', '4'),
-      candidateReview('acme/two', 'skip', '5'),
-    ]).state).toBe('scratch_ready')
+  it('mints action grants only from a recorded human decision', () => {
+    const record = resolution()
+    record.decisions = [{
+      id: `decision_${'a'.repeat(24)}`,
+      phase: 'gate1',
+      action: 'create_new',
+      selectedRepositories: [],
+      createdAt: '2026-08-17T00:00:00.000Z',
+    }]
+    expect(_testing.authorizationForResolution(record, []).state).toBe('scratch_ready')
+
+    record.decisions = [{
+      id: `decision_${'b'.repeat(24)}`,
+      phase: 'gate2',
+      action: 'use_this',
+      selectedRepositories: ['acme/one'],
+      reviewId: candidateReview('acme/one', 'use', '1').id,
+      reviewIdentity: '1'.repeat(40),
+      createdAt: '2026-08-17T00:00:00.000Z',
+    }]
+    expect(_testing.authorizationForResolution(record, [candidateReview('acme/one', 'use', '1')]).state)
+      .toBe('use_review')
   })
 
-  it('keeps marketplace setup required until the user installs or declines it', () => {
+  it('keeps marketplace setup required until discovery can finish', () => {
     const record = resolution()
     record.remoteCandidateSource = 'marketplace-setup'
-    record.remoteCandidates = [{
-      repository: 'awesome-dsh-plugin/dsh-find-plugin',
-      name: 'dsh-find-plugin',
-      description: 'marketplace',
-      stars: 0,
-      updatedAt: null,
-      topics: ['dsh-plugin'],
-    }]
+    record.remoteCandidates = []
     record.authorization = {
       state: 'market_required',
       resolutionId: record.id,
       reason: 'install marketplace',
     }
     expect(_testing.authorizationForResolution(record, []).state).toBe('market_required')
-    expect(_testing.authorizationForResolution(record, [
-      candidateReview('awesome-dsh-plugin/dsh-find-plugin', 'use', '6'),
-    ]).state).toBe('reuse_required')
-    expect(_testing.authorizationForResolution(record, [
-      candidateReview('awesome-dsh-plugin/dsh-find-plugin', 'skip', '7'),
-    ]).state).toBe('scratch_ready')
   })
 })

@@ -1,7 +1,8 @@
-export const POLICY_VERSION = 'v3-2026-08-16'
+export const POLICY_VERSION = 'v5-2026-08-17'
 
 export const TOOL_NAMES = [
   'capability_resolve',
+  'capability_decide',
   'plugin_review',
   'plugin_install',
   'plugin_remove',
@@ -10,14 +11,39 @@ export const TOOL_NAMES = [
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 export type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none'
-export type AuthorizationState = 'reuse_required' | 'review_required' | 'modify_required' | 'market_required' | 'scratch_ready'
+/** Evidence states wait; action states are minted only after a recorded human answer. */
+export type AuthorizationState =
+  | 'selection_required'
+  | 'confirmation_required'
+  | 'market_required'
+  | 'stopped'
+  | 'reuse_local'
+  | 'use_review'
+  | 'modify_review'
+  | 'scratch_ready'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'github' | 'marketplace-setup'
+export type DecisionPhase = 'gate1' | 'gate2'
+export type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local'
+
+export interface DecisionReceipt {
+  id: string
+  phase: DecisionPhase
+  action: DecisionAction
+  selectedRepositories: string[]
+  reviewId?: string
+  reviewIdentity?: string
+  userMessage?: string
+  createdAt: string
+}
 
 export interface ResolutionAuthorization {
   state: AuthorizationState
   resolutionId: string
   reason: string
+  selectedRepositories?: string[]
+  reviewId?: string
+  reviewIdentity?: string
 }
 
 export interface LocalCapabilityCandidate {
@@ -37,6 +63,8 @@ export interface RemotePluginCandidate {
   topics: string[]
   packageName?: string
   defaultBranch?: string
+  matchedTerms?: string[]
+  matchReason?: string
 }
 
 export interface ResolutionRecord {
@@ -53,10 +81,14 @@ export interface ResolutionRecord {
   remoteCandidateSource?: RemoteCandidateSource
   /** Whether every configured discovery fallback completed successfully. */
   remoteDiscoveryComplete?: boolean
-  /** Present on V2 records created by policy V3. */
+  /** Present on V2 records created by the current policy. */
   authorization?: ResolutionAuthorization
+  selectedRepositories?: string[]
+  decisions?: DecisionReceipt[]
   queries: string[]
   reasons: string[]
+  /** Instruction for the Agent: present in chat, then call capability_decide. */
+  nextStep?: string
 }
 
 export type ReviewFit = 'full' | 'partial' | 'none'
@@ -135,6 +167,7 @@ export interface ReviewRecord {
 
 export interface ReviewResult extends ReviewRecord {
   authorization: ResolutionAuthorization
+  nextStep?: string
 }
 
 export type InstallationRetention = 'temporary' | 'persistent'
@@ -191,6 +224,14 @@ export interface InstallationRecord {
 
 export interface ResolveInput {
   requirement: string
+}
+
+export interface DecideInput {
+  resolutionId: string
+  userMessage: string
+  action?: DecisionAction | 'search_more'
+  repositories?: string[]
+  reviewId?: string
 }
 
 export interface ReviewInput {

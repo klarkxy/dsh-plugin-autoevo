@@ -32,7 +32,7 @@ AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agen
 
 1. 真正的能力进化模式：`agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 必须返回 owner 为 `dsh-plugin-autoevo` 且协议版本匹配的标记。preset id 或同名外来 preset 不能冒充。
 2. 模式外：拒绝并提示切换到 **能力进化**；即使内存里残留 `scratch_ready` 也不放行。
-3. 模式内：没有当前 Agent 的 `scratch_ready` 权限时，调用会以明确理由失败；`reuse_required`、`modify_required` 与 `review_required` 均不能创建。权限在调用进入前绑定 callId，避免并发消费；失败或取消后恢复，成功后消费。每次新的 `capability_resolve` 先撤销旧权限，并建立新的 generation；较晚返回的旧解析，以及不属于该 Agent 当前 resolution 的 review，都不能恢复或覆盖权限。
+3. 模式内：没有当前 Agent 的 `scratch_ready` 权限时，调用会以明确理由失败；`reuse_local`、`use_review`、`modify_review`、`selection_required`、`confirmation_required`、`stopped` 与 `market_required` 均不能创建。权限只在 `capability_decide` 记下与用户原话匹配的「新建」后发放，并在调用进入前绑定 callId，避免并发消费；失败或取消后恢复，成功后消费。每次新的 `capability_resolve` 先撤销旧权限，并建立新的 generation；较晚返回的旧解析，以及不属于该 Agent 当前 resolution 的 review，都不能恢复或覆盖权限。搜完或审完后不得用 `ask_user` 直接弹窗；必须先在对话里说明候选或审查结果。
 
 这不是通用代码意图分类器：普通编辑、命令、测试、Git 操作、AutoEvo 自身安装流程、无 Agent 的内部工具调用与 `cordis_define(kind:existing)` 不在门禁范围内。官方 Creator 技能不被全局禁用。权限仅驻留内存；持久 V1/V2 旧记录不会在重启后恢复创建能力。
 

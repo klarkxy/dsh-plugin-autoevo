@@ -90,7 +90,7 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(execution('call-final'))).toContain('call capability_resolve')
   })
 
-  it.each(['reuse_required', 'review_required', 'modify_required', 'market_required'] as const)(
+  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'modify_review', 'use_review', 'market_required', 'stopped'] as const)(
     'keeps new definitions blocked in evolution mode for %s',
     async (state) => {
       const guard = inModeGuard()
@@ -186,7 +186,7 @@ describe('new Cordis Plugin creation guard', () => {
     const guard = inModeGuard()
     const staleGeneration = guard.beginResolution(agent)!
     const currentGeneration = guard.beginResolution(agent)!
-    const current = { ...authorization('reuse_required'), resolutionId: `resolution_${'b'.repeat(24)}` }
+    const current = { ...authorization('reuse_local'), resolutionId: `resolution_${'b'.repeat(24)}` }
     expect(guard.applyResolutionAuthorization(agent, current, currentGeneration)).toBe(true)
     expect(guard.applyResolutionAuthorization(agent, authorization('scratch_ready'), staleGeneration)).toBe(false)
     expect(guard.authorization(agent)).toEqual(current)
@@ -195,7 +195,7 @@ describe('new Cordis Plugin creation guard', () => {
 
   it('only lets reviews update the active in-memory resolution for the same Agent', () => {
     const guard = inModeGuard()
-    const active = { ...authorization('review_required'), resolutionId: `resolution_${'c'.repeat(24)}` }
+    const active = { ...authorization('selection_required'), resolutionId: `resolution_${'c'.repeat(24)}` }
     resolveAs(guard, active)
     const foreign = { ...authorization('scratch_ready'), resolutionId: `resolution_${'d'.repeat(24)}` }
     expect(guard.applyReviewAuthorization(agent, foreign)).toBe(false)
