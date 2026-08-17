@@ -17,12 +17,12 @@
 ## 安装
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.4.0
 ```
 
 安装后重启对应的 DSH 进程。bundle 在进程启动时加载。
 
-升级时把 tag 换成新版本，再执行同一条安装命令，例如 `#v0.2.0` 换成 `#v0.2.1`。
+升级时把 tag 换成新版本，再执行同一条安装命令，例如 `#v0.4.0` 换成 `#v0.4.1`。
 
 DSH 的 `plugin` 命令把依赖操作转交给 pnpm。semver、Git tag 和 exact commit 都能钉住版本，但 DSH 不会自动追踪或热加载。固定版本后需要显式升级并重启。
 
@@ -33,7 +33,7 @@ pnpm install
 pnpm build
 New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
 npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.2.0.tgz"
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.4.0.tgz"
 ```
 
 开发包同样使用不可变 `file:...tgz`。这也避开了 DSH rc.6 在 Windows 上转交含空格 `link:` 路径时的参数拆分问题。第三方候选也会打成 owned `file:...tgz`。
@@ -84,7 +84,7 @@ AutoEvo 新增这些高层工具，并在 DSH 工具执行边界上守卫 `cordi
 
 ## 基线
 
-维护线 `0.2.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
+维护线 `0.4.0`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
 
 ```powershell
 node --version

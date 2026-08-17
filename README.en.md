@@ -17,12 +17,12 @@ English | [Chinese](README.md)
 ## Install
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.2.0
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.4.0
 ```
 
 Restart the corresponding DSH process afterward. Bundles load at process start.
 
-To upgrade, replace the tag and run the same command again, for example `#v0.2.0` to `#v0.2.1`.
+To upgrade, replace the tag and run the same command again, for example `#v0.4.0` to `#v0.4.1`.
 
 DSH forwards `plugin` operations to pnpm. Semver, Git tags, and exact commits all pin a version, but DSH does not track or hot-load new releases. After pinning a tag or commit, upgrade explicitly and restart.
 
@@ -33,7 +33,7 @@ pnpm install
 pnpm build
 New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
 npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.2.0.tgz"
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.4.0.tgz"
 ```
 
 The development install also uses an immutable `file:...tgz`. This avoids DSH rc.6 splitting a Windows `link:` argument whose path contains spaces. Third-party candidates likewise become owned `file:...tgz` packages.
@@ -84,7 +84,7 @@ AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH'
 
 ## Baseline
 
-Maintenance line `0.2.0`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
+Maintenance line `0.4.0`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
 
 ```powershell
 node --version
