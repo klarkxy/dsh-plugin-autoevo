@@ -161,7 +161,7 @@ describe('materializeEvolutionPreset', () => {
     await mkdir(crlfTemplate, { recursive: true })
     for (const name of ['preset.yml', 'agent.cordis.yml'] as const) {
       const body = await readFile(path.join(packageTemplate, name), 'utf8')
-      await writeFile(path.join(crlfTemplate, name), body.replace(/\n/gu, '\r\n'), 'utf8')
+      await writeFile(path.join(crlfTemplate, name), body.replace(/\r\n/gu, '\n').replace(/\n/gu, '\r\n'), 'utf8')
     }
     await materializeEvolutionPreset({ dshHome, enabled: true, templateDir: crlfTemplate })
 

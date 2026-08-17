@@ -189,7 +189,7 @@ async function listExactChildren(directory: string): Promise<string[]> {
 
 /** Managed preset files are text. Hash and write LF so Windows autocrlf checkouts stay upgradeable. */
 function normalizeManagedText(bytes: Uint8Array): Buffer {
-  return Buffer.from(Buffer.from(bytes).toString('utf8').replace(/\r\n/gu, '\n'), 'utf8')
+  return Buffer.from(Buffer.from(bytes).toString('utf8').replace(/\r\n/gu, '\n').replace(/\r/gu, '\n'), 'utf8')
 }
 
 async function hashFile(filePath: string): Promise<string> {
