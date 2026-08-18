@@ -209,29 +209,34 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
     throw new EvolutionError('invalid_input', 'modify_this requires a review')
   }
   if (ctx.host.prepareModify) {
-    const prepared = await ctx.host.prepareModify(current, review, ctx.exec)
+    const prepared = await ctx.host.prepareModify(current, review, ctx.exec, ctx.workflow)
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
-      return { kind: 'next', node: 'review_local', resolution: prepared.resolution, review }
+      ctx.workflow.managedSourceId = prepared.path
     }
     if (prepared.deferred) {
       return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution, review }
     }
+    if (prepared.path) {
+      return { kind: 'next', node: 'review_local', resolution: prepared.resolution, review }
+    }
     return { kind: 'done', node: 'modify_authorized', resolution: prepared.resolution, review }
   }
-  // Commit-1 placeholder: record authorization without accepting a model-selected path.
   return { kind: 'done', node: 'modify_authorized', resolution: current, review }
 }
 
 async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   if (ctx.host.prepareCreate) {
-    const prepared = await ctx.host.prepareCreate(current, ctx.exec)
+    const prepared = await ctx.host.prepareCreate(current, ctx.exec, ctx.workflow)
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
-      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
+      ctx.workflow.managedSourceId = prepared.path
     }
     if (prepared.deferred) {
+      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
+    }
+    if (prepared.path) {
       return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
     }
     return { kind: 'done', node: 'create_authorized', resolution: prepared.resolution }

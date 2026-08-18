@@ -136,10 +136,12 @@ export interface WorkflowHost {
     resolution: ResolutionRecord,
     review: ReviewRecord,
     exec: WorkflowExec,
+    workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
   prepareCreate?(
     resolution: ResolutionRecord,
     exec: WorkflowExec,
+    workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
   applyDecision(
     resolution: ResolutionRecord,

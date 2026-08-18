@@ -35,6 +35,7 @@ import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
 import { probeWorkspaceWriteSandbox, type SandboxStack } from './sandbox-probe.js'
+import { SourceManager, sourceIdForCreate, sourceIdForRepository } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import { WorkflowEngine } from './workflow/engine.js'
@@ -236,6 +237,7 @@ function asToolExec(exec: WorkflowExec): ToolRunContext {
 export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
+  readonly sources: SourceManager
   private readonly launcher: DshLauncher
   private readonly engine: WorkflowEngine
 
@@ -247,6 +249,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly creationGuard: CreationGuard,
   ) {
     this.launcher = new DshLauncher(runner, config)
+    this.sources = new SourceManager(config, runner)
     this.installer = new PluginInstaller(
       ctx,
       config,
@@ -487,32 +490,36 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return record
   }
 
-  private managedSourceProbeCwd(sourceKey: string): string {
-    return path.join(this.config.stateDir, 'sources', sourceKey)
-  }
-
   private async assertChildSandbox(sourceKey: string): Promise<void> {
-    await probeWorkspaceWriteSandbox(resolveSandboxStack(this.ctx), this.managedSourceProbeCwd(sourceKey))
+    await probeWorkspaceWriteSandbox(resolveSandboxStack(this.ctx), this.sources.sourcePath(sourceKey))
   }
 
   async prepareModify(
     resolution: ResolutionRecord,
     review: ReviewRecord,
-    _exec: WorkflowExec,
+    exec: WorkflowExec,
+    workflow: { id: string },
   ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
-    const sourceKey = review.sourceSnapshot.kind === 'github'
-      ? review.sourceSnapshot.repository.toLowerCase().replace(/[^\w.-]+/gu, '_')
-      : `local_${review.id.slice(-12)}`
-    // Fail closed unless the live sandbox stack can host a workspace-write child at the managed source cwd.
+    if (review.sourceSnapshot.kind !== 'github') {
+      throw new EvolutionError('invalid_input', 'modify_this currently materializes only from a GitHub review commit')
+    }
+    const sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
     await this.assertChildSandbox(sourceKey)
-    return { resolution }
+    const receipt = await this.sources.materializeReviewedGithub({
+      review,
+      workflowId: workflow.id,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    // Child edits the managed source next; local re-review happens after the child returns.
+    return { resolution, path: receipt.path, deferred: true }
   }
 
   async prepareCreate(
     resolution: ResolutionRecord,
     _exec: WorkflowExec,
+    _workflow: { id: string },
   ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
-    const sourceKey = `create_${resolution.id.slice(-12)}`
+    const sourceKey = sourceIdForCreate(resolution.id)
     await this.assertChildSandbox(sourceKey)
     return { resolution }
   }

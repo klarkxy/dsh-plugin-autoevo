@@ -4,6 +4,8 @@ import Schema from '@deepseek-ai/schemastery'
 export interface Config {
   dshHome?: string
   stateDir?: string
+  /** Managed plugin source repositories. Defaults to `<stateDir>/sources`. */
+  sourceDir?: string
   ghCommand?: string
   gitCommand?: string
   dshCommand?: string
@@ -21,6 +23,7 @@ export interface Config {
 export interface RuntimeConfig {
   dshHome: string
   stateDir: string
+  sourceDir: string
   ghCommand: string
   gitCommand: string
   dshCommand: string
@@ -37,6 +40,7 @@ export interface RuntimeConfig {
 export const Config: Schema<Config> = Schema.object({
   dshHome: Schema.string().default(''),
   stateDir: Schema.string().default(''),
+  sourceDir: Schema.string().default(''),
   ghCommand: Schema.string().default('gh'),
   gitCommand: Schema.string().default('git'),
   dshCommand: Schema.string().default('dsh'),
@@ -52,9 +56,11 @@ export const Config: Schema<Config> = Schema.object({
 
 export function normalizeConfig(input: Config): RuntimeConfig {
   const dshHome = path.resolve(input.dshHome || process.env.DSH_HOME || path.join(process.cwd(), '.dsh'))
+  const stateDir = path.resolve(input.stateDir || path.join(dshHome, 'autoevo'))
   return {
     dshHome,
-    stateDir: path.resolve(input.stateDir || path.join(dshHome, 'autoevo')),
+    stateDir,
+    sourceDir: path.resolve(input.sourceDir || path.join(stateDir, 'sources')),
     ghCommand: input.ghCommand || 'gh',
     gitCommand: input.gitCommand || 'git',
     dshCommand: input.dshCommand || 'dsh',
