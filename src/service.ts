@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { valid } from 'semver'
@@ -33,6 +34,7 @@ import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
+import { probeWorkspaceWriteSandbox, type SandboxStack } from './sandbox-probe.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import { WorkflowEngine } from './workflow/engine.js'
@@ -44,6 +46,15 @@ import type {
   WorkflowPendingInstall,
   WorkflowView,
 } from './workflow/contracts.js'
+
+function resolveSandboxStack(ctx: Context): SandboxStack | undefined {
+  const direct = ctx.get('sandbox') as SandboxStack | undefined
+  if (direct && (direct.filesystem || direct.shell)) return direct
+  const filesystem = ctx.get('filesystem') as SandboxStack['filesystem'] | undefined
+  const shell = ctx.get('shell') as SandboxStack['shell'] | undefined
+  if (filesystem || shell) return { filesystem, shell }
+  return undefined
+}
 
 export function addExplicitCandidate(
   resolution: ResolutionRecord,
@@ -474,6 +485,36 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
     }, asToolExec(exec))
     return record
+  }
+
+  private managedSourceProbeCwd(sourceKey: string): string {
+    return path.join(this.config.stateDir, 'sources', sourceKey)
+  }
+
+  private async assertChildSandbox(sourceKey: string): Promise<void> {
+    await probeWorkspaceWriteSandbox(resolveSandboxStack(this.ctx), this.managedSourceProbeCwd(sourceKey))
+  }
+
+  async prepareModify(
+    resolution: ResolutionRecord,
+    review: ReviewRecord,
+    _exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
+    const sourceKey = review.sourceSnapshot.kind === 'github'
+      ? review.sourceSnapshot.repository.toLowerCase().replace(/[^\w.-]+/gu, '_')
+      : `local_${review.id.slice(-12)}`
+    // Fail closed unless the live sandbox stack can host a workspace-write child at the managed source cwd.
+    await this.assertChildSandbox(sourceKey)
+    return { resolution }
+  }
+
+  async prepareCreate(
+    resolution: ResolutionRecord,
+    _exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
+    const sourceKey = `create_${resolution.id.slice(-12)}`
+    await this.assertChildSandbox(sourceKey)
+    return { resolution }
   }
 
   async applyDecision(

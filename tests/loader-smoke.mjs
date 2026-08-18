@@ -42,6 +42,8 @@ try {
   assert.match(policy.text, /Before implementing a new capability, call capability_workflow/u)
   assert.match(policy.text, /capability_workflow_resume/u)
   assert.match(policy.text, /create_authorized/u)
+  assert.match(policy.text, /workspace-write/u)
+  assert.match(policy.text, /integrity-oriented partial isolation/u)
   assert.match(policy.text, /Never fork, push, or open an upstream PR without explicit user approval/u)
   assert.doesNotMatch(policy.text, /replaces the shipped cordis-plugin-development/u)
 
