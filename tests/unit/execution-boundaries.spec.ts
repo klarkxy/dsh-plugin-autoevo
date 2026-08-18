@@ -60,12 +60,14 @@ describe('child execution boundaries', () => {
     expect(child.guard(exec('pwsh', { command: 'C:\\ProgramData\\Git\\git.exe push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
     expect(child.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
     expect(child.guard(exec('bash', { command: 'pnpm publish' }))).toMatch(/publication/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm install --store-dir .pnpm-store' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('bash', { command: 'npx vitest run' }))).toMatch(/dependency installation/i)
     expect(child.guard(exec('external_mutator'))).toMatch(/unrecognized tool/i)
   })
 
-  it('allows in-repo filesystem work, shell tests, and read-only git inspection', async () => {
+  it('allows the Code Mode transport, in-repo filesystem work, shell tests, and read-only git inspection', async () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    for (const call of [exec('write'), exec('read'), exec('pwsh', { command: 'pnpm test' }), exec('bash', { command: 'git diff --check' })]) {
+    for (const call of [exec('run_code'), exec('write'), exec('read'), exec('pwsh', { command: 'pnpm test' }), exec('bash', { command: 'git diff --check' })]) {
       await expect(child.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
   })

@@ -49,6 +49,27 @@ function isPathInside(parent: string, candidate: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
+const FORBIDDEN_UNTRACKED_PREFIXES = [
+  '.pnpm-store',
+  'node_modules',
+  'coverage',
+  'build-test',
+  '.vite',
+  '.turbo',
+  '.cache',
+  '.nyc_output',
+] as const
+
+function forbiddenUntrackedPath(status: string): string | undefined {
+  for (const line of status.split(/\r?\n/u)) {
+    if (!line.startsWith('?? ')) continue
+    const candidate = line.slice(3).trim().replaceAll('\\', '/').replace(/^"|"$/gu, '')
+    if (FORBIDDEN_UNTRACKED_PREFIXES.some((prefix) => candidate === prefix
+      || candidate.startsWith(`${prefix}/`))) return candidate
+  }
+  return undefined
+}
+
 /**
  * Cross-platform lock-holder liveness probe.
  * - non-positive PID => dead/invalid (eligible for stale recovery)
@@ -477,6 +498,12 @@ export class SourceManager {
     if (!pending) {
       throw new EvolutionError('invalid_input', 'Managed child returned without changing the source repository')
     }
+    const forbiddenPath = forbiddenUntrackedPath(pending)
+    if (forbiddenPath) {
+      throw new EvolutionError('review_rejected', 'Managed child left dependency/cache artifacts in the source repository', {
+        path: forbiddenPath,
+      })
+    }
     await this.git(root, ['add', '-A'], input.signal)
     const hooksDir = await this.disabledHooksPath()
     await this.runner.run({
@@ -589,4 +616,5 @@ export const _testing = {
   sourceIdForRepository,
   sourceIdForCreate,
   hashObject,
+  forbiddenUntrackedPath,
 }

@@ -8,7 +8,7 @@ import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DshManagedChildHost } from '../../src/managed-child.js'
+import { DshManagedChildHost, _testing as managedChildTesting } from '../../src/managed-child.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 
 const temporary: string[] = []
@@ -110,6 +110,25 @@ function runtime(cwd: string, owned = true) {
 }
 
 describe('real Host-managed child lifecycle', () => {
+  it('injects a final-only instruction at the soft budget and rejects the hard-limit step', async () => {
+    const budget = new managedChildTesting.ChildTurnBudget()
+    const next = vi.fn(async () => ({ kind: 'enter' as const, messages: [] }))
+
+    await expect(budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT - 1, [], next))
+      .resolves.toEqual({ kind: 'enter', messages: [] })
+    expect(budget.denialReason()).toBeUndefined()
+
+    const forced = await budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT, [], next)
+    expect(forced.kind).toBe('enter')
+    expect(forced.kind === 'enter' && forced.messages.at(-1)?.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(managedChildTesting.CHILD_RESULT_MARKER),
+    })
+    expect(budget.denialReason()).toBe(managedChildTesting.CHILD_BUDGET_DENIAL)
+    await expect(budget.preStep(managedChildTesting.CHILD_HARD_STEP_LIMIT, [], next))
+      .resolves.toEqual({ kind: 'reject' })
+  })
+
   it('creates an owned cwd-bound child, installs policy/guards before the turn, and disposes it', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-host-'))
     temporary.push(cwd)
@@ -122,6 +141,15 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.preExecuteInstalled).toBe(true)
     expect(live.guardInstalled).toBe(true)
     expect(live.followups).toHaveLength(1)
+    const instruction = live.followups[0]?.content
+      .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n') ?? ''
+    expect(instruction).toContain('attempt the project\'s normal test command at most once')
+    expect(instruction).toContain('make the first source edit before step 16')
+    expect(instruction).toContain('spawn EPERM')
+    expect(instruction).toContain('Do not retry it, create alternate runners/configs')
+    expect(instruction).toContain(`${managedChildTesting.CHILD_SOFT_STEP_LIMIT}-step soft budget`)
     expect(result.taskResult).toMatch(/AUTOEVO_CHILD_COMPLETED$/u)
     expect(live.disposed).toHaveBeenCalledOnce()
   })

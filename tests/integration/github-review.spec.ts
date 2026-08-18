@@ -36,6 +36,8 @@ describe('local review binding', () => {
         runtimeVersion: '0.1.0-rc.6',
       })
       expect(result.record.sourceSnapshot).toEqual({ kind: 'local', path: plugin, baseReviewId: 'review_0123456789abcdef', baseCommit: 'b'.repeat(40), statusHash: expect.any(String) })
+      expect(result.record.sourceSnapshot.kind === 'local' && result.record.sourceSnapshot.statusHash)
+        .not.toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
       expect(result.record.installSpec).toBeNull()
       expect(result.record.inspectedFiles.map((file) => file.path)).toContain('native.wasm')
       expect(result.contentHash).toMatch(/^[a-f0-9]{64}$/)

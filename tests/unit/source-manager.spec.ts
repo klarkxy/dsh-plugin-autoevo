@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import type { CommandRunner } from '../../src/process/runner.js'
-import { SourceManager, sourceIdForRepository } from '../../src/source-manager.js'
+import { SourceManager, sourceIdForRepository, _testing as sourceTesting } from '../../src/source-manager.js'
 
 const temporary: string[] = []
 
@@ -244,6 +244,26 @@ describe('SourceManager defaults and provenance', () => {
     expect(recorded).toMatchObject({ reviewId: `review_${'e'.repeat(64)}`, artifactHash: 'f'.repeat(64) })
     await manager.completeWorkflow(receipt.sourceId, workflowId)
     expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBeNull()
+  })
+
+  it('rejects untracked dependency stores before Host git add', async () => {
+    expect(sourceTesting.forbiddenUntrackedPath('?? .pnpm-store/v10/files/cache\n')).toBe('.pnpm-store/v10/files/cache')
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-cache-'))
+    temporary.push(root)
+    const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
+      head: 'c'.repeat(40), branch: 'main', dirty: '',
+    }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'9'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    state.dirty = '?? .pnpm-store/\n M src/index.ts\n'
+    await expect(manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'fix: should reject cache',
+    })).rejects.toThrow(/dependency\/cache artifacts/i)
+    expect(state.commits).toBeUndefined()
   })
 
   it('rejects child tampering with repository Git configuration before Host commit', async () => {

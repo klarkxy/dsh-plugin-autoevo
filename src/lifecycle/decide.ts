@@ -14,12 +14,12 @@ import { EvolutionError } from '../errors.js'
 import { hashObject } from '../state/hashes.js'
 import type { InterruptPayload, ValidatedResume, WorkflowPendingInstall } from '../workflow/contracts.js'
 
-const CREATE_NEW_RE = /新建|从零|自己写|自己做|create new|from scratch|没有合适|都不行|都不想用|都不合适/iu
+const CREATE_NEW_RE = /新建|从零|自己写|自己做|create[_ -]?new|from scratch|没有合适|都不行|都不想用|都不合适/iu
 const STOP_RE = /先停|停下|停止|取消|算了|stop for now|\bstop\b|\bcancel\b/iu
-const USE_THIS_RE = /用这个|就用这个|使用这个|use this|install this|采用这个/iu
-const MODIFY_THIS_RE = /在这个上改|改进这个|改这个|improve this|modify this|patch this/iu
-const USE_LOCAL_RE = /用已有|本地能力|use (?:the )?local|use existing/iu
-const SEARCH_MORE_RE = /继续找|再搜|search more|search anyway|找插件/iu
+const USE_THIS_RE = /用这个|就用这个|使用这个|use[_ -]?this|install this|采用这个/iu
+const MODIFY_THIS_RE = /在这个上改|改进这个|改这个|improve this|modify[_ -]?this|patch this/iu
+const USE_LOCAL_RE = /用已有|本地能力|use[_ -]?(?:the[_ -]?)?local|use existing/iu
+const SEARCH_MORE_RE = /继续找|再搜|search[_ -]?more|search anyway|找插件/iu
 const INSPECT_RE = /审查|先看|具体看看|inspect|review|看看/iu
 const PERSISTENT_RE = /永久|持久|persistent|keep installed/iu
 const TEMPORARY_RE = /临时|试用|temporary|trial/iu
@@ -104,8 +104,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '先在对话里讲清这次审查：匹配程度、风险、缺什么、主要发现。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume（只用 workflow_id 与 interrupt_id）。'
-      : 'Explain the review in chat (fit, risk, missing pieces, findings). Do not call ask_user. After the user replies, call capability_workflow_resume with only workflow_id and interrupt_id.'
+      ? '先在对话里讲清这次审查：匹配程度、风险、缺什么、主要发现。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume（只用 workflow_id 与 interrupt_id）。用户选择“在这个上改”时，不要在 resume 前追加设计问卷，也不要声称修改会立即安装；Host 会把真实用户回合交给子会话，修改后重新审查并再次确认。'
+      : 'Explain the review in chat (fit, risk, missing pieces, findings). Do not call ask_user. After the user replies, call capability_workflow_resume with only workflow_id and interrupt_id. When the user chooses to modify this candidate, do not add a design questionnaire before resume or claim modification installs immediately; the Host relays the authentic user turn to the child, then returns the result for a fresh review and confirmation.'
   }
   if (authorization.state === 'create_authorized') {
     return zh

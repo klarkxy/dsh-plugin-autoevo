@@ -578,7 +578,10 @@ export async function reviewLocalPlugin(options: {
   const baseCommit = lineageRoot.toLowerCase()
   const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
   const snapshot = await inspectLocalDirectory(canonicalRoot, options.config)
-  const statusHash = sha256(status)
+  // A Host-committed managed change has a clean worktree, so status alone is
+  // always the SHA-256 of empty text. Bind the local identity to exact HEAD as
+  // well as any residual status to distinguish reviewed commits truthfully.
+  const statusHash = sha256(`${head.toLowerCase()}\n${status}`)
   const contentHash = hashObject(snapshot.files.map((file) => ({ path: file.path, sha256: sha256(file.content), bytes: file.content.byteLength })))
   const record = evaluatePluginContent({
     resolutionId: options.resolutionId,

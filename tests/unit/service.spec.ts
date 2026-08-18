@@ -36,6 +36,27 @@ describe('review revalidation identity', () => {
   })
 })
 
+describe('managed modification instruction', () => {
+  it('relays the authenticated Host user turn instead of only the original requirement', () => {
+    const record = resolution()
+    const selected = candidateReview('acme/one', 'use', '1')
+    record.decisions = [{
+      id: `decision_${'c'.repeat(24)}`,
+      phase: 'gate2',
+      action: 'modify_this',
+      selectedRepositories: ['acme/one'],
+      reviewId: selected.id,
+      reviewIdentity: '1'.repeat(40),
+      userMessage: '在这个上改：支持勾选多段指定对话，再拼成一张长截图。先不要装。',
+      createdAt: '2026-08-18T00:00:00.000Z',
+    }]
+
+    const task = _testing.modificationTask(record, selected)
+    expect(task).toContain(`original capability requirement: ${record.requirement}`)
+    expect(task).toContain('Authenticated user modification instruction: 在这个上改：支持勾选多段指定对话，再拼成一张长截图。先不要装。')
+  })
+})
+
 function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
   const id = `resolution_${'b'.repeat(24)}`
   return {

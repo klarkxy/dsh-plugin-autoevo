@@ -31,11 +31,13 @@ const DELEGATION_TOOLS = new Set([
 const PLUGIN_MUTATION_TOOLS = new Set(['plugin_install', 'plugin_remove', 'dsh_plugin_add', 'dsh_plugin_remove'])
 const READ_ONLY_DISCOVERY_TOOLS = new Set(['find_dsh_plugin', 'web_search', 'web_fetch', 'skill', 'read_skill'])
 const CHILD_SUPPORT_TOOLS = new Set(['todo_write', 'todo_read'])
+const CODE_MODE_TRANSPORT_TOOL = 'run_code'
 const GIT_COMMAND_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const SAFE_GIT_READ_RE = /(?:^|[\s&])["']?git(?:\.exe)?["']?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b/iu
 const GH_COMMAND_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const DSH_PLUGIN_MUTATION_RE = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|remove|rm|uninstall)\b/iu
 const PACKAGE_PUBLICATION_RE = /(?:^|[\s;&|])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
+const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\s;&|])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -128,6 +130,10 @@ export class ExecutionGuard {
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
+    // DSH Code Mode reserves run_code as a presentation-only transport. Every
+    // SDK sub-dispatch re-enters tools/pre-execute and this guard with its real
+    // tool name, so allowing the wrapper grants no endpoint capability.
+    if (name === CODE_MODE_TRANSPORT_TOOL) return undefined
     if (AUTOEVO_TOOLS.has(name)) {
       return 'Managed source child session denies AutoEvo decision tools; return to the parent workflow for confirmation.'
     }
@@ -151,6 +157,9 @@ export class ExecutionGuard {
       if (PACKAGE_PUBLICATION_RE.test(command)) {
         return 'Managed source child session denies package publication and release/version commands.'
       }
+      if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
+        return 'Managed source child session denies dependency installation or mutation; use only the reviewed repository inputs already present.'
+      }
       if (hasUnsafeGitCommand(command)) {
         return 'Managed source child session permits only read-only git status/diff/show/log/rev-parse; the Host owns commits and publication.'
       }
@@ -171,6 +180,8 @@ export const _testing = {
   hasUnsafeGitCommand,
   DSH_PLUGIN_MUTATION_RE,
   PACKAGE_PUBLICATION_RE,
+  PACKAGE_DEPENDENCY_MUTATION_RE,
   matchesSet,
   shellCommandText,
+  CODE_MODE_TRANSPORT_TOOL,
 }

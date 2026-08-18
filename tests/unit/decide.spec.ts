@@ -5,6 +5,7 @@ import { CreationGuard } from '../../src/creation-guard.js'
 import {
   assertUseThisReceipt,
   inferOptionId,
+  nextStepForAuthorization,
   resolveDecisionFromHost,
   resolveRepositoryFromMessage,
   reviewIdentity,
@@ -50,10 +51,28 @@ function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload 
 }
 
 describe('resume validation', () => {
+  it('tells the model to resume an explicit modification without inventing another gate', () => {
+    const text = nextStepForAuthorization('改进插件', {
+      state: 'confirmation_required',
+      resolutionId: `resolution_${'f'.repeat(24)}`,
+      reason: 'review complete',
+    })
+    expect(text).toContain('不要在 resume 前追加设计问卷')
+    expect(text).toContain('修改后重新审查并再次确认')
+  })
+
   it('infers inspect from a host turn that names a candidate repository', () => {
     expect(inferOptionId('先看 MirDie/dsh-xai', interrupt(['inspect', 'stop']), remotes)).toBe('inspect')
     expect(resolveRepositoryFromMessage('审查 MirDie/dsh-xai', remotes)).toEqual(['MirDie/dsh-xai'])
     expect(_testing.CREATE_NEW_RE.test('Create new')).toBe(true)
+  })
+
+  it('accepts the canonical option id together with the authentic modification details', () => {
+    expect(inferOptionId(
+      '确认 modify_this：按 turn 支持不连续多选，按原顺序拼成一张长截图并保留细分隔线。',
+      interrupt(['modify_this', 'stop']),
+      remotes,
+    )).toBe('modify_this')
   })
 
   it('derives the decision and repository only from the fresh Host user turn', () => {

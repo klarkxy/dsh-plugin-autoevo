@@ -1,18 +1,54 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentRegistry, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import { setSandboxMode, type SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
 import { EvolutionError } from './errors.js'
 import { ExecutionGuard } from './execution-guard.js'
 import type { CommandRunner } from './process/runner.js'
 import { probeWorkspaceWriteSandbox } from './sandbox-probe.js'
 
 const CHILD_RESULT_MARKER = 'AUTOEVO_CHILD_COMPLETED'
+const CHILD_SOFT_STEP_LIMIT = 48
+const CHILD_HARD_STEP_LIMIT = 52
+const CHILD_BUDGET_DENIAL = 'Managed child execution budget is exhausted; stop calling tools and return the final result marker now.'
+
+function childBudgetMessage(): UserMessage {
+  return createUserMessage({
+    source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
+    content: [{
+      type: 'text',
+      text: `Host execution budget reached. Do not call any more tools or attempt more verification. Summarize the changes and checks already completed, state any skipped check honestly, and finish now with final line exactly ${CHILD_RESULT_MARKER}.`,
+    }],
+  })
+}
+
+class ChildTurnBudget {
+  private forcingFinal = false
+
+  async preStep(
+    step: number,
+    messages: UserMessage[],
+    next: () => Promise<PreStepDecision>,
+  ): Promise<PreStepDecision> {
+    if (step >= CHILD_HARD_STEP_LIMIT) {
+      this.forcingFinal = true
+      return { kind: 'reject' }
+    }
+    const decision = await next()
+    if (decision.kind === 'reject' || step < CHILD_SOFT_STEP_LIMIT) return decision
+    this.forcingFinal = true
+    return { kind: 'enter', messages: [...decision.messages, childBudgetMessage()] }
+  }
+
+  denialReason(): string | undefined {
+    return this.forcingFinal ? CHILD_BUDGET_DENIAL : undefined
+  }
+}
 
 export interface ManagedChildRequest {
   parent: Agent
@@ -89,8 +125,12 @@ ${task}
 
 Rules enforced by the Host:
 - Work only inside the exact workspace. Do not inspect or change sibling paths.
+- Spend at most 12 model steps inspecting and make the first source edit before step 16. Do not substitute broad installed-package/runtime exploration for implementing the smallest in-repository solution.
 - Do not call AutoEvo decision tools, Cordis mutation, plugin install/remove, delegation, push, tag, release, or PR tools.
-- Run appropriate local tests when available. Do not install new dependencies from the network.
+- Run appropriate local tests when available. Do not run package install/add/ci/dlx/exec commands or install new dependencies from the network; the Host rejects dependency mutation.
+- Keep verification bounded: attempt the project's normal test command at most once, then one build or typecheck that does not hit the same sandbox denial.
+- On Windows, a test runner that reports spawn EPERM because confined processes cannot open piped stdio is a final sandbox limitation. Do not retry it, create alternate runners/configs, or modify test infrastructure to work around it; report the skipped test and continue to the final diff review.
+- The Host enforces a ${CHILD_SOFT_STEP_LIMIT}-step soft budget. Finish before it; after that the Host denies further tools and requires the final marker.
 - Do not commit; the Host performs the reviewed hookless unsigned commit after you return.
 - Finish with a short result whose final line is exactly ${CHILD_RESULT_MARKER}.
 `
@@ -117,6 +157,7 @@ export class DshManagedChildHost implements ManagedChildHost {
       })
     }
     const childGuard = new ExecutionGuard({ role: 'child' })
+    const childBudget = new ChildTurnBudget()
     const sessionId = SessionId(`autoevo-child-${randomUUID()}`)
     const handle = await parentAgents.create({
       sessionId,
@@ -139,7 +180,11 @@ export class DshManagedChildHost implements ManagedChildHost {
         if (mounted.id !== 'code' || services.agentPresets.composedPreset(agentCtx) !== 'code') {
           throw new EvolutionError('invalid_input', 'Managed child did not mount the expected code preset')
         }
-        agentCtx.on('tools/pre-execute', (exec, next) => childGuard.preExecute(exec, next))
+        agentCtx.on('agent/pre-step', ({ messages, step }, next) => childBudget.preStep(step, messages, next))
+        agentCtx.on('tools/pre-execute', (exec, next) => {
+          const budgetDenial = childBudget.denialReason()
+          return budgetDenial ? Promise.resolve({ kind: 'deny', reason: budgetDenial }) : childGuard.preExecute(exec, next)
+        })
         agentCtx.tools.guard((exec) => childGuard.guard(exec))
         agentCtx.systemPrompt.section({
           name: 'autoevo:managed-child-boundary',
@@ -180,4 +225,14 @@ export class DshManagedChildHost implements ManagedChildHost {
   }
 }
 
-export const _testing = { assistantText, assertCompletedTurn, childInstruction, CHILD_RESULT_MARKER }
+export const _testing = {
+  assistantText,
+  assertCompletedTurn,
+  childInstruction,
+  childBudgetMessage,
+  ChildTurnBudget,
+  CHILD_RESULT_MARKER,
+  CHILD_SOFT_STEP_LIMIT,
+  CHILD_HARD_STEP_LIMIT,
+  CHILD_BUDGET_DENIAL,
+}

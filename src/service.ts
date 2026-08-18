@@ -81,6 +81,20 @@ export function addExplicitCandidate(
   }
 }
 
+function modificationTask(resolution: ResolutionRecord, review: ReviewRecord): string {
+  const decision = [...(resolution.decisions ?? [])].reverse().find((item) => item.phase === 'gate2'
+    && item.action === 'modify_this'
+    && item.reviewId === review.id)
+  const userInstruction = decision?.userMessage?.trim()
+  return [
+    `Improve the reviewed plugin for this original capability requirement: ${resolution.requirement}`,
+    ...(userInstruction ? [`Authenticated user modification instruction: ${userInstruction}`] : []),
+    `Missing capabilities: ${JSON.stringify(review.missingCapabilities)}`,
+    `Review finding codes: ${JSON.stringify(review.findings.map((finding) => finding.code))}`,
+    'Preserve the package identity and implement the smallest complete change.',
+  ].join('\n')
+}
+
 function newResolutionId(requirement: string): string {
   return `resolution_${hashObject({ requirement, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
 }
@@ -555,7 +569,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     await this.managedChild.run({
       parent: this.requireParentAgent(exec),
       cwd: receipt.path,
-      task: `Improve the reviewed plugin for this requirement: ${resolution.requirement}\nMissing capabilities: ${JSON.stringify(review.missingCapabilities)}\nReview finding codes: ${JSON.stringify(review.findings.map((finding) => finding.code))}\nPreserve the package identity and implement the smallest complete change.`,
+      task: modificationTask(resolution, review),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     await this.sources.finalizeChildCommit({
@@ -796,6 +810,7 @@ export const _testing = {
   authorizationForResolution,
   lineageRootReview,
   materialReviewFacts,
+  modificationTask,
   reviewIdentity,
   waitingAuthorization,
 }
