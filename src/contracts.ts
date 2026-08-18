@@ -18,7 +18,7 @@ export type AuthorizationState =
   | 'reuse_local'
   | 'use_review'
   | 'modify_review'
-  | 'scratch_ready'
+  | 'create_authorized'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
 export type DecisionPhase = 'gate1' | 'gate2'
@@ -30,7 +30,6 @@ export type DecisionAction =
   | 'modify_this'
   | 'use_local'
   | 'search_more'
-  | 'resume_modify'
 export type WorkflowOptionId = DecisionAction
 
 export interface DecisionReceipt {
@@ -42,6 +41,8 @@ export interface DecisionReceipt {
   reviewIdentity?: string
   userMessage?: string
   optionId?: WorkflowOptionId
+  interruptId?: string
+  hostTurnId?: string
   createdAt: string
 }
 
@@ -76,7 +77,7 @@ export interface RemotePluginCandidate {
 }
 
 export interface ResolutionRecord {
-  /** V1 records remain readable but never restore a scratch-build grant. */
+  /** V1 records remain readable but never restore a create grant. */
   schemaVersion: 1 | 2
   id: string
   policyVersion: string
@@ -180,6 +181,8 @@ export interface ReviewResult extends ReviewRecord {
 
 export type InstallationRetention = 'temporary' | 'persistent'
 export type InstallationState = 'installed' | 'not_installed' | 'unknown'
+/** Public install outcome: success only after Loader/runtime verification. */
+export type InstallOutcome = 'pending' | 'verified' | 'failed_absent' | 'recovery_required'
 
 export interface VerificationEvidence {
   attempted: boolean
@@ -211,6 +214,8 @@ export interface InstallationRecord {
   artifactSha256?: string
   /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
   installState?: InstallationState
+  /** Fail-closed public outcome. Success is only `verified`. */
+  installOutcome?: InstallOutcome
   installed: boolean
   loaded: boolean
   verified: boolean
@@ -242,16 +247,8 @@ export interface RemoveInput {
   installationId: string
 }
 
+/** Public resume input is intentionally narrow: Host owns the decision facts. */
 export interface ResumeInput {
   workflowId: string
-  userMessage: string
-  optionId: WorkflowOptionId
-  repositories?: string[]
-  path?: string
-  ref?: string
-  reviewId?: string
-  targetProfile?: string
-  retention?: InstallationRetention
-  verificationTask?: string
-  verificationExpectedText?: string
+  interruptId: string
 }

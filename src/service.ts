@@ -501,6 +501,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const receipt = newDecisionReceipt(phaseForOption(resume.optionId), resume.optionId, selected, {
       userMessage: resume.userMessage,
       optionId: resume.optionId,
+      interruptId: resume.interruptId,
+      hostTurnId: resume.hostTurnId,
       ...(review ? { reviewId: review.id, reviewIdentity: reviewIdentity(review) } : {}),
     })
     const authorization = authorizationFromDecision(nextRecord.id, resume.optionId, selected, review)

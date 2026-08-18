@@ -124,4 +124,4 @@ export function isEvolutionPresetManifest(value: unknown): value is EvolutionPre
 
 /** Stable denial when cordis_define(kind:new) is attempted outside genuine evolution mode. */
 export const OUTSIDE_EVOLUTION_MODE_DENIAL =
-  'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Dynamic new Cordis definitions are permitted only in Capability Evolution mode after the user explicitly allows create-new.'
+  'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Dynamic new Cordis definitions are not permitted on the parent session; create-new continues only in a managed git source child session after an explicit user decision.'

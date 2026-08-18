@@ -164,7 +164,7 @@ describe('resolution authorization state', () => {
       selectedRepositories: [],
       createdAt: '2026-08-17T00:00:00.000Z',
     }]
-    expect(_testing.authorizationForResolution(record, []).state).toBe('scratch_ready')
+    expect(_testing.authorizationForResolution(record, []).state).toBe('create_authorized')
 
     record.decisions = [{
       id: `decision_${'b'.repeat(24)}`,

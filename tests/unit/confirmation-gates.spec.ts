@@ -33,13 +33,16 @@ function config(root: string): RuntimeConfig {
   }
 }
 
-function exec(): ToolRunContext {
+function exec(sessionId = 'session-gates'): ToolRunContext {
   return {
     callId: 'call-1',
     rootCallId: 'call-1',
     token: Symbol('call-1'),
     signal: new AbortController().signal,
-    agent: { session: { header: { cwd: process.cwd() } } },
+    agent: {
+      id: sessionId,
+      session: { header: { id: sessionId, cwd: process.cwd(), version: 0, createdAt: 0 } },
+    },
   } as unknown as ToolRunContext
 }
 
@@ -53,6 +56,11 @@ function commandResult(stdout = ''): { exitCode: number, signal: null, stdout: s
 
 function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: string): void {
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
+}
+
+async function resumeWith(service: CapabilityEvolutionService, guard: CreationGuard, turn: ToolRunContext, workflowId: string, interruptId: string, text: string) {
+  remember(guard, turn.agent, text)
+  return service.resume({ workflowId, interruptId }, turn)
 }
 
 function localCtx(): Context {
@@ -140,7 +148,7 @@ const grokHighRisk = {
 }
 
 describe('conversational confirmation gates', () => {
-  it('does not mint scratch after empty completed discovery without create-new', async () => {
+  it('does not mint create authorization after empty completed discovery without create-new', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-empty-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -155,13 +163,8 @@ describe('conversational confirmation gates', () => {
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.authorization?.state).toBe('selection_required')
     expect(started.workflow.cursor).toBe('await_selection')
-    expect(started.nextStep).toMatch(/对话|chat|ask_user/u)
-    remember(guard, turn.agent, '先停')
-    const stopped = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '先停',
-      optionId: 'stop',
-    }, turn)
+    expect(started.nextStep).toMatch(/对话|chat|ask_user|interrupt_id/u)
+    const stopped = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '先停')
     expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-1',
@@ -171,7 +174,7 @@ describe('conversational confirmation gates', () => {
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
-  it('does not mint scratch from start itself', async () => {
+  it('does not mint create authorization from start itself', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-resolve-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -184,11 +187,11 @@ describe('conversational confirmation gates', () => {
     )
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', exec())
     expect(started.resolution?.authorization?.state).toBe('selection_required')
-    expect(started.resolution?.authorization?.state).not.toBe('scratch_ready')
+    expect(started.resolution?.authorization?.state).not.toBe('create_authorized')
     expect(started.resolution?.selectedRepositories ?? []).toEqual([])
   })
 
-  it('reviews only after an inspect resume names the repository', async () => {
+  it('reviews only after a host turn names the repository', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-unselected-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -207,20 +210,14 @@ describe('conversational confirmation gates', () => {
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.selectedRepositories ?? []).toEqual([])
-    remember(guard, turn.agent, '先看 MirDie/dsh-xai')
-    const reviewed = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '先看 MirDie/dsh-xai',
-      optionId: 'inspect',
-      repositories: ['MirDie/dsh-xai'],
-    }, turn)
+    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '先看 MirDie/dsh-xai')
     expect(reviewed.resolution?.selectedRepositories).toEqual(['MirDie/dsh-xai'])
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('MirDie/dsh-xai')
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
   })
 
-  it('presents full+high at confirmation instead of auto-scratch, and stop stays stopped', async () => {
+  it('presents full+high at confirmation instead of auto-create, and stop stays stopped', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-high-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -238,23 +235,12 @@ describe('conversational confirmation gates', () => {
     )
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
-    remember(guard, turn.agent, '审查 MirDie/dsh-xai')
-    const reviewed = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '审查 MirDie/dsh-xai',
-      optionId: 'inspect',
-      repositories: ['MirDie/dsh-xai'],
-    }, turn)
+    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '审查 MirDie/dsh-xai')
     expect(reviewed.review?.fit).toBe('full')
     expect(reviewed.review?.securityRisk).toBe('high')
     expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
-    expect(reviewed.nextStep).toMatch(/对话|chat|ask_user/u)
-    remember(guard, turn.agent, '先停')
-    const stopped = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '先停',
-      optionId: 'stop',
-    }, turn)
+    expect(reviewed.nextStep).toMatch(/对话|chat|ask_user|interrupt_id/u)
+    const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停')
     expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-high',
@@ -264,7 +250,7 @@ describe('conversational confirmation gates', () => {
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
-  it('grants define only after an explicit create-new chat reply', async () => {
+  it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-create-'))
     temporary.push(root)
     const turn = exec()
@@ -277,32 +263,23 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
-    remember(guard, turn.agent, '这个仓库看起来不错')
-    await expect(service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '这个仓库看起来不错',
-      optionId: 'create_new',
-    }, turn)).rejects.toThrow(/contradict/i)
-    remember(guard, turn.agent, '没有合适的，新建一个')
-    const decided = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '没有合适的，新建一个',
-      optionId: 'create_new',
-    }, turn)
-    expect(decided.resolution?.authorization?.state).toBe('scratch_ready')
-    expect(decided.workflow.cursor).toBe('scratch_ready')
+    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错'))
+      .rejects.toThrow(/Could not resolve a workflow decision/i)
+    const decided = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个')
+    expect(decided.resolution?.authorization?.state).toBe('create_authorized')
+    expect(decided.workflow.cursor).toBe('create_authorized')
     await expect(guard.preExecute({
       callId: 'define-ok',
       name: 'cordis_define',
       arguments: { plugin: { kind: 'new' } },
       agent: turn.agent,
-    } as never, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
+    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
   it('lets a local hit still choose create-new, and binds use-this to the reviewed identity', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-use-'))
     temporary.push(root)
-    const agent = exec().agent!
+    const localTurn = exec('session-local')
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const localService = new CapabilityEvolutionService(
       localCtx(),
@@ -311,16 +288,11 @@ describe('conversational confirmation gates', () => {
       new StateStore(root),
       guard,
     )
-    const created = await localService.start('run a PowerShell command', { ...exec(), agent })
+    const created = await localService.start('run a PowerShell command', localTurn)
     expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
     expect(created.resolution?.authorization?.state).toBe('selection_required')
-    remember(guard, agent, 'Create new')
-    const allowed = await localService.resume({
-      workflowId: created.workflow.id,
-      userMessage: 'Create new',
-      optionId: 'create_new',
-    }, { ...exec(), agent })
-    expect(allowed.resolution?.authorization?.state).toBe('scratch_ready')
+    const allowed = await resumeWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'Create new')
+    expect(allowed.resolution?.authorization?.state).toBe('create_authorized')
 
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
@@ -336,32 +308,21 @@ describe('conversational confirmation gates', () => {
       store,
       useGuard,
     )
-    const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', { ...exec(), agent })
-    remember(useGuard, agent, '审查 MirDie/dsh-xai')
-    const reviewed = await useService.resume({
-      workflowId: resolved.workflow.id,
-      userMessage: '审查 MirDie/dsh-xai',
-      optionId: 'inspect',
-      repositories: ['MirDie/dsh-xai'],
-    }, { ...exec(), agent })
+    useService.listInstallProfiles = async () => ['web']
+    const useTurn = exec('session-use')
+    const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', useTurn)
+    const reviewed = await resumeWith(useService, useGuard, useTurn, resolved.workflow.id, resolved.workflow.interrupt!.interruptId, '审查 MirDie/dsh-xai')
     expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
-    remember(useGuard, agent, '用这个')
-    const confirmed = await useService.resume({
-      workflowId: resolved.workflow.id,
-      userMessage: '用这个',
-      optionId: 'use_this',
-      ...(reviewed.review?.id ? { reviewId: reviewed.review.id } : {}),
-      targetProfile: 'web',
-      retention: 'persistent',
-    }, { ...exec(), agent })
+    expect(reviewed.workflow.interrupt?.facts.installProfiles).toEqual(['web'])
+    const confirmed = await resumeWith(useService, useGuard, useTurn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个')
     const stored = await store.getResolution(resolved.resolution!.id)
     expect(stored.decisions?.some((item) => item.action === 'use_this')).toBe(true)
-    expect(() => useGuard.assertInstallAuthorized(agent, reviewed.review!, stored)).not.toThrow()
-    expect(() => useGuard.assertInstallAuthorized(agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/has not chosen/i)
+    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, reviewed.review!, stored)).not.toThrow()
+    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/has not chosen/i)
     expect(confirmed.workflow.cursor === 'installed' || confirmed.workflow.cursor === 'await_confirmation').toBe(true)
   })
 
-  it('rejects a forged resume that does not match the latest user turn', async () => {
+  it('rejects a forged resume that does not match the latest host user turn', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-auth-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -388,18 +349,10 @@ describe('conversational confirmation gates', () => {
     remember(guard, turn.agent, '随便看看')
     await expect(service.resume({
       workflowId: started.workflow.id,
-      userMessage: '具体看看3',
-      optionId: 'inspect',
-      repositories: ['paicat1/dsh-grok-screenshot'],
-    }, turn)).rejects.toThrow(/does not match the latest user turn/i)
+      interruptId: started.workflow.interrupt!.interruptId,
+    }, turn)).rejects.toThrow(/Could not resolve a workflow decision/i)
 
-    remember(guard, turn.agent, '具体看看3')
-    const reviewed = await service.resume({
-      workflowId: started.workflow.id,
-      userMessage: '具体看看3',
-      optionId: 'inspect',
-      repositories: ['paicat1/dsh-grok-screenshot'],
-    }, turn)
+    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '具体看看 paicat1/dsh-grok-screenshot')
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('paicat1/dsh-grok-screenshot')
     const stored = await store.getResolution(started.resolution!.id)

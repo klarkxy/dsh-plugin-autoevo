@@ -1,8 +1,6 @@
 import type {
   InstallationRecord,
   InstallationRetention,
-  LocalCapabilityCandidate,
-  RemotePluginCandidate,
   ResolutionRecord,
   ReviewRecord,
   WorkflowOptionId,
@@ -17,15 +15,17 @@ export type WorkflowNodeId =
   | 'await_selection'
   | 'review_github'
   | 'await_confirmation'
+  | 'prepare_modify'
   | 'await_modify_work'
   | 'review_local'
   | 'install_verify'
-  | 'grant_scratch'
+  | 'prepare_create'
   | 'reuse_local'
   | 'stopped'
   | 'market_restart_required'
   | 'installed'
-  | 'scratch_ready'
+  | 'create_authorized'
+  | 'modify_authorized'
 
 export type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work'
 
@@ -37,6 +37,11 @@ export interface WorkflowOption {
 
 export interface InterruptPayload {
   kind: InterruptKind
+  interruptId: string
+  ownerSessionId: string
+  bootId: string
+  validAfterTurnId: string
+  snapshotDigest: string
   options: WorkflowOption[]
   facts: Record<string, unknown>
 }
@@ -55,12 +60,16 @@ export interface WorkflowRecord {
   createdAt: string
   updatedAt: string
   requirement: string
+  requirementNormalized?: string
   cwd?: string
+  ownerSessionId?: string
+  bootId?: string
   resolutionId?: string
   status: WorkflowStatus
   cursor: WorkflowNodeId
   generation: number
   interrupt?: InterruptPayload
+  consumedInterruptIds?: string[]
   lineageTipReviewId?: string
   lastReviewId?: string
   lastInstallationId?: string
@@ -69,6 +78,7 @@ export interface WorkflowRecord {
   pendingRef?: string
   pendingPath?: string
   pendingInstall?: WorkflowPendingInstall
+  managedSourceId?: string
   lastFailure?: { code: string; message: string }
   error?: { code: string; message: string }
 }
@@ -84,6 +94,8 @@ export interface WorkflowView {
 export interface ValidatedResume {
   optionId: WorkflowOptionId
   userMessage: string
+  hostTurnId: string
+  interruptId: string
   repositories: string[]
   path?: string
   ref?: string
@@ -120,6 +132,15 @@ export interface WorkflowHost {
     input: WorkflowPendingInstall,
     exec: WorkflowExec,
   ): Promise<InstallationRecord>
+  prepareModify?(
+    resolution: ResolutionRecord,
+    review: ReviewRecord,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
+  prepareCreate?(
+    resolution: ResolutionRecord,
+    exec: WorkflowExec,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
   applyDecision(
     resolution: ResolutionRecord,
     resume: ValidatedResume,
@@ -149,7 +170,8 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'stopped',
   'market_restart_required',
   'installed',
-  'scratch_ready',
+  'create_authorized',
+  'modify_authorized',
 ])
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
@@ -160,7 +182,6 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个' },
   modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改' },
-  resume_modify: { id: 'resume_modify', labelEn: 'Review the local checkout', labelZh: '改完了，再审本地检出' },
 }
 
 export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
@@ -210,14 +231,14 @@ export function modifyWorkFacts(review: ReviewRecord): Record<string, unknown> {
   return {
     reviewId: review.id,
     commit: source.kind === 'github' ? source.commit : source.baseCommit,
-    instruction: 'Check out the exact reviewed commit, make a minimal patch, run the upstream tests, then resume with the local checkout path. The workflow derives base_review_id from this lineage.',
+    instruction: 'Modification continues in a managed workspace-write child session. Wait for the next confirmation interrupt; do not supply a local path.',
     ...(source.kind === 'github' ? { repository: source.repository } : { path: source.path }),
   }
 }
 
 export function optionsFor(kind: InterruptKind, resolution: ResolutionRecord): WorkflowOption[] {
   if (kind === 'await_modify_work') {
-    return [WORKFLOW_OPTIONS.resume_modify, WORKFLOW_OPTIONS.stop]
+    return [WORKFLOW_OPTIONS.stop]
   }
   const options: WorkflowOption[] = []
   if (kind === 'await_selection' && resolution.remoteCandidates.length > 0) options.push(WORKFLOW_OPTIONS.inspect)

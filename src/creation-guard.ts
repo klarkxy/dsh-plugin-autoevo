@@ -3,19 +3,20 @@ import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deeps
 import type { ResolutionRecord, ResolutionAuthorization, ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
+import { newBootId, newTurnId, ownerSessionId } from './host-identity.js'
 import { assertUseThisReceipt } from './lifecycle/decide.js'
-
-type Grant =
-  | { state: 'available'; resolutionId: string }
-  | { state: 'reserved'; resolutionId: string; callId: string }
+import type { InterruptPayload } from './workflow/contracts.js'
 
 interface AgentGateState {
   generation: number
   activeResolutionId?: string
   authorization?: ResolutionAuthorization
-  grant?: Grant
   lastUserMessage?: string
+  currentTurnId?: string
+  turnSequence: number
+  consumedTurnIds: Set<string>
   waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work'
+  sessionId?: string
 }
 
 const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
@@ -26,6 +27,12 @@ const SKIP_USER_TEXT = /^(?:Current runtime context\.|<system-reminder>)/u
 
 export interface UserFacingMessage {
   content?: readonly unknown[]
+}
+
+export interface ClaimedHostTurn {
+  turnId: string
+  message: string
+  sequence: number
 }
 
 export function extractUserFacingText(message: UserFacingMessage): string {
@@ -68,15 +75,18 @@ function denialReason(authorization?: ResolutionAuthorization): string {
   }
   const prefix = `AutoEvo denied new Cordis plugin creation for ${authorization.resolutionId}`
   if (authorization.state === 'reuse_local') return `${prefix}: reuse the existing local capability the user chose. ${authorization.reason}`
-  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin the user chose instead of building from scratch. ${authorization.reason}`
+  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin in the managed source child session instead of cordis_define. ${authorization.reason}`
   if (authorization.state === 'use_review') return `${prefix}: the user chose to use a reviewed plugin, not create a new one. ${authorization.reason}`
-    if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
+  if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
   if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
   if (authorization.state === 'stopped') return `${prefix}: the user stopped. ${authorization.reason}`
   if (authorization.state === 'market_required') {
     return `${prefix}: wait for the DSH plugin marketplace script install and a DSH restart, then call capability_workflow again. Do not create a plugin. ${authorization.reason}`
   }
-  return `${prefix}: the scratch-build authorization has already been reserved or consumed.`
+  if (authorization.state === 'create_authorized') {
+    return `${prefix}: create-new continues only inside a managed git source and workspace-write child session; cordis_define(kind:new) is not permitted.`
+  }
+  return `${prefix}: dynamic Cordis creation is not permitted on the parent AutoEvo session.`
 }
 
 function outsideEvolutionModeReason(): string {
@@ -86,14 +96,19 @@ function outsideEvolutionModeReason(): string {
 export interface CreationGuardOptions {
   /** True only when agentPresets.serviceFor(agent, 'autoevoEvolutionMode') yields exact marker. */
   isEvolutionMode?: (agent: Agent) => boolean
+  /** Service boot identity; interrupts bound to a prior boot are invalidated. */
+  bootId?: string
 }
 
-/** Runtime-only, fail-closed authorization for one new dynamic Cordis Plugin. */
+/** Runtime-only, fail-closed authorization for AutoEvo parent-session decisions. */
 export class CreationGuard {
   private readonly states = new WeakMap<Agent, AgentGateState>()
   private nextGeneration = 0
+  readonly bootId: string
 
-  constructor(private readonly options: CreationGuardOptions = {}) {}
+  constructor(private readonly options: CreationGuardOptions = {}) {
+    this.bootId = options.bootId ?? newBootId()
+  }
 
   beginResolution(agent?: Agent): number | undefined {
     if (!agent) return undefined
@@ -101,7 +116,11 @@ export class CreationGuard {
     const prior = this.states.get(agent)
     this.states.set(agent, {
       generation,
+      turnSequence: prior?.turnSequence ?? 0,
+      consumedTurnIds: prior?.consumedTurnIds ?? new Set<string>(),
       ...(prior?.lastUserMessage ? { lastUserMessage: prior.lastUserMessage } : {}),
+      ...(prior?.currentTurnId ? { currentTurnId: prior.currentTurnId } : {}),
+      ...(prior?.sessionId ? { sessionId: prior.sessionId } : {}),
     })
     return generation
   }
@@ -110,12 +129,18 @@ export class CreationGuard {
     if (!agent) return
     const text = extractUserFacingText(message)
     if (!text) return
-    const state = this.states.get(agent)
-    if (state) {
-      state.lastUserMessage = text
-      return
+    const sessionId = ownerSessionId(agent) ?? 'anonymous'
+    const state = this.states.get(agent) ?? {
+      generation: 0,
+      turnSequence: 0,
+      consumedTurnIds: new Set<string>(),
+      sessionId,
     }
-    this.states.set(agent, { generation: 0, lastUserMessage: text })
+    state.turnSequence += 1
+    state.currentTurnId = newTurnId(sessionId, state.turnSequence)
+    state.lastUserMessage = text
+    state.sessionId = sessionId
+    this.states.set(agent, state)
   }
 
   lastUserMessage(agent: Agent | undefined): string | undefined {
@@ -123,12 +148,67 @@ export class CreationGuard {
     return this.states.get(agent)?.lastUserMessage
   }
 
+  currentTurnId(agent: Agent | undefined): string | undefined {
+    if (!agent) return undefined
+    return this.states.get(agent)?.currentTurnId
+  }
+
+  /**
+   * Consume the latest host-owned user turn for an interrupt.
+   * Rejects missing turns, already-consumed (replay) turns, and turns at/before the interrupt watermark.
+   */
+  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
+    if (!agent) {
+      throw new EvolutionError('invalid_input', 'A live Agent session is required to resume a workflow decision')
+    }
+    const sessionId = ownerSessionId(agent)
+    if (!sessionId || sessionId !== interrupt.ownerSessionId) {
+      throw new EvolutionError('invalid_input', 'Workflow interrupt belongs to a different owner session', {
+        expected: interrupt.ownerSessionId,
+        actual: sessionId,
+      })
+    }
+    if (interrupt.bootId !== this.bootId) {
+      throw new EvolutionError('invalid_input', 'Workflow interrupt was invalidated by a service restart; present the reissued interrupt and obtain a fresh user confirmation', {
+        expectedBootId: this.bootId,
+        interruptBootId: interrupt.bootId,
+      })
+    }
+    const state = this.states.get(agent)
+    const turnId = state?.currentTurnId
+    const message = state?.lastUserMessage
+    if (!state || !turnId || !message) {
+      throw new EvolutionError('invalid_input', 'No host-claimed user turn is available for this decision')
+    }
+    if (state.consumedTurnIds.has(turnId)) {
+      throw new EvolutionError('invalid_input', 'This host user turn was already consumed by a prior resume (replay rejected)', {
+        turnId,
+      })
+    }
+    if (turnId === interrupt.validAfterTurnId) {
+      throw new EvolutionError('invalid_input', 'Decision requires a fresh user turn after the interrupt was issued (stale/previous-turn rejected)', {
+        turnId,
+        validAfterTurnId: interrupt.validAfterTurnId,
+      })
+    }
+    // Sequence watermark: turn ids are opaque; also compare via remembered order by requiring inequality with watermark
+    // and that a new claim happened after interrupt issuance (caller reissues interrupt with current turn as watermark).
+    state.consumedTurnIds.add(turnId)
+    return { turnId, message, sequence: state.turnSequence }
+  }
+
   setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void {
     if (!agent) return
     const state = this.states.get(agent)
     if (!state) {
       if (!kind) return
-      this.states.set(agent, { generation: 0, waitingKind: kind })
+      this.states.set(agent, {
+        generation: 0,
+        turnSequence: 0,
+        consumedTurnIds: new Set(),
+        waitingKind: kind,
+        ...(ownerSessionId(agent) ? { sessionId: ownerSessionId(agent) } : {}),
+      })
       return
     }
     if (kind) state.waitingKind = kind
@@ -144,7 +224,7 @@ export class CreationGuard {
     const state = this.states.get(agent)
     if (!state || state.generation !== generation) return false
     state.activeResolutionId = authorization.resolutionId
-    this.setAuthorization(state, authorization)
+    state.authorization = authorization
     return true
   }
 
@@ -152,17 +232,8 @@ export class CreationGuard {
     if (!agent) return false
     const state = this.states.get(agent)
     if (!state || state.activeResolutionId !== authorization.resolutionId) return false
-    this.setAuthorization(state, authorization)
-    return true
-  }
-
-  private setAuthorization(state: AgentGateState, authorization: ResolutionAuthorization): void {
     state.authorization = authorization
-    if (authorization.state === 'scratch_ready') {
-      state.grant = { state: 'available', resolutionId: authorization.resolutionId }
-    } else {
-      delete state.grant
-    }
+    return true
   }
 
   assertInstallAuthorized(
@@ -193,7 +264,7 @@ export class CreationGuard {
       return 'Use the shortlist from capability_workflow. Call capability_workflow_resume; do not search again.'
     }
     if (exec.name === WEB_SEARCH_TOOL && waiting) {
-      return 'Discovery is finished. Call capability_workflow_resume with the user\'s latest message.'
+      return 'Discovery is finished. Call capability_workflow_resume with workflow_id and interrupt_id.'
     }
     if (SHELL_TOOLS.has(exec.name) && state?.authorization && isDshPluginAddCommand(shellCommandText(exec.arguments))) {
       return 'Install only via the capability workflow after review.'
@@ -209,12 +280,7 @@ export class CreationGuard {
       return Promise.resolve({ kind: 'deny', reason: outsideEvolutionModeReason() })
     }
     const state = this.states.get(exec.agent)
-    const grant = state?.grant
-    if (!grant || grant.state !== 'available') {
-      return Promise.resolve({ kind: 'deny', reason: denialReason(state?.authorization) })
-    }
-    state.grant = { state: 'reserved', resolutionId: grant.resolutionId, callId: String(exec.callId) }
-    return next()
+    return Promise.resolve({ kind: 'deny', reason: denialReason(state?.authorization) })
   }
 
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
@@ -224,21 +290,11 @@ export class CreationGuard {
     if (!exec.agent || !isNewCordisDefinition(exec)) return undefined
     if (!this.inEvolutionMode(exec.agent)) return outsideEvolutionModeReason()
     const state = this.states.get(exec.agent)
-    const grant = state?.grant
-    if (grant?.state === 'reserved' && grant.callId === String(exec.callId)) return undefined
     return denialReason(state?.authorization)
   }
 
-  result(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): void {
-    if (!exec.agent || !isNewCordisDefinition(exec)) return
-    const state = this.states.get(exec.agent)
-    const grant = state?.grant
-    if (!state || !grant || grant.state !== 'reserved' || grant.callId !== String(exec.callId)) return
-    if (result.isError) {
-      state.grant = { state: 'available', resolutionId: grant.resolutionId }
-    } else {
-      delete state.grant
-    }
+  result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
+    // Parent session never grants cordis_define(kind:new); nothing to consume.
   }
 
   authorization(agent: Agent): ResolutionAuthorization | undefined {

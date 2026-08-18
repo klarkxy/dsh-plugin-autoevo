@@ -3,15 +3,20 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { POLICY_VERSION, type ResolutionAuthorization, type ResumeInput } from '../contracts.js'
 import type { CreationGuard } from '../creation-guard.js'
 import { EvolutionError } from '../errors.js'
-import { nextStepForAuthorization } from '../lifecycle/decide.js'
-import { validateResume } from '../lifecycle/decide.js'
+import {
+  newInterruptId,
+  normalizeRequirement,
+  ownerSessionId,
+  sessionCwd,
+} from '../host-identity.js'
+import { nextStepForAuthorization, resolveDecisionFromHost } from '../lifecycle/decide.js'
 import { hashObject } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
 import {
   INTERRUPT_NODES,
   TERMINAL_NODES,
   isInterruptKind,
-  isWorkflowOptionId,
+  type InterruptPayload,
   type WorkflowExec,
   type WorkflowHost,
   type WorkflowRecord,
@@ -29,6 +34,43 @@ function newWorkflowId(requirement: string): string {
   return `workflow_${hashObject({ requirement, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
 }
 
+function snapshotDigestFor(
+  kind: InterruptPayload['kind'],
+  resolution: WorkflowView['resolution'],
+  review?: WorkflowView['review'],
+): string {
+  if (kind === 'await_confirmation' || kind === 'await_modify_work') {
+    if (!review) throw new EvolutionError('invalid_input', 'Confirmation interrupt requires a review snapshot')
+    return hashObject({
+      kind,
+      reviewId: review.id,
+      reviewIdentity: review.sourceSnapshot.kind === 'github'
+        ? review.sourceSnapshot.commit
+        : review.sourceSnapshot.statusHash,
+      installSpec: review.installSpec,
+      inspectedFiles: review.inspectedFiles,
+      manifest: review.manifest,
+    })
+  }
+  if (!resolution) throw new EvolutionError('invalid_input', 'Selection interrupt requires a resolution snapshot')
+  return hashObject({
+    kind,
+    localCandidates: resolution.localCandidates,
+    remoteCandidates: resolution.remoteCandidates.map((item) => ({
+      repository: item.repository,
+      name: item.name,
+      stars: item.stars,
+      updatedAt: item.updatedAt,
+    })),
+    remoteDiscoveryComplete: resolution.remoteDiscoveryComplete,
+    remoteCandidateSource: resolution.remoteCandidateSource,
+  })
+}
+
+function isUnfinished(status: WorkflowRecord['status']): boolean {
+  return status === 'interrupted' || status === 'running'
+}
+
 export class WorkflowEngine {
   private readonly inflight = new Set<string>()
 
@@ -39,6 +81,27 @@ export class WorkflowEngine {
   ) {}
 
   async start(requirement: string, exec: ToolRunContext): Promise<WorkflowView> {
+    const normalized = normalizeRequirement(requirement)
+    if (!normalized || normalized.length > 2_000) {
+      throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
+    }
+    const sessionId = ownerSessionId(exec.agent)
+    if (!sessionId) {
+      throw new EvolutionError('invalid_input', 'A live Agent session identity is required to start a workflow')
+    }
+    const cwd = sessionCwd(exec.agent)
+    const existing = await this.findReusableWorkflow(sessionId, cwd, normalized)
+    if (existing) {
+      return await this.withLock(existing.id, async () => {
+        const latest = await this.store.getWorkflow(existing.id)
+        if (latest.bootId !== this.creationGuard.bootId && latest.status === 'interrupted' && latest.interrupt) {
+          await this.reissueInterrupt(latest, exec)
+        }
+        let resolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
+        return await this.view(latest, resolution)
+      })
+    }
+
     const now = new Date().toISOString()
     const workflow: WorkflowRecord = {
       schemaVersion: 1,
@@ -47,9 +110,14 @@ export class WorkflowEngine {
       createdAt: now,
       updatedAt: now,
       requirement,
+      requirementNormalized: normalized,
+      cwd,
+      ownerSessionId: sessionId,
+      bootId: this.creationGuard.bootId,
       status: 'running',
       cursor: 'resolve_local',
       generation: 1,
+      consumedInterruptIds: [],
     }
     const guardGeneration = this.creationGuard.beginResolution(exec.agent)
     return await this.withLock(workflow.id, () => this.runUntilPark(workflow, exec, guardGeneration))
@@ -67,28 +135,52 @@ export class WorkflowEngine {
           cursor: workflow.cursor,
         })
       }
-      if (!isWorkflowOptionId(input.optionId)) {
-        throw new EvolutionError('invalid_input', 'option_id is not a known workflow option', { optionId: input.optionId })
+      if (workflow.consumedInterruptIds?.includes(input.interruptId)) {
+        throw new EvolutionError('invalid_input', 'This interrupt_id was already consumed (replay rejected)', {
+          interruptId: input.interruptId,
+        })
+      }
+      if (workflow.interrupt.interruptId !== input.interruptId) {
+        throw new EvolutionError('invalid_input', 'interrupt_id does not match the current workflow interrupt', {
+          expected: workflow.interrupt.interruptId,
+          actual: input.interruptId,
+        })
+      }
+
+      const sessionId = ownerSessionId(exec.agent)
+      if (!sessionId || sessionId !== workflow.ownerSessionId || sessionId !== workflow.interrupt.ownerSessionId) {
+        throw new EvolutionError('invalid_input', 'Workflow interrupt belongs to a different owner session', {
+          expected: workflow.ownerSessionId,
+          actual: sessionId,
+        })
+      }
+      if (workflow.interrupt.bootId !== this.creationGuard.bootId || workflow.bootId !== this.creationGuard.bootId) {
+        await this.reissueInterrupt(workflow, exec)
+        throw new EvolutionError('invalid_input', 'Workflow interrupt was invalidated by a service restart; present the reissued interrupt and obtain a fresh user confirmation', {
+          workflowId: workflow.id,
+          interruptId: workflow.interrupt?.interruptId,
+        })
       }
       if (!workflow.resolutionId) {
         throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
       }
       const resolution = await this.host.getResolution(workflow.resolutionId)
-      const resume = validateResume({
+      const review = workflow.lastReviewId ? await this.host.getReview(workflow.lastReviewId) : undefined
+      const expectedDigest = snapshotDigestFor(workflow.interrupt.kind, resolution, review)
+      if (expectedDigest !== workflow.interrupt.snapshotDigest) {
+        throw new EvolutionError('invalid_input', 'Interrupt candidate/review snapshot digest mismatch', {
+          expected: expectedDigest,
+          actual: workflow.interrupt.snapshotDigest,
+        })
+      }
+
+      const resume = resolveDecisionFromHost({
         guard: this.creationGuard,
         agent: exec.agent,
         interrupt: workflow.interrupt,
-        userMessage: input.userMessage,
-        optionId: input.optionId,
         remotes: resolution.remoteCandidates,
-        ...(input.repositories !== undefined ? { repositories: input.repositories } : {}),
-        ...(input.path !== undefined ? { path: input.path } : {}),
-        ...(input.ref !== undefined ? { ref: input.ref } : {}),
-        ...(input.reviewId !== undefined ? { reviewId: input.reviewId } : {}),
-        ...(input.targetProfile !== undefined ? { targetProfile: input.targetProfile } : {}),
-        ...(input.retention !== undefined ? { retention: input.retention } : {}),
-        ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
-        ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
+        requirement: workflow.requirement,
+        ...(review ? { reviewId: review.id } : {}),
       })
 
       const latest = await this.store.getWorkflow(workflow.id)
@@ -98,6 +190,7 @@ export class WorkflowEngine {
       latest.generation += 1
       latest.status = 'running'
       delete latest.lastFailure
+      latest.consumedInterruptIds = [...(latest.consumedInterruptIds ?? []), input.interruptId]
       latest.pendingRepositories = resume.repositories
       if (resume.ref) latest.pendingRef = resume.ref
       else delete latest.pendingRef
@@ -106,17 +199,68 @@ export class WorkflowEngine {
       if (resume.install) latest.pendingInstall = resume.install
       else delete latest.pendingInstall
       latest.forceRemoteDiscovery = resume.optionId === 'search_more'
-      const review = resume.optionId === 'use_this' || resume.optionId === 'modify_this' || resume.optionId === 'resume_modify'
+      const decisionReview = resume.optionId === 'use_this' || resume.optionId === 'modify_this'
         ? await this.host.latestReview(resolution.id, resume.reviewId ?? latest.lineageTipReviewId ?? latest.lastReviewId)
         : undefined
-      const nextResolution = await this.host.applyDecision(resolution, resume, review)
-      if (resume.optionId === 'modify_this' && review) {
-        latest.lineageTipReviewId = review.id
+      const nextResolution = await this.host.applyDecision(resolution, resume, decisionReview)
+      if (resume.optionId === 'modify_this' && decisionReview) {
+        latest.lineageTipReviewId = decisionReview.id
       }
       latest.cursor = transition(latest.cursor, resume.optionId)
       delete latest.interrupt
       return await this.runUntilPark(latest, exec, undefined, nextResolution)
     })
+  }
+
+  private async findReusableWorkflow(
+    sessionId: string,
+    cwd: string,
+    requirementNormalized: string,
+  ): Promise<WorkflowRecord | undefined> {
+    const workflows = await this.store.listWorkflows()
+    const matches = workflows
+      .filter((item) => isUnfinished(item.status)
+        && item.ownerSessionId === sessionId
+        && item.cwd === cwd
+        && item.requirementNormalized === requirementNormalized
+        && item.policyVersion === POLICY_VERSION)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    return matches[0]
+  }
+
+  private async reissueInterrupt(workflow: WorkflowRecord, exec: ToolRunContext): Promise<void> {
+    if (!workflow.resolutionId || !INTERRUPT_NODES.has(workflow.cursor)) return
+    const resolution = await this.host.getResolution(workflow.resolutionId)
+    const review = workflow.lastReviewId ? await this.host.getReview(workflow.lastReviewId) : undefined
+    const installProfiles = workflow.cursor === 'await_confirmation'
+      ? await this.host.listInstallProfiles?.() ?? []
+      : []
+    const base = interruptPayload(workflow.cursor, resolution, review, {
+      ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
+      ...(installProfiles.length > 0 ? { installProfiles } : {}),
+    })
+    const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
+    if (!sessionId) {
+      throw new EvolutionError('invalid_input', 'Cannot reissue interrupt without an owner session')
+    }
+    const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+    const snapshotDigest = snapshotDigestFor(base.kind, resolution, review)
+    workflow.bootId = this.creationGuard.bootId
+    workflow.interrupt = {
+      ...base,
+      interruptId: newInterruptId({
+        ownerSessionId: sessionId,
+        bootId: this.creationGuard.bootId,
+        validAfterTurnId,
+        snapshotDigest,
+      }),
+      ownerSessionId: sessionId,
+      bootId: this.creationGuard.bootId,
+      validAfterTurnId,
+      snapshotDigest,
+    }
+    workflow.status = 'interrupted'
+    await this.checkpoint(workflow)
   }
 
   private async withLock<T>(id: string, run: () => Promise<T>): Promise<T> {
@@ -160,10 +304,31 @@ export class WorkflowEngine {
           const installProfiles = workflow.cursor === 'await_confirmation'
             ? await this.host.listInstallProfiles?.() ?? []
             : []
-          workflow.interrupt = interruptPayload(workflow.cursor, resolution, review, {
+          const base = interruptPayload(workflow.cursor, resolution, review, {
             ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
             ...(installProfiles.length > 0 ? { installProfiles } : {}),
           })
+          const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
+          if (!sessionId) {
+            throw new EvolutionError('invalid_input', 'Cannot issue interrupt without an owner session')
+          }
+          const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+          const snapshotDigest = snapshotDigestFor(base.kind, resolution, review)
+          workflow.bootId = this.creationGuard.bootId
+          workflow.ownerSessionId = sessionId
+          workflow.interrupt = {
+            ...base,
+            interruptId: newInterruptId({
+              ownerSessionId: sessionId,
+              bootId: this.creationGuard.bootId,
+              validAfterTurnId,
+              snapshotDigest,
+            }),
+            ownerSessionId: sessionId,
+            bootId: this.creationGuard.bootId,
+            validAfterTurnId,
+            snapshotDigest,
+          }
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           return await this.view(workflow, resolution)

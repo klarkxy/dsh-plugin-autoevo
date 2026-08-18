@@ -5,11 +5,14 @@ import { CreationGuard } from '../../src/creation-guard.js'
 import {
   assertResumeContradiction,
   assertUseThisReceipt,
+  inferOptionId,
+  resolveRepositoryFromMessage,
   resolveResumeRepositories,
   reviewIdentity,
   validateResume,
+  _testing,
 } from '../../src/lifecycle/decide.js'
-import { WORKFLOW_OPTIONS } from '../../src/workflow/contracts.js'
+import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
 
 const remotes: RemotePluginCandidate[] = [
   {
@@ -30,18 +33,26 @@ const remotes: RemotePluginCandidate[] = [
   },
 ]
 
-const agent = {} as Agent
+const agent = {
+  id: 'session-decide',
+  session: { header: { id: 'session-decide', cwd: 'C:/workspace', version: 0, createdAt: 0 } },
+} as unknown as Agent
 
-function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>) {
+function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload {
   return {
-    kind: 'await_selection' as const,
+    kind: 'await_selection',
+    interruptId: `interrupt_${'a'.repeat(24)}`,
+    ownerSessionId: 'session-decide',
+    bootId: 'boot_decide',
+    validAfterTurnId: `turn_${'0'.repeat(24)}`,
+    snapshotDigest: 'b'.repeat(64),
     options: ids.map((id) => WORKFLOW_OPTIONS[id]),
     facts: {},
   }
 }
 
 describe('resume validation', () => {
-  it('accepts option_id as the decision and keeps claimed repositories in the candidate set', () => {
+  it('accepts repositories claimed for inspect and rejects invalid combinations', () => {
     expect(resolveResumeRepositories(['omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
       .toEqual(['omdsh-dev/dsh-tool-calculator'])
     expect(() => resolveResumeRepositories([], remotes, 'inspect')).toThrow(/exactly one repository/i)
@@ -57,8 +68,14 @@ describe('resume validation', () => {
     expect(() => assertResumeContradiction('没有合适的，新建一个', 'create_new')).not.toThrow()
   })
 
+  it('infers inspect from a host turn that names a candidate repository', () => {
+    expect(inferOptionId('先看 MirDie/dsh-xai', interrupt(['inspect', 'stop']), remotes)).toBe('inspect')
+    expect(resolveRepositoryFromMessage('审查 MirDie/dsh-xai', remotes)).toEqual(['MirDie/dsh-xai'])
+    expect(_testing.CREATE_NEW_RE.test('Create new')).toBe(true)
+  })
+
   it('requires the live user turn to match user_message when a turn was claimed', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     expect(validateResume({
       guard,
       agent,
@@ -98,7 +115,7 @@ describe('resume validation', () => {
   })
 
   it('rejects an option that is not in the current interrupt', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
     expect(() => validateResume({
       guard,

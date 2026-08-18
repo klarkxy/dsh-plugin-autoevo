@@ -65,9 +65,9 @@ const creatorSkillSuccess: ToolExecutionResult = {
 } as unknown as ToolExecutionResult
 
 describe('new Cordis Plugin creation guard', () => {
-  it('denies new definitions outside evolution mode even with a stale scratch grant', async () => {
+  it('denies new definitions outside evolution mode even with a stale create authorization', async () => {
     const guard = outsideModeGuard()
-    resolveAs(guard, authorization('scratch_ready'))
+    resolveAs(guard, authorization('create_authorized'))
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     const exec = execution('call-outside')
     await expect(guard.preExecute(exec, next)).resolves.toEqual({
@@ -90,7 +90,7 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(execution('call-final'))).toContain('call capability_workflow')
   })
 
-  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'modify_review', 'use_review', 'market_required', 'stopped'] as const)(
+  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'modify_review', 'use_review', 'market_required', 'stopped', 'create_authorized'] as const)(
     'keeps new definitions blocked in evolution mode for %s',
     async (state) => {
       const guard = inModeGuard()
@@ -102,32 +102,26 @@ describe('new Cordis Plugin creation guard', () => {
     },
   )
 
-  it('reserves one scratch grant, restores it after failure, and consumes it after success', async () => {
+  it('never grants parent-session cordis_define after create_authorized', async () => {
     const guard = inModeGuard()
-    resolveAs(guard, authorization('scratch_ready'))
+    resolveAs(guard, authorization('create_authorized'))
     const first = execution('call-first')
-    await expect(guard.preExecute(first, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
-    expect(guard.guard(first)).toBeUndefined()
-
-    const concurrent = await guard.preExecute(execution('call-concurrent'), async () => ({ kind: 'allow' }))
-    expect(concurrent.kind).toBe('deny')
-
+    await expect(guard.preExecute(first, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    expect(guard.guard(first)).toMatch(/managed git source|workspace-write|not permitted/i)
     guard.result(first, failure)
     const retry = execution('call-retry')
-    await expect(guard.preExecute(retry, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
-    guard.result(retry, success)
-
-    const consumed = await guard.preExecute(execution('call-after-success'), async () => ({ kind: 'allow' }))
-    expect(consumed.kind).toBe('deny')
-    if (consumed.kind === 'deny') expect(consumed.reason).toContain('consumed')
+    await expect(guard.preExecute(retry, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
-  it('does not require a creator skill result before scratch grant works', async () => {
+  it('keeps create_authorized denied even after loading the creator skill', async () => {
     const guard = inModeGuard()
-    resolveAs(guard, authorization('scratch_ready'))
-    const exec = execution('call-no-skill')
-    await expect(guard.preExecute(exec, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
-    expect(guard.guard(exec)).toBeUndefined()
+    resolveAs(guard, authorization('create_authorized'))
+    const skill = skillExecution('call-skill')
+    await expect(guard.preExecute(skill, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
+    guard.result(skill, creatorSkillSuccess)
+    const exec = execution('call-after-skill')
+    await expect(guard.preExecute(exec, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    expect(guard.guard(exec)).toMatch(/managed git source|not permitted/i)
   })
 
   it('does not block official creator skill loads', async () => {
@@ -149,11 +143,12 @@ describe('new Cordis Plugin creation guard', () => {
     const guard = new CreationGuard({
       isEvolutionMode: (target) => target === agent,
     })
-    resolveAs(guard, authorization('scratch_ready'), agent)
-    resolveAs(guard, authorization('scratch_ready'), otherAgent)
+    resolveAs(guard, authorization('create_authorized'), agent)
+    resolveAs(guard, authorization('create_authorized'), otherAgent)
 
-    const allowed = execution('call-real-mode')
-    await expect(guard.preExecute(allowed, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
+    const inMode = execution('call-real-mode')
+    await expect(guard.preExecute(inMode, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    expect(guard.guard(inMode)).toMatch(/managed git source|not permitted/i)
 
     const foreign = {
       ...execution('call-foreign'),
@@ -174,9 +169,9 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(execution('call-pwsh', 'new', 'pwsh'))).toBeUndefined()
   })
 
-  it('revokes an unconsumed grant when a new resolution starts', async () => {
+  it('clears prior authorization bookkeeping when a new resolution starts', async () => {
     const guard = inModeGuard()
-    resolveAs(guard, authorization('scratch_ready'))
+    resolveAs(guard, authorization('create_authorized'))
     guard.beginResolution(agent)
     const decision = await guard.preExecute(execution('call-revoked'), async () => ({ kind: 'allow' }))
     expect(decision.kind).toBe('deny')
@@ -188,7 +183,7 @@ describe('new Cordis Plugin creation guard', () => {
     const currentGeneration = guard.beginResolution(agent)!
     const current = { ...authorization('reuse_local'), resolutionId: `resolution_${'b'.repeat(24)}` }
     expect(guard.applyResolutionAuthorization(agent, current, currentGeneration)).toBe(true)
-    expect(guard.applyResolutionAuthorization(agent, authorization('scratch_ready'), staleGeneration)).toBe(false)
+    expect(guard.applyResolutionAuthorization(agent, authorization('create_authorized'), staleGeneration)).toBe(false)
     expect(guard.authorization(agent)).toEqual(current)
     expect((await guard.preExecute(execution('call-stale'), async () => ({ kind: 'allow' }))).kind).toBe('deny')
   })
@@ -197,7 +192,7 @@ describe('new Cordis Plugin creation guard', () => {
     const guard = inModeGuard()
     const active = { ...authorization('selection_required'), resolutionId: `resolution_${'c'.repeat(24)}` }
     resolveAs(guard, active)
-    const foreign = { ...authorization('scratch_ready'), resolutionId: `resolution_${'d'.repeat(24)}` }
+    const foreign = { ...authorization('create_authorized'), resolutionId: `resolution_${'d'.repeat(24)}` }
     expect(guard.applyReviewAuthorization(agent, foreign)).toBe(false)
     expect(guard.applyReviewAuthorization(otherAgent, active)).toBe(false)
     expect(guard.authorization(agent)).toEqual(active)

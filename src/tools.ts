@@ -11,7 +11,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
   return [
     defineTool({
       name: 'capability_workflow',
-      description: 'Start the capability evolution workflow. Uses the user\'s original wording to check local tools/skills and search find_dsh_plugin. Returns an interrupt with a shortlist and structured options. Present the facts in chat and wait. Do not call ask_user. After the user replies, call capability_workflow_resume.',
+      description: 'Start the capability evolution workflow. Uses the user\'s original wording to check local tools/skills and search find_dsh_plugin. Returns an interrupt with a shortlist, interrupt_id, and structured options. Present the facts in chat and wait. Do not call ask_user. After the user replies, call capability_workflow_resume with only workflow_id and interrupt_id. Same session/cwd/requirement reuses an unfinished workflow.',
       parameters: {
         requirement: { type: 'string', required: true, description: 'Concrete capability required by the current user task.' },
       },
@@ -22,49 +22,22 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_resume',
-      description: 'Resume an interrupted capability workflow. Pass the user\'s latest chat message verbatim and the option_id from the current interrupt. This is the only way to inspect repositories, allow one new plugin, reuse a local capability, confirm use-this / improve-this, review a local checkout, install, or stop. Do not invent a create-new decision.',
+      description: 'Resume an interrupted capability workflow. Pass only workflow_id and interrupt_id. The Host resolves the real user decision from the already-claimed user turn for this session. Do not supply user_message, option_id, repositories, paths, review ids, or install facts.',
       parameters: {
         workflow_id: { type: 'string', required: true, description: 'Workflow id returned by capability_workflow.' },
-        user_message: { type: 'string', required: true, description: 'The user\'s latest chat reply, verbatim.' },
-        option_id: {
-          type: 'string',
-          enum: ['inspect', 'search_more', 'use_local', 'create_new', 'stop', 'use_this', 'modify_this', 'resume_modify'],
-          required: true,
-          description: 'Option id from the current interrupt payload.',
-        },
-        repositories: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Exactly one owner/repo when inspecting. Optional when confirming a review.',
-        },
-        path: { type: 'string', description: 'Local Git worktree root after improve-this work is done.' },
-        ref: { type: 'string', description: 'Optional Git ref; resolved to an exact commit before review.' },
-        review_id: { type: 'string', description: 'Review id when confirming use-this or improve-this.' },
-        target_profile: { type: 'string', description: 'Explicit DSH profile name when option_id is use_this.' },
-        retention: { type: 'string', enum: ['temporary', 'persistent'], description: 'Install retention when option_id is use_this.' },
-        verification_task: { type: 'string', description: 'Task for a fresh DSH child. Required for temporary trials.' },
-        verification_expected_text: { type: 'string', description: 'Optional exact text that must appear in the completed child final answer.' },
+        interrupt_id: { type: 'string', required: true, description: 'interrupt_id from the current interrupt payload.' },
       },
       output: jsonOutput,
       async execute(args, exec) {
         return await service.resume({
           workflowId: args.workflow_id,
-          userMessage: args.user_message,
-          optionId: args.option_id,
-          ...(args.repositories !== undefined ? { repositories: args.repositories } : {}),
-          ...(args.path !== undefined ? { path: args.path } : {}),
-          ...(args.ref !== undefined ? { ref: args.ref } : {}),
-          ...(args.review_id !== undefined ? { reviewId: args.review_id } : {}),
-          ...(args.target_profile !== undefined ? { targetProfile: args.target_profile } : {}),
-          ...(args.retention !== undefined ? { retention: args.retention } : {}),
-          ...(args.verification_task !== undefined ? { verificationTask: args.verification_task } : {}),
-          ...(args.verification_expected_text !== undefined ? { verificationExpectedText: args.verification_expected_text } : {}),
+          interruptId: args.interrupt_id,
         }, exec) as unknown as JsonValue
       },
     }),
     defineTool({
       name: 'plugin_remove',
-      description: 'Request one-time approval and remove exactly one installation identified by an owned receipt.',
+      description: 'Request one-time approval and remove exactly one installation identified by an owned receipt. Never deletes a managed source repository.',
       parameters: {
         installation_id: { type: 'string', required: true },
       },

@@ -15,13 +15,16 @@ afterEach(async () => {
   await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
 })
 
-function exec(): ToolRunContext {
+function exec(sessionId = 'session-1'): ToolRunContext {
   return {
     callId: 'call-1',
     rootCallId: 'call-1',
     token: Symbol('call-1'),
     signal: new AbortController().signal,
-    agent: { session: { header: { cwd: process.cwd() } } },
+    agent: {
+      id: sessionId,
+      session: { header: { id: sessionId, cwd: process.cwd(), version: 0, createdAt: 0 } },
+    },
   } as unknown as ToolRunContext
 }
 
@@ -100,17 +103,20 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
 }
 
 describe('workflow engine', () => {
-  it('starts, checkpoints, and parks on await_selection', async () => {
+  it('starts, checkpoints, and parks on await_selection with a bound interrupt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const record = resolution()
     const engine = new WorkflowEngine(store, guard, host(store, record))
     const view = await engine.start('run a PowerShell command', exec())
     expect(view.workflow.status).toBe('interrupted')
     expect(view.workflow.cursor).toBe('await_selection')
     expect(view.workflow.interrupt?.options.map((item) => item.id)).toContain('use_local')
+    expect(view.workflow.interrupt?.interruptId).toMatch(/^interrupt_/u)
+    expect(view.workflow.interrupt?.ownerSessionId).toBe('session-1')
+    expect(view.workflow.interrupt?.bootId).toBe('boot_engine')
     const stored = await store.getWorkflow(view.workflow.id)
     expect(stored.generation).toBe(1)
     expect(stored.resolutionId).toBe(record.id)
@@ -120,7 +126,7 @@ describe('workflow engine', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-lock-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const record = resolution()
     let release!: () => void
     const blocked = new Promise<void>((resolve) => {
@@ -138,13 +144,11 @@ describe('workflow engine', () => {
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先停' }] })
     const first = engine.resume({
       workflowId: started.workflow.id,
-      userMessage: '先停',
-      optionId: 'stop',
+      interruptId: started.workflow.interrupt!.interruptId,
     }, turn)
     await expect(engine.resume({
       workflowId: started.workflow.id,
-      userMessage: '先停',
-      optionId: 'stop',
+      interruptId: started.workflow.interrupt!.interruptId,
     }, turn)).rejects.toThrow(/already running/i)
     release()
     await expect(first).resolves.toMatchObject({ workflow: { cursor: 'stopped' } })
@@ -154,18 +158,18 @@ describe('workflow engine', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-cancel-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const controller = new AbortController()
     controller.abort()
     const engine = new WorkflowEngine(store, guard, host(store, resolution()))
     await expect(engine.start('calculator', { ...exec(), signal: controller.signal })).rejects.toThrow(/cancelled/i)
   })
 
-  it('resumes stop from the interrupt options and completes', async () => {
+  it('resumes stop from the host turn and completes', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-stop-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const record = resolution()
     const engine = new WorkflowEngine(store, guard, host(store, record))
     const turn = exec()
@@ -173,8 +177,7 @@ describe('workflow engine', () => {
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先停' }] })
     const stopped = await engine.resume({
       workflowId: started.workflow.id,
-      userMessage: '先停',
-      optionId: 'stop',
+      interruptId: started.workflow.interrupt!.interruptId,
     }, turn)
     expect(stopped.workflow.status).toBe('completed')
     expect(stopped.workflow.cursor).toBe('stopped')

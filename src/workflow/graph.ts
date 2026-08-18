@@ -33,20 +33,19 @@ const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionI
     inspect: 'review_github',
     search_more: 'discover_remote',
     use_local: 'reuse_local',
-    create_new: 'grant_scratch',
+    create_new: 'prepare_create',
     stop: 'stopped',
   },
   await_confirmation: {
     use_this: 'install_verify',
-    modify_this: 'await_modify_work',
+    modify_this: 'prepare_modify',
     inspect: 'review_github',
     search_more: 'discover_remote',
     use_local: 'reuse_local',
-    create_new: 'grant_scratch',
+    create_new: 'prepare_create',
     stop: 'stopped',
   },
   await_modify_work: {
-    resume_modify: 'review_local',
     stop: 'stopped',
   },
 }
@@ -67,7 +66,7 @@ export function interruptPayload(
   resolution: ResolutionRecord,
   review?: ReviewRecord,
   extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
-): InterruptPayload {
+): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
   if (cursor === 'await_selection') {
     return {
       kind: 'await_selection',
@@ -112,7 +111,8 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
   if (node === 'review_github') return executeReviewGithub(ctx)
   if (node === 'review_local') return executeReviewLocal(ctx)
   if (node === 'install_verify') return executeInstallVerify(ctx)
-  if (node === 'grant_scratch') return { kind: 'done', node: 'scratch_ready', ...(ctx.resolution ? { resolution: ctx.resolution } : {}) }
+  if (node === 'prepare_modify') return executePrepareModify(ctx)
+  if (node === 'prepare_create') return executePrepareCreate(ctx)
   throw new EvolutionError('invalid_input', 'No automatic implementation for this workflow node', { node })
 }
 
@@ -197,6 +197,46 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
     }
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }
   }
+}
+
+async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionResult> {
+  const current = await requireResolution(ctx)
+  const review = await ctx.host.latestReview(
+    current.id,
+    ctx.workflow.lastReviewId ?? ctx.workflow.lineageTipReviewId,
+  )
+  if (!review) {
+    throw new EvolutionError('invalid_input', 'modify_this requires a review')
+  }
+  if (ctx.host.prepareModify) {
+    const prepared = await ctx.host.prepareModify(current, review, ctx.exec)
+    if (prepared.path) {
+      ctx.workflow.pendingPath = prepared.path
+      return { kind: 'next', node: 'review_local', resolution: prepared.resolution, review }
+    }
+    if (prepared.deferred) {
+      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution, review }
+    }
+    return { kind: 'done', node: 'modify_authorized', resolution: prepared.resolution, review }
+  }
+  // Commit-1 placeholder: record authorization without accepting a model-selected path.
+  return { kind: 'done', node: 'modify_authorized', resolution: current, review }
+}
+
+async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionResult> {
+  const current = await requireResolution(ctx)
+  if (ctx.host.prepareCreate) {
+    const prepared = await ctx.host.prepareCreate(current, ctx.exec)
+    if (prepared.path) {
+      ctx.workflow.pendingPath = prepared.path
+      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
+    }
+    if (prepared.deferred) {
+      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
+    }
+    return { kind: 'done', node: 'create_authorized', resolution: prepared.resolution }
+  }
+  return { kind: 'done', node: 'create_authorized', resolution: current }
 }
 
 async function requireResolution(ctx: GraphContext): Promise<ResolutionRecord> {

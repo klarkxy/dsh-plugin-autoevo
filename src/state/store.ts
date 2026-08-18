@@ -48,6 +48,24 @@ export class StateStore {
     return this.get('workflows', id) as Promise<WorkflowRecord>
   }
 
+  async listWorkflows(): Promise<WorkflowRecord[]> {
+    const directory = path.join(this.root, 'workflows')
+    let entries: string[]
+    try {
+      entries = await readdir(directory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const workflows: WorkflowRecord[] = []
+    for (const entry of entries.sort()) {
+      if (!/^workflow_[a-f0-9]{16,64}\.json$/u.test(entry)) continue
+      const record = JSON.parse(await readFile(path.join(directory, entry), 'utf8')) as WorkflowRecord
+      workflows.push(record)
+    }
+    return workflows
+  }
+
   async listReviews(resolutionId: string): Promise<ReviewRecord[]> {
     assertRecordId(resolutionId)
     const directory = path.join(this.root, 'reviews')

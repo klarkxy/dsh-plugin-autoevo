@@ -79,11 +79,11 @@ describe('workflow graph transitions', () => {
   it('routes selection and confirmation options onto the declared nodes', () => {
     expect(transition('await_selection', 'inspect')).toBe('review_github')
     expect(transition('await_selection', 'search_more')).toBe('discover_remote')
-    expect(transition('await_selection', 'create_new')).toBe('grant_scratch')
+    expect(transition('await_selection', 'create_new')).toBe('prepare_create')
     expect(transition('await_confirmation', 'use_this')).toBe('install_verify')
-    expect(transition('await_confirmation', 'modify_this')).toBe('await_modify_work')
+    expect(transition('await_confirmation', 'modify_this')).toBe('prepare_modify')
     expect(transition('await_confirmation', 'inspect')).toBe('review_github')
-    expect(transition('await_modify_work', 'resume_modify')).toBe('review_local')
+    expect(transition('await_modify_work', 'stop')).toBe('stopped')
     expect(() => transition('await_selection', 'use_this')).toThrow(/cannot resume/i)
   })
 
@@ -170,6 +170,17 @@ describe('workflow graph nodes', () => {
     })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
     expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'verify failed' })
+  })
+
+  it('authorizes create-new without a scratch grant node', async () => {
+    const current = resolution()
+    const result = await executeNode('prepare_create', {
+      host: {} as WorkflowHost,
+      workflow: workflow('prepare_create'),
+      exec: {},
+      resolution: current,
+    })
+    expect(result).toMatchObject({ kind: 'done', node: 'create_authorized' })
   })
 
   it('loops search_more back through remote discovery', async () => {
