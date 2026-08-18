@@ -4,7 +4,14 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
-import type { InstallationState, InstallInput, InstallationRecord, ReviewRecord, VerificationEvidence } from '../contracts.js'
+import type {
+  InstallationState,
+  InstallInput,
+  InstallationRecord,
+  InstallOutcome,
+  ReviewRecord,
+  VerificationEvidence,
+} from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import { hashObject } from '../state/hashes.js'
@@ -105,7 +112,7 @@ function installFailure(error: unknown): NonNullable<InstallationRecord['install
 
 function failedInstallation(
   expectedTools: readonly string[],
-  installState: InstallationState,
+  outcome: InstallOutcome,
   failure: NonNullable<InstallationRecord['installFailure']>,
 ): VerificationEvidence {
   const diagnostic = failure.diagnosticHash ? ` Diagnostic sha256: ${failure.diagnosticHash}.` : ''
@@ -117,11 +124,9 @@ function failedInstallation(
     failedTools: [],
     sessionFiles: [],
     taskResultObserved: false,
-    reason: (installState === 'installed'
-      ? 'The DSH installation command did not complete successfully, but profile reconciliation found the dependency installed; verification is still required.'
-      : installState === 'not_installed'
-        ? 'The DSH installation command did not complete successfully and profile reconciliation found no installed dependency.'
-        : 'The DSH installation command did not complete successfully and profile reconciliation failed; recovery is required before retrying.')
+    reason: (outcome === 'failed_absent'
+      ? 'The DSH installation command did not complete successfully and profile reconciliation confirmed the dependency is absent.'
+      : 'The DSH installation command did not complete successfully and the target is present, unknown, or unverifiable; recovery is required before retrying.')
       + ` ${failure.message}.${diagnostic}`,
   }
 }
@@ -148,9 +153,40 @@ async function requestApproval(
   }
 }
 
-function githubInstallSpec(review: ReviewRecord): string | null {
+/** Exact review-derived GitHub install spec. No fallback synthesis at install time. */
+export function expectedGithubInstallSpec(review: ReviewRecord): string | null {
   if (review.sourceSnapshot.kind !== 'github' || !review.manifest.packageName) return null
   return `github:${review.sourceSnapshot.repository}#${review.sourceSnapshot.commit}`
+}
+
+export function assertStrictInstallSpec(review: ReviewRecord): string {
+  if (review.sourceSnapshot.kind === 'github') {
+    const expected = expectedGithubInstallSpec(review)
+    if (!expected) {
+      throw new EvolutionError('review_rejected', 'GitHub review is missing package identity required for an immutable install specification')
+    }
+    if (!review.installSpec) {
+      throw new EvolutionError('review_rejected', 'Review is missing an immutable install specification')
+    }
+    if (review.installSpec !== expected) {
+      throw new EvolutionError('review_rejected', 'Review install specification does not match the reviewed GitHub source', {
+        expected,
+        actual: review.installSpec,
+      })
+    }
+    return review.installSpec
+  }
+  // Local installs materialize an owned file: spec from the reviewed tree; a pre-set non-file spec is rejected.
+  if (review.installSpec && !review.installSpec.startsWith('file:')) {
+    throw new EvolutionError('review_rejected', 'Local review install specification must be an owned file: artifact or null before materialization', {
+      actual: review.installSpec,
+    })
+  }
+  return review.installSpec ?? ''
+}
+
+function outcomeAfterCommandFailure(installState: InstallationState): InstallOutcome {
+  return installState === 'not_installed' ? 'failed_absent' : 'recovery_required'
 }
 
 export class PluginInstaller {
@@ -180,8 +216,9 @@ export class PluginInstaller {
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
     if (this.authorizeInstall) await this.authorizeInstall(review, exec)
-    const installableSpec = review.installSpec ?? githubInstallSpec(review)
-    const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(installableSpec)
+
+    const strictSpec = assertStrictInstallSpec(review)
+    const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(strictSpec)
     const userChoseUse = Boolean(this.authorizeInstall)
     const hardSkip = review.findings.some((finding) => finding.code === 'prompt_injection' || finding.code === 'dynamic_evaluation')
     const blocked = review.manifest.kind !== 'bundle'
@@ -230,7 +267,7 @@ export class PluginInstaller {
     if (input.retention === 'temporary') await mkdir(dshHome, { recursive: true })
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
 
-    let installSpec = review.installSpec ?? installableSpec
+    let installSpec = strictSpec
     let ownedArtifactRoot: string | undefined
     let artifactSha256: string | undefined
     if (review.sourceSnapshot.kind === 'local') {
@@ -262,6 +299,7 @@ export class PluginInstaller {
       ...(ownedArtifactRoot ? { ownedArtifactRoot } : {}),
       ...(artifactSha256 ? { artifactSha256 } : {}),
       installState: 'unknown',
+      installOutcome: 'pending',
       installed: false,
       loaded: false,
       verified: false,
@@ -293,13 +331,15 @@ export class PluginInstaller {
           installState = 'unknown'
         }
       }
+      const installOutcome = outcomeAfterCommandFailure(installState)
       const failedRecord: InstallationRecord = {
         ...provisional,
         installState,
-        installed: installState === 'installed',
+        installOutcome,
+        installed: false,
         removed,
         installFailure: failure,
-        verification: failedInstallation(review.manifest.expectedTools, installState, failure),
+        verification: failedInstallation(review.manifest.expectedTools, installOutcome, failure),
       }
       await this.store.put('installations', failedRecord)
       return failedRecord
@@ -335,19 +375,31 @@ export class PluginInstaller {
           && !verification.failedTools.includes(name)))
     const failedTemporaryTrialRemoved = input.retention === 'temporary' && verification.attempted && !verified
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
+
+    let installOutcome: InstallOutcome
+    if (verified) installOutcome = 'verified'
+    else if (failedTemporaryTrialRemoved) installOutcome = 'failed_absent'
+    else installOutcome = 'recovery_required'
+
     const contributionEligible = review.sourceSnapshot.kind === 'local' && verified && review.fit === 'full'
       && review.recommendation === 'use' && Boolean(review.license)
     const record: InstallationRecord = {
       ...provisional,
-      installState: 'installed',
-      installed: true,
-      loaded,
+      installState: verified || !failedTemporaryTrialRemoved ? 'installed' : 'not_installed',
+      installOutcome,
+      installed: verified,
+      loaded: verified ? loaded : false,
       verified,
       restartRequired: input.retention === 'persistent',
       removed: failedTemporaryTrialRemoved,
       verification: failedTemporaryTrialRemoved
         ? { ...verification, reason: `${verification.reason} Failed temporary trial was removed.` }
-        : verification,
+        : verified
+          ? verification
+          : {
+              ...verification,
+              reason: `${verification.reason} Install command finished but Loader/runtime verification did not prove the expected plugin; recovery is required.`,
+            },
       ...(review.sourceSnapshot.kind === 'local'
         ? {
             contributionAdvice: {
@@ -367,6 +419,7 @@ export class PluginInstaller {
         try {
           await this.store.put('installations', {
             ...provisional,
+            installOutcome: 'recovery_required',
             removed: true,
             verification: {
               ...verification,
@@ -386,4 +439,11 @@ export class PluginInstaller {
   }
 }
 
-export const _testing = { validateProfile, verificationTask, verificationExpectation }
+export const _testing = {
+  validateProfile,
+  verificationTask,
+  verificationExpectation,
+  assertStrictInstallSpec,
+  expectedGithubInstallSpec,
+  outcomeAfterCommandFailure,
+}

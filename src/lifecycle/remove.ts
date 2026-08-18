@@ -43,6 +43,10 @@ export class PluginRemover {
     private readonly launcher: DshLauncher,
   ) {}
 
+  /**
+   * Uninstalls exactly one installation receipt.
+   * Never deletes a managed source repository under stateDir/sources.
+   */
   async remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
     const record = await this.store.getInstallation(input.installationId)
     if (record.removed) {

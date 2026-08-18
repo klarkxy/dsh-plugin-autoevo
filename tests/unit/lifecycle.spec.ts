@@ -181,7 +181,13 @@ describe('lifecycle validation', () => {
 
     expect(approvalReason).toContain('risk=medium')
     expect(approvalReason).toContain('lifecycleScripts=prepare')
-    expect(result).toMatchObject({ installed: true, loaded: false, verified: false, removed: true })
+    expect(result).toMatchObject({
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      removed: true,
+    })
     expect(result.verification.reason).toContain('Failed temporary trial was removed.')
     await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -239,8 +245,14 @@ describe('lifecycle validation', () => {
       retention: 'persistent',
     }, execution())
 
-    expect(result).toMatchObject({ installState: 'installed', installed: true, verified: false, removed: false })
-    expect(result.verification.reason).toContain('profile reconciliation found the dependency installed')
+    expect(result).toMatchObject({
+      installState: 'installed',
+      installOutcome: 'recovery_required',
+      installed: false,
+      verified: false,
+      removed: false,
+    })
+    expect(result.verification.reason).toMatch(/present, unknown, or unverifiable|recovery is required/i)
   })
 
   it('treats a no-tool plugin as loaded and verified after a completed child turn', async () => {
@@ -283,7 +295,13 @@ describe('lifecycle validation', () => {
       verificationTask: 'list installed bundles',
       verificationExpectedText: 'dsh-subscription-auth',
     }, execution())
-    expect(result).toMatchObject({ installed: true, loaded: true, verified: true, removed: false })
+    expect(result).toMatchObject({
+      installOutcome: 'verified',
+      installed: true,
+      loaded: true,
+      verified: true,
+      removed: false,
+    })
   })
 
   it('marks a persistent install outcome unknown when reconciliation also fails', async () => {
@@ -304,7 +322,13 @@ describe('lifecycle validation', () => {
       retention: 'persistent',
     }, execution())
 
-    expect(result).toMatchObject({ installState: 'unknown', installed: false, verified: false, removed: false })
+    expect(result).toMatchObject({
+      installState: 'unknown',
+      installOutcome: 'recovery_required',
+      installed: false,
+      verified: false,
+      removed: false,
+    })
     expect(result.verification.reason).toContain('recovery is required')
   })
 
@@ -341,7 +365,13 @@ describe('lifecycle validation', () => {
       verificationExpectedText: '42',
     }, execution())
 
-    expect(result).toMatchObject({ installState: 'installed', installed: true, loaded: true, verified: false, removed: true })
+    expect(result).toMatchObject({
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      removed: true,
+    })
   })
 
   it('uses a provisional receipt to recover from final receipt persistence failure', async () => {
@@ -415,7 +445,14 @@ describe('lifecycle validation', () => {
       verificationTask: 'test calculator',
     }, execution())
 
-    expect(result).toMatchObject({ installed: true, loaded: false, verified: false, removed: false, restartRequired: true })
+    expect(result).toMatchObject({
+      installOutcome: 'recovery_required',
+      installed: false,
+      loaded: false,
+      verified: false,
+      removed: false,
+      restartRequired: true,
+    })
     expect(result.verification.reason).toContain('could not complete')
     await expect(store.getInstallation(result.id)).resolves.toMatchObject({ id: result.id, verified: false })
   })
