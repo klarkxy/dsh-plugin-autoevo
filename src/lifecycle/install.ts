@@ -278,6 +278,12 @@ export class PluginInstaller {
         const materialized = await this.launcher.materializeLocal(review, ownedArtifactRoot, exec.signal)
         installSpec = materialized.installSpec
         artifactSha256 = materialized.artifactSha256
+        if (input.expectedArtifactSha256 && artifactSha256 !== input.expectedArtifactSha256) {
+          throw new EvolutionError('review_rejected', 'Managed source package bytes changed after user confirmation', {
+            expectedArtifactSha256: input.expectedArtifactSha256,
+            actualArtifactSha256: artifactSha256,
+          })
+        }
       } catch (error) {
         if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
         else await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
@@ -324,9 +330,9 @@ export class PluginInstaller {
       let installState: InstallationState = 'not_installed'
       if (input.retention === 'persistent') {
         try {
-          installState = await this.launcher.hasProfileDependency(dshHome, input.targetProfile, packageName)
-            ? 'installed'
-            : 'not_installed'
+          installState = await this.launcher.profileTargetAbsent(dshHome, input.targetProfile, packageName)
+            ? 'not_installed'
+            : 'installed'
         } catch {
           installState = 'unknown'
         }
@@ -344,8 +350,25 @@ export class PluginInstaller {
       await this.store.put('installations', failedRecord)
       return failedRecord
     }
+    const sourceMatched = await this.launcher.profileSourceMatches(
+      dshHome,
+      input.targetProfile,
+      packageName,
+      installSpec,
+    ).catch(() => false)
     let verification: VerificationEvidence
-    if (task) {
+    if (!sourceMatched) {
+      verification = {
+        attempted: false,
+        expectedTools: [...review.manifest.expectedTools],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'The install command finished, but the target profile did not record the exact reviewed source as an active bundle.',
+      }
+    } else if (task) {
       try {
         verification = await this.launcher.verify(
           dshHome,
@@ -364,11 +387,11 @@ export class PluginInstaller {
     }
     const expectedTools = review.manifest.expectedTools
     const loadOnly = expectedTools.length === 0
-    const loaded = verification.attempted && verification.exitCode === 0
+    const loaded = sourceMatched && verification.attempted && verification.exitCode === 0
       && (loadOnly
         ? verification.taskResultObserved
         : expectedTools.some((name) => verification.calledTools.includes(name)))
-    const verified = loaded && verification.taskResultObserved && verification.taskResultMatchedExpectation !== false
+    const verified = sourceMatched && loaded && verification.taskResultObserved && verification.taskResultMatchedExpectation !== false
       && (loadOnly
         || expectedTools.every((name) => verification.calledTools.includes(name)
           && verification.resultTools.includes(name)

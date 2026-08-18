@@ -55,14 +55,16 @@ capability_workflow
 
 ## 3. DSH 接缝
 
-入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。四个 required services：
+入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。主要 required services：
 
 - `tools`：枚举能力并注册三个高层工具（`capability_workflow`、`capability_workflow_resume`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
+- `agents` / `agentPresets`：由 Host 建立并验证 `code` 子会话所有权；
+- `sandbox` / `sandboxPolicy` / `fs`：对子会话的真实 `workspace-write` 文件与 shell 边界做启动探测。
 
-`tools` 同时承载新建门禁。它只识别带 Agent 身份、结构化的 `cordis_define` 且 `plugin.kind = "new"`，不会猜测普通文件、shell、Git 或无 Agent 的内部调用意图；`plugin.kind = "existing"` 也直接放行。
+`tools` 同时承载最终执行门禁。父会话的 `cordis_define(kind=new)` 永远拒绝；父会话也以 allowlist 拒绝写文件、shell、Cordis 修改、委派和直接装卸。modify/create 只能由 Host 建立受管子会话；提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -84,18 +86,19 @@ stateDir/
    └─ tool-roundtrip.jsonl
 ```
 
-`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
+`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
 
 社区质量筛选与上报不在主线；完整实现留在 `community-quality` 分支。
 
-V2 resolution receipt 记录 `authorization` 与远端发现是否完整。创建、安装和改进由工作流 interrupt 上的用户选项决定；`inspect` 一次只审一个仓库，`create_new` 必须由用户原话匹配的 resume 发放，不会因为审查全是 skip 自动授权。运行时一次性权限不写入 receipt，也不跨 Agent 或进程恢复。
+V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要；resume 公共参数只有 `workflow_id + interrupt_id`，决定只能从 Host 捕获的下一条用户消息推导。旧 boot 的 interrupt 会重签并要求新的用户回合，不跨 Agent 或进程恢复确认。
 
 Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash、material manifest facts，以及实际 DSH runtime 版本和兼容性。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容、manifest 或 runtime 兼容性变化会使凭据过期。
 
 ## 5. 状态语义
 
 - `installState`：`installed`、`not_installed` 或 `unknown`。持久安装命令异常后必须读取 Profile dependency 协调状态；读取也失败时保持 `unknown` 并要求恢复，不能断言未安装。
-- `installed`：兼容旧回执的布尔投影；仅 `installState: installed` 为 true。
+- `installOutcome`：`pending | verified | failed_absent | recovery_required`；只有 `verified` 可投影为成功。
+- `installed`：兼容旧调用方的布尔投影；只有 Loader/runtime 与精确 profile 来源都验证后才为 true。
 - `loaded`：隔离子进程退出成功，可信 observer 至少看到一个预期工具的真实调用。
 - `verified`：每个预期工具都有 call-id 匹配的成功 `tool/result`，DSH 会话给出以 `turn/end: completed` 收口的最终回答，并且可选预期文本匹配。
 - `restartRequired`：常驻 Profile 已写入依赖，新进程加载新 bundle。
@@ -105,7 +108,7 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 
 ## 6. 部分适配
 
-GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，Agent 从精确 commit 建立 workspace 内 Git checkout，做最小修改并运行原测试，再用 `source_kind=local + base_review_id` 重审。第二刀的 `base_review_id` 可以是上一刀本地 review。HEAD 可以是 lineage root 或其后代提交。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。symlink、特殊文件或触及文件/字节上限的快照记为 `skip`。
+GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再启动 cwd 精确绑定该仓库的 `workspace-write` 子会话。子会话只改源码和运行本地检查；Host 校验 branch/HEAD、Git config/hooks 摘要与工作树后，禁用 hooks 和签名创建本地 commit，再做 local review 与固定 tgz。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。symlink、特殊文件或触及文件/字节上限的快照记为 `skip`。
 
 本地快照成为 `full` 且用户 `use_this` 之后才能安装。批准后，安装器把已审查字节复制到 owned snapshot，比较完整路径/hash/size，再用 `npm pack --ignore-scripts` 生成 tgz，复核 snapshot 后交给 DSH 的是 owned `file:...tgz`。temporary artifact 随 trial 清理；persistent artifact 随 receipt 驱动的 remove 清理。同一需求的第二刀补丁必须留在这条 resolution：`base_review_id` 可以是上一刀本地 review，HEAD 可以是 lineage root 的后代提交。安装授权看该 resolution 最新一条匹配的 `use_this` 回执，不依赖当前进程里另一次 resolve。
 
@@ -116,7 +119,9 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，A
 ## 7. 实现入口
 
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
-- [src/creation-guard.ts](../src/creation-guard.ts)：动态 Cordis 新建调用的一次性运行时授权与并发预留。
+- [src/creation-guard.ts](../src/creation-guard.ts)：Host 用户回合、session/boot/interrupt 绑定与 Cordis 新建拒绝。
+- [src/managed-child.ts](../src/managed-child.ts)：Host-owned 子会话、code preset、sandbox 探测和完成回执。
+- [src/source-manager.ts](../src/source-manager.ts)：普通 Git 源、排他锁、hookless commit 与来源回执。
 - [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
 - [src/github/discovery.ts](../src/github/discovery.ts)：严格 `owner/repository` 标识校验。
 - [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。

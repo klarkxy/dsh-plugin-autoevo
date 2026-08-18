@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord, VerificationEvidence } from '../../src/contracts.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
@@ -102,7 +102,7 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => { throw new Error('dsh exited with code 1') },
-      hasProfileDependency: async () => false,
+      profileTargetAbsent: async () => true,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -126,7 +126,7 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => { throw new Error('timeout after manifest update') },
-      hasProfileDependency: async () => true,
+      profileTargetAbsent: async () => false,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -150,7 +150,7 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => { throw new Error('timeout') },
-      hasProfileDependency: async () => { throw new Error('profile unreadable') },
+      profileTargetAbsent: async () => { throw new Error('profile unreadable') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -174,6 +174,7 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
       verify: async (): Promise<VerificationEvidence> => ({
         ...verifiedEvidence,
         taskResultMatchedExpectation: false,
@@ -204,6 +205,7 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
       verify: async () => verifiedEvidence,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -220,5 +222,66 @@ describe('fail-closed install outcomes', () => {
       loaded: true,
       verified: true,
     })
+  })
+
+  it('requires the target profile to bind the exact reviewed source before verification can succeed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-source-mismatch-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const verify = vi.fn(async () => verifiedEvidence)
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => false,
+      verify,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const result = await installer.install({
+      reviewId: review().id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution())
+    expect(verify).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      installOutcome: 'recovery_required',
+      installed: false,
+      loaded: false,
+      verified: false,
+    })
+    expect(result.verification.reason).toMatch(/exact reviewed source/i)
+  })
+
+  it('rejects a managed local package whose packed bytes changed after confirmation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-artifact-drift-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const local = review({
+      sourceSnapshot: {
+        kind: 'local',
+        path: path.join(root, 'source'),
+        baseReviewId: `review_${'b'.repeat(64)}`,
+        baseCommit: 'c'.repeat(40),
+        statusHash: 'd'.repeat(64),
+      },
+      installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
+    })
+    await store.put('reviews', local)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      materializeLocal: async () => ({
+        installSpec: `file:${path.join(root, 'actual.tgz').replaceAll('\\', '/')}`,
+        artifactRoot: path.join(root, 'actual'),
+        artifactSha256: 'e'.repeat(64),
+      }),
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    await expect(installer.install({
+      reviewId: local.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      expectedArtifactSha256: 'f'.repeat(64),
+    }, execution())).rejects.toThrow(/package bytes changed after user confirmation/i)
   })
 })

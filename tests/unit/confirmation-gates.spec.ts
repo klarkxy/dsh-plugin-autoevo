@@ -55,7 +55,7 @@ function commandResult(stdout = ''): { exitCode: number, signal: null, stdout: s
 }
 
 function withGitSupport(base: { run: (request: { argv: readonly string[], cwd: string }) => Promise<{ exitCode: number, signal: null, stdout: string, stderr: string }> }) {
-  const gitState = { head: '1'.repeat(40), branch: 'main', n: 0 }
+  const gitState = { head: '1'.repeat(40), branch: 'main', n: 0, dirty: true }
   return {
     async run(request: { argv: readonly string[], cwd: string }) {
       const args = request.argv.slice(1)
@@ -64,19 +64,25 @@ function withGitSupport(base: { run: (request: { argv: readonly string[], cwd: s
         const { mkdir, writeFile } = await import('node:fs/promises')
         if (joined === 'init') {
           await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+          await writeFile(path.join(request.cwd, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n')
           return commandResult()
         }
         if (joined.startsWith('checkout -B')) {
           gitState.branch = args[2]!
           return commandResult()
         }
-        if (joined === 'status --porcelain') return commandResult()
+        if (joined === 'status --porcelain') return commandResult(gitState.dirty ? '?? scaffold\n' : '')
         if (joined === 'rev-parse HEAD') return commandResult(`${gitState.head}\n`)
         if (joined === 'rev-parse --abbrev-ref HEAD') return commandResult(`${gitState.branch}\n`)
+        if (joined.includes('rev-parse --show-toplevel')) return commandResult(`${request.cwd}\n`)
+        if (joined.includes('rev-parse HEAD')) return commandResult(`${gitState.head}\n`)
+        if (joined.includes('merge-base --is-ancestor')) return commandResult()
+        if (joined.includes('status --porcelain=v1 --untracked-files=all')) return commandResult()
         if (joined === 'add -A') return commandResult()
-        if (args[0] === 'commit') {
+        if (args.includes('commit')) {
           gitState.n += 1
-          gitState.head = `create${gitState.n}`.padEnd(40, '0')
+          gitState.head = String((gitState.n % 9) + 1).repeat(40)
+          gitState.dirty = false
           return commandResult()
         }
         return commandResult()
@@ -305,20 +311,20 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const turn = exec()
     const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const store = new StateStore(root)
     const service = new CapabilityEvolutionService(
       marketplaceCtx([], root),
       config(root),
       withGitSupport({ run: async () => commandResult('0.1.0-rc.6\n') }),
-      new StateStore(root),
+      store,
       guard,
     )
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错'))
       .rejects.toThrow(/Could not resolve a workflow decision/i)
-    const decided = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个')
-    expect(decided.resolution?.authorization?.state).toBe('create_authorized')
-    expect(decided.workflow.cursor).toBe('await_modify_work')
-    expect(decided.workflow.pendingPath).toBeTruthy()
+    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个'))
+      .rejects.toThrow(/Agent|managed modify\/create|without changing/i)
+    expect((await store.getResolution(started.resolution!.id)).authorization?.state).toBe('create_authorized')
     await expect(guard.preExecute({
       callId: 'define-ok',
       name: 'cordis_define',
@@ -332,19 +338,20 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const localTurn = exec('session-local')
     const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const localStore = new StateStore(root)
     const localService = new CapabilityEvolutionService(
       localCtx(root),
       config(root),
       withGitSupport({ run: async () => commandResult('0.1.0-rc.6\n') }),
-      new StateStore(root),
+      localStore,
       guard,
     )
     const created = await localService.start('run a PowerShell command', localTurn)
     expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
     expect(created.resolution?.authorization?.state).toBe('selection_required')
-    const allowed = await resumeWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'Create new')
-    expect(allowed.resolution?.authorization?.state).toBe('create_authorized')
-    expect(allowed.workflow.cursor).toBe('await_modify_work')
+    await expect(resumeWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'Create new'))
+      .rejects.toThrow(/Agent|managed modify\/create|without changing/i)
+    expect((await localStore.getResolution(created.resolution!.id)).authorization?.state).toBe('create_authorized')
 
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)

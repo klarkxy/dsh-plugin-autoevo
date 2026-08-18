@@ -3,13 +3,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { POLICY_VERSION, type RemotePluginCandidate, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import {
-  assertResumeContradiction,
   assertUseThisReceipt,
   inferOptionId,
+  resolveDecisionFromHost,
   resolveRepositoryFromMessage,
-  resolveResumeRepositories,
   reviewIdentity,
-  validateResume,
   _testing,
 } from '../../src/lifecycle/decide.js'
 import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
@@ -52,79 +50,44 @@ function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload 
 }
 
 describe('resume validation', () => {
-  it('accepts repositories claimed for inspect and rejects invalid combinations', () => {
-    expect(resolveResumeRepositories(['omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
-      .toEqual(['omdsh-dev/dsh-tool-calculator'])
-    expect(() => resolveResumeRepositories([], remotes, 'inspect')).toThrow(/exactly one repository/i)
-    expect(() => resolveResumeRepositories(['MirDie/dsh-xai', 'omdsh-dev/dsh-tool-calculator'], remotes, 'inspect'))
-      .toThrow(/exactly one repository/i)
-    expect(() => resolveResumeRepositories(['acme/one'], remotes, 'stop')).toThrow(/only valid when inspecting/i)
-  })
-
-  it('rejects a create-new option that the user message does not support', () => {
-    expect(() => assertResumeContradiction('这个看起来不错', 'create_new')).toThrow(/contradict/i)
-    expect(() => assertResumeContradiction('没有合适的，新建一个', 'use_this')).toThrow(/contradict/i)
-    expect(() => assertResumeContradiction('先停', 'inspect')).toThrow(/contradict/i)
-    expect(() => assertResumeContradiction('没有合适的，新建一个', 'create_new')).not.toThrow()
-  })
-
   it('infers inspect from a host turn that names a candidate repository', () => {
     expect(inferOptionId('先看 MirDie/dsh-xai', interrupt(['inspect', 'stop']), remotes)).toBe('inspect')
     expect(resolveRepositoryFromMessage('审查 MirDie/dsh-xai', remotes)).toEqual(['MirDie/dsh-xai'])
     expect(_testing.CREATE_NEW_RE.test('Create new')).toBe(true)
   })
 
-  it('requires the live user turn to match user_message when a turn was claimed', () => {
+  it('derives the decision and repository only from the fresh Host user turn', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
-    expect(validateResume({
-      guard,
-      agent,
-      interrupt: interrupt(['inspect', 'stop']),
-      userMessage: '审查 MirDie/dsh-xai',
-      optionId: 'inspect',
-      remotes,
-      repositories: ['MirDie/dsh-xai'],
-    })).toMatchObject({
-      optionId: 'inspect',
-      repositories: ['MirDie/dsh-xai'],
-    })
-
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '审查 MirDie/dsh-xai' }] })
-    expect(validateResume({
+    expect(resolveDecisionFromHost({
       guard,
       agent,
       interrupt: interrupt(['inspect', 'stop']),
-      userMessage: '审查 MirDie/dsh-xai',
-      optionId: 'inspect',
       remotes,
-      repositories: ['MirDie/dsh-xai'],
+      requirement: 'calculator',
     })).toMatchObject({
       optionId: 'inspect',
       repositories: ['MirDie/dsh-xai'],
     })
-
-    expect(() => validateResume({
+    expect(() => resolveDecisionFromHost({
       guard,
       agent,
       interrupt: interrupt(['inspect', 'stop']),
-      userMessage: '先看第二个',
-      optionId: 'inspect',
       remotes,
-      repositories: ['MirDie/dsh-xai'],
-    })).toThrow(/does not match the latest user turn/i)
+      requirement: 'calculator',
+    })).toThrow(/already consumed|replay/i)
   })
 
   it('rejects an option that is not in the current interrupt', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
-    expect(() => validateResume({
+    expect(() => resolveDecisionFromHost({
       guard,
       agent,
       interrupt: interrupt(['inspect', 'stop']),
-      userMessage: '用这个',
-      optionId: 'use_this',
       remotes,
-    })).toThrow(/not available/i)
+      requirement: 'calculator',
+    })).toThrow(/Could not resolve/i)
   })
 })
 

@@ -109,6 +109,23 @@ export class WorkflowEngine {
     if (existing) {
       return await this.withLock(existing.id, async () => {
         const latest = await this.store.getWorkflow(existing.id)
+        if (latest.status === 'running') {
+          if (latest.bootId === this.creationGuard.bootId) {
+            throw new EvolutionError('invalid_input', 'This workflow is already running')
+          }
+          latest.bootId = this.creationGuard.bootId
+          latest.cursor = 'recovery_required'
+          latest.status = 'completed'
+          latest.lastFailure = {
+            code: 'service_restart_incomplete',
+            message: 'The service restarted while this workflow was running. Side effects are not retried automatically; recovery is required.',
+          }
+          delete latest.interrupt
+          await this.host.releaseManagedSource?.(latest, exec as WorkflowExec).catch(() => undefined)
+          await this.checkpoint(latest)
+          const interruptedResolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
+          return await this.view(latest, interruptedResolution)
+        }
         if (latest.bootId !== this.creationGuard.bootId && latest.status === 'interrupted' && latest.interrupt) {
           await this.reissueInterrupt(latest, exec)
         }
@@ -352,6 +369,7 @@ export class WorkflowEngine {
         }
 
         if (TERMINAL_NODES.has(workflow.cursor)) {
+          await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec)
           workflow.status = 'completed'
           delete workflow.interrupt
           await this.checkpoint(workflow)
@@ -377,6 +395,7 @@ export class WorkflowEngine {
           continue
         }
         workflow.cursor = result.node
+        await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec)
         workflow.status = 'completed'
         delete workflow.interrupt
         await this.checkpoint(workflow)
@@ -384,6 +403,7 @@ export class WorkflowEngine {
         return await this.view(workflow, resolution)
       }
     } catch (error) {
+      await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec).catch(() => undefined)
       workflow.status = 'failed'
       workflow.error = {
         code: error instanceof EvolutionError ? error.code : 'command_failed',

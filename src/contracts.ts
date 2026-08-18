@@ -241,6 +241,8 @@ export interface InstallInput {
   retention: InstallationRetention
   verificationTask?: string
   verificationExpectedText?: string
+  /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
+  expectedArtifactSha256?: string
 }
 
 export interface RemoveInput {

@@ -200,7 +200,17 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
   delete ctx.workflow.lastFailure
   try {
     const installation = await ctx.host.installReviewed(review, install, ctx.exec)
-    return { kind: 'done', node: 'installed', resolution: current, review, installation }
+    if (installation.installOutcome === 'verified' && installation.verified && installation.installed) {
+      return { kind: 'done', node: 'installed', resolution: current, review, installation }
+    }
+    ctx.workflow.lastFailure = {
+      code: installation.installOutcome ?? 'recovery_required',
+      message: installation.verification.reason,
+    }
+    if (installation.installOutcome === 'failed_absent') {
+      return { kind: 'next', node: 'await_confirmation', resolution: current, review, installation }
+    }
+    return { kind: 'done', node: 'recovery_required', resolution: current, review, installation }
   } catch (error) {
     if (error instanceof EvolutionError && error.code === 'invalid_input') throw error
     ctx.workflow.lastFailure = {
@@ -224,10 +234,9 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
     const prepared = await ctx.host.prepareModify(current, review, ctx.exec, ctx.workflow)
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
-      ctx.workflow.managedSourceId = prepared.path
     }
-    if (prepared.deferred) {
-      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution, review }
+    if (prepared.review) {
+      return { kind: 'next', node: 'await_confirmation', resolution: prepared.resolution, review: prepared.review }
     }
     if (prepared.path) {
       return { kind: 'next', node: 'review_local', resolution: prepared.resolution, review }
@@ -243,10 +252,9 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
     const prepared = await ctx.host.prepareCreate(current, ctx.exec, ctx.workflow)
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
-      ctx.workflow.managedSourceId = prepared.path
     }
-    if (prepared.deferred) {
-      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }
+    if (prepared.review) {
+      return { kind: 'next', node: 'await_confirmation', resolution: prepared.resolution, review: prepared.review }
     }
     if (prepared.path) {
       return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution }

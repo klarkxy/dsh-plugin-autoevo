@@ -1,31 +1,17 @@
+import { access, rm } from 'node:fs/promises'
 import path from 'node:path'
+import type { FileSystem } from '@deepseek-ai/dsh-fs'
+import type { SandboxExecutionPolicy, SandboxProvider } from '@deepseek-ai/dsh-sandbox'
+import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { EvolutionError } from './errors.js'
+import type { CommandRunner } from './process/runner.js'
 
-export type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access' | string
-
-export interface SandboxFilesystemProvider {
-  mode?: SandboxMode
-  cwd?: string
-  /**
-   * When true, the Host binds cwd to the managed source path at child launch.
-   * Mode must still be workspace-write; containment is probed against expectedCwd.
-   */
-  bindsManagedCwd?: boolean
-  /** Optional containment probe used by tests and capable hosts. */
-  assertContained?(candidatePath: string): Promise<boolean> | boolean
-}
-
-export interface SandboxShellProvider {
-  mode?: SandboxMode
-  cwd?: string
-  bindsManagedCwd?: boolean
-  /** Optional write probe; must reject paths outside cwd. */
-  canWrite?(candidatePath: string): Promise<boolean> | boolean
-}
-
-export interface SandboxStack {
-  filesystem?: SandboxFilesystemProvider | null
-  shell?: SandboxShellProvider | null
+export interface LiveSandboxStack {
+  sandbox?: SandboxProvider
+  sandboxPolicy?: SandboxPolicyService
+  fs?: FileSystem
+  runner?: CommandRunner
 }
 
 export interface SandboxProbeResult {
@@ -33,6 +19,7 @@ export interface SandboxProbeResult {
   mode: 'workspace-write'
   cwd: string
   platform: NodeJS.Platform
+  enforcement: 'full' | 'partial'
   isolation: 'integrity-partial'
   note: string
 }
@@ -46,104 +33,160 @@ function isPathInside(parent: string, candidate: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
+async function exists(candidate: string): Promise<boolean> {
+  return access(candidate).then(() => true).catch(() => false)
+}
+
+async function probeFilesystem(
+  fs: FileSystem,
+  policy: SandboxExecutionPolicy,
+  cwd: string,
+  insidePath: string,
+  outsidePath: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (fs.sandboxMode === undefined) {
+    throw new EvolutionError('invalid_input', 'DSH filesystem provider is not sandbox-enforcing; modify/create cannot proceed', {
+      reason: 'unsandboxed_filesystem_provider',
+    })
+  }
+  const resolveOptions = signal ? { signal } : undefined
+  const workspace = await fs.resolve(cwd, resolveOptions)
+  const inside = await fs.resolve(insidePath, resolveOptions)
+  const outside = await fs.resolve(outsidePath, resolveOptions)
+  if (!fs.contains(workspace, inside) || fs.contains(workspace, outside)) {
+    throw new EvolutionError('invalid_input', 'DSH filesystem provider reported an invalid managed-source containment boundary', {
+      reason: 'filesystem_containment_mismatch',
+    })
+  }
+  await fs.writeText(inside, 'autoevo sandbox probe\n', undefined, signal, policy)
+  let escaped = false
+  try {
+    await fs.writeText(outside, 'autoevo escape probe\n', undefined, signal, policy)
+    escaped = true
+  } catch {
+    // Expected: the real sandboxed filesystem rejects a write outside workspaceRoot.
+  }
+  if (escaped || await exists(outsidePath)) {
+    throw new EvolutionError('invalid_input', 'DSH filesystem sandbox accepted an outside-workspace write', {
+      reason: 'filesystem_escape_probe_failed',
+    })
+  }
+}
+
+async function probeShell(
+  sandbox: SandboxProvider,
+  runner: CommandRunner,
+  policy: SandboxExecutionPolicy,
+  cwd: string,
+  insidePath: string,
+  outsidePath: string,
+  signal?: AbortSignal,
+): Promise<'full' | 'partial'> {
+  const script = "require('node:fs').writeFileSync(process.argv[1], 'autoevo shell probe\\n')"
+  const inside = sandbox.confine([process.execPath, '-e', script, insidePath], {
+    mode: 'workspace-write',
+    workspaceRoot: policy.workspaceRoot,
+    ...(policy.sessionId ? { sessionId: policy.sessionId } : {}),
+  })
+  const insideResult = await runner.run({
+    argv: inside.argv as [string, ...string[]],
+    cwd,
+    allowFailure: true,
+    ...(signal ? { signal } : {}),
+  })
+  if (insideResult.exitCode !== 0 || !(await exists(insidePath))) {
+    throw new EvolutionError('invalid_input', 'DSH shell sandbox rejected an in-workspace write required for modify/create', {
+      reason: 'shell_incapable',
+      enforcement: inside.enforcement,
+    })
+  }
+
+  const outside = sandbox.confine([process.execPath, '-e', script, outsidePath], {
+    mode: 'workspace-write',
+    workspaceRoot: policy.workspaceRoot,
+    ...(policy.sessionId ? { sessionId: policy.sessionId } : {}),
+  })
+  const outsideResult = await runner.run({
+    argv: outside.argv as [string, ...string[]],
+    cwd,
+    allowFailure: true,
+    ...(signal ? { signal } : {}),
+  })
+  if (outsideResult.exitCode === 0 || await exists(outsidePath)) {
+    throw new EvolutionError('invalid_input', 'DSH shell sandbox accepted an outside-workspace write', {
+      reason: 'shell_escape_probe_failed',
+      enforcement: outside.enforcement,
+    })
+  }
+  return inside.enforcement === 'full' && outside.enforcement === 'full' ? 'full' : 'partial'
+}
+
 /**
- * Probe the live DSH filesystem/shell sandbox stack before exposing modify/create.
- * Fail closed on missing providers, wrong mode/cwd binding, or failed containment.
- * Windows enforcement is integrity-oriented partial isolation only.
+ * Probe the official rc.6 DSH policy, filesystem, and subprocess sandbox seams.
+ * The probe runs only after a child session exists and has a durable
+ * `workspace-write` override. It owns and removes every probe path.
  */
 export async function probeWorkspaceWriteSandbox(
-  stack: SandboxStack | undefined,
+  stack: LiveSandboxStack | undefined,
+  session: Session,
   expectedCwd: string,
+  signal?: AbortSignal,
 ): Promise<SandboxProbeResult> {
-  if (!stack) {
-    throw new EvolutionError('invalid_input', 'DSH sandbox stack is unavailable; modify/create cannot proceed', {
-      reason: 'missing_sandbox_stack',
+  if (!stack?.sandbox || !stack.sandboxPolicy || !stack.fs || !stack.runner) {
+    throw new EvolutionError('invalid_input', 'The official DSH sandbox, policy, filesystem, and subprocess services are required for modify/create', {
+      reason: 'missing_sandbox_service',
     })
   }
-  if (!stack.filesystem) {
-    throw new EvolutionError('invalid_input', 'DSH filesystem sandbox provider is unavailable; modify/create cannot proceed', {
-      reason: 'missing_filesystem_provider',
-    })
-  }
-  if (!stack.shell) {
-    throw new EvolutionError('invalid_input', 'DSH shell sandbox provider is unavailable; modify/create cannot proceed', {
-      reason: 'missing_shell_provider',
-    })
-  }
-
   const cwd = normalizePath(expectedCwd)
-  const fsMode = stack.filesystem.mode
-  const shellMode = stack.shell.mode
-  if (fsMode !== 'workspace-write') {
-    throw new EvolutionError('invalid_input', 'Filesystem sandbox mode must be workspace-write for modify/create', {
-      reason: 'wrong_filesystem_mode',
-      mode: fsMode,
+  const policy = stack.sandboxPolicy.resolve({ session })
+  if (policy.mode !== 'workspace-write') {
+    throw new EvolutionError('invalid_input', 'Child session sandbox mode must be workspace-write', {
+      reason: 'wrong_sandbox_mode',
+      actual: policy.mode,
     })
   }
-  if (shellMode !== 'workspace-write') {
-    throw new EvolutionError('invalid_input', 'Shell sandbox mode must be workspace-write for modify/create', {
-      reason: 'wrong_shell_mode',
-      mode: shellMode,
-    })
-  }
-
-  const fsCwd = stack.filesystem.cwd ? normalizePath(stack.filesystem.cwd) : undefined
-  const shellCwd = stack.shell.cwd ? normalizePath(stack.shell.cwd) : undefined
-  if (!stack.filesystem.bindsManagedCwd && (!fsCwd || fsCwd !== cwd)) {
-    throw new EvolutionError('invalid_input', 'Filesystem sandbox cwd is not bound to the managed source repository', {
+  if (normalizePath(policy.workspaceRoot) !== cwd) {
+    throw new EvolutionError('invalid_input', 'Child session sandbox workspaceRoot is not the managed source repository', {
       reason: 'cwd_mismatch',
       expected: cwd,
-      actual: fsCwd,
-    })
-  }
-  if (!stack.shell.bindsManagedCwd && (!shellCwd || shellCwd !== cwd)) {
-    throw new EvolutionError('invalid_input', 'Shell sandbox cwd is not bound to the managed source repository', {
-      reason: 'cwd_mismatch',
-      expected: cwd,
-      actual: shellCwd,
+      actual: policy.workspaceRoot,
     })
   }
 
-  const escapeCandidate = path.join(cwd, '..', 'escape-probe')
-  if (typeof stack.filesystem.assertContained === 'function') {
-    const contained = await stack.filesystem.assertContained(escapeCandidate)
-    if (contained) {
-      throw new EvolutionError('invalid_input', 'Filesystem sandbox failed containment probe (path escape accepted)', {
-        reason: 'containment_probe_failed',
-        escapeCandidate,
-      })
-    }
-  } else if (isPathInside(cwd, escapeCandidate)) {
-    throw new EvolutionError('invalid_input', 'Filesystem sandbox containment probe is unsupported on this configuration', {
-      reason: 'unsupported_configuration',
-    })
+  const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const insideFs = path.join(cwd, `.autoevo-fs-probe-${nonce}`)
+  const insideShell = path.join(cwd, `.autoevo-shell-probe-${nonce}`)
+  const outsideRoot = path.dirname(cwd)
+  const outsideFs = path.join(outsideRoot, `.autoevo-fs-escape-${nonce}`)
+  const outsideShell = path.join(outsideRoot, `.autoevo-shell-escape-${nonce}`)
+  if (!isPathInside(cwd, insideFs) || isPathInside(cwd, outsideFs)) {
+    throw new EvolutionError('invalid_input', 'Sandbox probe paths did not form the expected containment boundary')
   }
-
-  if (typeof stack.shell.canWrite === 'function') {
-    const outsideWrite = await stack.shell.canWrite(escapeCandidate)
-    if (outsideWrite) {
-      throw new EvolutionError('invalid_input', 'Shell sandbox failed outside-cwd write probe', {
-        reason: 'shell_escape_probe_failed',
-        escapeCandidate,
-      })
-    }
-    const insideWrite = await stack.shell.canWrite(path.join(cwd, 'probe.txt'))
-    if (!insideWrite) {
-      throw new EvolutionError('invalid_input', 'Shell sandbox rejected an in-cwd write required for workspace-write mode', {
-        reason: 'shell_incapable',
-      })
+  for (const candidate of [insideFs, insideShell, outsideFs, outsideShell]) {
+    if (await exists(candidate)) {
+      throw new EvolutionError('invalid_input', 'Sandbox probe path unexpectedly already exists', { path: candidate })
     }
   }
 
-  return {
-    ok: true,
-    mode: 'workspace-write',
-    cwd,
-    platform: process.platform,
-    isolation: 'integrity-partial',
-    note: process.platform === 'win32'
-      ? 'Windows sandbox enforcement is integrity-oriented partial isolation; it does not claim confidentiality or network isolation.'
-      : 'workspace-write sandbox probe passed for managed source modify/create.',
+  try {
+    await probeFilesystem(stack.fs, policy, cwd, insideFs, outsideFs, signal)
+    const enforcement = await probeShell(stack.sandbox, stack.runner, policy, cwd, insideShell, outsideShell, signal)
+    return {
+      ok: true,
+      mode: 'workspace-write',
+      cwd,
+      platform: process.platform,
+      enforcement,
+      isolation: 'integrity-partial',
+      note: process.platform === 'win32'
+        ? 'Windows sandbox enforcement is integrity-oriented partial isolation; it does not claim confidentiality or network isolation.'
+        : `workspace-write sandbox probes passed with ${enforcement} shell enforcement.`,
+    }
+  } finally {
+    await Promise.all([insideFs, insideShell, outsideFs, outsideShell].map(async (candidate) => {
+      await rm(candidate, { force: true }).catch(() => undefined)
+    }))
   }
 }
 

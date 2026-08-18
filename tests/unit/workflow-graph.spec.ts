@@ -172,6 +172,35 @@ describe('workflow graph nodes', () => {
     expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'verify failed' })
   })
 
+  it.each([
+    ['verified', true, 'done', 'installed'],
+    ['failed_absent', false, 'next', 'await_confirmation'],
+    ['recovery_required', false, 'done', 'recovery_required'],
+    ['pending', false, 'done', 'recovery_required'],
+  ] as const)('routes install outcome %s without misreporting success', async (installOutcome, verified, kind, node) => {
+    const current = resolution()
+    const inspected = review()
+    const host = {
+      async latestReview() { return inspected },
+      async installReviewed() {
+        return {
+          id: `installation_${'a'.repeat(24)}`,
+          installOutcome,
+          installed: verified,
+          verified,
+          verification: { reason: installOutcome },
+        }
+      },
+    } as unknown as WorkflowHost
+    const result = await executeNode('install_verify', {
+      host,
+      workflow: workflow('install_verify'),
+      exec: {},
+      resolution: current,
+    })
+    expect(result).toMatchObject({ kind, node, installation: { installOutcome } })
+  })
+
   it('authorizes create-new without a scratch grant node', async () => {
     const current = resolution()
     const result = await executeNode('prepare_create', {

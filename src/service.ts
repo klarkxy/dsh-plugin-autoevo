@@ -31,10 +31,10 @@ import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { installMarketplace, profilesWithAutoEvo } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
+import { DshManagedChildHost, type ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
-import { probeWorkspaceWriteSandbox, type SandboxStack } from './sandbox-probe.js'
 import { SourceManager, sourceIdForCreate, sourceIdForRepository } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
@@ -45,20 +45,9 @@ import type {
   WorkflowExec,
   WorkflowHost,
   WorkflowPendingInstall,
+  WorkflowRecord,
   WorkflowView,
 } from './workflow/contracts.js'
-
-function resolveSandboxStack(ctx: Context): SandboxStack | undefined {
-  const direct = ctx.get('sandbox') as SandboxStack | undefined
-  if (direct && (direct.filesystem || direct.shell)) return direct
-  const filesystem = ctx.get('filesystem') as SandboxStack['filesystem'] | undefined
-  const shell = ctx.get('shell') as SandboxStack['shell'] | undefined
-  if (!filesystem && !shell) return undefined
-  return {
-    ...(filesystem !== undefined ? { filesystem } : {}),
-    ...(shell !== undefined ? { shell } : {}),
-  }
-}
 
 export function addExplicitCandidate(
   resolution: ResolutionRecord,
@@ -243,6 +232,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
   readonly sources: SourceManager
   private readonly launcher: DshLauncher
   private readonly engine: WorkflowEngine
+  private readonly managedChild: ManagedChildHost
 
   constructor(
     private readonly ctx: Context,
@@ -250,9 +240,11 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
+    managedChild?: ManagedChildHost,
   ) {
     this.launcher = new DshLauncher(runner, config)
     this.sources = new SourceManager(config, runner)
+    this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
     this.installer = new PluginInstaller(
       ctx,
       config,
@@ -483,54 +475,157 @@ export class CapabilityEvolutionService implements WorkflowHost {
     input: WorkflowPendingInstall,
     exec: WorkflowExec,
   ): Promise<InstallationRecord> {
+    const provenance = review.sourceSnapshot.kind === 'local'
+      ? await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
+      : undefined
+    if (review.sourceSnapshot.kind === 'local'
+      && (!provenance || provenance.reviewId !== review.id || !provenance.artifactHash)) {
+      throw new EvolutionError('review_rejected', 'Managed local review is missing matching frozen artifact provenance')
+    }
     const record = await this.installer.install({
       reviewId: review.id,
       targetProfile: input.targetProfile,
       retention: input.retention,
       ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
       ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
+      ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
     }, asToolExec(exec))
     return record
   }
 
-  private async assertChildSandbox(sourceKey: string): Promise<void> {
-    await probeWorkspaceWriteSandbox(resolveSandboxStack(this.ctx), this.sources.sourcePath(sourceKey))
+  private requireParentAgent(exec: WorkflowExec): NonNullable<WorkflowExec['agent']> {
+    if (!exec.agent) {
+      throw new EvolutionError('invalid_input', 'A live parent Agent session is required for managed modify/create')
+    }
+    return exec.agent
+  }
+
+  private async reviewAndFreezeManagedSource(input: {
+    resolution: ResolutionRecord
+    sourceId: string
+    path: string
+    baseReviewId: string
+    lineageRootCommit: string
+    workflowId: string
+    exec: WorkflowExec
+  }): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+    const runtimeVersion = await this.dshRuntimeVersion(input.resolution.cwd, input.exec.signal)
+    const local = await reviewLocalPlugin({
+      runner: this.runner,
+      config: this.config,
+      workspaceRoot: this.sources.sourceRoot,
+      path: input.path,
+      baseReviewId: input.baseReviewId,
+      lineageRootCommit: input.lineageRootCommit,
+      resolutionId: input.resolution.id,
+      requirement: input.resolution.requirement,
+      ...(runtimeVersion ? { runtimeVersion } : {}),
+    })
+    const artifactRoot = path.join(this.config.stateDir, 'review-artifacts', `${local.record.id}-${randomUUID()}`)
+    const materialized = await this.launcher.materializeLocal(local.record, artifactRoot, input.exec.signal)
+    const review: ReviewRecord = { ...local.record, installSpec: materialized.installSpec }
+    await this.sources.recordReviewedArtifact({
+      sourceId: input.sourceId,
+      workflowId: input.workflowId,
+      reviewId: review.id,
+      artifactHash: materialized.artifactSha256,
+    })
+    await this.store.put('reviews', review)
+    const waiting = withNextStep(this.waitingConfirmation(input.resolution, review))
+    await this.store.put('resolutions', waiting)
+    return { resolution: waiting, review }
   }
 
   async prepareModify(
     resolution: ResolutionRecord,
     review: ReviewRecord,
     exec: WorkflowExec,
-    workflow: { id: string },
-  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
+    workflow: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }> {
     if (review.sourceSnapshot.kind !== 'github') {
       throw new EvolutionError('invalid_input', 'modify_this currently materializes only from a GitHub review commit')
     }
     const sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
-    await this.assertChildSandbox(sourceKey)
     const receipt = await this.sources.materializeReviewedGithub({
       review,
       workflowId: workflow.id,
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    // Child edits the managed source next; local re-review happens after the child returns.
-    return { resolution, path: receipt.path, deferred: true }
+    workflow.managedSourceId = sourceKey
+    await this.managedChild.run({
+      parent: this.requireParentAgent(exec),
+      cwd: receipt.path,
+      task: `Improve the reviewed plugin for this requirement: ${resolution.requirement}\nMissing capabilities: ${JSON.stringify(review.missingCapabilities)}\nReview finding codes: ${JSON.stringify(review.findings.map((finding) => finding.code))}\nPreserve the package identity and implement the smallest complete change.`,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    await this.sources.finalizeChildCommit({
+      sourceId: sourceKey,
+      workflowId: workflow.id,
+      reviewId: review.id,
+      message: `fix: satisfy AutoEvo workflow ${workflow.id}`,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    const finalized = await this.reviewAndFreezeManagedSource({
+      resolution,
+      sourceId: sourceKey,
+      path: receipt.path,
+      baseReviewId: review.id,
+      lineageRootCommit: review.sourceSnapshot.commit,
+      workflowId: workflow.id,
+      exec,
+    })
+    return { ...finalized, path: receipt.path }
   }
 
   async prepareCreate(
     resolution: ResolutionRecord,
     exec: WorkflowExec,
-    workflow: { id: string },
-  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
+    workflow: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }> {
     const sourceKey = sourceIdForCreate(resolution.id)
-    await this.assertChildSandbox(sourceKey)
     const receipt = await this.sources.initializeCreateSource({
       resolutionId: resolution.id,
       workflowId: workflow.id,
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    // Child implements inside the scaffolded repo; confirmation/install remain Host-gated.
-    return { resolution, path: receipt.path, deferred: true }
+    workflow.managedSourceId = sourceKey
+    const scaffoldBaseId = `review_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 64)}`
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const scaffold = await reviewLocalPlugin({
+      runner: this.runner,
+      config: this.config,
+      workspaceRoot: this.sources.sourceRoot,
+      path: receipt.path,
+      baseReviewId: scaffoldBaseId,
+      lineageRootCommit: receipt.baseCommit,
+      resolutionId: resolution.id,
+      requirement: resolution.requirement,
+      ...(runtimeVersion ? { runtimeVersion } : {}),
+    })
+    await this.store.put('reviews', scaffold.record)
+    await this.managedChild.run({
+      parent: this.requireParentAgent(exec),
+      cwd: receipt.path,
+      task: `Implement a new DSH plugin for this requirement: ${resolution.requirement}\nBuild on the trusted scaffold, include a complete bundle patch and implementation, and add focused tests or self-checks where practical.`,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    await this.sources.finalizeChildCommit({
+      sourceId: sourceKey,
+      workflowId: workflow.id,
+      reviewId: scaffold.record.id,
+      message: `feat: implement AutoEvo workflow ${workflow.id}`,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    const finalized = await this.reviewAndFreezeManagedSource({
+      resolution,
+      sourceId: sourceKey,
+      path: receipt.path,
+      baseReviewId: scaffold.record.id,
+      lineageRootCommit: receipt.baseCommit,
+      workflowId: workflow.id,
+      exec,
+    })
+    return { ...finalized, path: receipt.path }
   }
 
   async applyDecision(
@@ -607,6 +702,11 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return profilesWithAutoEvo(this.launcher, this.config.dshHome)
   }
 
+  async releaseManagedSource(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void> {
+    if (!workflow.managedSourceId) return
+    await this.sources.completeWorkflow(workflow.managedSourceId, workflow.id, exec.signal)
+  }
+
   private waitingConfirmation(resolution: ResolutionRecord, review: ReviewRecord): ResolutionRecord {
     const chinese = prefersChinese(resolution.requirement)
     const authorization: ResolutionAuthorization = {
@@ -646,17 +746,19 @@ export class CapabilityEvolutionService implements WorkflowHost {
           })
         } else {
           const prior = await this.store.listReviews(resolution.id)
-          const root = lineageRootReview(review, prior)
-          if (root.sourceSnapshot.kind !== 'github') {
-            return false
-          }
+          const managed = await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
+          const root = managed ? undefined : lineageRootReview(review, prior)
+          if (!managed && root?.sourceSnapshot.kind !== 'github') return false
+          const lineageRootCommit = managed?.baseCommit
+            ?? (root?.sourceSnapshot.kind === 'github' ? root.sourceSnapshot.commit : undefined)
+          if (!lineageRootCommit) return false
           current = (await reviewLocalPlugin({
             runner: this.runner,
             config: this.config,
-            workspaceRoot: resolution.cwd,
+            workspaceRoot: managed ? this.sources.sourceRoot : resolution.cwd,
             path: review.sourceSnapshot.path,
             baseReviewId: review.sourceSnapshot.baseReviewId,
-            lineageRootCommit: root.sourceSnapshot.commit,
+            lineageRootCommit,
             resolutionId: resolution.id,
             requirement: resolution.requirement,
             ...(runtimeVersion ? { runtimeVersion } : {}),

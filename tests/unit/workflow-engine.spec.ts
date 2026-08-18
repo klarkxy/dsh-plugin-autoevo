@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { StateStore } from '../../src/state/store.js'
@@ -163,6 +163,41 @@ describe('workflow engine', () => {
     controller.abort()
     const engine = new WorkflowEngine(store, guard, host(store, resolution()))
     await expect(engine.start('calculator', { ...exec(), signal: controller.signal })).rejects.toThrow(/cancelled/i)
+  })
+
+  it('converts an interrupted-by-restart running workflow to recovery_required without replaying side effects', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-restart-running-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    const running: WorkflowRecord = {
+      schemaVersion: 1,
+      id: `workflow_${'f'.repeat(24)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-17T00:00:00.000Z',
+      updatedAt: '2026-08-17T00:00:00.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: process.cwd(),
+      ownerSessionId: 'session-1',
+      bootId: 'boot_old',
+      resolutionId: record.id,
+      status: 'running',
+      cursor: 'install_verify',
+      generation: 4,
+    }
+    await store.put('workflows', running)
+    await store.put('resolutions', record)
+    const installReviewed = vi.fn()
+    const engine = new WorkflowEngine(
+      store,
+      new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_new' }),
+      { ...host(store, record), installReviewed },
+    )
+    const recovered = await engine.start('calculator', exec())
+    expect(installReviewed).not.toHaveBeenCalled()
+    expect(recovered.workflow).toMatchObject({ status: 'completed', cursor: 'recovery_required' })
+    expect(recovered.workflow.lastFailure?.code).toBe('service_restart_incomplete')
   })
 
   it('resumes stop from the host turn and completes', async () => {

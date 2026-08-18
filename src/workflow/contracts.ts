@@ -24,6 +24,7 @@ export type WorkflowNodeId =
   | 'stopped'
   | 'market_restart_required'
   | 'installed'
+  | 'recovery_required'
   | 'create_authorized'
   | 'modify_authorized'
 
@@ -137,12 +138,12 @@ export interface WorkflowHost {
     review: ReviewRecord,
     exec: WorkflowExec,
     workflow: WorkflowRecord,
-  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }>
   prepareCreate?(
     resolution: ResolutionRecord,
     exec: WorkflowExec,
     workflow: WorkflowRecord,
-  ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }>
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }>
   applyDecision(
     resolution: ResolutionRecord,
     resume: ValidatedResume,
@@ -153,6 +154,7 @@ export interface WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>
   getInstallation(id: string): Promise<InstallationRecord>
   listInstallProfiles?(): Promise<string[]>
+  releaseManagedSource?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>
 }
 
 export interface WorkflowExec {
@@ -172,6 +174,7 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'stopped',
   'market_restart_required',
   'installed',
+  'recovery_required',
   'create_authorized',
   'modify_authorized',
 ])

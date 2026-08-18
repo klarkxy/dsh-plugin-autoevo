@@ -29,8 +29,13 @@ const DELEGATION_TOOLS = new Set([
   'task',
 ])
 const PLUGIN_MUTATION_TOOLS = new Set(['plugin_install', 'plugin_remove', 'dsh_plugin_add', 'dsh_plugin_remove'])
-const GIT_PUBLICATION_RE = /\bgit\b[\s\S]*\b(push|tag|release)\b|\bgh\b[\s\S]*\b(pr|release)\b/iu
+const READ_ONLY_DISCOVERY_TOOLS = new Set(['find_dsh_plugin', 'web_search', 'web_fetch', 'skill', 'read_skill'])
+const CHILD_SUPPORT_TOOLS = new Set(['todo_write', 'todo_read'])
+const GIT_COMMAND_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
+const SAFE_GIT_READ_RE = /(?:^|[\s&])["']?git(?:\.exe)?["']?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b/iu
+const GH_COMMAND_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const DSH_PLUGIN_MUTATION_RE = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|remove|rm|uninstall)\b/iu
+const PACKAGE_PUBLICATION_RE = /(?:^|[\s;&|])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -51,7 +56,18 @@ function toolAliases(name: string): string[] {
 }
 
 function matchesSet(name: string, set: Set<string>): boolean {
-  return toolAliases(name).some((alias) => set.has(alias) || set.has(name))
+  const normalizedSet = new Set([...set].flatMap((entry) => toolAliases(entry)))
+  return toolAliases(name).some((alias) => normalizedSet.has(alias))
+}
+
+function hasUnsafeGitCommand(command: string): boolean {
+  if (!GIT_COMMAND_RE.test(command)) return false
+  const segments = command.split(/&&|\|\||[;|]/u)
+  for (const segment of segments) {
+    if (!GIT_COMMAND_RE.test(segment)) continue
+    if (!SAFE_GIT_READ_RE.test(segment)) return true
+  }
+  return false
 }
 
 export interface ExecutionGuardOptions {
@@ -88,6 +104,7 @@ export class ExecutionGuard {
   private parentDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
     if (AUTOEVO_TOOLS.has(name)) return undefined
     if (matchesSet(name, FS_READ_TOOLS)) return undefined
+    if (matchesSet(name, READ_ONLY_DISCOVERY_TOOLS)) return undefined
     if (matchesSet(name, FS_WRITE_TOOLS)) {
       return 'AutoEvo parent session denies filesystem write/edit; modify/create runs only in a managed workspace-write child.'
     }
@@ -107,7 +124,7 @@ export class ExecutionGuard {
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
       return 'AutoEvo parent session denies direct plugin install/remove tools; use the capability workflow.'
     }
-    return undefined
+    return `AutoEvo parent session denies unrecognized tool ${JSON.stringify(name)}; only AutoEvo decisions and explicit read-only discovery/review tools are allowed.`
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
@@ -128,11 +145,19 @@ export class ExecutionGuard {
       if (DSH_PLUGIN_MUTATION_RE.test(command)) {
         return 'Managed source child session denies direct DSH plugin install/remove.'
       }
-      if (GIT_PUBLICATION_RE.test(command)) {
-        return 'Managed source child session denies git push/tag/release and gh pr/release publication.'
+      if (GH_COMMAND_RE.test(command)) {
+        return 'Managed source child session denies every GitHub CLI command; publication and external coordination stay with the parent.'
       }
+      if (PACKAGE_PUBLICATION_RE.test(command)) {
+        return 'Managed source child session denies package publication and release/version commands.'
+      }
+      if (hasUnsafeGitCommand(command)) {
+        return 'Managed source child session permits only read-only git status/diff/show/log/rev-parse; the Host owns commits and publication.'
+      }
+      return undefined
     }
-    return undefined
+    if (matchesSet(name, FS_READ_TOOLS) || matchesSet(name, FS_WRITE_TOOLS) || matchesSet(name, CHILD_SUPPORT_TOOLS)) return undefined
+    return `Managed source child session denies unrecognized tool ${JSON.stringify(name)}; only in-repo filesystem, shell testing, and read-only support tools are allowed.`
   }
 }
 
@@ -140,8 +165,12 @@ export const _testing = {
   FS_WRITE_TOOLS,
   SHELL_TOOLS,
   DELEGATION_TOOLS,
-  GIT_PUBLICATION_RE,
+  GIT_COMMAND_RE,
+  SAFE_GIT_READ_RE,
+  GH_COMMAND_RE,
+  hasUnsafeGitCommand,
   DSH_PLUGIN_MUTATION_RE,
+  PACKAGE_PUBLICATION_RE,
   matchesSet,
   shellCommandText,
 }

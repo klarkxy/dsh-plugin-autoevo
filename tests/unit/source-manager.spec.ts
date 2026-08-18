@@ -6,7 +6,6 @@ import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 import { SourceManager, sourceIdForRepository } from '../../src/source-manager.js'
-import { sha256 } from '../../src/state/hashes.js'
 
 const temporary: string[] = []
 
@@ -79,10 +78,19 @@ function scriptedGit(state: {
 }): CommandRunner {
   return {
     async run(request) {
-      const args = request.argv.slice(1)
+      const raw = request.argv.slice(1)
+      const args: string[] = []
+      for (let index = 0; index < raw.length; index += 1) {
+        if (raw[index] === '-c') {
+          index += 1
+          continue
+        }
+        args.push(raw[index]!)
+      }
       const joined = args.join(' ')
       if (joined === 'init') {
         await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+        await writeFile(path.join(request.cwd, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n')
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       }
       if (joined.startsWith('remote add origin')) {
@@ -109,7 +117,7 @@ function scriptedGit(state: {
       if (joined === 'add -A') {
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       }
-      if (args[0] === 'commit') {
+      if (args.includes('commit')) {
         state.head = `commit_${(state.commits ??= []).length + 1}`.padEnd(40, '0')
         state.commits.push(state.head)
         state.dirty = ''
@@ -199,7 +207,8 @@ describe('SourceManager defaults and provenance', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-escape-'))
     temporary.push(root)
     const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    expect(() => manager.sourcePath(`..${path.sep}escape`)).toThrow(/escaped sourceDir/i)
+    expect(() => manager.sourcePath(`..${path.sep}escape`)).toThrow(/safe single path segment/i)
+    expect(() => manager.sourcePath('.')).toThrow(/safe single path segment/i)
 
     const outside = path.join(root, 'outside')
     await mkdir(outside, { recursive: true })
@@ -209,26 +218,69 @@ describe('SourceManager defaults and provenance', () => {
     await expect(manager.assertPathContainment('linked')).rejects.toThrow(/symlink|escaped/i)
   })
 
-  it('produces stable artifact hashes from normalized packed bytes', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-hash-'))
+  it('keeps control metadata outside the child repo and finalizes reviewed provenance', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-finalize-'))
     temporary.push(root)
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const sourceId = 'acme_calculator'
-    const sourcePath = manager.sourcePath(sourceId)
-    await mkdir(path.join(sourcePath, 'lib'), { recursive: true })
-    await writeFile(path.join(sourcePath, 'package.json'), '{"name":"dsh-tool-calculator"}\n', 'utf8')
-    await writeFile(path.join(sourcePath, 'lib', 'index.js'), 'export const x = 1\n', 'utf8')
-    await mkdir(path.join(sourcePath, '.git'), { recursive: true })
+    const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'d'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    expect(path.dirname(manager.receiptPath(receipt.sourceId))).not.toBe(receipt.path)
+    await writeFile(path.join(receipt.path, 'lib.js'), 'export const x = 1\n', 'utf8')
+    state.dirty = '?? lib.js\n'
+    const committed = await manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'fix: managed child change',
+    })
+    expect(committed.headCommit).not.toBe(receipt.headCommit)
+    const recorded = await manager.recordReviewedArtifact({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: `review_${'e'.repeat(64)}`,
+      artifactHash: 'f'.repeat(64),
+    })
+    expect(recorded).toMatchObject({ reviewId: `review_${'e'.repeat(64)}`, artifactHash: 'f'.repeat(64) })
+    await manager.completeWorkflow(receipt.sourceId, workflowId)
+    expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBeNull()
+  })
 
-    const out1 = path.join(root, 'out-1')
-    const out2 = path.join(root, 'out-2')
-    const first = await manager.buildNormalizedTgz({ sourceId, outputDir: out1 })
-    const second = await manager.buildNormalizedTgz({ sourceId, outputDir: out2 })
-    expect(first.artifactHash).toBe(second.artifactHash)
-    expect(first.artifactHash).toMatch(/^[a-f0-9]{64}$/u)
-    expect(first.installSpec.startsWith('file:')).toBe(true)
-    const body = await readFile(first.installSpec.slice('file:'.length))
-    expect(sha256(body)).toMatch(/^[a-f0-9]{64}$/u)
+  it('rejects child tampering with repository Git configuration before Host commit', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-git-config-'))
+    temporary.push(root)
+    const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'e'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    state.dirty = ' M package.json\n'
+    await writeFile(path.join(receipt.path, '.git', 'config'), '[core]\n\thooksPath = evil\n')
+    await expect(manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'fix: should not commit',
+    })).rejects.toThrow(/Git configuration/i)
+  })
+
+  it('rejects child-created Git hooks before any Host commit can execute them', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-git-hooks-'))
+    temporary.push(root)
+    const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'e'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    state.dirty = ' M package.json\n'
+    await mkdir(path.join(receipt.path, '.git', 'hooks'), { recursive: true })
+    await writeFile(path.join(receipt.path, '.git', 'hooks', 'pre-commit'), 'exit 0\n')
+    await expect(manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'fix: should not run hook',
+    })).rejects.toThrow(/Git configuration/i)
+    await expect(manager.completeWorkflow(receipt.sourceId, workflowId)).rejects.toThrow(/final repository state changed/i)
+    expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBe(workflowId)
   })
 
   it('keeps managed sources after uninstall-style artifact cleanup', async () => {

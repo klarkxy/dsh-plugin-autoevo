@@ -60,7 +60,7 @@ AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesyste
 
 临时目录由 `installationId` 唯一拥有。删除前对 trial root 与候选路径做 `realpath`，确认候选是 trials root 的严格子目录。删除使用 Node `rm`，对象是已经验证的精确路径。
 
-外部安装前先持久化 `installState: unknown` 的 provisional receipt。安装命令异常时，persistent Profile 必须重读 dependency：存在记 `installed`，不存在记 `not_installed`，读取失败保持 `unknown`。最终 receipt 写入失败时，temporary trial 立即补偿删除；persistent Profile 保留 fail-closed recovery anchor。清理 persistent 失败记录时同样先查 Profile 依赖；依赖已经消失就只删 owned artifact。临时试用在批准和文件写入前就确定验证任务。
+外部安装前先持久化 `installState: unknown`、`installOutcome: pending` 的 provisional receipt。安装命令异常时，persistent Profile 只有在 dependency 与可见 package target 都不存在时才记 `failed_absent`；存在、未知或不可核实时记 `recovery_required`。安装命令成功后，还必须证明 Profile dependency 等于精确审查 spec 且 bundle 已启用，才执行 Loader/runtime 验证。最终 receipt 写入失败时，temporary trial 立即补偿删除；persistent Profile 保留 fail-closed recovery anchor。
 
 ## 6. Prompt Injection
 
@@ -72,4 +72,4 @@ AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesyste
 - 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值与 prompt injection 信号，供安装决策使用。
 - `medium` 风险候选在理由清晰的批准后可以试用；含 `prompt_injection` / `dynamic_evaluation` 的 high 停在审查阶段。可修 high 走 modify，用户 `use_this` 后才可带 HIGH RISK 批准安装。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
-- fork、push、commit 与 PR 走现有 Git / `gh` 能力，每一次提交单独批准。
+- 内部托管源 commit 由 Host 在禁用 hooks/签名后本地完成；任何 fork、push、tag、release 或上游 PR 都属于后续发布动作，仍需另行明确批准。

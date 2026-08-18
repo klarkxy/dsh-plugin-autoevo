@@ -1,8 +1,12 @@
 import Schema from "@deepseek-ai/schemastery";
+import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
+import { Session } from "@deepseek-ai/dsh-session";
 import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { Context } from "@deepseek-ai/cordis";
 import { Agent } from "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-subprocess";
+import { FileSystem } from "@deepseek-ai/dsh-fs";
+import { SandboxProvider } from "@deepseek-ai/dsh-sandbox";
 //#region src/config.d.ts
 interface Config$1 {
   dshHome?: string;
@@ -238,6 +242,8 @@ interface InstallInput {
   retention: InstallationRetention;
   verificationTask?: string;
   verificationExpectedText?: string;
+  /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
+  expectedArtifactSha256?: string;
 }
 interface RemoveInput {
   installationId: string;
@@ -250,7 +256,7 @@ interface ResumeInput {
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'create_authorized' | 'modify_authorized';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work';
 interface WorkflowOption {
   id: WorkflowOptionId;
@@ -349,12 +355,12 @@ interface WorkflowHost {
   prepareModify?(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
-    deferred?: boolean;
+    review?: ReviewRecord;
   }>;
   prepareCreate?(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
-    deferred?: boolean;
+    review?: ReviewRecord;
   }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
@@ -362,6 +368,7 @@ interface WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles?(): Promise<string[]>;
+  releaseManagedSource?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
 }
 interface WorkflowExec {
   agent?: import('@deepseek-ai/dsh-agent').Agent;
@@ -502,6 +509,10 @@ declare class DshLauncher {
   install(dshHome: string, profile: string, spec: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   remove(dshHome: string, profile: string, packageName: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   hasProfileDependency(dshHome: string, profile: string, packageName: string): Promise<boolean>;
+  /** Verify that the target profile records the exact reviewed source and loads that bundle. */
+  profileSourceMatches(dshHome: string, profile: string, packageName: string, expectedSpec: string): Promise<boolean>;
+  /** Confirm absence in both the profile manifest and its visible node_modules target. */
+  profileTargetAbsent(dshHome: string, profile: string, packageName: string): Promise<boolean>;
   verify(dshHome: string, profile: string, cwd: string, task: string, expectedTools: readonly string[], expectedText?: string, signal?: AbortSignal): Promise<VerificationEvidence>;
 }
 //#endregion
@@ -541,6 +552,45 @@ declare class PluginRemover {
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
 }
 //#endregion
+//#region src/sandbox-probe.d.ts
+interface LiveSandboxStack {
+  sandbox?: SandboxProvider;
+  sandboxPolicy?: SandboxPolicyService;
+  fs?: FileSystem;
+  runner?: CommandRunner;
+}
+interface SandboxProbeResult {
+  ok: true;
+  mode: 'workspace-write';
+  cwd: string;
+  platform: NodeJS.Platform;
+  enforcement: 'full' | 'partial';
+  isolation: 'integrity-partial';
+  note: string;
+}
+/**
+ * Probe the official rc.6 DSH policy, filesystem, and subprocess sandbox seams.
+ * The probe runs only after a child session exists and has a durable
+ * `workspace-write` override. It owns and removes every probe path.
+ */
+declare function probeWorkspaceWriteSandbox(stack: LiveSandboxStack | undefined, session: Session, expectedCwd: string, signal?: AbortSignal): Promise<SandboxProbeResult>;
+//#endregion
+//#region src/managed-child.d.ts
+interface ManagedChildRequest {
+  parent: Agent;
+  cwd: string;
+  task: string;
+  signal?: AbortSignal;
+}
+interface ManagedChildResult {
+  sessionId: string;
+  taskResult: string;
+  sandbox: Awaited<ReturnType<typeof probeWorkspaceWriteSandbox>>;
+}
+interface ManagedChildHost {
+  run(request: ManagedChildRequest): Promise<ManagedChildResult>;
+}
+//#endregion
 //#region src/source-manager.d.ts
 interface SourceReceipt {
   sourceId: string;
@@ -551,7 +601,9 @@ interface SourceReceipt {
   headCommit: string;
   reviewId: string;
   artifactHash: string | null;
-  activeWorkflowId: string;
+  activeWorkflowId: string | null;
+  /** Hash of Host-controlled Git config and hooks metadata. */
+  gitConfigHash: string;
 }
 declare class SourceManager {
   private readonly config;
@@ -563,10 +615,14 @@ declare class SourceManager {
   receiptPath(sourceId: string): string;
   lockPath(sourceId: string): string;
   readReceipt(sourceId: string): Promise<SourceReceipt | undefined>;
+  receiptForManagedPath(candidate: string): Promise<SourceReceipt | undefined>;
   writeReceipt(receipt: SourceReceipt): Promise<void>;
   private git;
+  private gitConfigHash;
+  private disabledHooksPath;
   acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
   releaseLock(sourceId: string, workflowId: string): Promise<void>;
+  completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
   assertCleanTree(sourceId: string, signal?: AbortSignal): Promise<void>;
   assertPathContainment(sourceId: string): Promise<string>;
   /** Trusted minimal DSH bundle scaffold written before any child edit session. */
@@ -595,14 +651,19 @@ declare class SourceManager {
     message: string;
     signal?: AbortSignal;
   }): Promise<string>;
-  buildNormalizedTgz(input: {
+  finalizeChildCommit(input: {
     sourceId: string;
-    outputDir: string;
+    workflowId: string;
+    reviewId: string;
+    message: string;
     signal?: AbortSignal;
-  }): Promise<{
-    installSpec: string;
+  }): Promise<SourceReceipt>;
+  recordReviewedArtifact(input: {
+    sourceId: string;
+    workflowId: string;
+    reviewId: string;
     artifactHash: string;
-  }>;
+  }): Promise<SourceReceipt>;
 }
 //#endregion
 //#region src/service.d.ts
@@ -617,7 +678,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   readonly sources: SourceManager;
   private readonly launcher;
   private readonly engine;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard);
+  private readonly managedChild;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost);
   start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
@@ -636,20 +698,17 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
-  private assertChildSandbox;
-  prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: {
-    id: string;
-  }): Promise<{
+  private requireParentAgent;
+  private reviewAndFreezeManagedSource;
+  prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
-    deferred?: boolean;
+    review?: ReviewRecord;
   }>;
-  prepareCreate(resolution: ResolutionRecord, exec: WorkflowExec, workflow: {
-    id: string;
-  }): Promise<{
+  prepareCreate(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
-    deferred?: boolean;
+    review?: ReviewRecord;
   }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
@@ -657,49 +716,11 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles(): Promise<string[]>;
+  releaseManagedSource(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
   private waitingConfirmation;
   private revalidate;
   private dshRuntimeVersion;
 }
-//#endregion
-//#region src/sandbox-probe.d.ts
-type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access' | string;
-interface SandboxFilesystemProvider {
-  mode?: SandboxMode;
-  cwd?: string;
-  /**
-   * When true, the Host binds cwd to the managed source path at child launch.
-   * Mode must still be workspace-write; containment is probed against expectedCwd.
-   */
-  bindsManagedCwd?: boolean;
-  /** Optional containment probe used by tests and capable hosts. */
-  assertContained?(candidatePath: string): Promise<boolean> | boolean;
-}
-interface SandboxShellProvider {
-  mode?: SandboxMode;
-  cwd?: string;
-  bindsManagedCwd?: boolean;
-  /** Optional write probe; must reject paths outside cwd. */
-  canWrite?(candidatePath: string): Promise<boolean> | boolean;
-}
-interface SandboxStack {
-  filesystem?: SandboxFilesystemProvider | null;
-  shell?: SandboxShellProvider | null;
-}
-interface SandboxProbeResult {
-  ok: true;
-  mode: 'workspace-write';
-  cwd: string;
-  platform: NodeJS.Platform;
-  isolation: 'integrity-partial';
-  note: string;
-}
-/**
- * Probe the live DSH filesystem/shell sandbox stack before exposing modify/create.
- * Fail closed on missing providers, wrong mode/cwd binding, or failed containment.
- * Windows enforcement is integrity-oriented partial isolation only.
- */
-declare function probeWorkspaceWriteSandbox(stack: SandboxStack | undefined, expectedCwd: string): Promise<SandboxProbeResult>;
 //#endregion
 //#region src/index.d.ts
 declare const name = "autoevo";

@@ -8,7 +8,7 @@ import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord, VerificationEvidence } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
-import type { DshLauncher } from '../../src/lifecycle/launcher.js'
+import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
 import { StateStore } from '../../src/state/store.js'
 import { _testing as snapshotTesting } from '../../src/lifecycle/snapshot.js'
@@ -105,6 +105,21 @@ describe('lifecycle validation', () => {
     expect(snapshotTesting.shellForwardedFileSpec('C:\\safe path\\plugin.tgz')).toMatch(/^file:/u)
   })
 
+  it('matches only the exact profile source when the reviewed bundle is active', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-profile-source-'))
+    temporary.push(root)
+    const profileRoot = path.join(root, 'home', 'profiles', 'trial')
+    await mkdir(profileRoot, { recursive: true })
+    const spec = `github:acme/calculator#${'c'.repeat(40)}`
+    await writeFile(path.join(profileRoot, 'package.json'), `${JSON.stringify({
+      dependencies: { 'dsh-tool-calculator': spec },
+      dsh: { profile: { bundles: ['dsh-tool-calculator'] } },
+    })}\n`)
+    const launcher = new DshLauncher({ run: async () => { throw new Error('not used') } }, config(root))
+    await expect(launcher.profileSourceMatches(path.join(root, 'home'), 'trial', 'dsh-tool-calculator', spec)).resolves.toBe(true)
+    await expect(launcher.profileSourceMatches(path.join(root, 'home'), 'trial', 'dsh-tool-calculator', `${spec}-other`)).resolves.toBe(false)
+  })
+
   it('rejects a partial candidate until it has been modified and reviewed as a full fit', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
@@ -169,6 +184,7 @@ describe('lifecycle validation', () => {
     }
     const launcher = {
       install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
+      profileSourceMatches: async () => true,
       verify: async () => failedVerification,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -235,7 +251,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => { throw new Error('timeout after manifest update') },
-      hasProfileDependency: async () => true,
+      profileTargetAbsent: async () => false,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
@@ -285,6 +301,7 @@ describe('lifecycle validation', () => {
     }
     const launcher = {
       install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
+      profileSourceMatches: async () => true,
       verify: async () => loadVerification,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -312,7 +329,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => { throw new Error('timeout') },
-      hasProfileDependency: async () => { throw new Error('profile unreadable') },
+      profileTargetAbsent: async () => { throw new Error('profile unreadable') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
@@ -340,6 +357,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
       verify: async (): Promise<VerificationEvidence> => ({
         attempted: true,
         task: 'calculate 6 * 7',
@@ -393,6 +411,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
       verify: async (): Promise<VerificationEvidence> => ({
         attempted: true,
         task: 'test calculator',
@@ -434,6 +453,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
       verify: async () => { throw new Error('simulated verification interruption') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)

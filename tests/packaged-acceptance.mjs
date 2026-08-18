@@ -1,116 +1,114 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+
 const projectRoot = path.resolve(import.meta.dirname, '..')
-
-function skip(reason) {
-  process.stdout.write(`${JSON.stringify({ status: 'skipped', reason })}\n`)
-  process.exit(0)
-}
-
-let Context
-let Loader
-try {
-  ;({ Context } = await import('@deepseek-ai/cordis'))
-  Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
-} catch (error) {
-  skip(`live-only Loader/Cordis dependency unavailable: ${error instanceof Error ? error.message : String(error)}`)
-}
-
+const dshBin = path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const driver = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'packaged-preset-driver.mjs')).href
 const blankHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-packaged-blank-'))
-const root = new Context()
-root.baseUrl = `${pathToFileURL(projectRoot).href}/`
+const dshHome = path.join(blankHome, 'dsh')
+const stateDir = path.join(blankHome, 'state')
+const packDir = path.join(blankHome, 'pack')
+
+async function run(command, args, options = {}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? projectRoot,
+      env: { ...process.env, ...options.env },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk })
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error(`${command} timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`))
+    }, options.timeoutMs ?? 300_000)
+    child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve({ stdout, stderr })
+      else reject(new Error(`${command} exited ${String(code)}\nstdout:\n${stdout}\nstderr:\n${stderr}`))
+    })
+  })
+}
+
+async function npmArgv() {
+  const adjacent = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+  if (await access(adjacent).then(() => true).catch(() => false)) return [process.execPath, await realpath(adjacent)]
+  return ['npm']
+}
 
 try {
-  await root.plugin(Loader)
-  const entries = [
-    ['system-prompt', import.meta.resolve('@deepseek-ai/dsh-system-prompt')],
-    ['tools', import.meta.resolve('@deepseek-ai/dsh-tools')],
-    ['skills', import.meta.resolve('@deepseek-ai/dsh-skill')],
-    ['subprocess', import.meta.resolve('@deepseek-ai/dsh-subprocess')],
-    ['autoevo', pathToFileURL(path.join(projectRoot, 'lib', 'index.js')).href],
-  ]
-  for (const [id, name] of entries) {
-    await root.loader.create({
-      id,
-      name,
-      ...(id === 'autoevo'
-        ? {
-            config: {
-              dshHome: path.join(blankHome, 'dsh'),
-              stateDir: path.join(blankHome, 'state'),
-              evolutionPreset: true,
-            },
-          }
-        : {}),
-    })
-  }
-  await root.loader.await()
+  await mkdir(packDir, { recursive: true })
+  const [npm, ...npmPrefix] = await npmArgv()
+  await run(npm, [...npmPrefix, 'pack', projectRoot, '--pack-destination', packDir, '--ignore-scripts'], {
+    env: { NPM_CONFIG_CACHE: path.join(blankHome, 'npm-cache'), NPM_CONFIG_IGNORE_SCRIPTS: 'true', NO_UPDATE_NOTIFIER: '1' },
+  })
+  const tarballs = (await readdir(packDir)).filter((name) => name.endsWith('.tgz'))
+  assert.equal(tarballs.length, 1)
+  const tarball = await realpath(path.join(packDir, tarballs[0]))
+  const localSpec = `file:${tarball.replaceAll('\\', '/')}`
 
-  // Allow async preset materialization to settle without touching the user profile.
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      const { access } = await import('node:fs/promises')
-      await access(path.join(blankHome, 'dsh', '.agent-presets', 'evolution', 'preset.yml'))
-      break
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 20))
-    }
-  }
+  const dshEnv = { DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1', DSH_TOOLS_MODE: 'code' }
+  await run(process.execPath, [dshBin, 'plugin', '--profile', 'headless', 'add', '--save-exact', localSpec], {
+    env: dshEnv,
+    timeoutMs: 300_000,
+  })
+  const profile = JSON.parse(await readFile(path.join(dshHome, 'profiles', 'headless', 'package.json'), 'utf8'))
+  assert.equal(profile.dependencies['dsh-plugin-autoevo'], localSpec)
+  assert.ok(profile.dsh.profile.bundles.includes('dsh-plugin-autoevo'))
 
-  const { readFile } = await import('node:fs/promises')
-  const manifest = JSON.parse(await readFile(
-    path.join(blankHome, 'dsh', '.agent-presets', 'evolution', '.autoevo-preset.json'),
-    'utf8',
-  ))
-  assert.equal(manifest.templateVersion, '5')
-
-  const expected = ['capability_workflow', 'capability_workflow_resume', 'plugin_remove']
-  const registered = root.tools.schemas().map((tool) => tool.name).sort()
-  assert.deepEqual(registered, expected)
-
-  const resume = root.tools.schemas().find((tool) => tool.name === 'capability_workflow_resume')
-  assert.ok(resume)
-  const resumeParams = resume.parameters ?? {}
-  const resumeProps = resumeParams.properties ?? resumeParams
-  const resumeKeys = Object.keys(resumeProps).sort()
-  assert.deepEqual(resumeKeys, ['interrupt_id', 'workflow_id'])
-  if (Array.isArray(resumeParams.required)) {
-    assert.deepEqual([...resumeParams.required].sort(), ['interrupt_id', 'workflow_id'])
-  }
-
-  // Exercise real Loader tool/call + tool/result contract for a denied/invalid resume without a live agent.
-  let toolResult
-  try {
-    toolResult = await root.tools.execute({
-      name: 'capability_workflow_resume',
-      arguments: {
-        workflow_id: `workflow_${'a'.repeat(24)}`,
-        interrupt_id: `interrupt_${'b'.repeat(24)}`,
+  const patchFile = path.join(blankHome, 'packaged-acceptance.cordis.yml')
+  await writeFile(patchFile, `${JSON.stringify([
+    { id: 'headless-runner', disabled: true },
+    { id: 'autoevo', config: { dshHome, stateDir, sourceDir: path.join(stateDir, 'sources'), evolutionPreset: true } },
+    { insert: [
+      { id: 'cordis-host-runner', name: '@deepseek-ai/dsh-cordis-host-runner' },
+      {
+        id: 'agent-presets',
+        name: '@deepseek-ai/dsh-agent-presets',
+        config: {
+          default: 'standard',
+          roots: [{ path: path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'config', 'agent-presets'), trust: 'system' }],
+          includeUserRoot: true,
+        },
       },
-    })
-  } catch (error) {
-    toolResult = { isError: true, error: { message: error instanceof Error ? error.message : String(error) } }
-  }
-  assert.equal(toolResult.isError, true)
+      { id: 'autoevo-packaged-driver', name: driver, config: { dshHome, cwd: blankHome } },
+    ] },
+  ], null, 2)}\n`)
 
-  const policy = (await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) }))
-    .sections.find((section) => section.name === 'autoevo:reuse-policy')
-  assert.ok(policy)
-  assert.match(policy.text, /interrupt_id/u)
-  assert.match(policy.text, /workspace-write/u)
-  assert.match(policy.text, /integrity-oriented partial isolation/u)
-  assert.doesNotMatch(policy.text, /scratch_ready/u)
+  const result = await run(process.execPath, [dshBin, '--profile', 'headless', '--patch', patchFile, 'packaged acceptance'], {
+    cwd: blankHome,
+    env: dshEnv,
+    timeoutMs: 300_000,
+  })
+  assert.match(result.stdout, /AUTOEVO_PACKAGED_V5_SESSION_OK/u)
+  const evidenceLine = result.stdout.split(/\r?\n/u).find((line) => line.includes('AUTOEVO_PACKAGED_V5_SESSION_OK'))
+  assert.ok(evidenceLine)
+  const evidence = JSON.parse(evidenceLine)
+  assert.equal(evidence.preset, 'evolution')
+  assert.deepEqual(evidence.tools, ['capability_workflow', 'capability_workflow_resume', 'plugin_remove'])
+  assert.ok(evidence.eventTypes.includes('tool/call'))
+  assert.ok(evidence.eventTypes.includes('tool/result'))
+  assert.ok(evidence.eventTypes.includes('turn/end'))
 
+  const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
+  assert.equal(manifest.templateVersion, '5')
   process.stdout.write(`${JSON.stringify({
     status: 'passed',
+    installedFrom: path.basename(tarball),
     templateVersion: manifest.templateVersion,
-    tools: registered,
-    blankHome,
+    preset: evidence.preset,
+    tools: evidence.tools,
+    durableEvents: ['tool/call', 'tool/result', 'turn/end'],
+    taskResult: evidence.marker,
   })}\n`)
 } finally {
-  await root.fiber.dispose().catch(() => undefined)
   await rm(blankHome, { recursive: true, force: true })
 }

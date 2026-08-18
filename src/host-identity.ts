@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { hashObject } from './state/hashes.js'
 
@@ -20,7 +21,7 @@ export function normalizeRequirement(requirement: string): string {
 }
 
 export function newBootId(): string {
-  return `boot_${hashObject({ at: new Date().toISOString(), nonce: Math.random() }).slice(0, 24)}`
+  return `boot_${hashObject({ at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
 }
 
 export function newInterruptId(binding: {

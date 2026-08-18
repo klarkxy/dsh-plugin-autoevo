@@ -196,6 +196,48 @@ export class DshLauncher {
     }
   }
 
+  /** Verify that the target profile records the exact reviewed source and loads that bundle. */
+  async profileSourceMatches(
+    dshHome: string,
+    profile: string,
+    packageName: string,
+    expectedSpec: string,
+  ): Promise<boolean> {
+    const safePackageName = assertSafePackageName(packageName)
+    const body = await readFile(path.join(dshHome, 'profiles', profile, 'package.json'), 'utf8')
+    const manifest: unknown = JSON.parse(body)
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return false
+    const record = manifest as {
+      dependencies?: unknown
+      dsh?: { profile?: { bundles?: unknown } }
+    }
+    const dependencies = record.dependencies
+    if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) return false
+    if ((dependencies as Record<string, unknown>)[safePackageName] !== expectedSpec) return false
+    const bundles = record.dsh?.profile?.bundles
+    return Array.isArray(bundles) && bundles.includes(safePackageName)
+  }
+
+  /** Confirm absence in both the profile manifest and its visible node_modules target. */
+  async profileTargetAbsent(dshHome: string, profile: string, packageName: string): Promise<boolean> {
+    const safePackageName = assertSafePackageName(packageName)
+    if (await this.hasProfileDependency(dshHome, profile, safePackageName)) return false
+    const packagePath = path.join(
+      dshHome,
+      'profiles',
+      profile,
+      'node_modules',
+      ...safePackageName.split('/'),
+    )
+    try {
+      await stat(packagePath)
+      return false
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+      throw error
+    }
+  }
+
   async verify(
     dshHome: string,
     profile: string,

@@ -9,7 +9,7 @@ import type {
   ReviewRecord,
   WorkflowOptionId,
 } from '../contracts.js'
-import type { CreationGuard, ClaimedHostTurn } from '../creation-guard.js'
+import type { CreationGuard } from '../creation-guard.js'
 import { EvolutionError } from '../errors.js'
 import { hashObject } from '../state/hashes.js'
 import type { InterruptPayload, ValidatedResume, WorkflowPendingInstall } from '../workflow/contracts.js'
@@ -342,128 +342,6 @@ export function resolveDecisionFromHost(input: {
     repositories,
     ...(input.reviewId ? { reviewId: input.reviewId } : {}),
   }
-}
-
-/** @deprecated Prefer resolveDecisionFromHost; kept for narrow unit tests of inference helpers. */
-export function validateResume(input: {
-  guard: CreationGuard
-  agent: Agent | undefined
-  interrupt: InterruptPayload
-  userMessage: string
-  optionId: WorkflowOptionId
-  remotes: readonly RemotePluginCandidate[]
-  repositories?: string[]
-  reviewId?: string
-  targetProfile?: string
-  retention?: InstallationRetention
-  verificationTask?: string
-  verificationExpectedText?: string
-}): ValidatedResume {
-  const claimed: ClaimedHostTurn = {
-    turnId: input.guard.currentTurnId(input.agent) ?? 'turn_test',
-    message: input.userMessage,
-    sequence: 0,
-  }
-  void claimed
-  const normalized = normalizeDecisionText(input.userMessage)
-  if (!normalized || normalized.length > 2_000) {
-    throw new EvolutionError('invalid_input', 'user_message must contain 1 to 2000 characters')
-  }
-  const last = input.guard.lastUserMessage(input.agent)
-  if (last && normalizeDecisionText(last) !== normalized) {
-    throw new EvolutionError('invalid_input', 'user_message does not match the latest user turn')
-  }
-  assertOptionAllowed(input.interrupt, input.optionId)
-  if (STOP_RE.test(normalized) && input.optionId !== 'stop') {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId: input.optionId,
-      inferredAction: 'stop',
-    })
-  }
-  if (CREATE_NEW_RE.test(normalized) && input.optionId !== 'create_new') {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId: input.optionId,
-      inferredAction: 'create_new',
-    })
-  }
-  if (input.optionId === 'create_new' && !CREATE_NEW_RE.test(normalized)) {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId: input.optionId,
-    })
-  }
-  const repositories = (input.repositories ?? []).map((item) => item.trim()).filter(Boolean)
-  if (input.optionId === 'inspect' && repositories.length !== 1) {
-    throw new EvolutionError('invalid_input', 'inspect requires exactly one repository')
-  }
-  const resolved = repositories.map((repository) => {
-    const known = input.remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-    return known?.repository ?? repository
-  })
-  if (input.optionId === 'use_this') {
-    if (!input.targetProfile || !input.retention) {
-      throw new EvolutionError('invalid_input', 'use_this requires target_profile and retention')
-    }
-    return {
-      optionId: input.optionId,
-      userMessage: normalized,
-      hostTurnId: input.guard.currentTurnId(input.agent) ?? 'turn_test',
-      interruptId: input.interrupt.interruptId,
-      repositories: resolved,
-      install: {
-        targetProfile: input.targetProfile,
-        retention: input.retention,
-        ...(input.verificationTask ? { verificationTask: input.verificationTask } : {}),
-        ...(input.verificationExpectedText ? { verificationExpectedText: input.verificationExpectedText } : {}),
-      },
-      ...(input.reviewId ? { reviewId: input.reviewId } : {}),
-    }
-  }
-  return {
-    optionId: input.optionId,
-    userMessage: normalized,
-    hostTurnId: input.guard.currentTurnId(input.agent) ?? 'turn_test',
-    interruptId: input.interrupt.interruptId,
-    repositories: resolved,
-    ...(input.reviewId ? { reviewId: input.reviewId } : {}),
-  }
-}
-
-export function assertResumeContradiction(userMessage: string, optionId: WorkflowOptionId): void {
-  if (STOP_RE.test(userMessage) && optionId !== 'stop') {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId,
-      inferredAction: 'stop',
-    })
-  }
-  if (CREATE_NEW_RE.test(userMessage) && optionId !== 'create_new') {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId,
-      inferredAction: 'create_new',
-    })
-  }
-  if (optionId === 'create_new' && !CREATE_NEW_RE.test(userMessage)) {
-    throw new EvolutionError('invalid_input', 'The claimed option contradicts the user message', {
-      optionId,
-    })
-  }
-}
-
-export function resolveResumeRepositories(
-  claimed: readonly string[] | undefined,
-  remotes: readonly RemotePluginCandidate[],
-  optionId: WorkflowOptionId,
-): string[] {
-  const requested = (claimed ?? []).map((item) => item.trim()).filter(Boolean)
-  if (optionId !== 'inspect' && optionId !== 'use_this' && optionId !== 'modify_this' && requested.length > 0) {
-    throw new EvolutionError('invalid_input', 'repositories are only valid when inspecting or confirming a review')
-  }
-  if (optionId === 'inspect' && requested.length !== 1) {
-    throw new EvolutionError('invalid_input', 'inspect requires exactly one repository')
-  }
-  return requested.map((repository) => {
-    const known = remotes.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-    return known?.repository ?? repository
-  })
 }
 
 export const _testing = {

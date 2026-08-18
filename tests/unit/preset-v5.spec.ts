@@ -186,7 +186,7 @@ describe('evolution preset V5 migration', () => {
     await expect(readFile(path.join(staging, 'preset.yml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('keeps packed-byte preset and plugin artifact hashes stable', async () => {
+  it('keeps normalized preset manifests stable across blank homes', async () => {
     const root = await tempDir('autoevo-v5-hash')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
     const first = await materializeEvolutionPreset({
@@ -206,37 +206,5 @@ describe('evolution preset V5 migration', () => {
     expect(manifestA).toEqual(manifestB)
     expect(manifestA.templateVersion).toBe('5')
 
-    const { SourceManager } = await import('../../src/source-manager.js')
-    const manager = new SourceManager({
-      dshHome: path.join(root, 'dsh-a'),
-      stateDir: root,
-      ghCommand: 'gh',
-      gitCommand: 'git',
-      dshCommand: 'dsh',
-      dshCommandArgs: [],
-      maxCandidates: 5,
-      maxFiles: 80,
-      maxRepositoryBytes: 1_048_576,
-      commandTimeoutMs: 30_000,
-      forwardedCredentialEnv: [],
-      verificationPatchPaths: [],
-      evolutionPreset: false,
-    } as never, {
-      async run() {
-        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
-      },
-    })
-    const sourceId = 'pack_hash'
-    const sourcePath = manager.sourcePath(sourceId)
-    await mkdir(path.join(sourcePath, 'lib'), { recursive: true })
-    await writeFile(path.join(sourcePath, 'package.json'), '{"name":"demo"}\n', 'utf8')
-    await writeFile(path.join(sourcePath, 'lib', 'index.js'), 'export {}\n', 'utf8')
-    await mkdir(path.join(sourcePath, '.git'), { recursive: true })
-    const one = await manager.buildNormalizedTgz({ sourceId, outputDir: path.join(root, 'o1') })
-    const two = await manager.buildNormalizedTgz({ sourceId, outputDir: path.join(root, 'o2') })
-    expect(one.artifactHash).toBe(two.artifactHash)
-    const tgz = JSON.parse(await readFile(one.installSpec.slice('file:'.length), 'utf8'))
-    expect(tgz.kind).toBe('autoevo-normalized-source')
-    expect(tgz.files.map((item: { path: string }) => item.path).sort()).toEqual(['lib/index.js', 'package.json'])
   })
 })
