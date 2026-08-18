@@ -54,6 +54,38 @@ function commandResult(stdout = ''): { exitCode: number, signal: null, stdout: s
   return { exitCode: 0, signal: null, stdout, stderr: '' }
 }
 
+function withGitSupport(base: { run: (request: { argv: readonly string[], cwd: string }) => Promise<{ exitCode: number, signal: null, stdout: string, stderr: string }> }) {
+  const gitState = { head: '1'.repeat(40), branch: 'main', n: 0 }
+  return {
+    async run(request: { argv: readonly string[], cwd: string }) {
+      const args = request.argv.slice(1)
+      const joined = args.join(' ')
+      if (request.argv[0] === 'git' || /git(?:\.exe)?$/iu.test(String(request.argv[0]))) {
+        const { mkdir, writeFile } = await import('node:fs/promises')
+        if (joined === 'init') {
+          await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+          return commandResult()
+        }
+        if (joined.startsWith('checkout -B')) {
+          gitState.branch = args[2]!
+          return commandResult()
+        }
+        if (joined === 'status --porcelain') return commandResult()
+        if (joined === 'rev-parse HEAD') return commandResult(`${gitState.head}\n`)
+        if (joined === 'rev-parse --abbrev-ref HEAD') return commandResult(`${gitState.branch}\n`)
+        if (joined === 'add -A') return commandResult()
+        if (args[0] === 'commit') {
+          gitState.n += 1
+          gitState.head = `create${gitState.n}`.padEnd(40, '0')
+          return commandResult()
+        }
+        return commandResult()
+      }
+      return base.run(request)
+    },
+  }
+}
+
 function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: string): void {
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
 }
@@ -276,7 +308,7 @@ describe('conversational confirmation gates', () => {
     const service = new CapabilityEvolutionService(
       marketplaceCtx([], root),
       config(root),
-      { run: async () => commandResult('0.1.0-rc.6\n') },
+      withGitSupport({ run: async () => commandResult('0.1.0-rc.6\n') }),
       new StateStore(root),
       guard,
     )
@@ -285,7 +317,8 @@ describe('conversational confirmation gates', () => {
       .rejects.toThrow(/Could not resolve a workflow decision/i)
     const decided = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个')
     expect(decided.resolution?.authorization?.state).toBe('create_authorized')
-    expect(decided.workflow.cursor).toBe('create_authorized')
+    expect(decided.workflow.cursor).toBe('await_modify_work')
+    expect(decided.workflow.pendingPath).toBeTruthy()
     await expect(guard.preExecute({
       callId: 'define-ok',
       name: 'cordis_define',
@@ -302,7 +335,7 @@ describe('conversational confirmation gates', () => {
     const localService = new CapabilityEvolutionService(
       localCtx(root),
       config(root),
-      { run: async () => commandResult('0.1.0-rc.6\n') },
+      withGitSupport({ run: async () => commandResult('0.1.0-rc.6\n') }),
       new StateStore(root),
       guard,
     )
@@ -311,6 +344,7 @@ describe('conversational confirmation gates', () => {
     expect(created.resolution?.authorization?.state).toBe('selection_required')
     const allowed = await resumeWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'Create new')
     expect(allowed.resolution?.authorization?.state).toBe('create_authorized')
+    expect(allowed.workflow.cursor).toBe('await_modify_work')
 
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)

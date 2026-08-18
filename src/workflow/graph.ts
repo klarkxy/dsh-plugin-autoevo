@@ -2,6 +2,7 @@ import type { InstallationRecord, ResolutionRecord, ReviewRecord, WorkflowOption
 import { EvolutionError } from '../errors.js'
 import {
   confirmationFacts,
+  createWorkFacts,
   modifyWorkFacts,
   optionsFor,
   selectionFacts,
@@ -65,7 +66,11 @@ export function interruptPayload(
   cursor: WorkflowNodeId,
   resolution: ResolutionRecord,
   review?: ReviewRecord,
-  extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
+  extras: {
+    lastFailure?: WorkflowRecord['lastFailure']
+    installProfiles?: string[]
+    pendingPath?: string
+  } = {},
 ): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
   if (cursor === 'await_selection') {
     return {
@@ -85,13 +90,20 @@ export function interruptPayload(
     }
   }
   if (cursor === 'await_modify_work') {
-    if (!review) {
-      throw new EvolutionError('invalid_input', 'Modify-work interrupt requires a review')
+    if (review) {
+      return {
+        kind: 'await_modify_work',
+        options: optionsFor('await_modify_work', resolution),
+        facts: modifyWorkFacts(review),
+      }
+    }
+    if (!extras.pendingPath) {
+      throw new EvolutionError('invalid_input', 'Create-work interrupt requires a managed source path')
     }
     return {
       kind: 'await_modify_work',
       options: optionsFor('await_modify_work', resolution),
-      facts: modifyWorkFacts(review),
+      facts: createWorkFacts(extras.pendingPath),
     }
   }
   throw new EvolutionError('invalid_input', 'Not an interrupt node', { cursor })

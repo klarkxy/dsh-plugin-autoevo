@@ -38,8 +38,9 @@ function snapshotDigestFor(
   kind: InterruptPayload['kind'],
   resolution: WorkflowView['resolution'],
   review?: WorkflowView['review'],
+  pendingPath?: string,
 ): string {
-  if (kind === 'await_confirmation' || kind === 'await_modify_work') {
+  if (kind === 'await_confirmation') {
     if (!review) throw new EvolutionError('invalid_input', 'Confirmation interrupt requires a review snapshot')
     return hashObject({
       kind,
@@ -51,6 +52,20 @@ function snapshotDigestFor(
       inspectedFiles: review.inspectedFiles,
       manifest: review.manifest,
     })
+  }
+  if (kind === 'await_modify_work') {
+    if (review) {
+      return hashObject({
+        kind,
+        reviewId: review.id,
+        reviewIdentity: review.sourceSnapshot.kind === 'github'
+          ? review.sourceSnapshot.commit
+          : review.sourceSnapshot.statusHash,
+        path: pendingPath,
+      })
+    }
+    if (!pendingPath) throw new EvolutionError('invalid_input', 'Create-work interrupt requires a managed source path snapshot')
+    return hashObject({ kind, path: pendingPath, resolutionId: resolution?.id })
   }
   if (!resolution) throw new EvolutionError('invalid_input', 'Selection interrupt requires a resolution snapshot')
   return hashObject({
@@ -166,7 +181,7 @@ export class WorkflowEngine {
       }
       const resolution = await this.host.getResolution(workflow.resolutionId)
       const review = workflow.lastReviewId ? await this.host.getReview(workflow.lastReviewId) : undefined
-      const expectedDigest = snapshotDigestFor(workflow.interrupt.kind, resolution, review)
+      const expectedDigest = snapshotDigestFor(workflow.interrupt.kind, resolution, review, workflow.pendingPath)
       if (expectedDigest !== workflow.interrupt.snapshotDigest) {
         throw new EvolutionError('invalid_input', 'Interrupt candidate/review snapshot digest mismatch', {
           expected: expectedDigest,
@@ -238,13 +253,14 @@ export class WorkflowEngine {
     const base = interruptPayload(workflow.cursor, resolution, review, {
       ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
       ...(installProfiles.length > 0 ? { installProfiles } : {}),
+      ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
     })
     const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
     if (!sessionId) {
       throw new EvolutionError('invalid_input', 'Cannot reissue interrupt without an owner session')
     }
     const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
-    const snapshotDigest = snapshotDigestFor(base.kind, resolution, review)
+    const snapshotDigest = snapshotDigestFor(base.kind, resolution, review, workflow.pendingPath)
     workflow.bootId = this.creationGuard.bootId
     workflow.interrupt = {
       ...base,
@@ -307,13 +323,14 @@ export class WorkflowEngine {
           const base = interruptPayload(workflow.cursor, resolution, review, {
             ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
             ...(installProfiles.length > 0 ? { installProfiles } : {}),
+            ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
           })
           const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
           if (!sessionId) {
             throw new EvolutionError('invalid_input', 'Cannot issue interrupt without an owner session')
           }
           const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
-          const snapshotDigest = snapshotDigestFor(base.kind, resolution, review)
+          const snapshotDigest = snapshotDigestFor(base.kind, resolution, review, workflow.pendingPath)
           workflow.bootId = this.creationGuard.bootId
           workflow.ownerSessionId = sessionId
           workflow.interrupt = {

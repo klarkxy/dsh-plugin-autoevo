@@ -516,12 +516,18 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async prepareCreate(
     resolution: ResolutionRecord,
-    _exec: WorkflowExec,
-    _workflow: { id: string },
+    exec: WorkflowExec,
+    workflow: { id: string },
   ): Promise<{ resolution: ResolutionRecord; path?: string; deferred?: boolean }> {
     const sourceKey = sourceIdForCreate(resolution.id)
     await this.assertChildSandbox(sourceKey)
-    return { resolution }
+    const receipt = await this.sources.initializeCreateSource({
+      resolutionId: resolution.id,
+      workflowId: workflow.id,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    // Child implements inside the scaffolded repo; confirmation/install remain Host-gated.
+    return { resolution, path: receipt.path, deferred: true }
   }
 
   async applyDecision(

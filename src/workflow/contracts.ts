@@ -238,6 +238,13 @@ export function modifyWorkFacts(review: ReviewRecord): Record<string, unknown> {
   }
 }
 
+export function createWorkFacts(path: string): Record<string, unknown> {
+  return {
+    path,
+    instruction: 'Creation continues in a managed workspace-write child session on the trusted scaffold. Wait for the next confirmation interrupt; do not call cordis_define on the parent session.',
+  }
+}
+
 export function optionsFor(kind: InterruptKind, resolution: ResolutionRecord): WorkflowOption[] {
   if (kind === 'await_modify_work') {
     return [WORKFLOW_OPTIONS.stop]

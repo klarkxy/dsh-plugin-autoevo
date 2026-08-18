@@ -219,6 +219,92 @@ export class SourceManager {
     return resolved
   }
 
+  /** Trusted minimal DSH bundle scaffold written before any child edit session. */
+  static trustedScaffoldFiles(packageName: string): Record<string, string> {
+    const safeName = packageName.replace(/[^\w@/-]+/gu, '-').toLowerCase() || 'dsh-plugin-new'
+    return {
+      'package.json': `${JSON.stringify({
+        name: safeName,
+        version: '0.0.0',
+        type: 'module',
+        main: './lib/index.js',
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+        peerDependencies: {
+          '@deepseek-ai/cordis': '^4.0.1',
+          '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0',
+        },
+      }, null, 2)}\n`,
+      'cordis.patch.yml': `- id: ${safeName.replace(/^@[^/]+\//u, '').replace(/[^\w-]+/gu, '-')}\n  name: ${safeName}\n`,
+      'lib/index.js': 'export const name = \'autoevo-scaffold\'\nexport function apply() {}\n',
+      'README.md': `# ${safeName}\n\nManaged AutoEvo scaffold. Implement only inside this repository.\n`,
+    }
+  }
+
+  /**
+   * Initialize a managed create-new repository with a trusted scaffold commit
+   * before any child session begins.
+   */
+  async initializeCreateSource(input: {
+    resolutionId: string
+    workflowId: string
+    packageName?: string
+    signal?: AbortSignal
+  }): Promise<SourceReceipt> {
+    const sourceId = sourceIdForCreate(input.resolutionId)
+    await this.acquireLock(sourceId, input.workflowId, input.signal)
+    try {
+      const root = this.sourcePath(sourceId)
+      await mkdir(this.sourceRoot, { recursive: true })
+      if (await access(path.join(root, '.git'), constants.F_OK).then(() => true).catch(() => false)) {
+        throw new EvolutionError('invalid_input', 'Managed create source already exists; refusing to overwrite', {
+          sourceId,
+        })
+      }
+      await mkdir(path.join(root, 'lib'), { recursive: true })
+      await this.git(root, ['init'], input.signal)
+      const branch = `autoevo/${input.workflowId}`
+      await this.git(root, ['checkout', '-B', branch], input.signal)
+      const files = SourceManager.trustedScaffoldFiles(input.packageName ?? `dsh-plugin-${sourceId.slice(-8)}`)
+      for (const [relative, body] of Object.entries(files)) {
+        const absolute = path.join(root, relative)
+        if (!isPathInside(root, absolute)) {
+          throw new EvolutionError('unsafe_path', 'Scaffold path escaped managed source', { relative })
+        }
+        await mkdir(path.dirname(absolute), { recursive: true })
+        await writeFile(absolute, body, 'utf8')
+      }
+      const headCommit = await this.createHooklessCommit({
+        sourceId,
+        message: 'chore: trusted AutoEvo plugin scaffold',
+        ...(input.signal ? { signal: input.signal } : {}),
+      })
+      const resolved = await this.assertPathContainment(sourceId)
+      const receipt: SourceReceipt = {
+        sourceId,
+        repository: null,
+        path: resolved,
+        baseCommit: headCommit,
+        branch,
+        headCommit,
+        reviewId: `scaffold_${hashObject({ sourceId, headCommit }).slice(0, 24)}`,
+        artifactHash: null,
+        activeWorkflowId: input.workflowId,
+      }
+      await this.writeReceipt(receipt)
+      await writeFile(this.lockPath(sourceId), `${JSON.stringify({
+        workflowId: input.workflowId,
+        createdAt: new Date().toISOString(),
+        pid: process.pid,
+        headCommit,
+        branch,
+      } satisfies SourceLock, null, 2)}\n`, 'utf8')
+      return receipt
+    } catch (error) {
+      await this.releaseLock(sourceId, input.workflowId).catch(() => undefined)
+      throw error
+    }
+  }
+
   /**
    * Materialize the exact reviewed remote commit into a managed git source and
    * create branch `autoevo/<workflow-id>`.
