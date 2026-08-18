@@ -58,7 +58,7 @@ describe('remote discovery precedence', () => {
     expect(queries.every((item) => item.lang === 'zh')).toBe(true)
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({
       name: FIND_PLUGIN_TOOL,
-      arguments: expect.objectContaining({ limit: 5 }),
+      arguments: expect.objectContaining({ limit: 15 }),
       parent: exec.token,
       rootCallId: exec.rootCallId,
     }))
@@ -207,6 +207,32 @@ describe('remote discovery precedence', () => {
         matchedTerms: expect.arrayContaining(['frobulate']),
         matchReason: expect.stringContaining('frobulate'),
       }),
+    ])
+  })
+
+  it('prefers a low-star exact conversation exporter over popular screenshot OCR', () => {
+    const exact = {
+      repository: 'acme/dsh-conv-export',
+      name: 'dsh-conv-export',
+      description: 'Export the current DSH conversation as a long PNG image.',
+      stars: 2,
+      updatedAt: null,
+      topics: ['dsh-plugin', 'conversation-export'],
+    }
+    const popularButWrong = {
+      repository: 'acme/dsh-vision-toolkit',
+      name: 'dsh-vision-toolkit',
+      description: 'Long screenshot OCR and UI restoration toolkit.',
+      stars: 680,
+      updatedAt: null,
+      topics: ['screenshot', 'ocr'],
+    }
+
+    expect(_testing.relevantRemoteCandidates(
+      '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+      [popularButWrong, exact],
+    )).toEqual([
+      expect.objectContaining({ repository: 'acme/dsh-conv-export', stars: 2 }),
     ])
   })
 

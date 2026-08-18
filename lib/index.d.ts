@@ -76,7 +76,7 @@ interface ResolutionAuthorization {
   reviewIdentity?: string;
 }
 interface LocalCapabilityCandidate {
-  kind: 'tool' | 'skill';
+  kind: 'tool' | 'skill' | 'plugin';
   name: string;
   description: string;
   availability: CandidateAvailability;

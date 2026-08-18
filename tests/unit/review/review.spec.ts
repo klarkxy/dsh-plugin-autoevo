@@ -11,6 +11,41 @@ const config: RuntimeConfig = {
 const loaderPatch = '- insert:\n    - id: calculator\n      name: calculator\n'
 
 describe('third-party review', () => {
+  it('requires conversation, export, and long-image facets instead of accepting screenshot OCR', () => {
+    const base = {
+      resolutionId: 'resolution_0123456789abcdef',
+      runtimeVersion: '0.1.0-rc.6',
+      requirement: '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+      sourceSnapshot: { kind: 'github' as const, repository: 'acme/plugin', requestedRef: 'main', commit: 'a'.repeat(40), defaultBranch: 'main' },
+    }
+    const manifest = {
+      license: 'MIT',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+      peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+    }
+    const vision = evaluatePluginContent({
+      ...base,
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({ name: 'dsh-vision-toolkit', ...manifest })) },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'README.md', content: Buffer.from('Long screenshot OCR and UI restoration toolkit.') },
+      ],
+    })
+    const exporter = evaluatePluginContent({
+      ...base,
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({ name: 'dsh-conv-export', ...manifest })) },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'README.md', content: Buffer.from('Export the current DSH conversation as a long PNG image.') },
+      ],
+    })
+
+    expect(vision.fit).toBe('partial')
+    expect(vision.missingCapabilities).toEqual(expect.arrayContaining(['聊天记录', '导出']))
+    expect(exporter.fit).toBe('full')
+    expect(exporter.missingCapabilities).toEqual([])
+  })
+
   it('derives security facts without returning source content and marks scientific notation support partial', () => {
     const record = evaluatePluginContent({
       id: 'review_0123456789abcdef',

@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -45,23 +49,36 @@ describe('capability query generation', () => {
     ])
   })
 
-  it('keeps screenshot first for the PNG/JPG conversation-capture wording', () => {
+  it('keeps the conversation subject attached to PNG/JPG screenshot searches', () => {
     // Real requirement from resolution_409cec426df715be5d4d7cfc.
     expect(marketplaceSearchQueries('把当前 DSH 对话记录(用户与助手的多轮消息)截图为图片文件(PNG/JPG),可以保存到本地工作区或下载到浏览器')).toEqual([
+      'conversation long png',
+      'chat to image',
       'screenshot',
+      'conversation export',
       'browser automation',
-      'image',
-      'png jpg',
-      'screen capture',
     ])
   })
 
-  it('drops the CJK fallback once a concept matched', () => {
+  it('uses composite queries instead of a truncated CJK fallback', () => {
     // Real requirement from resolution_19e41a12877ab2e4c9bd35d7, which used
     // to emit the truncated garbage query "我需要一个能把整".
     expect(marketplaceSearchQueries('我需要一个能把整个对话记录做成截图的能力')).toEqual([
+      'conversation long png',
+      'chat to image',
       'screenshot',
-      'screen capture',
+      'conversation export',
+      'chat transcript export',
+    ])
+  })
+
+  it('preserves all facets of a conversation export to long screenshot request', () => {
+    expect(marketplaceSearchQueries('我需要一个能把当前 DSH 聊天记录导出成长截图的插件。')).toEqual([
+      'conversation export',
+      'chat transcript export',
+      'conversation long png',
+      'chat to image',
+      'screenshot',
     ])
   })
 
@@ -105,6 +122,55 @@ describe('capability query generation', () => {
 })
 
 describe('local matching', () => {
+  it('recognizes an active client-only conversation exporter from Loader metadata', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'autoevo-client-plugin-'))
+    try {
+      const entryPath = path.join(root, 'lib', 'index.js')
+      await writeFile(path.join(root, 'package.json'), JSON.stringify({
+        name: '@dsh-external/dsh-conv-export',
+        description: 'Export the current DSH conversation as Markdown, PDF, or a long PNG image.',
+        keywords: ['conversation', 'export', 'long-png'],
+        dsh: { client: './dist' },
+      }))
+      const ctx = {
+        get: () => ({
+          * entries() {
+            yield {
+              disabled: false,
+              fiber: {},
+              options: { id: 'conversation-export', name: pathToFileURL(entryPath).href },
+              ctx: { baseUrl: pathToFileURL(entryPath).href },
+            }
+          },
+        }),
+        tools: { schemas: () => [] },
+        systemPrompt: { assemble: async () => ({ tools: [] }) },
+        skills: { list: async () => [] },
+      } as unknown as Context
+
+      const result = await resolveLocalCapabilities(
+        ctx,
+        '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+        { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+      )
+
+      expect(result.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'plugin', name: '@dsh-external/dsh-conv-export', availability: 'available' }),
+      ]))
+      expect(result.shouldDiscoverRemote).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not treat screenshot OCR as a full conversation export match', () => {
+    expect(_testing.matchConfidence(
+      '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+      'Anionex/dsh-vision-toolkit',
+      'Long screenshot OCR and UI restoration toolkit',
+    )).toBeLessThan(0.3)
+  })
+
   it('ignores laundry-list Codex name-drops and keeps a focused Codex plugin', () => {
     const requirement = '我需要一个能在dsh里调用codex的能力。'
     const nameDrop = [

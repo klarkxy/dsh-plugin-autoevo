@@ -56,7 +56,7 @@ export interface ResolutionAuthorization {
 }
 
 export interface LocalCapabilityCandidate {
-  kind: 'tool' | 'skill'
+  kind: 'tool' | 'skill' | 'plugin'
   name: string
   description: string
   availability: CandidateAvailability

@@ -37,6 +37,14 @@ const PEER_PRODUCTS = [
 
 const CONCEPTS: ReadonlyArray<{ patterns: RegExp[]; queries: string[] }> = [
   {
+    patterns: [/聊天记录/u, /对话记录/u, /整个对话/u, /当前对话/u, /conversation\s+(?:history|record)/iu, /chat\s+(?:history|record|transcript)/iu, /transcript/iu],
+    queries: ['conversation export', 'chat transcript export'],
+  },
+  {
+    patterns: [/导出/u, /转化成/u, /转换成/u, /export/iu, /render/iu, /convert/iu],
+    queries: ['export', 'render'],
+  },
+  {
     patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu],
     queries: ['powershell', 'pwsh', 'shell', 'command'],
   },
@@ -44,7 +52,7 @@ const CONCEPTS: ReadonlyArray<{ patterns: RegExp[]; queries: string[] }> = [
     // Capturing an image of something. Kept separate from the browser
     // concept so DOM/PNG-heavy wording cannot evict "screenshot", and so
     // "截 DSH 自己的 DOM" does not get routed to external-browser drivers.
-    patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu],
+    patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu, /long\s+(?:png|image)/iu],
     queries: ['screenshot', 'screen capture'],
   },
   {
@@ -96,8 +104,10 @@ const ANCHOR_DEFINITIONS: ReadonlyArray<CapabilityAnchorDefinition> = [
   { key: 'grok', patterns: [/\bgrok(?:\s+build)?\b/iu, /\bxai\b/iu], aliases: ['grok build', 'grok', 'xai'], weight: 1.4 },
   { key: 'codex', patterns: [/\bopenai\s+codex\b/iu, /\bcodex(?:\s+cli)?\b/iu], aliases: ['openai codex', 'codex'], weight: 1.4 },
   { key: 'powershell', patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu], aliases: ['powershell', 'pwsh', '命令行', 'shell command'], weight: 0.9 },
+  { key: 'conversation', patterns: [/聊天记录/u, /对话记录/u, /整个对话/u, /当前对话/u, /conversation\s+(?:history|record)/iu, /chat\s+(?:history|record|transcript)/iu, /transcript/iu], aliases: ['聊天记录', '对话记录', '整个对话', '当前对话', 'conversation', 'conversation history', 'chat history', 'chat transcript', 'transcript'], weight: 0.95 },
+  { key: 'export', patterns: [/导出/u, /转化成/u, /转换成/u, /export/iu, /render/iu, /convert/iu], aliases: ['导出', '转化成', '转换成', 'export', 'render', 'convert'], weight: 0.9 },
   { key: 'browser', patterns: [/浏览器/u, /网页/u, /chrome/iu, /browser/iu, /playwright/iu], aliases: ['浏览器', '网页', 'chrome', 'browser', 'playwright', 'browser automation', 'web testing'], weight: 0.65 },
-  { key: 'screenshot', patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu], aliases: ['截图', '截屏', '长图', '长截图', 'screenshot', 'screen capture'], weight: 0.7 },
+  { key: 'screenshot', patterns: [/截图/u, /截屏/u, /截成/u, /长图/u, /screenshot/iu, /screen\s*capture/iu, /long\s+(?:png|image)/iu], aliases: ['截图', '截屏', '长图', '长截图', 'screenshot', 'screen capture', 'long png', 'long image'], weight: 0.7 },
   { key: 'telegram', patterns: [/telegram/iu, /电报/u, /forum topic/iu], aliases: ['telegram', '电报', 'forum topic', 'messaging'], weight: 0.9 },
   { key: 'calculation', patterns: [/计算/u, /算式/u, /calculator/iu, /calculation/iu, /math/iu], aliases: ['计算', '算式', 'calculator', 'calculation', 'math'], weight: 0.85 },
   { key: 'scientific-notation', patterns: [/科学计数法/u, /scientific notation/iu, /exponential notation/iu], aliases: ['科学计数法', 'scientific notation', 'exponential notation'], weight: 0.95 },
@@ -180,6 +190,16 @@ export function marketplaceSearchQueries(requirement: string): string[] {
     .filter((token) => !STOP_WORDS.has(token) && !HOST_GENERIC_TERMS.has(token))
 
   const queries: string[] = []
+  const hasConversation = matchedConcepts.some((concept) => concept.queries[0] === 'conversation export')
+  const hasExport = matchedConcepts.some((concept) => concept.queries[0] === 'export')
+  const hasScreenshot = matchedConcepts.some((concept) => concept.queries[0] === 'screenshot')
+  if (hasConversation && hasExport && hasScreenshot) {
+    queries.push('conversation export', 'chat transcript export', 'conversation long png', 'chat to image', 'screenshot')
+  } else if (hasConversation && hasExport) {
+    queries.push('conversation export', 'chat transcript export')
+  } else if (hasConversation && hasScreenshot) {
+    queries.push('conversation long png', 'chat to image', 'screenshot')
+  }
   for (const concept of matchedConcepts) queries.push(concept.queries[0]!)
 
   if (english.length >= 2) {

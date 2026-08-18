@@ -107,12 +107,19 @@ function relevantRemoteCandidates(
   candidates: readonly RemotePluginCandidate[],
 ): RemotePluginCandidate[] {
   return candidates
-    .filter((candidate) => matchConfidence(
-      requirement,
-      `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
-      `${candidate.description} ${candidate.topics.join(' ')}`,
-    ) >= 0.3)
-    .map((candidate) => annotateRemoteCandidate(requirement, candidate))
+    .map((candidate) => ({
+      candidate,
+      confidence: matchConfidence(
+        requirement,
+        `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
+        `${candidate.description} ${candidate.topics.join(' ')}`,
+      ),
+    }))
+    .filter(({ confidence }) => confidence >= 0.3)
+    .sort((left, right) => right.confidence - left.confidence
+      || right.candidate.stars - left.candidate.stars
+      || left.candidate.repository.localeCompare(right.candidate.repository))
+    .map(({ candidate }) => annotateRemoteCandidate(requirement, candidate))
 }
 
 export function findPluginQuery(requirement: string): string {
@@ -126,7 +133,9 @@ async function discoverWithFindPlugin(options: {
   query: string
   exec: ToolRunContext
 }): Promise<RemotePluginCandidate[]> {
-  const poolLimit = options.config.maxCandidates
+  // Finder results are often star-ranked. Pull a bounded wider pool so exact,
+  // low-star matches can outrank popular plugins with only one matching facet.
+  const poolLimit = Math.min(20, Math.max(10, options.config.maxCandidates * 3))
   const result = await options.ctx.tools.execute({
     callId: `${options.exec.callId}:autoevo-find:${randomUUID()}` as typeof options.exec.callId,
     rootCallId: options.exec.rootCallId,
@@ -184,7 +193,6 @@ export async function discoverRemoteCandidates(options: {
       return { candidates: [], complete: false, queries, reasons }
     }
     const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
-      .sort((left, right) => right.stars - left.stars || left.repository.localeCompare(right.repository))
       .slice(0, options.config.maxCandidates)
     if (candidates.length === 0) {
       reasons.push('find_dsh_plugin returned no valid reusable candidates; GitHub fallback was not used.')

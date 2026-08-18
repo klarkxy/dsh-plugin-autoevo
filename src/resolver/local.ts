@@ -5,6 +5,7 @@ import type { LocalCapabilityCandidate } from '../contracts.js'
 import { TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
 import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
+import { resolveLoadedPluginCapabilities } from './plugins.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
@@ -117,6 +118,8 @@ export async function resolveLocalCapabilities(
       confidence,
     })
   }
+
+  candidates.push(...await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence))
 
   candidates.sort((left, right) => right.confidence - left.confidence || left.name.localeCompare(right.name))
   const useful = candidates.some((candidate) => candidate.confidence >= 0.62)
