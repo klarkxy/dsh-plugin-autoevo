@@ -60,6 +60,7 @@
     "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests",
     "test": "vitest run",
     "test:loader": "node tests/loader-smoke.mjs",
+    "test:packaged": "node tests/packaged-acceptance.mjs",
     "test:e2e:local": "node tests/e2e-runner.mjs resolve-local",
     "test:e2e:adversarial": "node tests/e2e-runner.mjs adversarial-define",
     "test:e2e:marketplace": "node tests/e2e-runner.mjs marketplace-flow",
@@ -68,7 +69,7 @@
     "test:e2e:offline": "pnpm test:e2e:local && pnpm test:e2e:adversarial",
     "test:e2e:live": "pnpm test:e2e:marketplace && pnpm test:e2e:full && pnpm test:e2e:partial",
     "test:e2e": "pnpm test:e2e:offline && pnpm test:e2e:live",
-    "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader",
+    "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader && pnpm test:packaged",
     "check": "pnpm check:fast && pnpm test:e2e:offline",
     "check:release": "pnpm check && pnpm test:e2e:live && pnpm pack:dry-run",
     "pack:dry-run": "pnpm pack --dry-run"

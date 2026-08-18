@@ -202,12 +202,13 @@ export class CreationGuard {
     const state = this.states.get(agent)
     if (!state) {
       if (!kind) return
+      const sessionId = ownerSessionId(agent)
       this.states.set(agent, {
         generation: 0,
         turnSequence: 0,
         consumedTurnIds: new Set(),
         waitingKind: kind,
-        ...(ownerSessionId(agent) ? { sessionId: ownerSessionId(agent) } : {}),
+        ...(sessionId ? { sessionId } : {}),
       })
       return
     }

@@ -27,17 +27,13 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
 
-## 2.1 新插件创建门禁
+## 2.1 父会话边界与托管源创建
 
-AutoEvo 在 DSH 的 `tools/pre-execute` 与 monotonic guard 两层检查带 Agent 身份的 `cordis_define(kind:new)`。
+AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesystem write/edit、shell、Cordis mutation/definition、agent/subagent/workflow 委托，以及直接的 DSH plugin install/remove。真正的能力进化模式仍由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。
 
-1. 真正的能力进化模式：`agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 必须返回 owner 为 `dsh-plugin-autoevo` 且协议版本匹配的标记。preset id 或同名外来 preset 不能冒充。
-2. 模式外：拒绝并提示切换到 **能力进化**；即使内存里残留 `scratch_ready` 也不放行。
-3. 模式内：没有当前 Agent 的 `scratch_ready` 权限时，调用会以明确理由失败；`reuse_local`、`use_review`、`modify_review`、`selection_required`、`confirmation_required`、`stopped` 与 `market_required` 均不能创建。权限只在 `capability_workflow_resume` 记下与用户原话匹配的「新建」后发放，并在调用进入前绑定 callId，避免并发消费；失败或取消后恢复，成功后消费。每次新的 `capability_workflow` 先撤销旧权限，并建立新的 generation；较晚返回的旧解析，以及不属于该 Agent 当前 resolution 的 review，都不能恢复或覆盖权限。搜完或审完后不得用 `ask_user` 直接弹窗；必须先在对话里说明候选或审查结果。
+`create_new` / `modify_this` 只在 Host 拉起、cwd 绑定托管 git 源、sandbox 模式为 `workspace-write` 的子会话中继续。父会话不得 `cordis_define(kind:new)`。子会话再拒绝 AutoEvo 决策工具、Cordis mutation、嵌套委托、直接装卸与 git push/tag/release / gh pr。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
 
-这不是通用代码意图分类器：普通编辑、命令、测试、Git 操作、AutoEvo 自身安装流程、无 Agent 的内部工具调用与 `cordis_define(kind:existing)` 不在门禁范围内。官方 Creator 技能不被全局禁用。权限仅驻留内存；持久 V1/V2 旧记录不会在重启后恢复创建能力。
-
-进化模式里，模型直调 `find_dsh_plugin`（无 nested `parent`）会被拒绝；`selection_required` / `confirmation_required` 期间拒绝 `web_search`；对已有 live resolution 的 `pwsh`/`bash` 若参数匹配 `dsh plugin add` 也会拒绝。AutoEvo 经 nested dispatch 调用市场搜索不受影响。审查与安装仍要求 review 回执、`use_this` 与 `allowed-once`。
+搜完或审完后不得用 `ask_user` 直接弹窗；必须先在对话里说明候选或审查结果，再用 `capability_workflow_resume(workflow_id, interrupt_id)` 消费 Host 已声明的用户回合。审查与安装仍要求 review 回执、匹配的不可变 install specification、`use_this` 与 `allowed-once`。安装结果只有 `pending | verified | failed_absent | recovery_required`。
 
 ## 3. 进程与凭据
 

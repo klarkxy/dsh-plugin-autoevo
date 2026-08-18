@@ -86,6 +86,7 @@ export function apply(ctx: Context, input: Config): void {
     bootId: newBootId(),
   })
   const parentExecutionGuard = new ExecutionGuard({ role: 'parent' })
+  const isEvolutionMode = createIsEvolutionMode(ctx)
   const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard)
 
   void materializeEvolutionPreset({
@@ -105,8 +106,18 @@ export function apply(ctx: Context, input: Config): void {
   ctx.on('agent/inbox/claimed', (payload) => {
     creationGuard.rememberUserMessage(payload.agent, payload.message)
   })
-  ctx.on('tools/pre-execute', (exec, next) => parentExecutionGuard.preExecute(exec, async () => creationGuard.preExecute(exec, next)))
-  ctx.tools.guard((exec) => parentExecutionGuard.guard(exec) ?? creationGuard.guard(exec))
+  ctx.on('tools/pre-execute', (exec, next) => {
+    const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))
+    if (inEvolution) {
+      return parentExecutionGuard.preExecute(exec, async () => creationGuard.preExecute(exec, next))
+    }
+    return creationGuard.preExecute(exec, next)
+  })
+  ctx.tools.guard((exec) => {
+    const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))
+    if (inEvolution) return parentExecutionGuard.guard(exec) ?? creationGuard.guard(exec)
+    return creationGuard.guard(exec)
+  })
   ctx.on('tools/result', (exec, result) => {
     creationGuard.result(exec, result)
     return undefined

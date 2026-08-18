@@ -50,8 +50,8 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 
 ## How it works
 
-- Agent-bound `cordis_define` with `plugin.kind = "new"` is allowed only in genuine Capability Evolution mode, and only after `capability_workflow` returns `scratch_ready`. Outside that mode the call is denied, with an instruction to switch to Capability Evolution.
-- Inside the mode, AutoEvo pauses after discovery so the user can pick candidates, create new, or stop. Only the one selected repository is reviewed. After review it pauses again for use this / improve this / create new / stop. `scratch_ready` means the user allowed one new plugin, not “start building”. Cancel is stop, never scratch. Technical failures may retry; success consumes the grant; a new resolution revokes an older one.
+- The parent session execution guard denies filesystem write/edit, shell, Cordis mutation/definition, agent/subagent/workflow delegation, and direct DSH plugin install/remove. Modify/create continues only in a Host-launched `workspace-write` child bound to a managed git source under `sourceDir` (default `<stateDir>/sources`). On Windows, sandbox enforcement is integrity-oriented partial isolation.
+- Inside the mode, AutoEvo pauses after discovery so the real user can pick candidates, create new, or stop. Resume with only `workflow_id` and `interrupt_id`; the Host resolves the decision from the claimed user turn. After review it pauses again for use this / improve this / create new. A DSH approval is not that decision. Install outcomes are `pending | verified | failed_absent | recovery_required`.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not treat generic development tools as plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
 - When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. If that marketplace is missing, AutoEvo installs `dsh-find-plugin` by script after one-time approval and hot-loads it when the host allows. Restart only if hot-load fails. Do not review the marketplace as the requested capability, and do not search GitHub directly. An installed marketplace with no relevant hit means there is no reusable plugin.
@@ -76,7 +76,7 @@ It should call `capability_workflow` first, explain what each candidate repo is 
 | Tool | Role | Surface |
 |---|---|---|
 | `capability_workflow` | Start the fixed workflow: check local capabilities, prefer `find_dsh_plugin`, and approve a script install if the marketplace is missing. Returns an interrupt with structured options | read-only / approval when installing marketplace |
-| `capability_workflow_resume` | Resume with the user's verbatim reply and `option_id` (inspect / create new / use this / improve this / install / stop) | read-only for review; approval for install |
+| `capability_workflow_resume` | Resume with only `workflow_id` + `interrupt_id`; Host resolves the claimed user turn | read-only for review; approval for install |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |
 
 AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.

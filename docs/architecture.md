@@ -16,7 +16,7 @@ capability_workflow
    └─ INTERRUPT await_selection ──► Agent explains in chat
                          │ user replies
                          ▼
-           capability_workflow_resume (option_id)
+           capability_workflow_resume (workflow_id + interrupt_id)
                          │
           inspect / search_more / use_local / create_new / stop
                          │ inspect
@@ -27,15 +27,14 @@ capability_workflow
            INTERRUPT await_confirmation ──► Agent explains review
                          │ user replies
                          ▼
-           capability_workflow_resume (use_this / modify_this / ...)
+           capability_workflow_resume (Host resolves use_this / modify_this / create_new)
                          │
-                    full/use ─────┴───── modify (partial, incompat, repairable high)
+                    full/use ─────┴───── modify/create (managed git source child)
                        │                       │
                        ▼                       ▼
-                 install_verify          INTERRUPT await_modify_work
-                       │                       │ Agent edits/tests
-                 approval once          resume_modify(path)
-                       │                       │ local re-review, lineage auto
+                 install_verify          workspace-write child + local re-review
+                       │                       │
+                 approval once          normalized tgz + explicit confirmation
                        │                       │
                        └─────────── use_this ──┘
                                   │
@@ -50,13 +49,9 @@ capability_workflow
                            plugin_remove
 ```
 
-动态 Cordis 新建入口还有一条执行门禁。带 Agent 身份的 `cordis_define(kind:new)` 首先要求 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 返回 AutoEvo 的精确模式标记（owner `dsh-plugin-autoevo` + 协议版本）。标记只由 scoped 导出 `dsh-plugin-autoevo/evolution-mode` 在 preset isolate realm 内发布；preset id 本身不是授权依据。
+父会话执行层拒绝 write/edit、shell、Cordis mutation、委托与直接 plugin 装卸。`create_new` / `modify_this` 只在 Host 拉起的托管 git 源子会话中继续（`sourceDir` 默认 `<stateDir>/sources`，sandbox 模式 `workspace-write`）。父会话不得 `cordis_define(kind:new)`。Windows 上为完整性导向的部分隔离。
 
-模式外调用会被拒绝，并引导切换到用户 preset **能力进化**（id `evolution`）。模式内再在 `tools/pre-execute` 预留一次性 `scratch_ready` 权限（仅当用户明确选择新建），并在 monotonic guard 做最终校验；成功的 `tools/result` 消费权限，失败结果恢复权限。空搜索或全部 skip 不会发放创建权限。
-
-权限只保存在当前进程中，以 Agent 身份和当前 resolution generation 隔离；旧状态记录只能读取，不能恢复创建权限，较晚完成的旧解析或旧 review 也不能覆盖当前授权。
-
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution` 安全物化到 `<dshHome>/.agent-presets/evolution`：首次写入 staging 后原子 rename；同版本同 hash 为 no-op；仅在已有目录具备有效 AutoEvo manifest 且文件集与 hash 完全一致时升级；用户修改、外来同名目录、缺文件或多余文件一律保留并诊断。配置为 `false` 时跳过安装与升级，且永不自动删除。
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V5）在排他迁移锁下安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确 V5 为 no-op；已知 pristine v1–v4 升级；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装与升级，且永不自动删除。
 
 ## 3. DSH 接缝
 

@@ -333,6 +333,95 @@ function randomSuffix(): string {
   return randomBytes(8).toString('hex')
 }
 
+function migrationLockPath(presetsRoot: string): string {
+  return assertContained(
+    presetsRoot,
+    path.join(presetsRoot, `.${EVOLUTION_PRESET_ID}.migrate.lock`),
+    'migration lock',
+  )
+}
+
+async function isPidAlive(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code: unknown }).code)
+      : undefined
+    if (code === 'ESRCH') return false
+    return true
+  }
+}
+
+async function acquireMigrationLock(presetsRoot: string): Promise<string> {
+  const lockFile = migrationLockPath(presetsRoot)
+  const payload = `${JSON.stringify({
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  }, null, 2)}\n`
+  try {
+    await writeFile(lockFile, payload, { encoding: 'utf8', flag: 'wx' })
+    return lockFile
+  } catch (error) {
+    if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
+      throw error
+    }
+  }
+  try {
+    const existing = JSON.parse(await readFile(lockFile, 'utf8')) as { pid?: number }
+    if (await isPidAlive(Number(existing.pid))) {
+      throw new Error('AutoEvo evolution preset migration is already running')
+    }
+    await unlink(lockFile)
+  } catch (error) {
+    if (error instanceof Error && /already running/u.test(error.message)) throw error
+    // Fail closed on unreadable/permissioned lock.
+    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  await writeFile(lockFile, payload, { encoding: 'utf8', flag: 'wx' })
+  return lockFile
+}
+
+async function releaseMigrationLock(lockFile: string): Promise<void> {
+  try {
+    await unlink(lockFile)
+  } catch (error) {
+    if (!isNotFound(error)) throw error
+  }
+}
+
+/**
+ * Recover from interrupted staging/backup: drop orphan staging trees; if the
+ * live target is missing but a single backup remains, restore it.
+ */
+async function recoverInterruptedMigration(
+  presetsRoot: string,
+  targetDir: string,
+  renamePath: (from: string, to: string) => Promise<void>,
+  logger?: MaterializeEvolutionPresetOptions['logger'],
+): Promise<void> {
+  const children = await listExactChildren(presetsRoot)
+  const staging = children.filter((name) => name.startsWith(`.${EVOLUTION_PRESET_ID}.staging-`))
+  const backups = children.filter((name) => name.startsWith(`.${EVOLUTION_PRESET_ID}.backup-`))
+  for (const name of staging) {
+    const stagingDir = assertContained(presetsRoot, path.join(presetsRoot, name), 'orphan staging')
+    await cleanupOwnedTree(stagingDir, presetsRoot).catch((error) => {
+      throw new Error(`AutoEvo failed to clean interrupted staging: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    logger?.warn?.(`AutoEvo removed interrupted preset staging ${name}`)
+  }
+  const targetExists = await pathExists(targetDir)
+  if (!targetExists && backups.length === 1 && backups[0]) {
+    const backupDir = assertContained(presetsRoot, path.join(presetsRoot, backups[0]), 'orphan backup')
+    await renamePath(backupDir, targetDir)
+    logger?.warn?.(`AutoEvo restored interrupted preset backup ${backups[0]}`)
+  } else if (!targetExists && backups.length > 1) {
+    throw new Error('AutoEvo found multiple interrupted preset backups; refusing automatic recovery')
+  }
+}
+
 export async function materializeEvolutionPreset(
   options: MaterializeEvolutionPresetOptions,
 ): Promise<EvolutionPresetInstallResult> {
@@ -351,9 +440,25 @@ export async function materializeEvolutionPreset(
     return { status: 'preserved', targetDir: paths.targetDir, reason: physicalPaths.reason }
   }
   const { presetsRoot, targetDir } = physicalPaths.paths
-
-  const templateVersion = options.templateVersion ?? EVOLUTION_PRESET_TEMPLATE_VERSION
   const renamePath = options.rename ?? rename
+
+  const lockFile = await acquireMigrationLock(presetsRoot)
+  try {
+    await recoverInterruptedMigration(presetsRoot, targetDir, renamePath, options.logger)
+    return await materializeEvolutionPresetLocked(options, paths, presetsRoot, targetDir, renamePath)
+  } finally {
+    await releaseMigrationLock(lockFile).catch(() => undefined)
+  }
+}
+
+async function materializeEvolutionPresetLocked(
+  options: MaterializeEvolutionPresetOptions,
+  paths: EvolutionPresetPaths,
+  presetsRoot: string,
+  targetDir: string,
+  renamePath: (from: string, to: string) => Promise<void>,
+): Promise<EvolutionPresetInstallResult> {
+  const templateVersion = options.templateVersion ?? EVOLUTION_PRESET_TEMPLATE_VERSION
   const { files: contentFiles, hashes } = await readTemplateFiles(options.templateDir)
   const desiredManifest = buildManifest(hashes, templateVersion)
 
@@ -484,4 +589,9 @@ export const _testing = {
   cleanupOwnedTree,
   posixJoin,
   listExactChildren,
+  acquireMigrationLock,
+  releaseMigrationLock,
+  recoverInterruptedMigration,
+  migrationLockPath,
+  isPidAlive,
 }

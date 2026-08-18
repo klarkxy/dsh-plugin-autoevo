@@ -7,6 +7,8 @@ import "@deepseek-ai/dsh-subprocess";
 interface Config$1 {
   dshHome?: string;
   stateDir?: string;
+  /** Managed plugin source repositories. Defaults to `<stateDir>/sources`. */
+  sourceDir?: string;
   ghCommand?: string;
   gitCommand?: string;
   dshCommand?: string;
@@ -23,6 +25,8 @@ interface Config$1 {
 interface RuntimeConfig {
   dshHome: string;
   stateDir: string;
+  /** Optional; omitted callers resolve to `<stateDir>/sources` at the SourceManager boundary. */
+  sourceDir?: string;
   ghCommand: string;
   gitCommand: string;
   dshCommand: string;
@@ -40,11 +44,11 @@ declare const Config$1: Schema<Config$1>;
 //#region src/contracts.d.ts
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
-type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'scratch_ready';
+type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
 type CandidateAvailability = 'available' | 'available_via_tool_search';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
 type DecisionPhase = 'gate1' | 'gate2';
-type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more' | 'resume_modify';
+type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more';
 type WorkflowOptionId = DecisionAction;
 interface DecisionReceipt {
   id: string;
@@ -55,6 +59,8 @@ interface DecisionReceipt {
   reviewIdentity?: string;
   userMessage?: string;
   optionId?: WorkflowOptionId;
+  interruptId?: string;
+  hostTurnId?: string;
   createdAt: string;
 }
 interface ResolutionAuthorization {
@@ -85,7 +91,7 @@ interface RemotePluginCandidate {
   matchReason?: string;
 }
 interface ResolutionRecord {
-  /** V1 records remain readable but never restore a scratch-build grant. */
+  /** V1 records remain readable but never restore a create grant. */
   schemaVersion: 1 | 2;
   id: string;
   policyVersion: string;
@@ -175,6 +181,8 @@ interface ReviewRecord {
 }
 type InstallationRetention = 'temporary' | 'persistent';
 type InstallationState = 'installed' | 'not_installed' | 'unknown';
+/** Public install outcome: success only after Loader/runtime verification. */
+type InstallOutcome = 'pending' | 'verified' | 'failed_absent' | 'recovery_required';
 interface VerificationEvidence {
   attempted: boolean;
   task?: string;
@@ -204,6 +212,8 @@ interface InstallationRecord {
   artifactSha256?: string;
   /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
   installState?: InstallationState;
+  /** Fail-closed public outcome. Success is only `verified`. */
+  installOutcome?: InstallOutcome;
   installed: boolean;
   loaded: boolean;
   verified: boolean;
@@ -232,70 +242,15 @@ interface InstallInput {
 interface RemoveInput {
   installationId: string;
 }
+/** Public resume input is intentionally narrow: Host owns the decision facts. */
 interface ResumeInput {
   workflowId: string;
-  userMessage: string;
-  optionId: WorkflowOptionId;
-  repositories?: string[];
-  path?: string;
-  ref?: string;
-  reviewId?: string;
-  targetProfile?: string;
-  retention?: InstallationRetention;
-  verificationTask?: string;
-  verificationExpectedText?: string;
-}
-//#endregion
-//#region src/creation-guard.d.ts
-type Grant = {
-  state: 'available';
-  resolutionId: string;
-} | {
-  state: 'reserved';
-  resolutionId: string;
-  callId: string;
-};
-interface AgentGateState {
-  generation: number;
-  activeResolutionId?: string;
-  authorization?: ResolutionAuthorization;
-  grant?: Grant;
-  lastUserMessage?: string;
-  waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work';
-}
-interface UserFacingMessage {
-  content?: readonly unknown[];
-}
-interface CreationGuardOptions {
-  /** True only when agentPresets.serviceFor(agent, 'autoevoEvolutionMode') yields exact marker. */
-  isEvolutionMode?: (agent: Agent) => boolean;
-}
-/** Runtime-only, fail-closed authorization for one new dynamic Cordis Plugin. */
-declare class CreationGuard {
-  private readonly options;
-  private readonly states;
-  private nextGeneration;
-  constructor(options?: CreationGuardOptions);
-  beginResolution(agent?: Agent): number | undefined;
-  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
-  lastUserMessage(agent: Agent | undefined): string | undefined;
-  setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void;
-  applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
-  applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
-  private setAuthorization;
-  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
-  private inEvolutionMode;
-  protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
-  preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
-  /** Final monotonic check: no earlier waterfall listener can override this denial. */
-  guard(exec: Readonly<ToolExecution>): string | undefined;
-  result(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): void;
-  authorization(agent: Agent): ResolutionAuthorization | undefined;
+  interruptId: string;
 }
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'await_modify_work' | 'review_local' | 'install_verify' | 'grant_scratch' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'scratch_ready';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work';
 interface WorkflowOption {
   id: WorkflowOptionId;
@@ -304,6 +259,11 @@ interface WorkflowOption {
 }
 interface InterruptPayload {
   kind: InterruptKind;
+  interruptId: string;
+  ownerSessionId: string;
+  bootId: string;
+  validAfterTurnId: string;
+  snapshotDigest: string;
   options: WorkflowOption[];
   facts: Record<string, unknown>;
 }
@@ -320,12 +280,16 @@ interface WorkflowRecord {
   createdAt: string;
   updatedAt: string;
   requirement: string;
+  requirementNormalized?: string;
   cwd?: string;
+  ownerSessionId?: string;
+  bootId?: string;
   resolutionId?: string;
   status: WorkflowStatus;
   cursor: WorkflowNodeId;
   generation: number;
   interrupt?: InterruptPayload;
+  consumedInterruptIds?: string[];
   lineageTipReviewId?: string;
   lastReviewId?: string;
   lastInstallationId?: string;
@@ -334,6 +298,7 @@ interface WorkflowRecord {
   pendingRef?: string;
   pendingPath?: string;
   pendingInstall?: WorkflowPendingInstall;
+  managedSourceId?: string;
   lastFailure?: {
     code: string;
     message: string;
@@ -353,6 +318,8 @@ interface WorkflowView {
 interface ValidatedResume {
   optionId: WorkflowOptionId;
   userMessage: string;
+  hostTurnId: string;
+  interruptId: string;
   repositories: string[];
   path?: string;
   ref?: string;
@@ -379,6 +346,16 @@ interface WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  prepareModify?(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    deferred?: boolean;
+  }>;
+  prepareCreate?(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    deferred?: boolean;
+  }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
@@ -390,6 +367,81 @@ interface WorkflowExec {
   agent?: import('@deepseek-ai/dsh-agent').Agent;
   signal?: AbortSignal;
   callId?: string;
+}
+//#endregion
+//#region src/creation-guard.d.ts
+interface AgentGateState {
+  generation: number;
+  activeResolutionId?: string;
+  authorization?: ResolutionAuthorization;
+  lastUserMessage?: string;
+  currentTurnId?: string;
+  turnSequence: number;
+  consumedTurnIds: Set<string>;
+  waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work';
+  sessionId?: string;
+}
+interface UserFacingMessage {
+  content?: readonly unknown[];
+}
+interface ClaimedHostTurn {
+  turnId: string;
+  message: string;
+  sequence: number;
+}
+interface CreationGuardOptions {
+  /** True only when agentPresets.serviceFor(agent, 'autoevoEvolutionMode') yields exact marker. */
+  isEvolutionMode?: (agent: Agent) => boolean;
+  /** Service boot identity; interrupts bound to a prior boot are invalidated. */
+  bootId?: string;
+}
+/** Runtime-only, fail-closed authorization for AutoEvo parent-session decisions. */
+declare class CreationGuard {
+  private readonly options;
+  private readonly states;
+  private nextGeneration;
+  readonly bootId: string;
+  constructor(options?: CreationGuardOptions);
+  beginResolution(agent?: Agent): number | undefined;
+  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
+  lastUserMessage(agent: Agent | undefined): string | undefined;
+  currentTurnId(agent: Agent | undefined): string | undefined;
+  /**
+   * Consume the latest host-owned user turn for an interrupt.
+   * Rejects missing turns, already-consumed (replay) turns, and turns at/before the interrupt watermark.
+   */
+  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn;
+  setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void;
+  applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
+  applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
+  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
+  private inEvolutionMode;
+  protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
+  preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
+  /** Final monotonic check: no earlier waterfall listener can override this denial. */
+  guard(exec: Readonly<ToolExecution>): string | undefined;
+  result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
+  authorization(agent: Agent): ResolutionAuthorization | undefined;
+}
+//#endregion
+//#region src/execution-guard.d.ts
+type ExecutionRole = 'parent' | 'child';
+interface ExecutionGuardOptions {
+  role: ExecutionRole;
+}
+/**
+ * Final execution-layer guard for AutoEvo parent and managed-source child sessions.
+ * Prompts are not enforcement; denials here are observable and rejectable.
+ */
+declare class ExecutionGuard {
+  private readonly options;
+  constructor(options: ExecutionGuardOptions);
+  get role(): ExecutionRole;
+  denyReason(exec: Readonly<ToolExecution>): string | undefined;
+  preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
+  guard(exec: Readonly<ToolExecution>): string | undefined;
+  private parentDenial;
+  private childDenial;
 }
 //#endregion
 //#region src/lifecycle/decide.d.ts
@@ -407,6 +459,7 @@ declare class StateStore {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   getWorkflow(id: string): Promise<WorkflowRecord>;
+  listWorkflows(): Promise<WorkflowRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private get;
 }
@@ -481,7 +534,75 @@ declare class PluginRemover {
   private readonly store;
   private readonly launcher;
   constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher);
+  /**
+   * Uninstalls exactly one installation receipt.
+   * Never deletes a managed source repository under stateDir/sources.
+   */
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
+}
+//#endregion
+//#region src/source-manager.d.ts
+interface SourceReceipt {
+  sourceId: string;
+  repository: string | null;
+  path: string;
+  baseCommit: string;
+  branch: string;
+  headCommit: string;
+  reviewId: string;
+  artifactHash: string | null;
+  activeWorkflowId: string;
+}
+declare class SourceManager {
+  private readonly config;
+  private readonly runner;
+  constructor(config: RuntimeConfig, runner: CommandRunner);
+  /** Resolve managed sources root; omitted config.sourceDir defaults to `<stateDir>/sources`. */
+  get sourceRoot(): string;
+  sourcePath(sourceId: string): string;
+  receiptPath(sourceId: string): string;
+  lockPath(sourceId: string): string;
+  readReceipt(sourceId: string): Promise<SourceReceipt | undefined>;
+  writeReceipt(receipt: SourceReceipt): Promise<void>;
+  private git;
+  acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
+  releaseLock(sourceId: string, workflowId: string): Promise<void>;
+  assertCleanTree(sourceId: string, signal?: AbortSignal): Promise<void>;
+  assertPathContainment(sourceId: string): Promise<string>;
+  /** Trusted minimal DSH bundle scaffold written before any child edit session. */
+  static trustedScaffoldFiles(packageName: string): Record<string, string>;
+  /**
+   * Initialize a managed create-new repository with a trusted scaffold commit
+   * before any child session begins.
+   */
+  initializeCreateSource(input: {
+    resolutionId: string;
+    workflowId: string;
+    packageName?: string;
+    signal?: AbortSignal;
+  }): Promise<SourceReceipt>;
+  /**
+   * Materialize the exact reviewed remote commit into a managed git source and
+   * create branch `autoevo/<workflow-id>`.
+   */
+  materializeReviewedGithub(input: {
+    review: ReviewRecord;
+    workflowId: string;
+    signal?: AbortSignal;
+  }): Promise<SourceReceipt>;
+  createHooklessCommit(input: {
+    sourceId: string;
+    message: string;
+    signal?: AbortSignal;
+  }): Promise<string>;
+  buildNormalizedTgz(input: {
+    sourceId: string;
+    outputDir: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    installSpec: string;
+    artifactHash: string;
+  }>;
 }
 //#endregion
 //#region src/service.d.ts
@@ -493,6 +614,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly creationGuard;
   readonly installer: PluginInstaller;
   readonly remover: PluginRemover;
+  readonly sources: SourceManager;
   private readonly launcher;
   private readonly engine;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard);
@@ -514,6 +636,21 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  private assertChildSandbox;
+  prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: {
+    id: string;
+  }): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    deferred?: boolean;
+  }>;
+  prepareCreate(resolution: ResolutionRecord, exec: WorkflowExec, workflow: {
+    id: string;
+  }): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    deferred?: boolean;
+  }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
@@ -524,6 +661,45 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private revalidate;
   private dshRuntimeVersion;
 }
+//#endregion
+//#region src/sandbox-probe.d.ts
+type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access' | string;
+interface SandboxFilesystemProvider {
+  mode?: SandboxMode;
+  cwd?: string;
+  /**
+   * When true, the Host binds cwd to the managed source path at child launch.
+   * Mode must still be workspace-write; containment is probed against expectedCwd.
+   */
+  bindsManagedCwd?: boolean;
+  /** Optional containment probe used by tests and capable hosts. */
+  assertContained?(candidatePath: string): Promise<boolean> | boolean;
+}
+interface SandboxShellProvider {
+  mode?: SandboxMode;
+  cwd?: string;
+  bindsManagedCwd?: boolean;
+  /** Optional write probe; must reject paths outside cwd. */
+  canWrite?(candidatePath: string): Promise<boolean> | boolean;
+}
+interface SandboxStack {
+  filesystem?: SandboxFilesystemProvider | null;
+  shell?: SandboxShellProvider | null;
+}
+interface SandboxProbeResult {
+  ok: true;
+  mode: 'workspace-write';
+  cwd: string;
+  platform: NodeJS.Platform;
+  isolation: 'integrity-partial';
+  note: string;
+}
+/**
+ * Probe the live DSH filesystem/shell sandbox stack before exposing modify/create.
+ * Fail closed on missing providers, wrong mode/cwd binding, or failed containment.
+ * Windows enforcement is integrity-oriented partial isolation only.
+ */
+declare function probeWorkspaceWriteSandbox(stack: SandboxStack | undefined, expectedCwd: string): Promise<SandboxProbeResult>;
 //#endregion
 //#region src/index.d.ts
 declare const name = "autoevo";
@@ -538,5 +714,5 @@ declare const _testing: {
 };
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { CapabilityEvolutionService, Config, CreationGuard, StateStore, _testing, apply, inject, name, reviewIdentity };
+export { CapabilityEvolutionService, Config, CreationGuard, ExecutionGuard, StateStore, _testing, apply, inject, name, probeWorkspaceWriteSandbox, reviewIdentity };
 //# sourceMappingURL=index.d.ts.map

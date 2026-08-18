@@ -46,12 +46,20 @@ describe('evolution preset template', () => {
     expect(composition).not.toMatch(/skills\/editing-cordis-compositions/u)
   })
 
-  it('persona teaches reuse-before-create without dropping ordinary tools', () => {
+  it('persona teaches reuse-before-create with Host interrupt resume and managed-child boundaries', () => {
     const composition = readFileSync(join(presetRoot, 'agent.cordis.yml'), 'utf8')
     expect(composition).toContain('Capability Evolution')
     expect(composition).toContain('reuse first')
     expect(composition).toContain('capability_workflow')
+    expect(composition).toContain('capability_workflow_resume')
+    expect(composition).toContain('workflow_id')
+    expect(composition).toContain('interrupt_id')
     expect(composition).toContain('autoevo-plugin-creator')
+    expect(composition).toContain('managed git source')
+    expect(composition).toContain('integrity-oriented partial isolation')
+    expect(composition).not.toContain('scratch_ready')
+    expect(composition).not.toContain('capability_resolve')
+    expect(composition).not.toContain('matching option_id')
     expect(composition).toContain('Ordinary coding tools remain available')
   })
 

@@ -53,8 +53,11 @@ function resolveSandboxStack(ctx: Context): SandboxStack | undefined {
   if (direct && (direct.filesystem || direct.shell)) return direct
   const filesystem = ctx.get('filesystem') as SandboxStack['filesystem'] | undefined
   const shell = ctx.get('shell') as SandboxStack['shell'] | undefined
-  if (filesystem || shell) return { filesystem, shell }
-  return undefined
+  if (!filesystem && !shell) return undefined
+  return {
+    ...(filesystem !== undefined ? { filesystem } : {}),
+    ...(shell !== undefined ? { shell } : {}),
+  }
 }
 
 export function addExplicitCandidate(

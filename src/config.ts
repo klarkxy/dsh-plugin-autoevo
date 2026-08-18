@@ -23,7 +23,8 @@ export interface Config {
 export interface RuntimeConfig {
   dshHome: string
   stateDir: string
-  sourceDir: string
+  /** Optional; omitted callers resolve to `<stateDir>/sources` at the SourceManager boundary. */
+  sourceDir?: string
   ghCommand: string
   gitCommand: string
   dshCommand: string

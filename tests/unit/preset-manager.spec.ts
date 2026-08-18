@@ -133,50 +133,63 @@ describe('materializeEvolutionPreset', () => {
     expect(body).toContain('upgraded')
   })
 
-  it('upgrades the shipped manifest through the built-in allowlist', async () => {
+  it('upgrades a pristine prior install to the shipped V5 template', async () => {
     const root = await tempDir('autoevo-preset-known-release')
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
-    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir: packageTemplate })
-
-    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
-      ...baseTemplate,
-      'preset.yml': 'name: next package version\n',
+    const seed = await writeTemplate(root, {
+      'preset.yml': 'name: prior-v4\n',
+      'agent.cordis.yml': '- id: prior\n',
     })
+    await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: seed,
+      templateVersion: '4',
+      trustedPriorManifests: [],
+    })
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const installed = JSON.parse(await readFile(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     const result = await materializeEvolutionPreset({
       dshHome,
       enabled: true,
-      templateDir: nextTemplate,
-      templateVersion: '2',
+      templateDir: packageTemplate,
+      trustedPriorManifests: [installed],
     })
-
     expect(result.status).toBe('upgraded')
+    expect(result.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
   })
 
-  it('upgrades a CRLF checkout of the shipped template through the built-in allowlist', async () => {
+  it('upgrades a CRLF checkout of a pristine prior to shipped V5', async () => {
     const root = await tempDir('autoevo-preset-crlf-checkout')
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
+    const priorFiles = {
+      'preset.yml': 'name: prior\ndescription: crlf\n',
+      'agent.cordis.yml': '- id: prior\n  name: prior\n',
+    }
     const crlfTemplate = path.join(root, 'crlf-template')
     await mkdir(crlfTemplate, { recursive: true })
-    for (const name of ['preset.yml', 'agent.cordis.yml'] as const) {
-      const body = await readFile(path.join(packageTemplate, name), 'utf8')
-      await writeFile(path.join(crlfTemplate, name), body.replace(/\r\n/gu, '\n').replace(/\n/gu, '\r\n'), 'utf8')
+    for (const [name, body] of Object.entries(priorFiles)) {
+      await writeFile(path.join(crlfTemplate, name), body.replace(/\n/gu, '\r\n'), 'utf8')
     }
-    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir: crlfTemplate })
-
-    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
-      ...baseTemplate,
-      'preset.yml': 'name: next package version\n',
+    await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: crlfTemplate,
+      templateVersion: '4',
+      trustedPriorManifests: [],
     })
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    const installed = JSON.parse(await readFile(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     const result = await materializeEvolutionPreset({
       dshHome,
       enabled: true,
-      templateDir: nextTemplate,
-      templateVersion: '2',
+      templateDir: packageTemplate,
+      trustedPriorManifests: [installed],
     })
-
     expect(result.status).toBe('upgraded')
+    expect(result.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
   })
 
   it('preserves user-modified managed files', async () => {
