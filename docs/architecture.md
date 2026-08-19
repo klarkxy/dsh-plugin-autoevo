@@ -54,7 +54,7 @@ capability_workflow
 
 托管子会话创建完成后，父取消信号不再依赖 DSH 的 creation-only signal，而由 AutoEvo 监听并立即调用 owned `AgentHandle.dispose()`。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V9）在排他迁移锁下安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确 V9 为 no-op；已知 pristine v1–v7 升级；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装与升级，且永不自动删除。
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V9）在排他迁移锁下安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确 V9 为 no-op；已知 pristine v1–v8 升级；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装与升级，且永不自动删除。
 
 ## 3. DSH 接缝
 

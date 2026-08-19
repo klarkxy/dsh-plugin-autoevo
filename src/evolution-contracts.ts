@@ -52,9 +52,7 @@ export interface EvolutionPresetManifest {
  * a user can rewrite both content and hashes.  Keep this allowlist in the
  * package so an altered manifest is preserved instead of being upgraded over.
  *
- * Includes historical pristine v1–v7 shapes plus compatibility releases.
- * Current V8 on-disk hashes from this checkout were not added in the Policy V5
- * pass; those installs stay preserved until the hashes are recorded.
+ * Includes historical pristine v1–v8 shapes plus compatibility releases.
  */
 export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
   Object.freeze({
@@ -144,6 +142,15 @@ export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[
     templateVersion: '7',
     files: Object.freeze({
       'agent.cordis.yml': '431053523105e7af9539d9944f486f8d239a8b752d4d748461167fc3795a2441',
+      'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
+    }),
+  }),
+  Object.freeze({
+    owner: EVOLUTION_MODE_OWNER,
+    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+    templateVersion: '8',
+    files: Object.freeze({
+      'agent.cordis.yml': '120467a9e9d9ae8e7f2c3ee2369083139bc73eeb40f64ebb8e9796676c7e2ff1',
       'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
     }),
   }),

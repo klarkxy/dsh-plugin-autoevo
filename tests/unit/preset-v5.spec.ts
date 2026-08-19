@@ -48,10 +48,10 @@ function bodyForDigest(digest: string, label: string): string {
 }
 
 describe('evolution preset V9 migration', () => {
-  it('encodes every known pristine v1–v7 shape including compatibility releases', () => {
+  it('encodes every known pristine v1–v8 shape including compatibility releases', () => {
     expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('9')
     const versions = EVOLUTION_PRESET_KNOWN_MANIFESTS.map((item) => item.templateVersion).sort()
-    expect(versions).toEqual(['1', '1', '2', '3', '4', '5', '5', '6', '7', '7'])
+    expect(versions).toEqual(['1', '1', '2', '3', '4', '5', '5', '6', '7', '7', '8'])
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -121,6 +121,13 @@ describe('evolution preset V9 migration', () => {
           templateVersion: '7',
           files: {
             'agent.cordis.yml': '431053523105e7af9539d9944f486f8d239a8b752d4d748461167fc3795a2441',
+            'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
+          },
+        }),
+        expect.objectContaining({
+          templateVersion: '8',
+          files: {
+            'agent.cordis.yml': '120467a9e9d9ae8e7f2c3ee2369083139bc73eeb40f64ebb8e9796676c7e2ff1',
             'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
           },
         }),
