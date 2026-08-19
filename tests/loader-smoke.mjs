@@ -32,8 +32,21 @@ try {
   await root.loader.await()
 
   const expected = ['capability_workflow', 'capability_workflow_resume', 'plugin_remove']
-  const registered = root.tools.schemas().map((tool) => tool.name).sort()
+  const schemas = root.tools.schemas()
+  const registered = schemas.map((tool) => tool.name).sort()
   assert.deepEqual(registered, expected)
+  const resumeSchema = schemas.find((tool) => tool.name === 'capability_workflow_resume')
+  assert.ok(resumeSchema)
+  assert.equal(resumeSchema.parameters.properties.decision.additionalProperties, false)
+  assert.deepEqual(resumeSchema.parameters.properties.decision.required, ['action'])
+  assert.deepEqual(
+    resumeSchema.parameters.properties.decision.properties.action.enum,
+    ['use_this', 'modify_this', 'create_new', 'stop'],
+  )
+  assert.deepEqual(
+    resumeSchema.parameters.properties.decision.properties.retention.enum,
+    ['temporary', 'persistent'],
+  )
   const assembly = await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) })
   assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), expected)
   const policy = assembly.sections.find((section) => section.name === 'autoevo:reuse-policy')

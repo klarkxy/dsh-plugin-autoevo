@@ -8,11 +8,15 @@ import {
   POLICY_VERSION,
   type DecisionReceipt,
   type InstallationRecord,
+  type NavigationInput,
   type RemotePluginCandidate,
   type RemoveInput,
   type ResolutionAuthorization,
   type ResolutionRecord,
   type ResumeInput,
+  type ReviewerRequest,
+  type ReviewerVerdict,
+  type ReviewMode,
   type ReviewRecord,
 } from './contracts.js'
 import type { CreationGuard } from './creation-guard.js'
@@ -23,7 +27,6 @@ import {
   authorizationFromDecision,
   newDecisionReceipt,
   nextStepForAuthorization,
-  phaseForOption,
   prefersChinese,
   reviewIdentity,
 } from './lifecycle/decide.js'
@@ -34,8 +37,27 @@ import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import { DshManagedChildHost, type ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
-import { reviewGithubPlugin, reviewLocalPlugin } from './review/index.js'
-import { SourceManager, sourceIdForCreate, sourceIdForRepository } from './source-manager.js'
+import {
+  assertDirectUseAllowed,
+  isDirectlyUsableReview,
+  needsSemanticReviewer,
+  reviewCandidateDigest,
+  reviewGithubPlugin,
+  reviewGithubPluginWithFiles,
+  reviewLocalPlugin,
+  reviewSnapshotDigest,
+} from './review/index.js'
+import type { ContentFile } from './review/review.js'
+import {
+  DshSemanticReviewerHost,
+  mintReviewerRequest,
+  requirementHashFor,
+  REVIEWER_VERSION,
+  type BoundedReviewFile,
+  type SemanticReviewerHost,
+} from './semantic-reviewer.js'
+import { DshSemanticVerifierHost, type SemanticVerifierHost } from './semantic-verifier.js'
+import { SourceManager, sourceIdForCreate, sourceIdForRepository, type SourceReceipt } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import { WorkflowEngine } from './workflow/engine.js'
@@ -125,6 +147,14 @@ function assertRequirement(requirement: string): string {
   return value
 }
 
+function shouldReviewAdaptiveThird(
+  mode: ReviewMode,
+  reviews: ReviewRecord[],
+  workflow?: WorkflowRecord,
+): boolean {
+  return mode === 'fixed' || !reviews.some((item) => isDirectlyUsableReview(item, workflow))
+}
+
 function waitingAuthorization(
   resolutionId: string,
   decision: ResolutionRecord['decision'],
@@ -190,7 +220,7 @@ function authorizationForResolution(
   }
 
   const decision = latestDecision(resolution)
-  if (decision && decision.action !== 'inspect' && decision.action !== 'search_more') {
+  if (decision?.phase === 'gate2') {
     const review = decision.reviewId
       ? reviews.find((item) => item.id === decision.reviewId)
       : undefined
@@ -240,6 +270,139 @@ function asToolExec(exec: WorkflowExec): ToolRunContext {
   return exec as ToolRunContext
 }
 
+export { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
+
+export function boundedReviewerFiles(files: readonly ContentFile[], inspected: ReviewRecord['inspectedFiles']): BoundedReviewFile[] {
+  return inspected.map((item) => {
+    const file = files.find((entry) => entry.path === item.path)
+    return {
+      path: item.path,
+      sha256: item.sha256,
+      bytes: item.bytes,
+      text: file ? Buffer.from(file.content).toString('utf8') : '',
+    }
+  })
+}
+
+function isReviewerIntegrityError(error: unknown): boolean {
+  return error instanceof EvolutionError && (error.code === 'invalid_input' || error.code === 'review_rejected')
+}
+
+function hostMintedUncertain(
+  review: ReviewRecord,
+  workflowId: string,
+  snapshotDigest: string,
+  candidateDigest: string,
+  evidence: string,
+): { request: ReviewerRequest; verdict: ReviewerVerdict } {
+  const request = mintReviewerRequest({
+    workflowId,
+    review,
+    snapshotDigest,
+    candidateDigest,
+  })
+  const completedAt = new Date().toISOString()
+  return {
+    request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
+    verdict: {
+      requestId: request.id,
+      reviewId: review.id,
+      requirementHash: requirementHashFor(review.requirement),
+      snapshotDigest,
+      candidateDigest,
+      reviewerSessionId: 'host',
+      reviewerVersion: REVIEWER_VERSION,
+      decision: 'uncertain',
+      evidence: [evidence.slice(0, 300)],
+      conditions: [],
+      semanticCoverage: 'none',
+      createdAt: completedAt,
+    },
+  }
+}
+
+export function assertSemanticReviewerBinding(
+  review: ReviewRecord,
+  result: { request: ReviewerRequest; verdict: ReviewerVerdict },
+  expected: { snapshotDigest: string; candidateDigest: string },
+): void {
+  if (result.request.reviewId !== review.id || result.verdict.reviewId !== review.id) {
+    throw new EvolutionError('invalid_input', 'Semantic reviewer result is not bound to this review', {
+      reviewId: review.id,
+    })
+  }
+  if (result.request.id !== result.verdict.requestId) {
+    throw new EvolutionError('invalid_input', 'Semantic reviewer verdict is not bound to its request')
+  }
+  if (result.request.snapshotDigest !== expected.snapshotDigest
+    || result.verdict.snapshotDigest !== expected.snapshotDigest
+    || result.request.candidateDigest !== expected.candidateDigest
+    || result.verdict.candidateDigest !== expected.candidateDigest) {
+    throw new EvolutionError('invalid_input', 'Semantic reviewer result digest mismatch', {
+      expectedSnapshot: expected.snapshotDigest,
+      expectedCandidate: expected.candidateDigest,
+    })
+  }
+  if (result.verdict.requirementHash !== requirementHashFor(review.requirement)) {
+    throw new EvolutionError('invalid_input', 'Semantic reviewer requirement hash mismatch')
+  }
+}
+
+export async function attachSemanticReview(input: {
+  host: SemanticReviewerHost
+  review: ReviewRecord
+  files: readonly ContentFile[]
+  exec: WorkflowExec
+  workflow?: WorkflowRecord
+  timeoutMs: number
+}): Promise<ReviewRecord> {
+  if (!needsSemanticReviewer(input.review)) return input.review
+  if (!input.exec.agent) {
+    throw new EvolutionError('invalid_input', 'A live top-level Agent is required to attach a semantic reviewer')
+  }
+  if ((input.exec.agent.session?.header?.delegationDepth ?? 0) !== 0) {
+    throw new EvolutionError('invalid_input', 'Semantic review requires a top-level parent Agent')
+  }
+  const snapshotDigest = reviewSnapshotDigest(input.review)
+  const candidateDigest = reviewCandidateDigest(input.review, input.workflow)
+  const workflowId = input.workflow?.id
+    ?? `workflow_${hashObject({ resolutionId: input.review.resolutionId, reviewId: input.review.id }).slice(0, 24)}`
+  try {
+    const result = await input.host.run({
+      parent: input.exec.agent,
+      workflowId,
+      review: input.review,
+      candidateDigest,
+      snapshotDigest,
+      files: boundedReviewerFiles(input.files, input.review.inspectedFiles),
+      timeoutMs: input.timeoutMs,
+      ...(input.exec.signal ? { signal: input.exec.signal } : {}),
+    })
+    assertSemanticReviewerBinding(input.review, result, { snapshotDigest, candidateDigest })
+    return {
+      ...input.review,
+      reviewerRequestId: result.request.id,
+      reviewerRequest: result.request,
+      reviewerVerdict: result.verdict,
+    }
+  } catch (error) {
+    if (isReviewerIntegrityError(error)) throw error
+    const minted = hostMintedUncertain(
+      input.review,
+      workflowId,
+      snapshotDigest,
+      candidateDigest,
+      error instanceof Error ? error.message : String(error),
+    )
+    return {
+      ...input.review,
+      reviewerRequestId: minted.request.id,
+      reviewerRequest: minted.request,
+      reviewerVerdict: minted.verdict,
+    }
+  }
+}
+
 export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
@@ -247,6 +410,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
   private readonly launcher: DshLauncher
   private readonly engine: WorkflowEngine
   private readonly managedChild: ManagedChildHost
+  private readonly semanticReviewer: SemanticReviewerHost
+  private readonly semanticVerifier: SemanticVerifierHost
 
   constructor(
     private readonly ctx: Context,
@@ -255,20 +420,26 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
     managedChild?: ManagedChildHost,
+    semanticReviewer?: SemanticReviewerHost,
+    semanticVerifier?: SemanticVerifierHost,
   ) {
     this.launcher = new DshLauncher(runner, config)
     this.sources = new SourceManager(config, runner)
     this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
+    this.semanticReviewer = semanticReviewer ?? new DshSemanticReviewerHost(ctx)
+    this.semanticVerifier = semanticVerifier ?? new DshSemanticVerifierHost(ctx)
     this.installer = new PluginInstaller(
       ctx,
       config,
       store,
       this.launcher,
       (review, signal) => this.revalidate(review, signal),
-      async (review, exec) => {
+      async (review, exec, binding) => {
         const resolution = await this.store.getResolution(review.resolutionId)
-        this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution)
+        this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution, binding)
       },
+      undefined,
+      this.semanticVerifier,
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
     this.engine = new WorkflowEngine(store, creationGuard, this)
@@ -335,7 +506,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const next = withNextStep({
       ...withoutSource,
       decision,
-      remoteCandidates: discovery.candidates,
+      remoteCandidates: discovery.candidates.slice(0, 3),
       ...(discovery.source ? { remoteCandidateSource: discovery.source } : {}),
       remoteDiscoveryComplete: discovery.complete,
       authorization,
@@ -372,19 +543,20 @@ export class CapabilityEvolutionService implements WorkflowHost {
       return { resolution: next, market: { status: 'loaded', reason: setup.reason } }
     }
     if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
-      const authorization = waitingAuthorization(resolution.id, 'none', true)
-      const { remoteCandidateSource: _ignoredSource, ...withoutSource } = resolution
-      void _ignoredSource
+      const authorization: ResolutionAuthorization = {
+        state: 'market_required',
+        resolutionId: resolution.id,
+        reason: setup.reason,
+      }
       const next = withNextStep({
-        ...withoutSource,
-        decision: 'none',
+        ...resolution,
         remoteCandidates: [],
-        remoteDiscoveryComplete: true,
+        remoteDiscoveryComplete: false,
         authorization,
         reasons,
       })
       await this.store.put('resolutions', next)
-      return { resolution: next, market: { status: 'empty', reason: setup.reason } }
+      return { resolution: next, market: { status: 'blocked', reason: setup.reason } }
     }
     const authorization: ResolutionAuthorization = {
       state: 'market_required',
@@ -407,6 +579,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     repository: string,
     ref: string | undefined,
     exec: WorkflowExec,
+    workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
     const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
     if (!selected.includes(repository.toLowerCase())) {
@@ -423,7 +596,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       })
     }
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
-    const review = await reviewGithubPlugin({
+    const evidence = await reviewGithubPluginWithFiles({
       runner: this.runner,
       config: this.config,
       cwd: resolution.cwd,
@@ -434,10 +607,80 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    await this.store.put('reviews', review)
-    const waiting = withNextStep(this.waitingConfirmation(resolution, review))
+    const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+    const waiting = withNextStep(this.waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
+  }
+
+  async reviewGithubBatch(
+    resolution: ResolutionRecord,
+    repositories: string[],
+    mode: ReviewMode,
+    exec: WorkflowExec,
+    workflow?: WorkflowRecord,
+  ): Promise<{
+    resolution: ResolutionRecord
+    reviews: ReviewRecord[]
+    failures: Array<{ repository: string; code: string; message: string }>
+  }> {
+    const selected = new Set((resolution.selectedRepositories ?? []).map((item) => item.toLowerCase()))
+    const ordered = [...new Set(repositories)].slice(0, 3)
+    for (const repository of ordered) {
+      if (!selected.has(repository.toLowerCase())) {
+        throw new EvolutionError('invalid_input', 'This repository was not selected for read-only review', { repository })
+      }
+    }
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const reviews: ReviewRecord[] = []
+    const failures: Array<{ repository: string; code: string; message: string }> = []
+    const reviewOne = async (repository: string): Promise<ReviewRecord> => {
+      const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
+      if (!candidate) throw new EvolutionError('invalid_input', 'Repository is outside the discovery snapshot', { repository })
+      const evidence = await reviewGithubPluginWithFiles({
+        runner: this.runner,
+        config: this.config,
+        cwd: resolution.cwd,
+        repository: candidate.repository,
+        ref: candidate.defaultBranch ?? 'HEAD',
+        resolutionId: resolution.id,
+        requirement: resolution.requirement,
+        ...(runtimeVersion ? { runtimeVersion } : {}),
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      return await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+    }
+    const runBatch = async (batch: string[]): Promise<void> => {
+      const settled = await Promise.allSettled(batch.map(reviewOne))
+      for (let index = 0; index < settled.length; index += 1) {
+        const result = settled[index]!
+        const repository = batch[index]!
+        if (result.status === 'fulfilled') {
+          reviews.push(result.value)
+        } else {
+          failures.push({
+            repository,
+            code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
+            message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 500),
+          })
+        }
+      }
+    }
+    await runBatch(ordered.slice(0, 2))
+    if (ordered[2] && shouldReviewAdaptiveThird(mode, reviews, workflow)) await runBatch([ordered[2]])
+
+    const rank = (review: ReviewRecord): number => {
+      if (isDirectlyUsableReview(review, workflow)) return 0
+      if (review.recommendation === 'modify' || review.fit !== 'none') return 1
+      return 2
+    }
+    reviews.sort((left, right) => rank(left) - rank(right))
+    const primary = reviews[0]
+    const waiting = primary
+      ? withNextStep(this.waitingConfirmation({ ...resolution, selectedRepositories: ordered }, primary, workflow))
+      : resolution
+    await this.store.put('resolutions', waiting)
+    return { resolution: waiting, reviews, failures }
   }
 
   async reviewLocal(
@@ -445,6 +688,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     path: string,
     baseReviewId: string,
     exec: WorkflowExec,
+    workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
     const prior = await this.store.listReviews(resolution.id)
     const current = authorizationForResolution(resolution, prior)
@@ -477,9 +721,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
       || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
       throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
     }
-    const review = local.record
-    await this.store.put('reviews', review)
-    const waiting = withNextStep(this.waitingConfirmation(resolution, review))
+    const review = await this.persistReviewed(local.record, local.files, exec, workflow)
+    const waiting = withNextStep(this.waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
   }
@@ -488,7 +731,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
     review: ReviewRecord,
     input: WorkflowPendingInstall,
     exec: WorkflowExec,
+    workflow?: WorkflowRecord,
   ): Promise<InstallationRecord> {
+    assertDirectUseAllowed(review, workflow)
     const provenance = review.sourceSnapshot.kind === 'local'
       ? await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
       : undefined
@@ -503,7 +748,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
       ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
       ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
-    }, asToolExec(exec))
+    }, asToolExec(exec), {
+      ...(workflow ? { workflow } : {}),
+      ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
+      ...(workflow?.selectionReceipt ? { receipt: workflow.selectionReceipt } : {}),
+      ...(input.retention ? { retention: input.retention } : {}),
+    })
     return record
   }
 
@@ -512,6 +762,95 @@ export class CapabilityEvolutionService implements WorkflowHost {
       throw new EvolutionError('invalid_input', 'A live parent Agent session is required for managed modify/create')
     }
     return exec.agent
+  }
+
+  private async runManagedChild(input: {
+    sourceId: string
+    workflowId: string
+    reviewId: string
+    cwd: string
+    task: string
+    exec: WorkflowExec
+  }): Promise<void> {
+    try {
+      await this.managedChild.run({
+        parent: this.requireParentAgent(input.exec),
+        cwd: input.cwd,
+        task: input.task,
+        ...(input.exec.signal ? { signal: input.exec.signal } : {}),
+      })
+    } catch (error) {
+      try {
+        // Cleanup must still checkpoint bounded edits when the child inherited an
+        // already-aborted user signal; otherwise cancellation itself can strand
+        // a dirty tree behind an unreleasable live lock.
+        const preserveSignal = input.exec.signal?.aborted ? undefined : input.exec.signal
+        await this.sources.preserveInterruptedChild({
+          sourceId: input.sourceId,
+          workflowId: input.workflowId,
+          reviewId: input.reviewId,
+          ...(preserveSignal ? { signal: preserveSignal } : {}),
+        })
+      } catch (preserveError) {
+        throw new EvolutionError(
+          'command_failed',
+          'Managed child failed and its bounded edits could not be checkpointed; explicit source recovery is required',
+          {
+            recoveryRequired: true,
+            childDiagnostic: hashObject({ cause: error instanceof Error ? error.message : String(error) }),
+            preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
+          },
+        )
+      }
+      if (input.exec.signal?.aborted) throw error
+      throw new EvolutionError(
+        'command_failed',
+        'Managed child failed; its bounded edits were checkpointed and this workflow can be retried',
+        { childDiagnostic: hashObject({ cause: error instanceof Error ? error.message : String(error) }) },
+      )
+    }
+  }
+
+  private async preserveCancelledManagedWork(input: {
+    sourceId: string
+    workflowId: string
+    reviewId: string
+    cause: unknown
+  }): Promise<never> {
+    let checkpoint: SourceReceipt
+    try {
+      // Cancellation belongs to the user turn, not to Host cleanup.  Checkpoint
+      // with the runner's own bounded timeout so an already-aborted signal
+      // cannot strand a dirty tree behind a live workflow lock.
+      checkpoint = await this.sources.preserveInterruptedChild({
+        sourceId: input.sourceId,
+        workflowId: input.workflowId,
+        reviewId: input.reviewId,
+      })
+    } catch (preserveError) {
+      throw new EvolutionError(
+        'command_failed',
+        'Managed child was cancelled and its edits require explicit source recovery',
+        {
+          recoveryRequired: true,
+          cancelled: true,
+          sourceId: input.sourceId,
+          childDiagnostic: hashObject({ cause: input.cause instanceof Error ? input.cause.message : String(input.cause) }),
+          preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
+        },
+      )
+    }
+    throw new EvolutionError(
+      'command_failed',
+      'Managed child was cancelled; its bounded edits were checkpointed for recovery',
+      {
+        recoveryRequired: true,
+        cancelled: true,
+        sourceId: input.sourceId,
+        branch: checkpoint.branch,
+        headCommit: checkpoint.headCommit,
+      },
+    )
   }
 
   private async reviewAndFreezeManagedSource(input: {
@@ -556,39 +895,63 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }> {
-    if (review.sourceSnapshot.kind !== 'github') {
-      throw new EvolutionError('invalid_input', 'modify_this currently materializes only from a GitHub review commit')
+    let sourceKey = workflow.managedSourceId
+    if (!sourceKey && review.sourceSnapshot.kind === 'local') {
+      const managed = await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
+      if (!managed || managed.reviewId !== review.id) {
+        throw new EvolutionError('invalid_input', 'Local review is not the current tip of a managed source')
+      }
+      sourceKey = managed.sourceId
     }
-    const sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
-    const receipt = await this.sources.materializeReviewedGithub({
-      review,
-      workflowId: workflow.id,
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
+    let receipt: SourceReceipt
+    if (sourceKey) {
+      receipt = await this.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
+    } else if (review.sourceSnapshot.kind === 'github') {
+      sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
+      receipt = await this.sources.materializeReviewedGithub({
+        review,
+        workflowId: workflow.id,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+    } else {
+      throw new EvolutionError('invalid_input', 'Local modification requires a managed source receipt')
+    }
     workflow.managedSourceId = sourceKey
-    await this.managedChild.run({
-      parent: this.requireParentAgent(exec),
-      cwd: receipt.path,
-      task: modificationTask(resolution, review),
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    await this.sources.finalizeChildCommit({
-      sourceId: sourceKey,
-      workflowId: workflow.id,
-      reviewId: review.id,
-      message: `fix: satisfy AutoEvo workflow ${workflow.id}`,
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    const finalized = await this.reviewAndFreezeManagedSource({
-      resolution,
-      sourceId: sourceKey,
-      path: receipt.path,
-      baseReviewId: review.id,
-      lineageRootCommit: review.sourceSnapshot.commit,
-      workflowId: workflow.id,
-      exec,
-    })
-    return { ...finalized, path: receipt.path }
+    try {
+      await this.runManagedChild({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: review.id,
+        cwd: receipt.path,
+        task: modificationTask(resolution, review),
+        exec,
+      })
+      await this.sources.finalizeChildCommit({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: review.id,
+        message: `fix: satisfy AutoEvo workflow ${workflow.id}`,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      const finalized = await this.reviewAndFreezeManagedSource({
+        resolution,
+        sourceId: sourceKey,
+        path: receipt.path,
+        baseReviewId: review.id,
+        lineageRootCommit: receipt.baseCommit,
+        workflowId: workflow.id,
+        exec,
+      })
+      return { ...finalized, path: receipt.path }
+    } catch (error) {
+      if (!exec.signal?.aborted) throw error
+      return await this.preserveCancelledManagedWork({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: review.id,
+        cause: error,
+      })
+    }
   }
 
   async prepareCreate(
@@ -603,49 +966,66 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     workflow.managedSourceId = sourceKey
-    const scaffoldBaseId = `review_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 64)}`
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
-    const scaffold = await reviewLocalPlugin({
-      runner: this.runner,
-      config: this.config,
-      workspaceRoot: this.sources.sourceRoot,
-      path: receipt.path,
-      baseReviewId: scaffoldBaseId,
-      lineageRootCommit: receipt.baseCommit,
-      resolutionId: resolution.id,
-      requirement: resolution.requirement,
-      ...(runtimeVersion ? { runtimeVersion } : {}),
-    })
-    await this.store.put('reviews', scaffold.record)
-    await this.managedChild.run({
-      parent: this.requireParentAgent(exec),
-      cwd: receipt.path,
-      task: `Implement a new DSH plugin for this requirement: ${resolution.requirement}\nBuild on the trusted scaffold, include a complete bundle patch and implementation, and add focused tests or self-checks where practical.`,
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    await this.sources.finalizeChildCommit({
-      sourceId: sourceKey,
-      workflowId: workflow.id,
-      reviewId: scaffold.record.id,
-      message: `feat: implement AutoEvo workflow ${workflow.id}`,
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    const finalized = await this.reviewAndFreezeManagedSource({
-      resolution,
-      sourceId: sourceKey,
-      path: receipt.path,
-      baseReviewId: scaffold.record.id,
-      lineageRootCommit: receipt.baseCommit,
-      workflowId: workflow.id,
-      exec,
-    })
-    return { ...finalized, path: receipt.path }
+    let reviewId = `scaffold_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 24)}`
+    try {
+      const scaffoldBaseId = `review_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 64)}`
+      const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+      const scaffold = await reviewLocalPlugin({
+        runner: this.runner,
+        config: this.config,
+        workspaceRoot: this.sources.sourceRoot,
+        path: receipt.path,
+        baseReviewId: scaffoldBaseId,
+        lineageRootCommit: receipt.baseCommit,
+        resolutionId: resolution.id,
+        requirement: resolution.requirement,
+        ...(runtimeVersion ? { runtimeVersion } : {}),
+      })
+      reviewId = scaffold.record.id
+      await this.store.put('reviews', scaffold.record)
+      workflow.lastReviewId = scaffold.record.id
+      workflow.lineageTipReviewId = scaffold.record.id
+      await this.runManagedChild({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: scaffold.record.id,
+        cwd: receipt.path,
+        task: `Implement a new DSH plugin for this requirement: ${resolution.requirement}\nBuild on the trusted scaffold, include a complete bundle patch and implementation, and add focused tests or self-checks where practical.`,
+        exec,
+      })
+      await this.sources.finalizeChildCommit({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: scaffold.record.id,
+        message: `feat: implement AutoEvo workflow ${workflow.id}`,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      const finalized = await this.reviewAndFreezeManagedSource({
+        resolution,
+        sourceId: sourceKey,
+        path: receipt.path,
+        baseReviewId: scaffold.record.id,
+        lineageRootCommit: receipt.baseCommit,
+        workflowId: workflow.id,
+        exec,
+      })
+      return { ...finalized, path: receipt.path }
+    } catch (error) {
+      if (!exec.signal?.aborted) throw error
+      return await this.preserveCancelledManagedWork({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId,
+        cause: error,
+      })
+    }
   }
 
   async applyDecision(
     resolution: ResolutionRecord,
     resume: ValidatedResume,
     review?: ReviewRecord,
+    workflow?: WorkflowRecord,
   ): Promise<ResolutionRecord> {
     if (resolution.authorization?.state === 'market_required') {
       throw new EvolutionError(
@@ -653,22 +1033,31 @@ export class CapabilityEvolutionService implements WorkflowHost {
         'Finish marketplace setup and call capability_workflow again before recording a decision',
       )
     }
-    let nextRecord = resolution
-    const selected = resume.optionId === 'inspect'
-      ? [...resume.repositories]
-      : resume.repositories.length > 0
-        ? [...resume.repositories]
-        : [...(resolution.selectedRepositories ?? [])]
-    for (const repository of selected) {
-      if (!nextRecord.remoteCandidates.some((item) => item.repository.toLowerCase() === repository.toLowerCase())) {
-        nextRecord = addExplicitCandidate(nextRecord, repository).resolution
-      }
+    if (resume.optionId === 'use_this' && (!review || !isDirectlyUsableReview(review, workflow))) {
+      throw new EvolutionError('review_rejected', 'The selected review is not directly installable', {
+        reviewId: review?.id,
+      })
     }
-    const receipt = newDecisionReceipt(phaseForOption(resume.optionId), resume.optionId, selected, {
+    if (resume.optionId === 'modify_this' && (!review || review.fit === 'none' || review.license === null)) {
+      throw new EvolutionError('review_rejected', 'The selected review is not eligible for managed modification', {
+        reviewId: review?.id,
+      })
+    }
+    const nextRecord = resolution
+    const selected = resume.repositories.length > 0
+      ? [...resume.repositories]
+      : [...(resolution.selectedRepositories ?? [])]
+    const receipt = newDecisionReceipt('gate2', resume.optionId, selected, {
       userMessage: resume.userMessage,
       optionId: resume.optionId,
       interruptId: resume.interruptId,
       hostTurnId: resume.hostTurnId,
+      snapshotDigest: resume.snapshotDigest,
+      ...(resume.candidateId ? { candidateId: resume.candidateId } : {}),
+      ...(resume.install ? {
+        retention: resume.install.retention,
+        targetProfile: resume.install.targetProfile,
+      } : {}),
       ...(review ? { reviewId: review.id, reviewIdentity: reviewIdentity(review) } : {}),
     })
     const authorization = authorizationFromDecision(nextRecord.id, resume.optionId, selected, review)
@@ -678,11 +1067,50 @@ export class CapabilityEvolutionService implements WorkflowHost {
       selectedRepositories: selected,
       decisions: [...(nextRecord.decisions ?? []), receipt],
       reasons: [...nextRecord.reasons, authorization.reason],
-      decision: resume.optionId === 'inspect' && selected.length > 0
-        ? 'inspect_remote'
-        : resume.optionId === 'use_local'
-          ? 'use_local'
-          : nextRecord.decision,
+      decision: nextRecord.decision,
+    })
+    await this.store.put('resolutions', next)
+    return next
+  }
+
+  async applyNavigation(
+    resolution: ResolutionRecord,
+    navigation: NavigationInput,
+    repositories: string[],
+  ): Promise<ResolutionRecord> {
+    let authorization: ResolutionAuthorization
+    if (navigation.kind === 'reuse_local') {
+      authorization = {
+        state: 'reuse_local',
+        resolutionId: resolution.id,
+        reason: 'The user selected a full local capability; no plugin mutation was authorized.',
+      }
+    } else if (navigation.kind === 'stop') {
+      authorization = {
+        state: 'stopped',
+        resolutionId: resolution.id,
+        reason: 'The user stopped read-only capability exploration.',
+      }
+    } else {
+      authorization = {
+        state: 'selection_required',
+        resolutionId: resolution.id,
+        reason: navigation.kind === 'review_candidates'
+          ? 'The Agent mapped the user request to snapshot-bound candidates for read-only review.'
+          : 'The user asked for more read-only discovery.',
+        ...(repositories.length > 0 ? { selectedRepositories: repositories } : {}),
+      }
+    }
+    const next = withNextStep({
+      ...resolution,
+      authorization,
+      ...(repositories.length > 0 ? { selectedRepositories: repositories } : {}),
+      reasons: [...resolution.reasons, authorization.reason],
+      decision: navigation.kind === 'reuse_local'
+        ? 'use_local'
+        : repositories.length > 0
+          ? 'inspect_remote'
+          : resolution.decision,
     })
     await this.store.put('resolutions', next)
     return next
@@ -716,19 +1144,48 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return profilesWithAutoEvo(this.launcher, this.config.dshHome)
   }
 
-  async releaseManagedSource(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void> {
-    if (!workflow.managedSourceId) return
-    await this.sources.completeWorkflow(workflow.managedSourceId, workflow.id, exec.signal)
+  private async persistReviewed(
+    record: ReviewRecord,
+    files: readonly ContentFile[],
+    exec: WorkflowExec,
+    workflow?: WorkflowRecord,
+  ): Promise<ReviewRecord> {
+    const review = await attachSemanticReview({
+      host: this.semanticReviewer,
+      review: record,
+      files,
+      exec,
+      timeoutMs: this.config.commandTimeoutMs,
+      ...(workflow ? { workflow } : {}),
+    })
+    await this.store.put('reviews', review)
+    return review
   }
 
-  private waitingConfirmation(resolution: ResolutionRecord, review: ReviewRecord): ResolutionRecord {
+  async releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void> {
+    if (!workflow.managedSourceId) return
+    // Lock release is Host cleanup. It must outlive an aborted user turn and is
+    // already bounded by the command runner's timeout.
+    await this.sources.completeWorkflow(workflow.managedSourceId, workflow.id)
+  }
+
+  private waitingConfirmation(
+    resolution: ResolutionRecord,
+    review: ReviewRecord,
+    workflow?: WorkflowRecord,
+  ): ResolutionRecord {
     const chinese = prefersChinese(resolution.requirement)
+    const usable = isDirectlyUsableReview(review, workflow)
     const authorization: ResolutionAuthorization = {
       state: 'confirmation_required',
       resolutionId: resolution.id,
       reason: chinese
-        ? '审查已完成。先在对话里讲清结果，再等用户选择用这个、在这个上改、新建或先停。'
-        : 'Review finished. Explain it in chat, then wait for the user to choose use this, improve it, create new, or stop.',
+        ? usable
+          ? '审查已完成。简要比较候选并等待用户明确选择安装、修改、新建或先停。'
+          : '审查已完成，但当前候选不能直接安装。简要说明阻断项，并等待用户选择修改、继续比较、新建或先停。'
+        : usable
+          ? 'Review finished. Compare the candidates briefly, then wait for an explicit install, modify, create, or stop decision.'
+          : 'Review finished, but the current candidate is not directly installable. Explain the blockers briefly, then wait for modify, compare, create, or stop.',
       selectedRepositories: resolution.selectedRepositories ?? [],
       reviewId: review.id,
       reviewIdentity: reviewIdentity(review),
@@ -741,6 +1198,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
   }
 
   private async revalidate(review: ReviewRecord, signal?: AbortSignal): Promise<boolean> {
+    let lastError: unknown
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const resolution = await this.store.getResolution(review.resolutionId)
@@ -779,11 +1237,19 @@ export class CapabilityEvolutionService implements WorkflowHost {
           })).record
         }
         return hashObject(materialReviewFacts(current)) === hashObject(materialReviewFacts(review))
-      } catch {
-        if (attempt === 1) return false
+      } catch (error) {
+        if (signal?.aborted) throw error
+        lastError = error
       }
     }
-    return false
+    throw new EvolutionError(
+      'command_failed',
+      'Review revalidation could not complete after retry; the previous review was not marked expired',
+      {
+        causeCode: lastError instanceof EvolutionError ? lastError.code : 'command_failed',
+        diagnosticHash: hashObject({ cause: lastError instanceof Error ? lastError.message : String(lastError) }),
+      },
+    )
   }
 
   private async dshRuntimeVersion(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -812,5 +1278,12 @@ export const _testing = {
   materialReviewFacts,
   modificationTask,
   reviewIdentity,
+  isDirectlyUsableReview,
+  shouldReviewAdaptiveThird,
   waitingAuthorization,
+  attachSemanticReview,
+  assertSemanticReviewerBinding,
+  boundedReviewerFiles,
+  reviewCandidateDigest,
+  reviewSnapshotDigest,
 }

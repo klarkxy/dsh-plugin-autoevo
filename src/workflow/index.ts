@@ -18,8 +18,11 @@ export type {
   WorkflowExec,
   WorkflowHost,
   WorkflowNodeId,
+  WorkflowOptionPlacement,
   WorkflowRecord,
   WorkflowStatus,
   WorkflowView,
 } from './contracts.js'
 export { executeNode, interruptPayload, transition } from './graph.js'
+export { lifecycleStateFor } from './lifecycle.js'
+export type { LifecycleMappingInput, WorkflowLifecycleState } from './lifecycle.js'

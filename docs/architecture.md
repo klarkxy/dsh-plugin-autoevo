@@ -12,24 +12,25 @@ User task
    ▼
 capability_workflow
    ├─ resolve_local
-   ├─ discover_remote / ensure_market
-   └─ INTERRUPT await_selection ──► Agent explains in chat
-                         │ user replies
-                         ▼
-           capability_workflow_resume (workflow_id + interrupt_id)
-                         │
-          inspect / search_more / use_local / create_new / stop
-                         │ inspect
-                         ▼
-                    review_github (selected only)
-                         │
-                         ▼
-           INTERRUPT await_confirmation ──► Agent explains review
-                         │ user replies
-                         ▼
-           capability_workflow_resume (Host resolves use_this / modify_this / create_new)
-                         │
-                    full/use ─────┴───── modify/create (managed git source child)
+   ├─ strict full local ──► interrupt-bound local recommendation
+   └─ partial/none ───────► discover_remote / ensure_market
+                                  │
+                 INTERRUPT await_selection (snapshot-bound shortlist, max 3)
+                                  │ Agent maps natural language to candidate IDs
+                                  ▼
+                 capability_workflow_resume + navigation
+                                  │ fixed or adaptive review plan
+                                  ▼
+                 review_github batch (concurrency 2, optional third)
+                                  │
+                                  ▼
+                 INTERRUPT await_confirmation (review-derived actions)
+                       │ compare another: navigation + candidate IDs
+                       │ side effect: LLM decision + bound candidate ID
+                       ▼
+                 Host authentic-turn and workflow-boundary validation
+                       │
+                  full/use ─────┴───── modify/create (managed git source child)
                        │                       │
                        ▼                       ▼
                  install_verify          workspace-write child + local re-review
@@ -51,11 +52,13 @@ capability_workflow
 
 父会话执行层拒绝 write/edit、shell、Cordis mutation、委托与直接 plugin 装卸。`create_new` / `modify_this` 只在 Host 拉起的托管 git 源子会话中继续（`sourceDir` 默认 `<stateDir>/sources`，sandbox 模式 `workspace-write`）。父会话不得 `cordis_define(kind:new)`。Windows 上为完整性导向的部分隔离。
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V5）在排他迁移锁下安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确 V5 为 no-op；已知 pristine v1–v4 升级；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装与升级，且永不自动删除。
+托管子会话创建完成后，父取消信号不再依赖 DSH 的 creation-only signal，而由 AutoEvo 监听并立即调用 owned `AgentHandle.dispose()`。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
+
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V9）在排他迁移锁下安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确 V9 为 no-op；已知 pristine v1–v7 升级；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装与升级，且永不自动删除。
 
 ## 3. DSH 接缝
 
-入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`。Loader 通过 `cordis.patch.yml` 挂载 bundle。主要 required services：
+入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V5 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VerificationVerdict`、`DshSemanticReviewerHost`、`DshSemanticVerifierHost`、`lifecycleStateFor`。Loader 通过 `cordis.patch.yml` 挂载 bundle。主要 required services：
 
 - `tools`：枚举能力并注册三个高层工具（`capability_workflow`、`capability_workflow_resume`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
@@ -69,6 +72,8 @@ capability_workflow
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
 远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 resume 记入回执的仓库才进入同一套 exact-commit 审查门禁。不要用 `ask_user` 在搜完后立刻弹窗。
+
+> **V6 覆盖说明：** 上一段的“resume 记入只读选择回执”已被新协议取代。产品名不能单独成为完整匹配；只有严格 `full` 的本地候选可跳过远端发现。远端固定为最多三个稳定候选 ID；Agent 把多选、序号和“另一个”等指代映射为只读 `navigation`，Host 只验证快照成员关系，不产生 DecisionReceipt。选定候选以两路并发审查，adaptive 模式在前两个均不可直接使用时才补审第三个。
 
 ## 4. 数据与状态
 
@@ -90,7 +95,13 @@ stateDir/
 
 社区质量筛选与上报不在主线；完整实现留在 `community-quality` 分支。
 
-V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要；resume 公共参数只有 `workflow_id + interrupt_id`，决定只能从 Host 捕获的下一条用户消息推导。旧 boot 的 interrupt 会重签并要求新的用户回合，不跨 Agent 或进程恢复确认。
+V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
+
+Policy V3 起，最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不再用关键词或正则重做语义理解。`use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`，Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供 repository、path、review id 或 install spec。Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
+
+Policy V5：新 resolution / review / workflow / receipt 使用 `POLICY_VERSION = 5`。未完成的旧 policy workflow 不得恢复或执行旧 decision、interrupt、selection receipt、reviewer/verification verdict、commitment 或 lease；通过 `capability_workflow` 启动时会作废旧未完成记录并开一条新的 V5 discovery，resume 旧 workflow 只返回 `policy_restart_required`（公开 lifecycle 为 `interrupted`），下一步再 start 才会新建 V5。旧 review 仍可读可展示，但不能授权 use/install。内部 graph cursor 不变；公开 `lifecycleState` 映射为 `searched -> selected -> reviewing -> approved|rejected|uncertain|skipped -> awaiting_confirmation -> committed -> leased -> executing -> verified|recovery_required`，外加 `modify_authorized`、`create_authorized`、`stopped`、`interrupted`，并保留 `restart_required` / `market_restart_required` / `market_setup_required` / `reuse_local` 等互不合并的终态。简单 UI 主操作为 `use_this` / `search_more`；`modify_this` / `create_new` / `stop` 放在 advanced/recovery。
+
+MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、lease、endpoint 或用户决定。安装成功要求 Host mechanical Loader 证据（call-id 匹配的 tool/call 与成功 tool/result，加上 completed-turn）以及独立 semantic verifier；`taskResultMatchedExpectation` 只是诊断字段，不是 verified 真值。
 
 Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 或本地 base commit/status、已检查文件的 blob/content hash、material manifest facts，以及实际 DSH runtime 版本和兼容性。安装前重新审查并比较这些材料。请求 ref 可以从分支名收成同一个 SHA；内容、manifest 或 runtime 兼容性变化会使凭据过期。
 
@@ -100,8 +111,8 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 - `installOutcome`：`pending | verified | failed_absent | recovery_required`；只有 `verified` 可投影为成功。
 - `installed`：兼容旧调用方的布尔投影；只有 Loader/runtime 与精确 profile 来源都验证后才为 true。
 - `loaded`：隔离子进程退出成功，可信 observer 至少看到一个预期工具的真实调用。
-- `verified`：每个预期工具都有 call-id 匹配的成功 `tool/result`，DSH 会话给出以 `turn/end: completed` 收口的最终回答，并且可选预期文本匹配。
-- `restartRequired`：常驻 Profile 已写入依赖，新进程加载新 bundle。
+- `verified`：Host mechanical 成功（每个预期工具都有 call-id 匹配的成功 `tool/result`，DSH 会话给出以 `turn/end: completed` 收口的最终回答）并且独立 semantic verifier 给出绑定当前 evidence digest 的 `verified` 裁决。`taskResultMatchedExpectation` 只作诊断，不作为成功门槛。
+- `restartRequired`：精确来源与独立子进程验证已通过，但当前进程的 Loader 热加载无法完整完成；仅此时要求新进程加载 bundle。
 - `removed`：临时 owned trial 已删除，或持久安装 receipt 已完成 remove。
 
 临时安装带验证任务。验证失败会删除 trial，并在 installation receipt 上写下 `removed: true`。

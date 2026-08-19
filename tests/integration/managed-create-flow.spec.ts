@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import type { ResolutionRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import type { ManagedChildHost } from '../../src/managed-child.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
@@ -63,7 +63,7 @@ function resolution(root: string): ResolutionRecord {
   return {
     schemaVersion: 2,
     id: `resolution_${'a'.repeat(24)}`,
-    policyVersion: 'v2-2026-08-15',
+    policyVersion: POLICY_VERSION,
     createdAt: new Date().toISOString(),
     requirement: 'provide a hello tool',
     cwd: root,
@@ -81,7 +81,7 @@ function workflow(): WorkflowRecord {
   return {
     schemaVersion: 1,
     id: `workflow_${'b'.repeat(24)}`,
-    policyVersion: 'v2-2026-08-15',
+    policyVersion: POLICY_VERSION,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     requirement: 'provide a hello tool',
@@ -137,5 +137,58 @@ describe('managed create vertical flow', () => {
     expect(receipt?.headCommit).not.toBe(receipt?.baseCommit)
     const revalidate = service as unknown as { revalidate(review: NonNullable<typeof result.review>): Promise<boolean> }
     await expect(revalidate.revalidate(result.review!)).resolves.toBe(true)
-  })
+  }, 20_000)
+
+  it('checkpoints cancelled child edits, reports recovery, and releases the source lock with an aborted parent signal', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-cancel-e2e-'))
+    temporary.push(root)
+    let childStarted!: () => void
+    const started = new Promise<void>((resolve) => { childStarted = resolve })
+    const child: ManagedChildHost = {
+      async run(request) {
+        await writeFile(path.join(request.cwd, 'cancelled-edit.js'), 'export const preserved = true\n')
+        childStarted()
+        await new Promise<void>((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => reject(new Error('child observed cancellation')), { once: true })
+        })
+        throw new Error('unreachable')
+      },
+    }
+    const runner = new NativeRunner()
+    const cfg = config(root)
+    const store = new StateStore(cfg.stateDir)
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      child,
+    )
+    const flow = workflow()
+    const controller = new AbortController()
+    const exec = {
+      agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent,
+      signal: controller.signal,
+    }
+    const running = service.prepareCreate(resolution(root), exec, flow)
+    await started
+    controller.abort()
+    const error = await running.then(() => undefined, (cause: unknown) => cause)
+    expect(error).toMatchObject({
+      message: expect.stringMatching(/cancelled.*checkpointed/i),
+      details: expect.objectContaining({ cancelled: true, recoveryRequired: true }),
+    })
+    expect(String((error as Error).message)).not.toMatch(/Executable is unavailable/u)
+
+    const sourceId = flow.managedSourceId!
+    const checkpoint = await service.sources.readReceipt(sourceId)
+    expect(checkpoint?.headCommit).not.toBe(checkpoint?.baseCommit)
+    expect(checkpoint?.activeWorkflowId).toBe(flow.id)
+    await service.releaseManagedSource(flow, exec)
+    expect((await service.sources.readReceipt(sourceId))?.activeWorkflowId).toBeNull()
+    await expect(readFile(service.sources.lockPath(sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    const status = await runner.run({ argv: ['git', 'status', '--porcelain'], cwd: service.sources.sourcePath(sourceId) })
+    expect(status.stdout.trim()).toBe('')
+  }, 20_000)
 })

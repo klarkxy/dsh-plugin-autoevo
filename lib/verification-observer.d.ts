@@ -5,6 +5,8 @@ interface Config {
   receiptPath: string;
   expectedTools: string[];
   expectedText?: string;
+  expectedProvider?: string;
+  expectedModel?: string;
 }
 declare const Config: Schema<Config>;
 declare const name = "dsh-plugin-autoevo-verification-observer";

@@ -1,8 +1,10 @@
+import { LoadHookContext } from "node:module";
 import Schema from "@deepseek-ai/schemastery";
 import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
 import { Session } from "@deepseek-ai/dsh-session";
 import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
-import { Context } from "@deepseek-ai/cordis";
+import "@deepseek-ai/cordis-plugin-include";
+import { Context, Fiber, Inject, Service } from "@deepseek-ai/cordis";
 import { Agent } from "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-subprocess";
 import { FileSystem } from "@deepseek-ai/dsh-fs";
@@ -46,18 +48,29 @@ interface RuntimeConfig {
 declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
+/** Receipt policy. New resolution/review/workflow records use this value. */
+declare const POLICY_VERSION = "5";
+declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
 type CandidateAvailability = 'available' | 'available_via_tool_search';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
+/** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
-type DecisionAction = 'inspect' | 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'use_local' | 'search_more';
-type WorkflowOptionId = DecisionAction;
+type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
+type NavigationKind = 'review_candidates' | 'search_more' | 'reuse_local' | 'stop';
+type ReviewMode = 'fixed' | 'adaptive';
+type WorkflowOptionId = AuthorizationAction | NavigationKind;
+interface NavigationInput {
+  kind: NavigationKind;
+  candidateIds?: string[];
+  reviewMode?: ReviewMode;
+}
 interface DecisionReceipt {
   id: string;
   phase: DecisionPhase;
-  action: DecisionAction;
+  action: AuthorizationAction;
   selectedRepositories: string[];
   reviewId?: string;
   reviewIdentity?: string;
@@ -65,6 +78,10 @@ interface DecisionReceipt {
   optionId?: WorkflowOptionId;
   interruptId?: string;
   hostTurnId?: string;
+  candidateId?: string;
+  retention?: InstallationRetention;
+  targetProfile?: string;
+  snapshotDigest?: string;
   createdAt: string;
 }
 interface ResolutionAuthorization {
@@ -81,6 +98,10 @@ interface LocalCapabilityCandidate {
   description: string;
   availability: CandidateAvailability;
   confidence: number;
+  /** Retrieval is broad; only `full` may suppress remote discovery. */
+  fit?: 'full' | 'partial' | 'none';
+  matchedFacets?: string[];
+  missingFacets?: string[];
 }
 interface RemotePluginCandidate {
   repository: string;
@@ -138,6 +159,11 @@ interface ManifestFacts {
   dependencies: string[];
   peerDependencies: Record<string, string>;
   expectedTools: string[];
+  /** Route declared by an agent-default-model patch, when statically derivable. */
+  expectedRoute?: {
+    provider: string;
+    model?: string;
+  };
 }
 interface InspectedFile {
   path: string;
@@ -158,6 +184,61 @@ type ReviewSourceSnapshot = {
   baseCommit: string;
   statusHash: string;
 };
+interface MechanicalFacts {
+  fit: ReviewFit;
+  missingCapabilities: string[];
+  staticRisk: SecurityRisk;
+  compatibility: {
+    status: CompatibilityStatus;
+    reason: string;
+    runtimeVersion: string | null;
+  };
+  manifest: {
+    kind: ManifestFacts['kind'];
+    packageName?: string;
+    packageVersion?: string;
+    bundlePatch?: string;
+    materializable: boolean;
+    installSpec: string | null;
+  };
+  truncated: boolean;
+  findings: Array<Pick<ReviewFinding, 'code' | 'severity' | 'source' | 'evidenceHash'>>;
+  evidenceHashes: string[];
+  semanticContextRequired: boolean;
+  /** Host still hard-rejects direct use_this when set; not a reviewer authorization. */
+  directUseHostBoundary?: 'incompatible' | 'not_materializable';
+}
+type ReviewerRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out';
+/** Host-owned reviewer job. Must not carry authorization or an install spec. */
+interface ReviewerRequest {
+  id: string;
+  workflowId: string;
+  resolutionId: string;
+  reviewId: string;
+  requirement: string;
+  snapshotDigest: string;
+  candidateDigest: string;
+  status: ReviewerRequestStatus;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+type ReviewerVerdictDecision = 'approved' | 'rejected' | 'uncertain';
+/** Reviewer semantic verdict. Must not carry authorization, lease, endpoint, or install spec. */
+interface ReviewerVerdict {
+  requestId: string;
+  reviewId: string;
+  requirementHash: string;
+  snapshotDigest: string;
+  candidateDigest: string;
+  reviewerSessionId: string;
+  reviewerVersion: string;
+  decision: ReviewerVerdictDecision;
+  evidence: string[];
+  conditions: string[];
+  semanticCoverage: ReviewFit;
+  createdAt: string;
+}
 interface ReviewRecord {
   schemaVersion: 1;
   id: string;
@@ -182,11 +263,22 @@ interface ReviewRecord {
   findings: ReviewFinding[];
   recommendation: ReviewRecommendation;
   installSpec: string | null;
+  /** Present on current reviews. Absent on old readable records, which are never a reviewer approval. */
+  mechanicalFacts?: MechanicalFacts;
+  reviewerRequestId?: string;
+  reviewerRequest?: ReviewerRequest;
+  reviewerVerdict?: ReviewerVerdict;
 }
 type InstallationRetention = 'temporary' | 'persistent';
 type InstallationState = 'installed' | 'not_installed' | 'unknown';
 /** Public install outcome: success only after Loader/runtime verification. */
 type InstallOutcome = 'pending' | 'verified' | 'failed_absent' | 'recovery_required';
+interface HotReloadEvidence {
+  attempted: boolean;
+  loaded: boolean;
+  method: 'already-loaded' | 'loader' | 'direct-import' | 'unsupported' | 'failed';
+  reason: string;
+}
 interface VerificationEvidence {
   attempted: boolean;
   task?: string;
@@ -199,8 +291,40 @@ interface VerificationEvidence {
   receiptPath?: string;
   taskResultObserved: boolean;
   taskResultSha256?: string;
+  /** Diagnostic substring observation only. Never Host verified truth. */
   taskResultMatchedExpectation?: boolean;
+  observedProvider?: string;
+  observedModel?: string;
+  routeMatchedExpectation?: boolean;
   reason: string;
+}
+type VerifierRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out';
+type VerificationVerdictDecision = 'verified' | 'rejected' | 'uncertain';
+/** Host-owned semantic verification job. Must not carry authorization or an install spec. */
+interface VerifierRequest {
+  id: string;
+  installationId: string;
+  reviewId: string;
+  requirement: string;
+  evidenceDigest: string;
+  status: VerifierRequestStatus;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+/** Independent semantic completion verdict. Must not carry authorization, lease, endpoint, or install spec. */
+interface VerificationVerdict {
+  requestId: string;
+  installationId: string;
+  reviewId: string;
+  requirementHash: string;
+  evidenceDigest: string;
+  verifierSessionId: string;
+  verifierVersion: string;
+  decision: VerificationVerdictDecision;
+  evidence: string[];
+  conditions: string[];
+  createdAt: string;
 }
 interface InstallationRecord {
   schemaVersion: 1;
@@ -222,8 +346,12 @@ interface InstallationRecord {
   loaded: boolean;
   verified: boolean;
   restartRequired: boolean;
+  hotReload?: HotReloadEvidence;
   removed: boolean;
   verification: VerificationEvidence;
+  verifierRequestId?: string;
+  verifierRequest?: VerifierRequest;
+  verificationVerdict?: VerificationVerdict;
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
     code: string;
@@ -248,20 +376,176 @@ interface InstallInput {
 interface RemoveInput {
   installationId: string;
 }
-/** Public resume input is intentionally narrow: Host owns the decision facts. */
+/** Model-interpreted final authorization intent, bounded by the current interrupt. */
+interface AuthorizationDecisionInput {
+  action: AuthorizationAction;
+  /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
+  candidateId?: string;
+  /** Optional for use_this. Defaults to temporary when the user did not express a preference. */
+  retention?: InstallationRetention;
+}
+/** Public resume input keeps model interpretation separate from Host-owned facts. */
 interface ResumeInput {
   workflowId: string;
   interruptId: string;
+  /** Model-interpreted read-only navigation. Never grants a side effect. */
+  navigation?: NavigationInput;
+  /** Model-interpreted final action. Host validates it against the current interrupt and fresh user turn. */
+  decision?: AuthorizationDecisionInput;
 }
+/**
+ * Host-owned selection evidence. Minted only after a fresh user turn is consumed.
+ * ResumeInput must not accept a model-forged copy of this object.
+ */
+interface SelectionReceipt {
+  id: string;
+  workflowId: string;
+  interruptId: string;
+  snapshotDigest: string;
+  kind: NavigationKind | AuthorizationAction;
+  candidateIds: string[];
+  candidateDigests: Record<string, string>;
+  hostTurnId: string;
+  ownerSessionId: string;
+  bootId: string;
+  createdAt: string;
+}
+type ExecutionEndpoint = {
+  kind: 'none';
+} | {
+  kind: 'exact_tool';
+  name: string;
+} | {
+  kind: 'bridge';
+  tools: readonly string[];
+  target: string;
+};
+interface FrozenCandidateIdentity {
+  kind: 'local' | 'remote';
+  localKind?: LocalCapabilityCandidate['kind'];
+  name: string;
+  identity: string;
+  availability?: CandidateAvailability;
+  fit?: 'full' | 'partial' | 'none';
+  repository?: string;
+}
+/** Host-derived from SelectionReceipt + the interrupt-bound candidate snapshot. */
+interface ActionCommitment {
+  id: string;
+  selectionReceiptId: string;
+  snapshotDigest: string;
+  candidateId?: string;
+  candidateDigest?: string;
+  frozenIdentity: FrozenCandidateIdentity | {
+    kind: 'none';
+  };
+  requestedAction: NavigationKind | AuthorizationAction;
+  retention?: InstallationRetention;
+  endpoint: ExecutionEndpoint;
+  allowedParameterConstraints: {
+    /** Exact bridge/tool target; tool_search/tool_call may not widen past this name. */
+    exactTarget?: string;
+  };
+  createdAt: string;
+  /** Host-frozen review identity. Reviewer output cannot mint these fields. */
+  reviewId?: string;
+  reviewSnapshotDigest?: string;
+  reviewerRequestId?: string;
+  reviewerVerdictDigest?: string;
+  frozenManifestDigest?: string;
+  frozenInstallSpec?: string | null;
+  targetProfile?: string;
+}
+/**
+ * Current-turn execution grant. Bound to commitment + session/boot/workflow + turn watermark.
+ * Host may silently re-sign the next continuation only when receipt, commitment, and endpoint are unchanged.
+ */
+interface ExecutionLease {
+  id: string;
+  commitmentId: string;
+  selectionReceiptId: string;
+  workflowId: string;
+  ownerSessionId: string;
+  bootId: string;
+  hostTurnId: string;
+  interruptId: string;
+  snapshotDigest: string;
+  candidateId?: string;
+  candidateDigest?: string;
+  requestedAction: ActionCommitment['requestedAction'];
+  endpoint: ExecutionEndpoint;
+  allowedParameterConstraints: ActionCommitment['allowedParameterConstraints'];
+  createdAt: string;
+}
+declare const BRIDGE_EXECUTION_TOOLS: readonly ["tool_search", "tool_describe", "tool_call"];
+declare const FORGED_RESUME_HOST_KEYS: readonly ["selectionReceipt", "actionCommitment", "executionLease", "commitment", "lease", "endpoint", "reviewerVerdict", "verificationVerdict", "verifierVerdict", "verifierRequest"];
+//#endregion
+//#region src/review/direct-use.d.ts
+/** Minimal snapshot context for candidate-digest binding. WorkflowRecord is assignable. */
+interface ReviewCandidateContext {
+  id?: string;
+  candidateSnapshot?: ReadonlyArray<{
+    id: string;
+    kind: 'local' | 'remote';
+    repository?: string;
+    identity: string;
+    digest?: string;
+  }>;
+  reviewIdsByCandidate?: Record<string, string>;
+}
+interface InstallCommitmentBinding {
+  workflow?: ReviewCandidateContext;
+  commitment?: ActionCommitment;
+  receipt?: SelectionReceipt;
+  retention?: ActionCommitment['retention'];
+}
+//#endregion
+//#region src/process/runner.d.ts
+interface CommandRequest {
+  argv: readonly [string, ...string[]];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  allowFailure?: boolean;
+}
+interface CommandResult {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+interface CommandRunner {
+  run(request: CommandRequest): Promise<CommandResult>;
+  resolveExecutable?(command: string, signal?: AbortSignal): Promise<string>;
+}
+//#endregion
+//#region src/workflow/lifecycle.d.ts
+/**
+ * Public workflow lifecycle presentation. Internal `cursor` names stay on the
+ * record for graph safety; this field is a deterministic mapping only.
+ */
+type WorkflowLifecycleState = 'searched' | 'selected' | 'reviewing' | 'approved' | 'rejected' | 'uncertain' | 'skipped' | 'awaiting_confirmation' | 'committed' | 'leased' | 'executing' | 'verified' | 'recovery_required' | 'restart_required' | 'market_restart_required' | 'market_setup_required' | 'modify_authorized' | 'create_authorized' | 'stopped' | 'interrupted' | 'reuse_local';
+interface LifecycleMappingInput {
+  reviews?: readonly ReviewRecord[];
+  installation?: InstallationRecord;
+}
+/** Map internal cursor/status/grants to the public lifecycle state. Never claims verified early. */
+declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cursor' | 'policyVersion' | 'actionCommitment' | 'executionLease' | 'lastFailure'>, extras?: LifecycleMappingInput): WorkflowLifecycleState;
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'installed' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work';
+type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
   id: WorkflowOptionId;
   labelEn: string;
   labelZh: string;
+  /** When present, the action is valid only for these interrupt-bound snapshot candidates. */
+  candidateIds?: string[];
+  /** Presentation group only. Does not change Host authorization. */
+  placement?: WorkflowOptionPlacement;
 }
 interface InterruptPayload {
   kind: InterruptKind;
@@ -279,8 +563,31 @@ interface WorkflowPendingInstall {
   verificationTask?: string;
   verificationExpectedText?: string;
 }
+interface CandidateSnapshotItem {
+  id: string;
+  index: number;
+  kind: 'local' | 'remote';
+  name: string;
+  identity: string;
+  digest: string;
+  repository?: string;
+  localName?: string;
+  localKind?: 'tool' | 'skill' | 'plugin';
+  availability?: 'available' | 'available_via_tool_search';
+  fit?: 'full' | 'partial' | 'none';
+}
+interface ReviewPlan {
+  mode: ReviewMode;
+  candidateIds: string[];
+  maxReviews: 1 | 2 | 3;
+}
+interface ReviewFailure {
+  candidateId: string;
+  code: string;
+  message: string;
+}
 interface WorkflowRecord {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   policyVersion: string;
   createdAt: string;
@@ -300,6 +607,17 @@ interface WorkflowRecord {
   lastReviewId?: string;
   lastInstallationId?: string;
   forceRemoteDiscovery?: boolean;
+  candidateSnapshot?: CandidateSnapshotItem[];
+  seenCandidateIds?: string[];
+  rejectedCandidateIds?: string[];
+  selectionReceipt?: SelectionReceipt;
+  actionCommitment?: ActionCommitment;
+  executionLease?: ExecutionLease;
+  reviewPlan?: ReviewPlan;
+  reviewQueue?: string[];
+  reviewedCandidateIds?: string[];
+  reviewIdsByCandidate?: Record<string, string>;
+  reviewFailures?: ReviewFailure[];
   pendingRepositories?: string[];
   pendingRef?: string;
   pendingPath?: string;
@@ -316,16 +634,21 @@ interface WorkflowRecord {
 }
 interface WorkflowView {
   workflow: WorkflowRecord;
+  /** Public lifecycle presentation. Internal `workflow.cursor` remains the graph cursor. */
+  lifecycleState: WorkflowLifecycleState;
   resolution?: ResolutionRecord;
   review?: ReviewRecord;
+  reviews?: ReviewRecord[];
   installation?: InstallationRecord;
   nextStep?: string;
 }
 interface ValidatedResume {
-  optionId: WorkflowOptionId;
+  optionId: AuthorizationAction;
   userMessage: string;
   hostTurnId: string;
   interruptId: string;
+  snapshotDigest: string;
+  candidateId?: string;
   repositories: string[];
   path?: string;
   ref?: string;
@@ -333,7 +656,7 @@ interface ValidatedResume {
   install?: WorkflowPendingInstall;
 }
 interface MarketplaceStepResult {
-  status: 'loaded' | 'restart' | 'empty';
+  status: 'loaded' | 'restart' | 'blocked' | 'empty';
   reason: string;
 }
 interface WorkflowHost {
@@ -343,15 +666,24 @@ interface WorkflowHost {
     resolution: ResolutionRecord;
     market: MarketplaceStepResult;
   }>;
-  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec): Promise<{
+  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec): Promise<{
+  reviewGithubBatch?(resolution: ResolutionRecord, repositories: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    reviews: ReviewRecord[];
+    failures: Array<{
+      repository: string;
+      code: string;
+      message: string;
+    }>;
+  }>;
+  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
   prepareModify?(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
@@ -362,7 +694,8 @@ interface WorkflowHost {
     path?: string;
     review?: ReviewRecord;
   }>;
-  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
+  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
+  applyNavigation?(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
@@ -387,6 +720,9 @@ interface AgentGateState {
   consumedTurnIds: Set<string>;
   waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work';
   sessionId?: string;
+  selectionReceipt?: SelectionReceipt;
+  actionCommitment?: ActionCommitment;
+  executionLease?: ExecutionLease;
 }
 interface UserFacingMessage {
   content?: readonly unknown[];
@@ -418,10 +754,17 @@ declare class CreationGuard {
    * Rejects missing turns, already-consumed (replay) turns, and turns at/before the interrupt watermark.
    */
   consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn;
+  /**
+   * Host-owned grant. Never accepted from ResumeInput.
+   * `lease` is omitted when the commitment endpoint is `none`.
+   */
+  grantHostSelection(agent: Agent | undefined, receipt: SelectionReceipt, commitment: ActionCommitment, lease?: ExecutionLease): void;
+  invalidateExecutionLease(agent: Agent | undefined): void;
+  activeExecutionLease(agent: Agent | undefined): ExecutionLease | undefined;
   setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void;
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
-  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>): void;
+  assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>, binding?: InstallCommitmentBinding): void;
   private inEvolutionMode;
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
@@ -429,12 +772,15 @@ declare class CreationGuard {
   guard(exec: Readonly<ToolExecution>): string | undefined;
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
+  private resignLeaseIfUnchanged;
 }
 //#endregion
 //#region src/execution-guard.d.ts
 type ExecutionRole = 'parent' | 'child';
 interface ExecutionGuardOptions {
   role: ExecutionRole;
+  /** Host-owned lease lookup. Absent or undefined results stay fail-closed. */
+  resolveLease?: (exec: Readonly<ToolExecution>) => ExecutionLease | undefined;
 }
 /**
  * Final execution-layer guard for AutoEvo parent and managed-source child sessions.
@@ -454,6 +800,59 @@ declare class ExecutionGuard {
 //#region src/lifecycle/decide.d.ts
 declare function reviewIdentity(review: ReviewRecord): string;
 //#endregion
+//#region src/semantic-verifier.d.ts
+declare const VERIFIER_SUBMIT_TOOL = "autoevo_submit_verification";
+declare const VERIFIER_VERSION = "1";
+/** Bounded Host receipt for the verifier. Never includes secrets or source paths. */
+interface RedactedVerificationReceipt {
+  expectedTools: string[];
+  calledTools: string[];
+  resultTools: string[];
+  failedTools: string[];
+  taskResultObserved: boolean;
+  taskResultSha256?: string;
+  observedProvider?: string;
+  observedModel?: string;
+  routeMatchedExpectation?: boolean;
+  exitCode?: number | null;
+}
+interface VerifierRunInput {
+  parent: Agent;
+  installationId: string;
+  reviewId: string;
+  requirement: string;
+  evidenceDigest: string;
+  receipt: RedactedVerificationReceipt;
+  signal?: AbortSignal;
+  timeoutMs: number;
+}
+interface SemanticVerifierResult {
+  request: VerifierRequest;
+  verdict: VerificationVerdict;
+}
+interface SemanticVerifierHost {
+  run(input: VerifierRunInput): Promise<SemanticVerifierResult>;
+}
+declare function verificationEvidenceDigest(evidence: Pick<VerificationEvidence, 'expectedTools' | 'calledTools' | 'resultTools' | 'failedTools' | 'taskResultObserved' | 'taskResultSha256' | 'observedProvider' | 'observedModel' | 'routeMatchedExpectation' | 'exitCode'>): string;
+declare function mintVerifierRequest(input: {
+  installationId: string;
+  reviewId: string;
+  requirement: string;
+  evidenceDigest: string;
+  createdAt?: string;
+}): VerifierRequest;
+declare function verificationVerdictAllowsCompletion(verdict: VerificationVerdict | undefined, expected: {
+  installationId: string;
+  reviewId: string;
+  requirement: string;
+  evidenceDigest: string;
+}): boolean;
+declare class DshSemanticVerifierHost implements SemanticVerifierHost {
+  private readonly ctx;
+  constructor(ctx: Context);
+  run(input: VerifierRunInput): Promise<SemanticVerifierResult>;
+}
+//#endregion
 //#region src/state/store.d.ts
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
 type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord;
@@ -469,26 +868,6 @@ declare class StateStore {
   listWorkflows(): Promise<WorkflowRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private get;
-}
-//#endregion
-//#region src/process/runner.d.ts
-interface CommandRequest {
-  argv: readonly [string, ...string[]];
-  cwd: string;
-  env?: NodeJS.ProcessEnv;
-  signal?: AbortSignal;
-  timeoutMs?: number;
-  allowFailure?: boolean;
-}
-interface CommandResult {
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: string;
-  stderr: string;
-}
-interface CommandRunner {
-  run(request: CommandRequest): Promise<CommandResult>;
-  resolveExecutable?(command: string, signal?: AbortSignal): Promise<string>;
 }
 //#endregion
 //#region src/lifecycle/snapshot.d.ts
@@ -513,12 +892,315 @@ declare class DshLauncher {
   profileSourceMatches(dshHome: string, profile: string, packageName: string, expectedSpec: string): Promise<boolean>;
   /** Confirm absence in both the profile manifest and its visible node_modules target. */
   profileTargetAbsent(dshHome: string, profile: string, packageName: string): Promise<boolean>;
-  verify(dshHome: string, profile: string, cwd: string, task: string, expectedTools: readonly string[], expectedText?: string, signal?: AbortSignal): Promise<VerificationEvidence>;
+  verify(dshHome: string, profile: string, cwd: string, task: string, expectedTools: readonly string[], expectedText?: string, expectedRoute?: {
+    provider: string;
+    model?: string;
+  }, signal?: AbortSignal): Promise<VerificationEvidence>;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cosmokit@1.8.2/node_modules/@deepseek-ai/cosmokit/lib/types/misc.d.ts
+/** String/symbol keyed dictionary type. */
+type Dict<T = any, K extends string | symbol = string> = { [key in K]: T; };
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/internal.d.ts
+/** Node internal module format names handled by loader hooks. */
+type ModuleFormat = 'builtin' | 'commonjs' | 'json' | 'module' | 'wasm';
+/** Source payload accepted by Node internal module load hooks. */
+type ModuleSource = string | ArrayBuffer;
+/** Result returned by a Node internal resolve hook. */
+interface ResolveResult {
+  format: ModuleFormat;
+  url: string;
+}
+/** Result returned by a Node internal load hook. */
+interface LoadResult {
+  format: ModuleFormat;
+  source?: ModuleSource;
+}
+type LoadCacheData = ModuleJob;
+/** @see https://github.com/nodejs/node/blob/main/lib/internal/modules/esm/module_map.js */
+interface LoadCache extends Omit<Map<string, Dict<LoadCacheData>>, 'get' | 'set' | 'has'> {
+  get(url: string, type?: string): LoadCacheData | undefined;
+  set(url: string, type?: string, job?: LoadCacheData): this;
+  has(url: string, type?: string): boolean;
+}
+/** Minimal Node internal ModuleWrap surface used by HMR helpers. */
+interface ModuleWrap {
+  url: string;
+  getNamespace(): any;
+}
+/** @see https://github.com/nodejs/node/blob/main/lib/internal/modules/esm/module_job.js */
+interface ModuleJob {
+  url: string;
+  loader: ModuleLoader;
+  module?: ModuleWrap;
+  importAttributes: ImportAttributes;
+  linked: Promise<ModuleJob[]>;
+  instantiate(): Promise<void>;
+  run(): Promise<{
+    module: ModuleWrap;
+  }>;
+}
+/**
+ * Node 22/23 ModuleLoader interface.
+ *
+ * Key methods:
+ * - getModuleJobForImport(specifier, parentURL, importAttributes)
+ * - resolve(specifier, parentURL, importAttributes) → Promise<ResolveResult>
+ * - resolveSync(specifier, parentURL, importAttributes) → ResolveResult
+ */
+interface ModuleLoaderV1 {
+  version: 'v1';
+  loadCache: LoadCache;
+  import(specifier: string, parentURL: string, importAttributes: ImportAttributes): Promise<any>;
+  register(specifier: string | URL, parentURL?: string | URL, data?: any, transferList?: any[]): void;
+  getModuleJobForImport(specifier: string, parentURL: string, importAttributes: ImportAttributes): Promise<ModuleJob>;
+  resolve(specifier: string, parentURL: string, importAttributes: ImportAttributes): Promise<ResolveResult>;
+  resolveSync(specifier: string, parentURL: string, importAttributes: ImportAttributes): ResolveResult;
+  load(specifier: string, context: Pick<LoadHookContext, 'format' | 'importAttributes'>): Promise<LoadResult>;
+}
+/** Node 24+ module request object. */
+interface ModuleRequest {
+  specifier: string;
+  attributes?: ImportAttributes;
+  phase?: ModulePhase;
+}
+/** @see https://github.com/nodejs/node/blob/main/src/module_wrap.h */
+declare const enum ModulePhase {
+  Source = 1,
+  Evaluation = 2
+}
+/** Opaque Node internal module request type marker. */
+type ModuleRequestType = unknown;
+/**
+ * Node 24+ ModuleLoader interface.
+ *
+ * Breaking changes from v1:
+ * - getModuleJobForImport removed → getOrCreateModuleJob(parentURL, request, requestType)
+ * - resolve removed (became private #resolve) → resolveSync(parentURL, request)
+ * - Parameter order reversed for resolveSync, request object { specifier, attributes }
+ * - LoadCache became typed Map<url, { [type]: ModuleJob }> with delete only setting undefined
+ */
+interface ModuleLoaderV2 {
+  version: 'v2';
+  loadCache: LoadCache;
+  import(specifier: string, parentURL: string, importAttributes: ImportAttributes, phase?: ModulePhase, isEntryPoint?: boolean): Promise<any>;
+  register(specifier: string | URL, parentURL?: string | URL, data?: any, transferList?: any[], isInternal?: boolean): void;
+  getOrCreateModuleJob(parentURL: string, request: ModuleRequest, requestType?: ModuleRequestType): Promise<ModuleJob>;
+  resolveSync(parentURL: string, request: ModuleRequest): ResolveResult;
+  load(url: string, context: Pick<LoadHookContext, 'format' | 'importAttributes'>): Promise<LoadResult>;
+}
+/** Supported Node internal ESM loader shapes. */
+type ModuleLoader = ModuleLoaderV1 | ModuleLoaderV2;
+/** Helpers for locating the current Node internal module loader. */
+declare namespace ModuleLoader {
+  function fromInternal(): ModuleLoader | undefined;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/config/tree.d.ts
+/** Mutable tree of loader entries. Persistence is supplied by subclasses. */
+declare abstract class EntryTree {
+  static readonly sep = ":";
+  ctx: Context;
+  enableLogs?: boolean;
+  root: EntryGroup;
+  store: Dict<Entry>;
+  constructor(ctx: Context);
+  get context(): Context;
+  /** Iterate entries in this tree and any nested subtrees. */
+  entries(): Generator<Entry, void, void>;
+  /** Return pending import and lifecycle tasks owned by this tree. */
+  getTasks(): Promise<void>[];
+  /**
+   * Wait until this tree has no active import or lifecycle tasks.
+   * @throws a settled fiber failure, or an aggregate when several fibers failed.
+   */
+  await(): Promise<void>;
+  ensureId(options: Partial<EntryOptions>): string;
+  /** Resolve an entry by id, including nested ids separated by `EntryTree.sep`. */
+  resolve(id: string): Entry;
+  resolveGroup(id: string | null): EntryGroup;
+  /** Create an entry in the root group or a nested group. */
+  create(options: Omit<EntryOptions, 'id'>, parent?: string | null, position?: number): Promise<string>;
+  /** Stop and remove an entry from its parent group. */
+  remove(id: string): Promise<void>;
+  /** Update an entry and optionally move it to another group. */
+  update(id: string, options: Omit<EntryOptions, 'id' | 'name'>, parent?: string | null, position?: number): Promise<void>;
+  /** Import a plugin module from a specifier or `cordis:` builtin. */
+  import(name: string, getOuterStack?: () => string[]): any;
+  /** Persist current tree state. In-memory trees may implement this as a no-op. */
+  abstract write(): void;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/config/group.d.ts
+/** Runtime owner for a list of child loader entries. */
+declare class EntryGroup {
+  ctx: Context;
+  tree: EntryTree;
+  static readonly key: unique symbol;
+  data: EntryOptions[];
+  constructor(ctx: Context, tree: EntryTree);
+  get context(): Context;
+  create(options: Omit<EntryOptions, 'id'>): Promise<string>;
+  unlink(options: EntryOptions): void;
+  remove(id: string, isDispose?: boolean): Promise<void>;
+  update(config: EntryOptions[]): Promise<void>;
+  stop(): Promise<void>;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/config/entry.d.ts
+/** Serialized plugin entry options stored in loader config files. */
+interface EntryOptions {
+  /** Stable id inside the containing entry tree. */
+  id: string;
+  /** Module specifier imported by the entry tree. */
+  name: string;
+  /** Config passed to the plugin. */
+  config?: any;
+  /** Marks this entry as a nested group. */
+  group?: boolean | null;
+  /** Prevents this entry and descendants from running. */
+  disabled?: boolean | null;
+  /** Required services or service intercept config for this entry. */
+  inject?: Inject | null;
+}
+/** One configured plugin node inside an `EntryTree`. */
+declare class Entry {
+  loader: Loader;
+  static readonly key: unique symbol;
+  ctx: Context;
+  fiber?: Fiber;
+  parent: EntryGroup;
+  options: EntryOptions;
+  subgroup?: EntryGroup;
+  subtree?: EntryTree;
+  _initTask?: Promise<void>;
+  _disposing: number;
+  constructor(loader: Loader);
+  get context(): Context;
+  get id(): string;
+  /** True when this entry or any owning parent entry is disabled. */
+  get disabled(): boolean;
+  private _disabled;
+  /**
+   * Effective disabled state: a `!!js` expression evaluates against the loader
+   * context. The raw node stays in the options, so write-back keeps the form.
+   */
+  private disabledOf;
+  evaluate(expr: string): any;
+  private _patchContext;
+  refresh(): Promise<void>;
+  _dispose(fiber?: Fiber | undefined): Promise<void>;
+  /** Merge new options, restart as needed, and persist through the parent tree. */
+  update(options: Partial<EntryOptions>, create?: boolean, force?: boolean): Promise<void>;
+  getOuterStack: () => string[];
+  /** Import and start the configured plugin if it is not already running. */
+  init(): Promise<void>;
+  _await(): Promise<void>;
+  private _init;
+  private _start;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/config/isolate.d.ts
+declare module './entry.ts' {
+  interface EntryOptions {
+    intercept?: Dict | null;
+    isolate?: Dict<true | string> | null;
+  }
+  interface Entry {
+    realm: LocalRealm;
+  }
+}
+/** Symbol realm used to isolate service implementations by entry or label. */
+declare abstract class Realm {
+  protected store: Dict<symbol>;
+  abstract get suffix(): string;
+  access(key: string, create?: boolean): symbol;
+  delete(key: string): void;
+  get size(): number;
+}
+/** Entry-local isolation realm. */
+declare class LocalRealm extends Realm {
+  private entry;
+  constructor(entry: Entry);
+  get suffix(): string;
+}
+//#endregion
+//#region node_modules/.pnpm/@deepseek-ai+cordis-plugin-_6bbed33e411487075eb8aac91da6ecf2/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/index.d.ts
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'exit'(signal: NodeJS.Signals): Promise<void>;
+    'loader/config-update'(): void;
+    'loader/entry-init'(entry: Entry): void;
+    'loader/partial-dispose'(entry: Entry, legacy: Partial<EntryOptions>, active: boolean): void;
+    'loader/patch-context'(entry: Entry, next: () => void | Promise<void>): void | Promise<void>;
+  }
+  interface Context {
+    loader: Loader;
+  }
+  interface EnvData {
+    startTime?: number;
+  }
+  interface Fiber {
+    entry?: Entry;
+  }
+}
+/** Loader config and dependency intercept namespace. */
+declare namespace Loader {
+  /** Root loader configuration. */
+  interface Config {
+    /** Base URL used to resolve relative plugin specifiers and config paths. */
+    baseUrl?: string;
+  }
+  /** Intercept config used when other plugins depend on `loader`. */
+  interface Intercept {
+    /** Keep dependent plugins pending while loader entries are still loading. */
+    await?: boolean;
+  }
+}
+/**
+ * Service that owns a loader entry tree and imports configured plugins.
+ *
+ * Subclasses provide persistence by implementing `write()` on `EntryTree`.
+ */
+declare class Loader extends EntryTree {
+  config: Loader.Config;
+  [Service.config]: Loader.Intercept;
+  envData: any;
+  name: string;
+  internal: ModuleLoader | undefined;
+  builtins: Dict<any>;
+  constructor(ctx: Context, config?: Loader.Config);
+  write(): void;
+  [Service.check](): boolean;
+  showLog(entry: Entry, type: string): void;
+  /** Return the loader entry id that owns `fiber`, if any. */
+  locate(fiber?: Fiber): string | undefined;
+  /** Hook for hosts that can restart the process on full-reload requests. */
+  exit(): void;
+  /** Normalize ESM/CJS/default export shapes before applying a plugin. */
+  unwrapExports(exports: any): any;
+}
+//#endregion
+//#region src/lifecycle/hot-load.d.ts
+interface HotReloadAttempt {
+  evidence: HotReloadEvidence;
+  /** Restore the exact previous Loader group after later receipt failure. */
+  rollback?: () => Promise<void>;
+  rollbackFailed?: boolean;
 }
 //#endregion
 //#region src/lifecycle/install.d.ts
 type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>;
-type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void | Promise<void>;
+type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext, binding?: InstallCommitmentBinding) => void | Promise<void>;
+type ProfileHotLoader = (input: {
+  ctx: Context;
+  dshHome: string;
+  profile: string;
+  packageName: string;
+  expectedTools: readonly string[];
+  agent?: ToolRunContext['agent'];
+}) => Promise<HotReloadAttempt>;
 declare class PluginInstaller {
   private readonly ctx;
   private readonly config;
@@ -526,9 +1208,12 @@ declare class PluginInstaller {
   private readonly launcher;
   private readonly revalidate;
   private readonly authorizeInstall?;
-  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined);
+  private readonly semanticVerifier?;
+  private readonly hotLoader;
+  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined);
   private removeOwnedDirectory;
-  install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord>;
+  install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;
+  private attachSemanticVerification;
 }
 //#endregion
 //#region src/lifecycle/remove.d.ts
@@ -589,6 +1274,48 @@ interface ManagedChildResult {
 }
 interface ManagedChildHost {
   run(request: ManagedChildRequest): Promise<ManagedChildResult>;
+}
+//#endregion
+//#region src/semantic-reviewer.d.ts
+declare const REVIEWER_SUBMIT_TOOL = "autoevo_submit_review";
+declare const REVIEWER_VERSION = "1";
+interface BoundedReviewFile {
+  path: string;
+  sha256: string;
+  bytes: number;
+  text: string;
+}
+/** Internal Host input. Never accepted on ResumeInput. */
+interface ReviewerRunInput {
+  parent: Agent;
+  workflowId: string;
+  review: ReviewRecord;
+  candidateDigest: string;
+  snapshotDigest: string;
+  files: readonly BoundedReviewFile[];
+  signal?: AbortSignal;
+  timeoutMs: number;
+}
+interface SemanticReviewerResult {
+  request: ReviewerRequest;
+  verdict: ReviewerVerdict;
+}
+interface SemanticReviewerHost {
+  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
+}
+declare function requirementHashFor(requirement: string): string;
+declare function mintReviewerRequest(input: {
+  workflowId: string;
+  review: ReviewRecord;
+  snapshotDigest: string;
+  candidateDigest: string;
+  createdAt?: string;
+}): ReviewerRequest;
+/** Real Host-owned DSH semantic reviewer lifecycle. */
+declare class DshSemanticReviewerHost implements SemanticReviewerHost {
+  private readonly ctx;
+  constructor(ctx: Context);
+  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
 }
 //#endregion
 //#region src/source-manager.d.ts
@@ -664,6 +1391,15 @@ declare class SourceManager {
     reviewId: string;
     artifactHash: string;
   }): Promise<SourceReceipt>;
+  /** Re-enter an already-owned managed source without resetting its lineage. */
+  resumeWorkflowSource(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<SourceReceipt>;
+  /** Preserve a failed child's bounded edits as a local WIP commit for retry. */
+  preserveInterruptedChild(input: {
+    sourceId: string;
+    workflowId: string;
+    reviewId: string;
+    signal?: AbortSignal;
+  }): Promise<SourceReceipt>;
 }
 //#endregion
 //#region src/service.d.ts
@@ -679,7 +1415,9 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly launcher;
   private readonly engine;
   private readonly managedChild;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost);
+  private readonly semanticReviewer;
+  private readonly semanticVerifier;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, semanticReviewer?: SemanticReviewerHost, semanticVerifier?: SemanticVerifierHost);
   start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
@@ -689,16 +1427,27 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     resolution: ResolutionRecord;
     market: MarketplaceStepResult;
   }>;
-  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec): Promise<{
+  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec): Promise<{
+  reviewGithubBatch(resolution: ResolutionRecord, repositories: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    reviews: ReviewRecord[];
+    failures: Array<{
+      repository: string;
+      code: string;
+      message: string;
+    }>;
+  }>;
+  reviewLocal(resolution: ResolutionRecord, path: string, baseReviewId: string, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec): Promise<InstallationRecord>;
+  installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
   private requireParentAgent;
+  private runManagedChild;
+  private preserveCancelledManagedWork;
   private reviewAndFreezeManagedSource;
   prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
@@ -710,13 +1459,15 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     path?: string;
     review?: ReviewRecord;
   }>;
-  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord): Promise<ResolutionRecord>;
+  applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
+  applyNavigation(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles(): Promise<string[]>;
-  releaseManagedSource(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
+  private persistReviewed;
+  releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void>;
   private waitingConfirmation;
   private revalidate;
   private dshRuntimeVersion;
@@ -735,5 +1486,5 @@ declare const _testing: {
 };
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { CapabilityEvolutionService, Config, CreationGuard, ExecutionGuard, StateStore, _testing, apply, inject, name, probeWorkspaceWriteSandbox, reviewIdentity };
+export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, type ExecutionLease, FORGED_RESUME_HOST_KEYS, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, _testing, apply, inject, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
 //# sourceMappingURL=index.d.ts.map

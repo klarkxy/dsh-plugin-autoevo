@@ -49,5 +49,7 @@ describe('evals/evals.json schema', () => {
       'repair-and-rollback',
       'near-miss-static-package-release',
     ]))
+    expect(JSON.stringify(raw)).not.toMatch(/scratch_ready/)
+    expect(JSON.stringify(raw)).toMatch(/create_authorized/)
   })
 })

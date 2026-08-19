@@ -1,36 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { POLICY_VERSION, type RemotePluginCandidate, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import {
   assertUseThisReceipt,
-  inferOptionId,
   nextStepForAuthorization,
-  resolveDecisionFromHost,
-  resolveRepositoryFromMessage,
+  resolveDecisionFromModel,
   reviewIdentity,
-  _testing,
 } from '../../src/lifecycle/decide.js'
 import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
 
-const remotes: RemotePluginCandidate[] = [
-  {
-    repository: 'MirDie/dsh-xai',
-    name: 'dsh-xai',
-    description: 'xAI Grok',
-    stars: 2,
-    updatedAt: null,
-    topics: ['dsh-plugin'],
-  },
-  {
-    repository: 'omdsh-dev/dsh-tool-calculator',
-    name: 'dsh-tool-calculator',
-    description: 'calculator',
-    stars: 1,
-    updatedAt: null,
-    topics: ['dsh-plugin'],
-  },
-]
+const candidateId = `candidate_${'c'.repeat(24)}`
+const repository = 'MirDie/dsh-xai'
 
 const agent = {
   id: 'session-decide',
@@ -39,74 +20,118 @@ const agent = {
 
 function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload {
   return {
-    kind: 'await_selection',
+    kind: 'await_confirmation',
     interruptId: `interrupt_${'a'.repeat(24)}`,
     ownerSessionId: 'session-decide',
     bootId: 'boot_decide',
     validAfterTurnId: `turn_${'0'.repeat(24)}`,
     snapshotDigest: 'b'.repeat(64),
-    options: ids.map((id) => WORKFLOW_OPTIONS[id]),
-    facts: {},
+    options: ids.map((id) => id === 'use_this' || id === 'modify_this'
+      ? { ...WORKFLOW_OPTIONS[id], candidateIds: [candidateId] }
+      : WORKFLOW_OPTIONS[id]),
+    facts: {
+      installProfiles: ['web'],
+      candidateSnapshot: [{ id: candidateId, index: 2, kind: 'remote', repository }],
+    },
   }
 }
 
 describe('resume validation', () => {
-  it('tells the model to resume an explicit modification without inventing another gate', () => {
+  it('tells the model to submit its semantic interpretation as a structured decision', () => {
     const text = nextStepForAuthorization('改进插件', {
       state: 'confirmation_required',
       resolutionId: `resolution_${'f'.repeat(24)}`,
       reason: 'review complete',
     })
-    expect(text).toContain('不要在 resume 前追加设计问卷')
-    expect(text).toContain('修改后重新审查并再次确认')
+    expect(text).toContain('结构化 decision')
+    expect(text).toContain('不再用关键词二次猜测')
+    expect(text).toContain('修改后仍会重新审查并再次确认')
   })
 
-  it('infers inspect from a host turn that names a candidate repository', () => {
-    expect(inferOptionId('先看 MirDie/dsh-xai', interrupt(['inspect', 'stop']), remotes)).toBe('inspect')
-    expect(resolveRepositoryFromMessage('审查 MirDie/dsh-xai', remotes)).toEqual(['MirDie/dsh-xai'])
-    expect(_testing.CREATE_NEW_RE.test('Create new')).toBe(true)
-  })
-
-  it('accepts the canonical option id together with the authentic modification details', () => {
-    expect(inferOptionId(
-      '确认 modify_this：按 turn 支持不连续多选，按原顺序拼成一张长截图并保留细分隔线。',
-      interrupt(['modify_this', 'stop']),
-      remotes,
-    )).toBe('modify_this')
-  })
-
-  it('derives the decision and repository only from the fresh Host user turn', () => {
+  it('trusts the model action for wording the old regex could not understand', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '审查 MirDie/dsh-xai' }] })
-    expect(resolveDecisionFromHost({
+    const current = interrupt(['modify_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '在 2 上改' }] })
+    expect(resolveDecisionFromModel({
       guard,
       agent,
-      interrupt: interrupt(['inspect', 'stop']),
-      remotes,
-      requirement: 'calculator',
+      interrupt: current,
+      decision: { action: 'modify_this', candidateId },
+      requirement: 'grok',
     })).toMatchObject({
-      optionId: 'inspect',
-      repositories: ['MirDie/dsh-xai'],
+      optionId: 'modify_this',
+      candidateId,
+      repositories: [repository],
+      userMessage: '在 2 上改',
     })
-    expect(() => resolveDecisionFromHost({
+    expect(() => resolveDecisionFromModel({
       guard,
       agent,
-      interrupt: interrupt(['inspect', 'stop']),
-      remotes,
-      requirement: 'calculator',
+      interrupt: current,
+      decision: { action: 'modify_this', candidateId },
+      requirement: 'grok',
     })).toThrow(/already consumed|replay/i)
   })
 
-  it('rejects an option that is not in the current interrupt', () => {
+  it('rejects unavailable or out-of-scope model decisions without consuming the fresh turn', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
-    expect(() => resolveDecisionFromHost({
+    const current = interrupt(['modify_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '你来理解这个决定' }] })
+    expect(() => resolveDecisionFromModel({
+      guard, agent, interrupt: current, decision: { action: 'create_new' }, requirement: 'grok',
+    })).toThrow(/not available/i)
+    expect(() => resolveDecisionFromModel({
+      guard, agent, interrupt: current, decision: { action: 'modify_this' }, requirement: 'grok',
+    })).toThrow(/requires candidate_id/i)
+    expect(() => resolveDecisionFromModel({
       guard,
       agent,
-      interrupt: interrupt(['inspect', 'stop']),
-      remotes,
-      requirement: 'calculator',
-    })).toThrow(/Could not resolve/i)
+      interrupt: current,
+      decision: { action: 'modify_this', candidateId: `candidate_${'f'.repeat(24)}` },
+      requirement: 'grok',
+    })).toThrow(/not allowed/i)
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'modify_this', candidateId, retention: 'persistent' },
+      requirement: 'grok',
+    })).toThrow(/does not accept retention/i)
+    expect(resolveDecisionFromModel({
+      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'grok',
+    })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
+  })
+
+  it('defaults use_this retention to temporary unless the same confirmation selects persistent', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['use_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId },
+      requirement: 'grok',
+    })).toMatchObject({
+      optionId: 'use_this',
+      install: { targetProfile: 'web', retention: 'temporary', verificationTask: 'grok' },
+    })
+  })
+
+  it('uses model-interpreted retention and Host-derived profile facts', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['use_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '以后都用它' }] })
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      requirement: 'grok',
+    })).toMatchObject({
+      optionId: 'use_this',
+      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
+    })
   })
 })
 

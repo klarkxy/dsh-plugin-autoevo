@@ -171,6 +171,19 @@ describe('local matching', () => {
     )).toBeLessThan(0.3)
   })
 
+  it('requires every material facet before a non-product local match is full', () => {
+    const requirement = 'Export the conversation transcript as a screenshot'
+    const name = 'conversation-export'
+    const description = 'Export conversation transcripts to Markdown and PDF'
+    expect(_testing.matchConfidence(requirement, name, description)).toBeGreaterThan(0.62)
+    expect(_testing.isStrictLocalMatch(requirement, name, description)).toBe(false)
+    expect(_testing.localFit(requirement, {
+      name,
+      description,
+      confidence: _testing.matchConfidence(requirement, name, description),
+    })).toMatchObject({ fit: 'partial', missingFacets: expect.arrayContaining(['screenshot']) })
+  })
+
   it('ignores laundry-list Codex name-drops and keeps a focused Codex plugin', () => {
     const requirement = '我需要一个能在dsh里调用codex的能力。'
     const nameDrop = [
@@ -187,6 +200,25 @@ describe('local matching', () => {
       'acme/dsh-codex-cli dsh-codex-cli',
       'Call Codex CLI from the current DSH session and return the result',
     )).toBeGreaterThanOrEqual(0.3)
+  })
+
+  it('keeps remote discovery open for a product-name-only Codex match', async () => {
+    const requirement = 'codex auto_review'
+    const imageTool = { name: 'gpt-image2-codex', description: 'Generate images with GPT Image 2' }
+    const reviewTool = { name: 'codex-auto-review', description: 'Run automated Codex reviews' }
+    const exec = { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>
+    const contextFor = (schemas: Array<{ name: string, description: string }>) => ({
+      tools: { schemas: () => schemas },
+      systemPrompt: { assemble: async () => ({ tools: schemas.map(({ name }) => ({ name })) }) },
+      skills: { list: async () => [] },
+    } as unknown as Context)
+
+    expect(_testing.isStrictLocalMatch('codex', imageTool.name, imageTool.description)).toBe(false)
+    expect(_testing.matchConfidence(requirement, imageTool.name, imageTool.description)).toBeGreaterThanOrEqual(0.3)
+    expect(_testing.isStrictLocalMatch(requirement, imageTool.name, imageTool.description)).toBe(false)
+    expect((await resolveLocalCapabilities(contextFor([imageTool]), requirement, exec)).shouldDiscoverRemote).toBe(true)
+
+    expect((await resolveLocalCapabilities(contextFor([imageTool, reviewTool]), requirement, exec)).shouldDiscoverRemote).toBe(false)
   })
 
   it('strongly matches a concrete tool and ignores unrelated names', () => {

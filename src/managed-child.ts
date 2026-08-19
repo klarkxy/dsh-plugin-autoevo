@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import type { Agent, AgentRegistry, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentRegistry, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
@@ -194,6 +194,12 @@ export class DshManagedChildHost implements ManagedChildHost {
       },
     })
 
+    let disposePromise: Promise<void> | undefined
+    const dispose = (): Promise<void> => {
+      disposePromise ??= handle.dispose()
+      return disposePromise
+    }
+
     try {
       if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
         throw new EvolutionError('invalid_input', 'Created child is not owned by the initiating parent Agent')
@@ -212,7 +218,7 @@ export class DshManagedChildHost implements ManagedChildHost {
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
         content: [{ type: 'text', text: childInstruction(request.task, cwd) }],
       }))
-      await handle.agent.whenIdle()
+      await waitForIdleOrAbort(handle, request.signal, dispose)
       assertCompletedTurn(handle.agent)
       const taskResult = assistantText(handle.agent)
       if (!taskResult.endsWith(CHILD_RESULT_MARKER)) {
@@ -220,7 +226,7 @@ export class DshManagedChildHost implements ManagedChildHost {
       }
       return { sessionId: String(handle.agent.id), taskResult, sandbox }
     } finally {
-      await handle.dispose()
+      await dispose()
     }
   }
 }
@@ -235,4 +241,44 @@ export const _testing = {
   CHILD_SOFT_STEP_LIMIT,
   CHILD_HARD_STEP_LIMIT,
   CHILD_BUDGET_DENIAL,
+  waitForIdleOrAbort,
+}
+
+function managedChildCancelled(): EvolutionError {
+  return new EvolutionError('command_failed', 'Managed child cancelled by the user', {
+    cancelled: true,
+  })
+}
+
+async function waitForIdleOrAbort(
+  handle: AgentHandle,
+  signal: AbortSignal | undefined,
+  dispose: () => Promise<void>,
+): Promise<void> {
+  if (!signal) {
+    await handle.agent.whenIdle()
+    return
+  }
+  if (signal.aborted) {
+    await dispose()
+    throw managedChildCancelled()
+  }
+
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<'aborted'>((resolve) => {
+    onAbort = () => resolve('aborted')
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    const outcome = await Promise.race([
+      handle.agent.whenIdle().then(() => 'idle' as const),
+      aborted,
+    ])
+    if (outcome === 'aborted') {
+      await dispose()
+      throw managedChildCancelled()
+    }
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
 }

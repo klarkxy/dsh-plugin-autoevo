@@ -12,10 +12,10 @@
     },
     {
       "id": "scratch-authorized-host-tool",
-      "prompt": "Create a live, session-only Cordis Plugin that adds a model-callable tool returning the current UTC time. No matching local capability or acceptable reviewed candidate exists; capability_workflow has returned scratch_ready.",
-      "expected_output": "Uses only exact Host/Builtin/Tool inspection needed for the tool, performs one authorized new definition, runs the returned package, and verifies a real tool call/result.",
+      "prompt": "Create a live, session-only Cordis Plugin that adds a model-callable tool returning the current UTC time. No matching local capability or acceptable reviewed candidate exists; capability_workflow has returned create_authorized.",
+      "expected_output": "Uses only exact Host/Builtin/Tool inspection needed for the tool inside the Host-launched workspace-write child, performs one authorized new definition there, runs the returned package, and verifies a real tool call/result.",
       "assertions": [
-        "Uses the current scratch_ready authorization before cordis_define(kind:new).",
+        "Uses the current create_authorized Host-child grant and does not call cordis_define(kind:new) on the parent session.",
         "Avoids broad inspect/list calls.",
         "Reports a real dynamic Tool verification, not only successful definition."
       ]
@@ -32,7 +32,7 @@
     },
     {
       "id": "client-slot-ui",
-      "prompt": "Create a live dynamic Cordis Plugin that adds a compact refresh button to the current conversation footer. capability_workflow has returned scratch_ready. The button should invoke the package's private Host refresh method and show the returned timestamp.",
+      "prompt": "Create a live dynamic Cordis Plugin that adds a compact refresh button to the current conversation footer. capability_workflow has returned create_authorized. The button should invoke the package's private Host refresh method and show the returned timestamp.",
       "expected_output": "Performs exact inspection of the selected Client Slot and the minimum Host/Client contracts, uses private JSON RPC, defines and activates the one authorized new Plugin, and verifies an actual Client render and click interaction.",
       "assertions": [
         "Inspects the exact target Slot protocol and props before Client registration.",

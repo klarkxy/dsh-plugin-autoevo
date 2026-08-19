@@ -84,14 +84,18 @@ function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
 
 function candidateReview(repository: string, recommendation: ReviewRecord['recommendation'], suffix: string): ReviewRecord {
   const record = review('main')
+  const commit = suffix.repeat(40)
+  const packageName = `dsh-${repository.slice(repository.indexOf('/') + 1)}`
   record.id = `review_${suffix.repeat(64)}`
   record.resolutionId = resolution().id
   record.policyVersion = POLICY_VERSION
   record.sourceSnapshot = {
-    kind: 'github', repository, requestedRef: 'main', commit: suffix.repeat(40), defaultBranch: 'main',
+    kind: 'github', repository, requestedRef: 'main', commit, defaultBranch: 'main',
   }
   record.recommendation = recommendation
   record.fit = recommendation === 'use' ? 'full' : recommendation === 'modify' ? 'partial' : 'none'
+  record.manifest = { ...record.manifest, packageName }
+  record.installSpec = `github:${repository}#${commit}`
   return record
 }
 
@@ -185,6 +189,11 @@ describe('resolution authorization state', () => {
       selectedRepositories: [],
       createdAt: '2026-08-17T00:00:00.000Z',
     }]
+    expect(_testing.authorizationForResolution(record, []).state).toBe('selection_required')
+    record.decisions = [{
+      ...record.decisions[0]!,
+      phase: 'gate2',
+    }]
     expect(_testing.authorizationForResolution(record, []).state).toBe('create_authorized')
 
     record.decisions = [{
@@ -210,5 +219,16 @@ describe('resolution authorization state', () => {
       reason: 'install marketplace',
     }
     expect(_testing.authorizationForResolution(record, []).state).toBe('market_required')
+  })
+})
+
+describe('adaptive review budget', () => {
+  it('reviews a third candidate only when the first two have no directly usable result', () => {
+    const usable = candidateReview('acme/one', 'use', '1')
+    const repairable = candidateReview('acme/two', 'modify', '2')
+    const skipped = candidateReview('acme/three', 'skip', '3')
+    expect(_testing.shouldReviewAdaptiveThird('adaptive', [usable, repairable])).toBe(false)
+    expect(_testing.shouldReviewAdaptiveThird('adaptive', [repairable, skipped])).toBe(true)
+    expect(_testing.shouldReviewAdaptiveThird('fixed', [usable])).toBe(true)
   })
 })

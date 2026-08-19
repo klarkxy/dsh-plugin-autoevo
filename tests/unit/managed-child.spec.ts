@@ -57,10 +57,13 @@ function sandboxServices(cwd: string, modes: string[]) {
   return { fs, sandbox, sandboxPolicy, runner, modes }
 }
 
-function runtime(cwd: string, owned = true) {
+function runtime(cwd: string, owned = true, lifecycle: {
+  whenIdle?: () => Promise<void>
+  onDispose?: () => void
+} = {}) {
   const modes: string[] = []
   const services = sandboxServices(cwd, modes)
-  const disposed = vi.fn(async () => undefined)
+  const disposed = vi.fn(async () => { lifecycle.onDispose?.() })
   const followups: UserMessage[] = []
   let createOptions: CreateAgentOptions | undefined
   let preExecuteInstalled = false
@@ -81,7 +84,7 @@ function runtime(cwd: string, owned = true) {
         options: options.agentOptions ?? {},
         session,
         followup(message: UserMessage) { followups.push(message) },
-        async whenIdle() {},
+        async whenIdle() { await lifecycle.whenIdle?.() },
       } as unknown as Agent
       await options.setup?.({
         agent: child,
@@ -160,6 +163,29 @@ describe('real Host-managed child lifecycle', () => {
     const live = runtime(cwd, false)
     const host = new DshManagedChildHost(live.ctx, live.runner)
     await expect(host.run({ parent: parentAgent(cwd, live.ctx), cwd, task: 'implement' })).rejects.toThrow(/not owned/i)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('disposes a running child promptly when the parent turn is cancelled', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-cancel-'))
+    temporary.push(cwd)
+    let resolveIdle!: () => void
+    const idle = new Promise<void>((resolve) => { resolveIdle = resolve })
+    const live = runtime(cwd, true, {
+      whenIdle: () => idle,
+      onDispose: () => resolveIdle(),
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    const controller = new AbortController()
+    const running = host.run({
+      parent: parentAgent(cwd, live.ctx),
+      cwd,
+      task: 'implement',
+      signal: controller.signal,
+    })
+    await vi.waitFor(() => expect(live.followups).toHaveLength(1))
+    controller.abort()
+    await expect(running).rejects.toThrow(/cancelled by the user/i)
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 })

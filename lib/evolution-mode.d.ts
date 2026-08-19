@@ -11,7 +11,7 @@ interface EvolutionModeMarker {
 //#endregion
 //#region src/evolution-mode.d.ts
 declare const name = "autoevo-evolution-mode";
-declare const inject: readonly ["skills", "systemPrompt"];
+declare const inject: readonly ["systemPrompt"];
 declare function apply(ctx: Context): void;
 declare function readEvolutionModeMarker(ctx: Context): EvolutionModeMarker | undefined;
 //#endregion

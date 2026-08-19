@@ -73,6 +73,7 @@
     "pack:dry-run": "pnpm pack --dry-run"
   },
   "dependencies": {
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "semver": "^7.7.2",
     "yaml": "^2.9.0"
@@ -94,7 +95,6 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/cordis-plugin-group": "1.0.1",
-    "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "1.0.2",
     "@deepseek-ai/dsh": "0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",

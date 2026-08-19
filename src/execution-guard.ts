@@ -1,5 +1,5 @@
 import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
-import { TOOL_NAMES } from './contracts.js'
+import { TOOL_NAMES, type ExecutionLease } from './contracts.js'
 import { isNewCordisDefinition } from './creation-guard.js'
 
 export type ExecutionRole = 'parent' | 'child'
@@ -57,6 +57,48 @@ function toolAliases(name: string): string[] {
   return [normalized, normalized.replace(/^dsh[_-]/u, ''), normalized.replace(/[_-]/gu, '')]
 }
 
+function normalizeEndpointName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+const BRIDGE_TARGET_KEYS = ['name', 'tool', 'tool_name', 'toolName', 'query'] as const
+
+/** Exact target from DSH bridge arguments. Multiple distinct values or none fail closed. */
+export function bridgeTargetFromArguments(args: unknown): string | undefined {
+  if (!isRecord(args)) return undefined
+  const found = new Set<string>()
+  for (const key of BRIDGE_TARGET_KEYS) {
+    const value = args[key]
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (!trimmed) continue
+    found.add(trimmed)
+  }
+  if (found.size !== 1) return undefined
+  return [...found][0]
+}
+
+export function leaseAllowsExecution(
+  lease: ExecutionLease | undefined,
+  exec: Pick<ToolExecution, 'name' | 'arguments'>,
+): boolean {
+  if (!lease) return false
+  const endpoint = lease.endpoint
+  const name = normalizeEndpointName(exec.name)
+  if (endpoint.kind === 'exact_tool') {
+    return name.length > 0 && name === normalizeEndpointName(endpoint.name)
+  }
+  if (endpoint.kind !== 'bridge') return false
+  const allowed = endpoint.tools.map((tool) => normalizeEndpointName(tool))
+  if (!allowed.includes(name)) return false
+  const target = bridgeTargetFromArguments(exec.arguments)
+  if (!target) return false
+  if (target !== endpoint.target) return false
+  const exactTarget = lease.allowedParameterConstraints.exactTarget
+  if (exactTarget !== undefined && target !== exactTarget) return false
+  return true
+}
+
 function matchesSet(name: string, set: Set<string>): boolean {
   const normalizedSet = new Set([...set].flatMap((entry) => toolAliases(entry)))
   return toolAliases(name).some((alias) => normalizedSet.has(alias))
@@ -74,6 +116,8 @@ function hasUnsafeGitCommand(command: string): boolean {
 
 export interface ExecutionGuardOptions {
   role: ExecutionRole
+  /** Host-owned lease lookup. Absent or undefined results stay fail-closed. */
+  resolveLease?: (exec: Readonly<ToolExecution>) => ExecutionLease | undefined
 }
 
 /**
@@ -126,6 +170,8 @@ export class ExecutionGuard {
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
       return 'AutoEvo parent session denies direct plugin install/remove tools; use the capability workflow.'
     }
+    const lease = this.options.resolveLease?.(exec)
+    if (leaseAllowsExecution(lease, exec)) return undefined
     return `AutoEvo parent session denies unrecognized tool ${JSON.stringify(name)}; only AutoEvo decisions and explicit read-only discovery/review tools are allowed.`
   }
 
@@ -184,4 +230,7 @@ export const _testing = {
   matchesSet,
   shellCommandText,
   CODE_MODE_TRANSPORT_TOOL,
+  normalizeEndpointName,
+  bridgeTargetFromArguments,
+  leaseAllowsExecution,
 }

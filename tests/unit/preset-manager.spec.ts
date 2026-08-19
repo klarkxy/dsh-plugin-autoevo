@@ -133,7 +133,7 @@ describe('materializeEvolutionPreset', () => {
     expect(body).toContain('upgraded')
   })
 
-  it('upgrades a pristine prior install to the shipped V5 template', async () => {
+  it('upgrades a pristine prior install to the shipped current template', async () => {
     const root = await tempDir('autoevo-preset-known-release')
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
@@ -160,7 +160,7 @@ describe('materializeEvolutionPreset', () => {
     expect(result.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
   })
 
-  it('upgrades a CRLF checkout of a pristine prior to shipped V5', async () => {
+  it('upgrades a CRLF checkout of a pristine prior to the shipped current template', async () => {
     const root = await tempDir('autoevo-preset-crlf-checkout')
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')

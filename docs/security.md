@@ -12,20 +12,21 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据
 
 同时满足以下条件才进入安装：
 
-1. 候选来自同一 resolution 的持久 review receipt；
-2. manifest 精确声明 `dsh.bundle.patch`，该安全相对路径存在于已审查快照且能按 Loader 方言解析，package name 通过 registry-name 校验；
-3. fit 为 `full`，且与回执记录的实际 DSH runtime 兼容性为 `compatible`；
-4. 风险为 `low` 或 `medium`，或用户已对仍含可修 high（如 `process_execution`）的本地改进明确 `use_this`，批准理由带 `HIGH RISK` 前缀；
-5. 不存在 `prompt_injection` 或 `dynamic_evaluation`；
-6. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
-7. 安装前重新审查，材料一致；该 resolution 最新一条 gate2 回执必须是匹配的 `use_this`；
-8. live DSH approval 返回一次性的 `allowed-once`。
+1. 候选来自同一当前 Policy V5 resolution 的持久 review receipt；旧 policy review 可读但不得授权；
+2. Host hard boundaries：完整/非截断、可物化 snapshot，可识别的安全 package identity，不可变且安全的 installSpec/manifest bundle，可安装来源，没有 path/symlink/special-file/patch/sandbox/resource 逃逸，兼容性不是 explicitly incompatible；
+3. 当 `needsSemanticReviewer` 为真时，必须有绑定当前 ReviewerRequest/review/requirementHash/snapshotDigest/candidateDigest/session/version 的 `approved` 裁决；缺失、过期、伪造、rejected、uncertain 一律 fail closed。MechanicalFacts、recommendation、keyword fit、star count、静态 high risk 只用于展示/召回/路由，不能单独取消 `use_this` 或让 installer 拒绝本可安装的候选；
+4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment（必要时 ExecutionLease）；reviewer/verifier 不能铸造授权；
+5. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
+6. 安装前重新审查，材料一致；live Host `selectionReceipt` 与 `actionCommitment` 必须存在且结构哈希匹配；
+7. live DSH approval 返回一次性的 `allowed-once`，只批准副作用，不代替用户决定。
 
-symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。`prompt_injection` / `dynamic_evaluation`、非 bundle、fit=none 仍为 skip 且不可装。可修的 high 或 peer 不兼容推荐 `modify`，不是 skip。
+symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。非 bundle 或 Host 判定不可物化仍不可直接安装。可修的 high 或 peer 不兼容仍可走 `modify_this`。
 
 本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；`npm pack --ignore-scripts` 生成 tgz 后再复核 snapshot，最终安装该 tgz。Windows 上 DSH rc.6 会经 shell 转发 pnpm 参数，owned artifact path 和卸载用 package name 都经过 shell 安全校验；移除前再校验一次 receipt 中的 package name。
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
+
+安全 finding 由静态 detector 产生。对 Agent 展示时按 `code + severity + detail` 合并同类 source/build 观察，同时保留全部来源和 evidence hash；持久 review 仍保存原始 finding，风险策略不降级。`process_execution` 只证明快照中存在进程 API 导入与调用模式，不证明命令目标、用途、必要性、实际运行或回调服务。Agent 必须把这些未建立语义明确说成未知，不能自行补理由。
 
 ## 2.1 父会话边界与托管源创建
 
@@ -33,7 +34,11 @@ AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesyste
 
 `create_new` / `modify_this` 只在 Host 拉起、cwd 绑定托管 git 源、sandbox 模式为 `workspace-write` 的子会话中继续。父会话不得 `cordis_define(kind:new)`。子会话再拒绝 AutoEvo 决策工具、Cordis mutation、嵌套委托、直接装卸与 git push/tag/release / gh pr。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
 
-搜完或审完后不得用 `ask_user` 直接弹窗；必须先在对话里说明候选或审查结果，再用 `capability_workflow_resume(workflow_id, interrupt_id)` 消费 Host 已声明的用户回合。审查与安装仍要求 review 回执、匹配的不可变 install specification、`use_this` 与 `allowed-once`。安装结果只有 `pending | verified | failed_absent | recovery_required`。
+父回合取消后，Host 通过 owned `AgentHandle.dispose()` 停止并 drain 子 Agent，不依赖创建阶段 signal。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock。取消、超时与真实 executable 缺失分别报告。
+
+搜完或审完后不得用 `ask_user` 直接弹窗；必须先在对话里说明候选或审查结果。只读选择由 LLM 映射为快照 `navigation`；最终安装、修改、新建或停止由 LLM 解释新鲜用户回合并提交结构化 `decision`。简单 UI 主操作为 `use_this` / `search_more`；`modify_this` / `create_new` / `stop` 属于 advanced/recovery。Host 不再对用户措辞做关键词复核，但仍要求 action 属于当前 interrupt；`use_this` / `modify_this` 的 `candidate_id` 必须属于该 action 的当前候选集合，并精确绑定工作流中的 review。审查与安装仍要求当前 Policy V5 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合、防重放与 `allowed-once`。安装结果只有 `pending | verified | failed_absent | recovery_required`。未完成的旧 policy workflow 不得 resume 执行旧 interrupt/decision/receipt/verdict/commitment/lease。
+
+这意味着语义正确性明确依赖当前 LLM：弱模型可能把真实用户意图解释成另一个同样合法的 action 或候选。Host 保证授权完整性和作用域约束，不保证模型的语言理解正确；因此能力进化模式不得搭配低智力、上下文保持差或结构化工具调用不可靠的模型。
 
 ## 3. 进程与凭据
 
@@ -54,7 +59,7 @@ AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesyste
 { "kind": "task/result", "resultSha256": "...", "matchedExpectation": true }
 ```
 
-验证器核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。没有 expected tools 的插件走 load 验证：子进程 `exit 0` 且观察到 completed-turn 最终回答即可；可选预期文本仍只保存匹配布尔值。仅凭 stdout 日志不算任务完成。最终回答只保存 SHA-256。
+Host mechanical 核对 callId/name 匹配、结果成功、预期工具全部覆盖，并只接受 DSH `assistant/message` 后紧跟 `turn/end: completed` 的最终回答。没有 expected tools 的插件走 load 验证：子进程 `exit 0` 且观察到 completed-turn 最终回答即可。`matchedExpectation` / `taskResultMatchedExpectation` 只保存为诊断布尔值，不得作为最终 `verified` 门槛。最终回答只保存 SHA-256。独立 semantic verifier 在 mechanical 成功之后运行，绑定 evidence digest / session / version；timeout、cancel、late submit 与缺失 submit 均为 `uncertain`，不能覆盖 mechanical 失败。
 
 ## 5. 删除
 
@@ -70,6 +75,6 @@ AutoEvo 父会话在 `tools/pre-execute` 与 monotonic guard 上拒绝 filesyste
 
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值与 prompt injection 信号，供安装决策使用。
-- `medium` 风险候选在理由清晰的批准后可以试用；含 `prompt_injection` / `dynamic_evaluation` 的 high 停在审查阶段。可修 high 走 modify，用户 `use_this` 后才可带 HIGH RISK 批准安装。
+- MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；直接安装由 Host hard boundaries、绑定的 reviewer 裁决和新鲜用户 `use_this` 决定。可修 high 仍可走 `modify_this`。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
 - 内部托管源 commit 由 Host 在禁用 hooks/签名后本地完成；任何 fork、push、tag、release 或上游 PR 都属于后续发布动作，仍需另行明确批准。

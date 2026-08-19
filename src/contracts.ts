@@ -1,4 +1,5 @@
-export const POLICY_VERSION = '1'
+/** Receipt policy. New resolution/review/workflow records use this value. */
+export const POLICY_VERSION = '5'
 
 export const TOOL_NAMES = [
   'capability_workflow',
@@ -21,21 +22,31 @@ export type AuthorizationState =
   | 'create_authorized'
 export type CandidateAvailability = 'available' | 'available_via_tool_search'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
+/** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 export type DecisionPhase = 'gate1' | 'gate2'
-export type DecisionAction =
-  | 'inspect'
+export type AuthorizationAction =
   | 'create_new'
   | 'stop'
   | 'use_this'
   | 'modify_this'
-  | 'use_local'
+export type NavigationKind =
+  | 'review_candidates'
   | 'search_more'
-export type WorkflowOptionId = DecisionAction
+  | 'reuse_local'
+  | 'stop'
+export type ReviewMode = 'fixed' | 'adaptive'
+export type WorkflowOptionId = AuthorizationAction | NavigationKind
+
+export interface NavigationInput {
+  kind: NavigationKind
+  candidateIds?: string[]
+  reviewMode?: ReviewMode
+}
 
 export interface DecisionReceipt {
   id: string
   phase: DecisionPhase
-  action: DecisionAction
+  action: AuthorizationAction
   selectedRepositories: string[]
   reviewId?: string
   reviewIdentity?: string
@@ -43,6 +54,10 @@ export interface DecisionReceipt {
   optionId?: WorkflowOptionId
   interruptId?: string
   hostTurnId?: string
+  candidateId?: string
+  retention?: InstallationRetention
+  targetProfile?: string
+  snapshotDigest?: string
   createdAt: string
 }
 
@@ -61,6 +76,10 @@ export interface LocalCapabilityCandidate {
   description: string
   availability: CandidateAvailability
   confidence: number
+  /** Retrieval is broad; only `full` may suppress remote discovery. */
+  fit?: 'full' | 'partial' | 'none'
+  matchedFacets?: string[]
+  missingFacets?: string[]
 }
 
 export interface RemotePluginCandidate {
@@ -123,6 +142,8 @@ export interface ManifestFacts {
   dependencies: string[]
   peerDependencies: Record<string, string>
   expectedTools: string[]
+  /** Route declared by an agent-default-model patch, when statically derivable. */
+  expectedRoute?: { provider: string; model?: string }
 }
 
 export interface InspectedFile {
@@ -148,6 +169,66 @@ export type ReviewSourceSnapshot =
       statusHash: string
     }
 
+export interface MechanicalFacts {
+  fit: ReviewFit
+  missingCapabilities: string[]
+  staticRisk: SecurityRisk
+  compatibility: {
+    status: CompatibilityStatus
+    reason: string
+    runtimeVersion: string | null
+  }
+  manifest: {
+    kind: ManifestFacts['kind']
+    packageName?: string
+    packageVersion?: string
+    bundlePatch?: string
+    materializable: boolean
+    installSpec: string | null
+  }
+  truncated: boolean
+  findings: Array<Pick<ReviewFinding, 'code' | 'severity' | 'source' | 'evidenceHash'>>
+  evidenceHashes: string[]
+  semanticContextRequired: boolean
+  /** Host still hard-rejects direct use_this when set; not a reviewer authorization. */
+  directUseHostBoundary?: 'incompatible' | 'not_materializable'
+}
+
+export type ReviewerRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out'
+
+/** Host-owned reviewer job. Must not carry authorization or an install spec. */
+export interface ReviewerRequest {
+  id: string
+  workflowId: string
+  resolutionId: string
+  reviewId: string
+  requirement: string
+  snapshotDigest: string
+  candidateDigest: string
+  status: ReviewerRequestStatus
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
+}
+
+export type ReviewerVerdictDecision = 'approved' | 'rejected' | 'uncertain'
+
+/** Reviewer semantic verdict. Must not carry authorization, lease, endpoint, or install spec. */
+export interface ReviewerVerdict {
+  requestId: string
+  reviewId: string
+  requirementHash: string
+  snapshotDigest: string
+  candidateDigest: string
+  reviewerSessionId: string
+  reviewerVersion: string
+  decision: ReviewerVerdictDecision
+  evidence: string[]
+  conditions: string[]
+  semanticCoverage: ReviewFit
+  createdAt: string
+}
+
 export interface ReviewRecord {
   schemaVersion: 1
   id: string
@@ -172,6 +253,11 @@ export interface ReviewRecord {
   findings: ReviewFinding[]
   recommendation: ReviewRecommendation
   installSpec: string | null
+  /** Present on current reviews. Absent on old readable records, which are never a reviewer approval. */
+  mechanicalFacts?: MechanicalFacts
+  reviewerRequestId?: string
+  reviewerRequest?: ReviewerRequest
+  reviewerVerdict?: ReviewerVerdict
 }
 
 export interface ReviewResult extends ReviewRecord {
@@ -183,6 +269,13 @@ export type InstallationRetention = 'temporary' | 'persistent'
 export type InstallationState = 'installed' | 'not_installed' | 'unknown'
 /** Public install outcome: success only after Loader/runtime verification. */
 export type InstallOutcome = 'pending' | 'verified' | 'failed_absent' | 'recovery_required'
+
+export interface HotReloadEvidence {
+  attempted: boolean
+  loaded: boolean
+  method: 'already-loaded' | 'loader' | 'direct-import' | 'unsupported' | 'failed'
+  reason: string
+}
 
 export interface VerificationEvidence {
   attempted: boolean
@@ -196,8 +289,43 @@ export interface VerificationEvidence {
   receiptPath?: string
   taskResultObserved: boolean
   taskResultSha256?: string
+  /** Diagnostic substring observation only. Never Host verified truth. */
   taskResultMatchedExpectation?: boolean
+  observedProvider?: string
+  observedModel?: string
+  routeMatchedExpectation?: boolean
   reason: string
+}
+
+export type VerifierRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out'
+export type VerificationVerdictDecision = 'verified' | 'rejected' | 'uncertain'
+
+/** Host-owned semantic verification job. Must not carry authorization or an install spec. */
+export interface VerifierRequest {
+  id: string
+  installationId: string
+  reviewId: string
+  requirement: string
+  evidenceDigest: string
+  status: VerifierRequestStatus
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
+}
+
+/** Independent semantic completion verdict. Must not carry authorization, lease, endpoint, or install spec. */
+export interface VerificationVerdict {
+  requestId: string
+  installationId: string
+  reviewId: string
+  requirementHash: string
+  evidenceDigest: string
+  verifierSessionId: string
+  verifierVersion: string
+  decision: VerificationVerdictDecision
+  evidence: string[]
+  conditions: string[]
+  createdAt: string
 }
 
 export interface InstallationRecord {
@@ -220,8 +348,12 @@ export interface InstallationRecord {
   loaded: boolean
   verified: boolean
   restartRequired: boolean
+  hotReload?: HotReloadEvidence
   removed: boolean
   verification: VerificationEvidence
+  verifierRequestId?: string
+  verifierRequest?: VerifierRequest
+  verificationVerdict?: VerificationVerdict
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
     code: string
@@ -249,8 +381,116 @@ export interface RemoveInput {
   installationId: string
 }
 
-/** Public resume input is intentionally narrow: Host owns the decision facts. */
+/** Model-interpreted final authorization intent, bounded by the current interrupt. */
+export interface AuthorizationDecisionInput {
+  action: AuthorizationAction
+  /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
+  candidateId?: string
+  /** Optional for use_this. Defaults to temporary when the user did not express a preference. */
+  retention?: InstallationRetention
+}
+
+/** Public resume input keeps model interpretation separate from Host-owned facts. */
 export interface ResumeInput {
   workflowId: string
   interruptId: string
+  /** Model-interpreted read-only navigation. Never grants a side effect. */
+  navigation?: NavigationInput
+  /** Model-interpreted final action. Host validates it against the current interrupt and fresh user turn. */
+  decision?: AuthorizationDecisionInput
 }
+
+/**
+ * Host-owned selection evidence. Minted only after a fresh user turn is consumed.
+ * ResumeInput must not accept a model-forged copy of this object.
+ */
+export interface SelectionReceipt {
+  id: string
+  workflowId: string
+  interruptId: string
+  snapshotDigest: string
+  kind: NavigationKind | AuthorizationAction
+  candidateIds: string[]
+  candidateDigests: Record<string, string>
+  hostTurnId: string
+  ownerSessionId: string
+  bootId: string
+  createdAt: string
+}
+
+export type ExecutionEndpoint =
+  | { kind: 'none' }
+  | { kind: 'exact_tool'; name: string }
+  | { kind: 'bridge'; tools: readonly string[]; target: string }
+
+export interface FrozenCandidateIdentity {
+  kind: 'local' | 'remote'
+  localKind?: LocalCapabilityCandidate['kind']
+  name: string
+  identity: string
+  availability?: CandidateAvailability
+  fit?: 'full' | 'partial' | 'none'
+  repository?: string
+}
+
+/** Host-derived from SelectionReceipt + the interrupt-bound candidate snapshot. */
+export interface ActionCommitment {
+  id: string
+  selectionReceiptId: string
+  snapshotDigest: string
+  candidateId?: string
+  candidateDigest?: string
+  frozenIdentity: FrozenCandidateIdentity | { kind: 'none' }
+  requestedAction: NavigationKind | AuthorizationAction
+  retention?: InstallationRetention
+  endpoint: ExecutionEndpoint
+  allowedParameterConstraints: {
+    /** Exact bridge/tool target; tool_search/tool_call may not widen past this name. */
+    exactTarget?: string
+  }
+  createdAt: string
+  /** Host-frozen review identity. Reviewer output cannot mint these fields. */
+  reviewId?: string
+  reviewSnapshotDigest?: string
+  reviewerRequestId?: string
+  reviewerVerdictDigest?: string
+  frozenManifestDigest?: string
+  frozenInstallSpec?: string | null
+  targetProfile?: string
+}
+
+/**
+ * Current-turn execution grant. Bound to commitment + session/boot/workflow + turn watermark.
+ * Host may silently re-sign the next continuation only when receipt, commitment, and endpoint are unchanged.
+ */
+export interface ExecutionLease {
+  id: string
+  commitmentId: string
+  selectionReceiptId: string
+  workflowId: string
+  ownerSessionId: string
+  bootId: string
+  hostTurnId: string
+  interruptId: string
+  snapshotDigest: string
+  candidateId?: string
+  candidateDigest?: string
+  requestedAction: ActionCommitment['requestedAction']
+  endpoint: ExecutionEndpoint
+  allowedParameterConstraints: ActionCommitment['allowedParameterConstraints']
+  createdAt: string
+}
+
+export const BRIDGE_EXECUTION_TOOLS = ['tool_search', 'tool_describe', 'tool_call'] as const
+export const FORGED_RESUME_HOST_KEYS = [
+  'selectionReceipt',
+  'actionCommitment',
+  'executionLease',
+  'commitment',
+  'lease',
+  'endpoint',
+  'reviewerVerdict',
+  'verificationVerdict',
+  'verifierVerdict',
+  'verifierRequest',
+] as const

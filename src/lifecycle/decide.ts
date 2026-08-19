@@ -1,10 +1,9 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  DecisionAction,
+  AuthorizationDecisionInput,
+  AuthorizationAction,
   DecisionPhase,
   DecisionReceipt,
-  InstallationRetention,
-  RemotePluginCandidate,
   ResolutionAuthorization,
   ReviewRecord,
   WorkflowOptionId,
@@ -14,22 +13,8 @@ import { EvolutionError } from '../errors.js'
 import { hashObject } from '../state/hashes.js'
 import type { InterruptPayload, ValidatedResume, WorkflowPendingInstall } from '../workflow/contracts.js'
 
-const CREATE_NEW_RE = /新建|从零|自己写|自己做|create[_ -]?new|from scratch|没有合适|都不行|都不想用|都不合适/iu
-const STOP_RE = /先停|停下|停止|取消|算了|stop for now|\bstop\b|\bcancel\b/iu
-const USE_THIS_RE = /用这个|就用这个|使用这个|use[_ -]?this|install this|采用这个/iu
-const MODIFY_THIS_RE = /在这个上改|改进这个|改这个|improve this|modify[_ -]?this|patch this/iu
-const USE_LOCAL_RE = /用已有|本地能力|use[_ -]?(?:the[_ -]?)?local|use existing/iu
-const SEARCH_MORE_RE = /继续找|再搜|search[_ -]?more|search anyway|找插件/iu
-const INSPECT_RE = /审查|先看|具体看看|inspect|review|看看/iu
-const PERSISTENT_RE = /永久|持久|persistent|keep installed/iu
-const TEMPORARY_RE = /临时|试用|temporary|trial/iu
-
 export function prefersChinese(text: string): boolean {
   return /[\p{Script=Han}]/u.test(text)
-}
-
-export function normalizeDecisionText(value: string): string {
-  return value.normalize('NFKC').trim()
 }
 
 export function reviewIdentity(review: ReviewRecord): string {
@@ -72,9 +57,9 @@ export function assertUseThisReceipt(
 
 export function newDecisionReceipt(
   phase: DecisionReceipt['phase'],
-  action: DecisionAction,
+  action: AuthorizationAction,
   selectedRepositories: string[],
-  extras: Partial<Pick<DecisionReceipt, 'reviewId' | 'reviewIdentity' | 'userMessage' | 'optionId' | 'interruptId' | 'hostTurnId'>> = {},
+  extras: Partial<Pick<DecisionReceipt, 'reviewId' | 'reviewIdentity' | 'userMessage' | 'optionId' | 'interruptId' | 'hostTurnId' | 'candidateId' | 'retention' | 'targetProfile' | 'snapshotDigest'>> = {},
 ): DecisionReceipt {
   const createdAt = new Date().toISOString()
   return {
@@ -99,13 +84,13 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'selection_required') {
     return zh
-      ? '先在对话里说明每个候选：仓库名、它是干什么的、为何被搜到、星数。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume，只传 workflow_id 与 interrupt_id。'
-      : 'Present each candidate in chat (repository, what it does, why it matched, stars). Do not call ask_user. After the user replies, call capability_workflow_resume with only workflow_id and interrupt_id.'
+      ? '精简展示带序号的候选及推荐审查计划。等用户回话后，把“两个都、前两个、全部、另一个、第二个”等自然语言映射为当前快照 candidate_id，并用 navigation 调用 capability_workflow_resume。不要调用 ask_user。'
+      : 'Present a concise numbered shortlist and recommended review plan. After the user replies, map natural language such as both, the first two, all, the other one, or the second one to current snapshot candidate IDs and call capability_workflow_resume with navigation. Do not call ask_user.'
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '先在对话里讲清这次审查：匹配程度、风险、缺什么、主要发现。不要调用 ask_user。等用户回话后，再调用 capability_workflow_resume（只用 workflow_id 与 interrupt_id）。用户选择“在这个上改”时，不要在 resume 前追加设计问卷，也不要声称修改会立即安装；Host 会把真实用户回合交给子会话，修改后重新审查并再次确认。'
-      : 'Explain the review in chat (fit, risk, missing pieces, findings). Do not call ask_user. After the user replies, call capability_workflow_resume with only workflow_id and interrupt_id. When the user chooses to modify this candidate, do not add a design questionnaire before resume or claim modification installs immediately; the Host relays the authentic user turn to the child, then returns the result for a fresh review and confirmation.'
+      ? '精简比较审查结论，只展示当前合法动作。安全发现只是静态观察：合并展示来源，不得推断用途、必要性、实际运行、命令目标或回调服务；事实未建立时明确说未知。用户要比较其它候选时，用 candidate_id 导航继续审查；用户明确选择安装、修改、新建或先停时，由你理解用户语义并把结构化 decision（action、必要时 candidate_id、可选 retention）传给 capability_workflow_resume。Host只校验真实新用户回合和当前 interrupt/快照边界，不再用关键词二次猜测。修改后仍会重新审查并再次确认。'
+      : 'Compare review outcomes concisely and show only legal actions. Security findings are static observations: group their sources and never infer purpose, necessity, runtime execution, command targets, or callback-server behavior; say unknown when the facts do not establish it. For another comparison, resume with candidate-ID navigation. For an explicit install, modify, create, or stop choice, interpret the user semantically and pass a structured decision (action, candidate_id when required, and optional retention) to capability_workflow_resume. The Host validates the fresh authentic turn and current interrupt/snapshot boundaries instead of re-parsing keywords. Modified sources are reviewed again before a fresh confirmation.'
   }
   if (authorization.state === 'create_authorized') {
     return zh
@@ -137,7 +122,7 @@ export function nextStepForAuthorization(
 
 export function authorizationFromDecision(
   resolutionId: string,
-  action: DecisionAction,
+  action: AuthorizationAction,
   selectedRepositories: string[],
   review?: ReviewRecord,
 ): ResolutionAuthorization {
@@ -149,16 +134,6 @@ export function authorizationFromDecision(
       state: 'create_authorized',
       resolutionId,
       reason: 'The user allowed one new plugin to be created in a managed source.',
-    }
-  }
-  if (action === 'use_local') {
-    return { state: 'reuse_local', resolutionId, reason: 'The user chose the existing local capability.' }
-  }
-  if (action === 'search_more') {
-    return {
-      state: 'selection_required',
-      resolutionId,
-      reason: 'The user asked to search for plugins again.',
     }
   }
   if (action === 'use_this' && review) {
@@ -200,71 +175,49 @@ export function assertOptionAllowed(interrupt: InterruptPayload, optionId: Workf
   }
 }
 
-export function resolveRepositoryFromMessage(
-  userMessage: string,
-  remotes: readonly RemotePluginCandidate[],
-): string[] {
-  const matches: string[] = []
-  for (const remote of remotes) {
-    const repo = remote.repository
-    const shortName = repo.split('/')[1] ?? repo
-    const patterns = [repo, shortName]
-    if (patterns.some((pattern) => pattern && userMessage.toLowerCase().includes(pattern.toLowerCase()))) {
-      matches.push(repo)
+export function resolveDecisionTarget(
+  decision: AuthorizationDecisionInput,
+  interrupt: InterruptPayload,
+): { repositories: string[]; candidateId?: string } {
+  assertOptionAllowed(interrupt, decision.action)
+  if (decision.action !== 'use_this' && decision.retention !== undefined) {
+    throw new EvolutionError('invalid_input', `${decision.action} does not accept retention`)
+  }
+  const option = interrupt.options.find((item) => item.id === decision.action)!
+  const needsCandidate = decision.action === 'use_this' || decision.action === 'modify_this'
+  if (!needsCandidate) {
+    if (decision.candidateId) {
+      throw new EvolutionError('invalid_input', `${decision.action} does not accept candidate_id`)
     }
+    return { repositories: [] }
   }
-  return [...new Set(matches)]
+  const candidateId = decision.candidateId?.trim()
+  if (!candidateId) {
+    throw new EvolutionError('invalid_input', `${decision.action} requires candidate_id from the current option`)
+  }
+  if (!option.candidateIds?.includes(candidateId)) {
+    throw new EvolutionError('invalid_input', 'candidate_id is not allowed for this decision action', {
+      action: decision.action,
+      candidateId,
+      allowedCandidateIds: option.candidateIds ?? [],
+    })
+  }
+  const snapshot = Array.isArray(interrupt.facts.candidateSnapshot)
+    ? interrupt.facts.candidateSnapshot as Array<{ id?: unknown; repository?: unknown }>
+    : []
+  const candidate = snapshot.find((item) => item.id === candidateId)
+  if (!candidate) {
+    throw new EvolutionError('invalid_input', 'candidate_id is outside the current candidate snapshot', { candidateId })
+  }
+  return {
+    candidateId,
+    repositories: typeof candidate.repository === 'string' ? [candidate.repository] : [],
+  }
 }
 
-export function inferOptionId(
-  userMessage: string,
+function resolveInstallFromDecision(
   interrupt: InterruptPayload,
-  remotes: readonly RemotePluginCandidate[],
-): WorkflowOptionId {
-  const allowed = new Set(interrupt.options.map((option) => option.id))
-  const pick = (id: WorkflowOptionId): WorkflowOptionId | undefined => (allowed.has(id) ? id : undefined)
-
-  if (STOP_RE.test(userMessage)) {
-    const stop = pick('stop')
-    if (stop) return stop
-  }
-  if (CREATE_NEW_RE.test(userMessage)) {
-    const create = pick('create_new')
-    if (create) return create
-  }
-  if (USE_THIS_RE.test(userMessage)) {
-    const useThis = pick('use_this')
-    if (useThis) return useThis
-  }
-  if (MODIFY_THIS_RE.test(userMessage)) {
-    const modify = pick('modify_this')
-    if (modify) return modify
-  }
-  if (USE_LOCAL_RE.test(userMessage)) {
-    const useLocal = pick('use_local')
-    if (useLocal) return useLocal
-  }
-  if (SEARCH_MORE_RE.test(userMessage)) {
-    const search = pick('search_more')
-    if (search) return search
-  }
-
-  const repos = resolveRepositoryFromMessage(userMessage, remotes)
-  if (repos.length === 1 && pick('inspect') && (INSPECT_RE.test(userMessage) || interrupt.kind === 'await_selection')) {
-    return 'inspect'
-  }
-  if (repos.length === 1 && pick('inspect') && interrupt.kind === 'await_confirmation' && INSPECT_RE.test(userMessage)) {
-    return 'inspect'
-  }
-
-  throw new EvolutionError('invalid_input', 'Could not resolve a workflow decision from the latest host user turn', {
-    allowed: [...allowed],
-  })
-}
-
-export function resolveInstallFromHost(
-  interrupt: InterruptPayload,
-  userMessage: string,
+  decision: AuthorizationDecisionInput,
   requirement: string,
 ): WorkflowPendingInstall {
   const profiles = Array.isArray(interrupt.facts.installProfiles)
@@ -277,79 +230,52 @@ export function resolveInstallFromHost(
       'use_this requires at least one AutoEvo-capable install profile in the interrupt facts',
     )
   }
-  let retention: InstallationRetention = 'temporary'
-  if (PERSISTENT_RE.test(userMessage) && !TEMPORARY_RE.test(userMessage)) retention = 'persistent'
-  if (TEMPORARY_RE.test(userMessage)) retention = 'temporary'
-  if (!PERSISTENT_RE.test(userMessage) && !TEMPORARY_RE.test(userMessage)) {
-    // Default temporary with a verification task derived from the requirement.
-    retention = 'temporary'
+  const retention = decision.retention ?? 'temporary'
+  if (retention !== 'temporary' && retention !== 'persistent') {
+    throw new EvolutionError('invalid_input', 'decision retention must be temporary or persistent')
   }
   return {
     targetProfile,
     retention,
-    ...(retention === 'temporary' ? { verificationTask: requirement } : {}),
+    verificationTask: requirement,
   }
 }
 
-export function phaseForOption(optionId: WorkflowOptionId): DecisionPhase {
-  return optionId === 'use_this' || optionId === 'modify_this' ? 'gate2' : 'gate1'
+export function phaseForOption(_optionId: AuthorizationAction): DecisionPhase {
+  return 'gate2'
 }
 
-export function resolveDecisionFromHost(input: {
+export function resolveDecisionFromModel(input: {
   guard: CreationGuard
   agent: Agent | undefined
   interrupt: InterruptPayload
-  remotes: readonly RemotePluginCandidate[]
+  decision: AuthorizationDecisionInput
   requirement: string
   reviewId?: string
 }): ValidatedResume {
+  const target = resolveDecisionTarget(input.decision, input.interrupt)
+  const install = input.decision.action === 'use_this'
+    ? resolveInstallFromDecision(input.interrupt, input.decision, input.requirement)
+    : undefined
   const turn = input.guard.consumeDecisionTurn(input.agent, input.interrupt)
-  const userMessage = normalizeDecisionText(turn.message)
+  const userMessage = turn.message.normalize('NFKC').trim()
   if (!userMessage || userMessage.length > 2_000) {
     throw new EvolutionError('invalid_input', 'host user turn must contain 1 to 2000 characters')
   }
-  const optionId = inferOptionId(userMessage, input.interrupt, input.remotes)
-  assertOptionAllowed(input.interrupt, optionId)
-
-  let repositories: string[] = []
-  if (optionId === 'inspect') {
-    repositories = resolveRepositoryFromMessage(userMessage, input.remotes)
-    if (repositories.length !== 1) {
-      throw new EvolutionError('invalid_input', 'inspect requires exactly one repository named in the user turn')
-    }
-  } else if (optionId === 'use_this' || optionId === 'modify_this') {
-    const named = resolveRepositoryFromMessage(userMessage, input.remotes)
-    repositories = named.length > 0 ? named : []
-  }
-
-  if (optionId === 'use_this') {
-    return {
-      optionId,
-      userMessage,
-      hostTurnId: turn.turnId,
-      interruptId: input.interrupt.interruptId,
-      repositories,
-      ...(input.reviewId ? { reviewId: input.reviewId } : {}),
-      install: resolveInstallFromHost(input.interrupt, userMessage, input.requirement),
-    }
-  }
-
   return {
-    optionId,
+    optionId: input.decision.action,
     userMessage,
     hostTurnId: turn.turnId,
     interruptId: input.interrupt.interruptId,
-    repositories,
+    snapshotDigest: input.interrupt.snapshotDigest,
+    ...(target.candidateId ? { candidateId: target.candidateId } : {}),
+    repositories: target.repositories,
     ...(input.reviewId ? { reviewId: input.reviewId } : {}),
+    ...(install ? { install } : {}),
   }
 }
 
 export const _testing = {
-  CREATE_NEW_RE,
-  STOP_RE,
-  USE_THIS_RE,
-  MODIFY_THIS_RE,
-  inferOptionId,
-  resolveRepositoryFromMessage,
-  resolveInstallFromHost,
+  resolveDecisionTarget,
+  resolveInstallFromDecision,
 }

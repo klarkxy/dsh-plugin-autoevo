@@ -57,7 +57,7 @@ function marketplaceCtx(): Context {
   return {
     tools: {
       schemas: () => [],
-      get: () => undefined,
+      get: (name: string) => name === 'find_dsh_plugin' ? {} : undefined,
       execute: async () => ({ isError: false, value: { results: [] }, content: [] }),
       register: () => undefined,
     },
@@ -76,14 +76,8 @@ function resolution(requirement = 'calculator'): ResolutionRecord {
     createdAt: '2026-08-17T00:00:00.000Z',
     requirement,
     cwd: process.cwd(),
-    decision: 'use_local',
-    localCandidates: [{
-      kind: 'tool',
-      name: 'pwsh',
-      description: 'Run a PowerShell command',
-      availability: 'available',
-      confidence: 0.9,
-    }],
+    decision: 'none',
+    localCandidates: [],
     remoteCandidates: [],
     remoteDiscoveryComplete: true,
     authorization: { state: 'selection_required', resolutionId: id, reason: 'wait' },
@@ -158,6 +152,7 @@ describe('interrupt binding and host-turn decisions', () => {
     const stopped = await engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'stop' },
     }, turn)
     expect(stopped.workflow.cursor).toBe('stopped')
   })
@@ -175,6 +170,7 @@ describe('interrupt binding and host-turn decisions', () => {
     await expect(engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'stop' },
     }, other)).rejects.toThrow(/different owner session/i)
   })
 
@@ -188,9 +184,9 @@ describe('interrupt binding and host-turn decisions', () => {
     const started = await engine.start('calculator', turn)
     const interruptId = started.workflow.interrupt!.interruptId
     remember(guard, turn.agent, '先停')
-    await engine.resume({ workflowId: started.workflow.id, interruptId }, turn)
+    await engine.resume({ workflowId: started.workflow.id, interruptId, decision: { action: 'stop' } }, turn)
     remember(guard, turn.agent, '先停')
-    await expect(engine.resume({ workflowId: started.workflow.id, interruptId }, turn))
+    await expect(engine.resume({ workflowId: started.workflow.id, interruptId, decision: { action: 'stop' } }, turn))
       .rejects.toThrow(/already consumed|not waiting/i)
   })
 
@@ -207,6 +203,7 @@ describe('interrupt binding and host-turn decisions', () => {
     await expect(engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'stop' },
     }, turn)).rejects.toThrow(/fresh user turn|stale|previous-turn/i)
   })
 
@@ -226,6 +223,7 @@ describe('interrupt binding and host-turn decisions', () => {
     await expect(engine2.resume({
       workflowId: started.workflow.id,
       interruptId: oldInterrupt,
+      decision: { action: 'stop' },
     }, turn)).rejects.toThrow(/service restart|reissued interrupt/i)
 
     const reused = await engine2.start('calculator', turn)
@@ -242,21 +240,22 @@ describe('interrupt binding and host-turn decisions', () => {
     const engine = new WorkflowEngine(store, guard, host(store, resolution()))
     const turn = exec()
     const started = await engine.start('calculator', turn)
-    const resolutionId = started.resolution!.id
-    const mutated = await store.getResolution(resolutionId)
-    mutated.remoteCandidates = [{
-      repository: 'acme/forged',
+    const mutated = await store.getWorkflow(started.workflow.id)
+    mutated.candidateSnapshot = [{
+      id: `candidate_${'f'.repeat(24)}`,
+      index: 1,
+      kind: 'remote',
       name: 'forged',
-      description: 'injected',
-      stars: 99,
-      updatedAt: null,
-      topics: [],
+      identity: 'acme/forged',
+      repository: 'acme/forged',
+      digest: 'f'.repeat(64),
     }]
-    await store.put('resolutions', mutated)
+    await store.put('workflows', mutated)
     remember(guard, turn.agent, '先停')
     await expect(engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'stop' },
     }, turn)).rejects.toThrow(/snapshot digest mismatch/i)
   })
 

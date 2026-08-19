@@ -21,7 +21,7 @@ class PackagedAdapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
-    const text = 'AUTOEVO_PACKAGED_V5_SESSION_OK'
+    const text = 'AUTOEVO_PACKAGED_V9_SESSION_OK'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -69,7 +69,7 @@ async function run(ctx, config) {
     const prompt = await handle.agent.ctx.systemPrompt.assemble({ agent: handle.agent, signal: AbortSignal.timeout(5_000) })
     const policy = prompt.sections.find((section) => section.name === 'autoevo:reuse-policy')
     if (!policy || !/interrupt_id/u.test(policy.text) || !/workspace-write/u.test(policy.text)) {
-      throw new Error('V5 AutoEvo policy was not active in the evolution Agent')
+      throw new Error('V9 AutoEvo policy was not active in the evolution Agent')
     }
     await handle.agent.whenIdle()
     const firstSeq = handle.agent.session.seq
@@ -85,7 +85,7 @@ async function run(ctx, config) {
       if (!eventTypes.includes(required)) throw new Error(`missing durable event ${required}`)
     }
     const taskResult = lastAssistantText(handle.agent.session)
-    if (taskResult !== 'AUTOEVO_PACKAGED_V5_SESSION_OK') throw new Error(`unexpected task result ${JSON.stringify(taskResult)}`)
+    if (taskResult !== 'AUTOEVO_PACKAGED_V9_SESSION_OK') throw new Error(`unexpected task result ${JSON.stringify(taskResult)}`)
     process.stdout.write(`${JSON.stringify({
       marker: taskResult,
       preset: 'evolution',

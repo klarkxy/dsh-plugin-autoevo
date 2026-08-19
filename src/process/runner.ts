@@ -56,6 +56,24 @@ function combinedSignal(signal: AbortSignal | undefined, timeoutMs: number): Abo
   return signal ? AbortSignal.any([signal, timeout]) : timeout
 }
 
+function signalFailure(command: string, signal: AbortSignal): EvolutionError {
+  const reasonName = signal.reason instanceof Error ? signal.reason.name : undefined
+  const timedOut = reasonName === 'TimeoutError'
+  return new EvolutionError(
+    'command_failed',
+    timedOut ? `${command} timed out` : `${command} was cancelled`,
+    {
+      command,
+      cancelled: !timedOut,
+      timedOut,
+    },
+  )
+}
+
+function throwIfCommandAborted(command: string, signal: AbortSignal): void {
+  if (signal.aborted) throw signalFailure(command, signal)
+}
+
 function effectiveEnvironment(
   command: string,
   requested: NodeJS.ProcessEnv = {},
@@ -104,9 +122,11 @@ export class DshCommandRunner implements CommandRunner {
     const lookupEnv = Object.fromEntries(Object.entries(effectiveEnv)
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     let executable: string
+    throwIfCommandAborted(command, signal)
     try {
       executable = await this.subprocess.resolveExecutable(command, lookupEnv, signal)
     } catch (error) {
+      throwIfCommandAborted(command, signal)
       throw new EvolutionError('command_failed', `Executable is unavailable: ${command}`, {
         command,
         cause: error instanceof Error ? error.message : String(error),
@@ -114,6 +134,7 @@ export class DshCommandRunner implements CommandRunner {
     }
 
     let handle
+    throwIfCommandAborted(command, signal)
     try {
       handle = this.subprocess.spawn({
         argv: argvForResolvedExecutable(executable, args),
@@ -128,6 +149,7 @@ export class DshCommandRunner implements CommandRunner {
         },
       })
     } catch (error) {
+      throwIfCommandAborted(command, signal)
       throw new EvolutionError('command_failed', `Failed to start ${command}`, {
         command,
         cause: error instanceof Error ? error.message : String(error),
@@ -138,11 +160,13 @@ export class DshCommandRunner implements CommandRunner {
     try {
       outcome = await handle.done
     } catch (error) {
+      throwIfCommandAborted(command, signal)
       throw new EvolutionError('command_failed', `Failed to start ${command}`, {
         command,
         cause: error instanceof Error ? error.message : String(error),
       })
     }
+    throwIfCommandAborted(command, signal)
     const stdoutRead = handle.collected.stdout?.readFrom(0)
     const stderrRead = handle.collected.stderr?.readFrom(0)
     if (stdoutRead?.lossy || stderrRead?.lossy) {
@@ -165,4 +189,4 @@ export class DshCommandRunner implements CommandRunner {
   }
 }
 
-export const _testing = { effectiveEnvironment, argvForResolvedExecutable }
+export const _testing = { effectiveEnvironment, argvForResolvedExecutable, signalFailure }

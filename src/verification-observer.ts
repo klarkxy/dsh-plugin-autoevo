@@ -9,12 +9,16 @@ export interface Config {
   receiptPath: string
   expectedTools: string[]
   expectedText?: string
+  expectedProvider?: string
+  expectedModel?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
   receiptPath: Schema.string().required(),
   expectedTools: Schema.array(Schema.string()).default([]),
   expectedText: Schema.string().default(''),
+  expectedProvider: Schema.string().default(''),
+  expectedModel: Schema.string().default(''),
 })
 
 export const name = 'dsh-plugin-autoevo-verification-observer'
@@ -29,6 +33,8 @@ type ReceiptEvent = {
   kind: 'task/result'
   resultSha256: string
   matchedExpectation?: boolean
+  provider?: string
+  model?: string
 }
 
 function appendReceipt(receiptPath: string, event: ReceiptEvent): void {
@@ -49,6 +55,7 @@ export function apply(ctx: Context, config: Config): void {
   const expected = new Set(config.expectedTools)
   const callSessions = new Map<string, string>()
   const successfulSessions = new Set<string>()
+  const routes = new Map<string, { provider: string; model: string }>()
   const finalByTurn = new Map<string, { resultSha256: string; matchedExpectation?: boolean }>()
   mkdirSync(path.dirname(config.receiptPath), { recursive: true })
 
@@ -79,6 +86,13 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   ctx.on('session/event', (session, event: SessionEvent) => {
+    if (event.type === 'request/context') {
+      routes.set(String(session.id), {
+        provider: event.data.provider,
+        model: event.data.model,
+      })
+      return
+    }
     if (event.type === 'assistant/message') {
       if (expected.size > 0 && !successfulSessions.has(String(session.id))) return
       const text = event.data.message.content
@@ -98,7 +112,12 @@ export function apply(ctx: Context, config: Config): void {
     const candidate = finalByTurn.get(turnKey)
     finalByTurn.delete(turnKey)
     if (event.data.reason.kind === 'completed' && candidate) {
-      appendReceipt(config.receiptPath, { kind: 'task/result', ...candidate })
+      const route = routes.get(String(session.id))
+      appendReceipt(config.receiptPath, {
+        kind: 'task/result',
+        ...candidate,
+        ...(route ? route : {}),
+      })
     }
   })
 }

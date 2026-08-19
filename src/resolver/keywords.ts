@@ -98,11 +98,15 @@ interface CapabilityAnchorDefinition {
   patterns: RegExp[]
   aliases: string[]
   weight: number
+  /** Product names identify a target, not the operation the user needs. */
+  product?: boolean
 }
 
 const ANCHOR_DEFINITIONS: ReadonlyArray<CapabilityAnchorDefinition> = [
-  { key: 'grok', patterns: [/\bgrok(?:\s+build)?\b/iu, /\bxai\b/iu], aliases: ['grok build', 'grok', 'xai'], weight: 1.4 },
-  { key: 'codex', patterns: [/\bopenai\s+codex\b/iu, /\bcodex(?:\s+cli)?\b/iu], aliases: ['openai codex', 'codex'], weight: 1.4 },
+  { key: 'grok', patterns: [/\bgrok(?:\s+build)?\b/iu, /\bxai\b/iu], aliases: ['grok build', 'grok', 'xai'], weight: 1.4, product: true },
+  { key: 'codex', patterns: [/\bopenai\s+codex\b/iu, /\bcodex(?:\s+cli)?\b/iu], aliases: ['openai codex', 'codex'], weight: 1.4, product: true },
+  { key: 'execution', patterns: [/\b(?:call|invoke|run|execute)\b/iu, /调用/u, /执行/u], aliases: ['call', 'invoke', 'run', 'execute', '调用', '执行'], weight: 0.8 },
+  { key: 'auto-review', patterns: [/\bauto(?:matic)?\s+review\b/iu, /自动(?:审查|评审)/u], aliases: ['auto review', 'automatic review', 'automated review', '自动审查', '自动评审'], weight: 0.95 },
   { key: 'powershell', patterns: [/powershell/iu, /pwsh/iu, /命令行/u, /shell command/iu], aliases: ['powershell', 'pwsh', '命令行', 'shell command'], weight: 0.9 },
   { key: 'conversation', patterns: [/聊天记录/u, /对话记录/u, /整个对话/u, /当前对话/u, /conversation\s+(?:history|record)/iu, /chat\s+(?:history|record|transcript)/iu, /transcript/iu], aliases: ['聊天记录', '对话记录', '整个对话', '当前对话', 'conversation', 'conversation history', 'chat history', 'chat transcript', 'transcript'], weight: 0.95 },
   { key: 'export', patterns: [/导出/u, /转化成/u, /转换成/u, /export/iu, /render/iu, /convert/iu], aliases: ['导出', '转化成', '转换成', 'export', 'render', 'convert'], weight: 0.9 },
@@ -125,6 +129,7 @@ export interface CapabilityAnchor {
   aliases: string[]
   weight: number
   generic: boolean
+  product: boolean
 }
 
 export function normalizeSearchText(value: string): string {
@@ -246,6 +251,7 @@ export function capabilityAnchors(requirement: string): CapabilityAnchor[] {
       aliases: definition.aliases.map(normalizeSearchText).filter(Boolean),
       weight: definition.weight,
       generic: false,
+      product: definition.product ?? false,
     })
   }
 
@@ -262,6 +268,7 @@ export function capabilityAnchors(requirement: string): CapabilityAnchor[] {
       aliases: [normalizedTerm],
       weight: generic ? 0.12 : 0.75,
       generic,
+      product: false,
     })
   }
   return anchors

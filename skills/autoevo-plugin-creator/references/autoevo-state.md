@@ -11,7 +11,7 @@
 | `modify_review` | The user chose to improve this review. | Modify minimally, then resume with the local checkout path. The workflow derives `base_review_id`. |
 | `market_required` | `find_dsh_plugin` is not installed. AutoEvo installs `dsh-find-plugin` by script after one-time approval. | Approve if asked, restart DSH, then call `capability_workflow` again. Do not review the marketplace as the requested capability and do not create a replacement plugin. |
 | `stopped` | The user stopped or cancelled. | Do not install or create. |
-| `scratch_ready` | The user explicitly allowed one new plugin. | Inspect Cordis contracts and make one new definition only if that is still what they want. |
+| `create_authorized` | The user explicitly allowed one new plugin. | Continue only in the Host-launched workspace-write child. The parent session must not `cordis_define(kind:new)`. |
 
 The grant belongs to the current Agent and current resolution. Starting another workflow revokes it. A successful new definition consumes it; a technical define failure restores it for retry. Do not retry after an approval rejection without a new user decision.
 

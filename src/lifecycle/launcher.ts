@@ -20,6 +20,25 @@ interface ReceiptEvidence {
   taskResultObserved: boolean
   taskResultSha256?: string
   taskResultMatchedExpectation?: boolean
+  observedProvider?: string
+  observedModel?: string
+}
+
+/** Host mechanical verification truth. Substring expectation is never used here. */
+export function hostMechanicalSuccess(input: {
+  sourceMatched: boolean
+  verification: Pick<VerificationEvidence, 'attempted' | 'exitCode' | 'expectedTools' | 'calledTools' | 'resultTools' | 'failedTools' | 'taskResultObserved' | 'routeMatchedExpectation'>
+}): boolean {
+  const evidence = input.verification
+  if (!input.sourceMatched || !evidence.attempted || evidence.exitCode !== 0 || !evidence.taskResultObserved) {
+    return false
+  }
+  if (evidence.routeMatchedExpectation === false) return false
+  const expected = evidence.expectedTools
+  if (expected.length === 0) return true
+  return expected.every((name) => evidence.calledTools.includes(name)
+    && evidence.resultTools.includes(name)
+    && !evidence.failedTools.includes(name))
 }
 
 async function collectSessionFiles(root: string): Promise<SessionFile[]> {
@@ -57,11 +76,14 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
   }
 
   const calls = new Map<string, string>()
+  const latestCall = new Map<string, string>()
+  const outcomes = new Map<string, boolean>()
   const called = new Set<string>()
   const successful = new Set<string>()
-  const failed = new Set<string>()
   let taskResultSha256: string | undefined
   let taskResultMatchedExpectation: boolean | undefined
+  let observedProvider: string | undefined
+  let observedModel: string | undefined
   for (const line of body.split(/\r?\n/u)) {
     if (!line.trim()) continue
     let value: unknown
@@ -75,29 +97,44 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     if (event.kind === 'task/result' && typeof event.resultSha256 === 'string' && /^[a-f0-9]{64}$/u.test(event.resultSha256)) {
       taskResultSha256 = event.resultSha256
       taskResultMatchedExpectation = typeof event.matchedExpectation === 'boolean' ? event.matchedExpectation : undefined
+      if (typeof event.provider === 'string' && event.provider.length > 0) observedProvider = event.provider
+      if (typeof event.model === 'string' && event.model.length > 0) observedModel = event.model
       continue
     }
     if (typeof event.callId !== 'string' || typeof event.name !== 'string') continue
     if (event.kind === 'tool/call') {
       calls.set(event.callId, event.name)
+      latestCall.set(event.name, event.callId)
       called.add(event.name)
       continue
     }
     if (event.kind !== 'tool/result' || calls.get(event.callId) !== event.name) continue
     if (event.isError === false) successful.add(event.name)
-    else if (event.isError === true) failed.add(event.name)
+    if (typeof event.isError === 'boolean') outcomes.set(event.callId, !event.isError)
   }
   return {
     calledTools: [...called].sort(),
     resultTools: [...successful].sort(),
-    failedTools: [...failed].sort(),
+    // Call order, rather than asynchronous result-arrival order, determines
+    // the final attempt. A latest call without a successful result also fails.
+    failedTools: [...latestCall]
+      .filter(([, callId]) => outcomes.get(callId) !== true)
+      .map(([name]) => name)
+      .sort(),
     taskResultObserved: Boolean(taskResultSha256),
     ...(taskResultSha256 ? { taskResultSha256 } : {}),
     ...(taskResultMatchedExpectation !== undefined ? { taskResultMatchedExpectation } : {}),
+    ...(observedProvider ? { observedProvider } : {}),
+    ...(observedModel ? { observedModel } : {}),
   }
 }
 
-function verificationOverlay(receiptPath: string, expectedTools: readonly string[], expectedText?: string): unknown[] {
+function verificationOverlay(
+  receiptPath: string,
+  expectedTools: readonly string[],
+  expectedText?: string,
+  expectedRoute?: { provider: string; model?: string },
+): unknown[] {
   // tsdown bundles lifecycle code into lib/index.js while emitting the observer
   // as a sibling entry, so this URL must stay relative to that bundled artifact.
   const observerUrl = new URL('./verification-observer.js', import.meta.url).href
@@ -109,6 +146,10 @@ function verificationOverlay(receiptPath: string, expectedTools: readonly string
         receiptPath,
         expectedTools: [...expectedTools],
         ...(expectedText ? { expectedText } : {}),
+        ...(expectedRoute ? {
+          expectedProvider: expectedRoute.provider,
+          ...(expectedRoute.model ? { expectedModel: expectedRoute.model } : {}),
+        } : {}),
       },
     }],
   }]
@@ -245,6 +286,7 @@ export class DshLauncher {
     task: string,
     expectedTools: readonly string[],
     expectedText?: string,
+    expectedRoute?: { provider: string; model?: string },
     signal?: AbortSignal,
   ): Promise<VerificationEvidence> {
     const startedAt = Date.now()
@@ -255,7 +297,7 @@ export class DshLauncher {
     await mkdir(verificationRoot, { recursive: true })
     await writeFile(
       overlayPath,
-      `${JSON.stringify(verificationOverlay(receiptPath, expectedTools, expectedText), null, 2)}\n`,
+      `${JSON.stringify(verificationOverlay(receiptPath, expectedTools, expectedText, expectedRoute), null, 2)}\n`,
       { encoding: 'utf8', flag: 'wx' },
     )
 
@@ -281,9 +323,10 @@ export class DshLauncher {
         && evidence.resultTools.includes(name)
         && !evidence.failedTools.includes(name))
     const taskResultObserved = evidence.taskResultObserved
-    const loadVerified = loadOnly && result.exitCode === 0 && taskResultObserved
-      && evidence.taskResultMatchedExpectation !== false
-    return {
+    const routeMatchedExpectation = !expectedRoute || (evidence.observedProvider === expectedRoute.provider
+      && (!expectedRoute.model
+        || evidence.observedModel === expectedRoute.model))
+    const mechanical: VerificationEvidence = {
       attempted: true,
       task,
       exitCode: result.exitCode,
@@ -298,21 +341,30 @@ export class DshLauncher {
       ...(evidence.taskResultMatchedExpectation !== undefined
         ? { taskResultMatchedExpectation: evidence.taskResultMatchedExpectation }
         : {}),
+      ...(evidence.observedProvider ? { observedProvider: evidence.observedProvider } : {}),
+      ...(evidence.observedModel ? { observedModel: evidence.observedModel } : {}),
+      ...(expectedRoute ? { routeMatchedExpectation } : {}),
+      reason: '',
+    }
+    const succeeded = hostMechanicalSuccess({ sourceMatched: true, verification: mechanical })
+    const diagnostic = evidence.taskResultMatchedExpectation === false
+      ? ' Expected-text substring is diagnostic only and did not match.'
+      : ''
+    return {
+      ...mechanical,
       reason: result.exitCode !== 0
         ? `DSH child exited with code ${result.exitCode ?? 'null'}.`
         : loadOnly && !taskResultObserved
           ? 'The child exited, but the trusted observer did not see a completed-turn final answer.'
-          : loadOnly && evidence.taskResultMatchedExpectation === false
-            ? 'The child completed with a final answer, but it did not contain the required expected text.'
-            : loadVerified
-              ? 'The trusted child overlay observed a completed-turn final answer for a plugin with no expected tools.'
+          : !routeMatchedExpectation
+            ? 'The child completed, but the observed provider/model route did not match the reviewed bundle route.'
+            : succeeded && loadOnly
+              ? `The trusted child overlay observed a completed-turn final answer for a plugin with no expected tools.${diagnostic}`
               : !toolRoundTrip
                 ? 'The child exited, but the trusted observer did not prove a successful target tool round-trip.'
                 : !taskResultObserved
                   ? 'The target tool round-trip succeeded, but no completed-turn final answer was observed.'
-                  : evidence.taskResultMatchedExpectation === false
-                    ? 'The child completed with a final answer, but it did not contain the required expected text.'
-                    : 'The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.',
+                  : `The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.${diagnostic}`,
     }
   }
 }
@@ -329,4 +381,4 @@ export async function assertOwnedTrialPath(candidate: string, trialsRoot: string
   return resolvedCandidate
 }
 
-export const _testing = { readReceipt, verificationOverlay }
+export const _testing = { readReceipt, verificationOverlay, hostMechanicalSuccess }

@@ -5,13 +5,45 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import type { ReviewRecord, VerificationEvidence } from '../../src/contracts.js'
+import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
+import { requirementHashFor } from '../../src/semantic-reviewer.js'
+import { mintVerifierRequest, VERIFIER_VERSION, type SemanticVerifierHost } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
 import { _testing as snapshotTesting } from '../../src/lifecycle/snapshot.js'
+
+function approvingVerifier(): SemanticVerifierHost {
+  return {
+    async run(input) {
+      const request = mintVerifierRequest({
+        installationId: input.installationId,
+        reviewId: input.reviewId,
+        requirement: input.requirement,
+        evidenceDigest: input.evidenceDigest,
+      })
+      const completedAt = '2026-08-19T00:00:10.000Z'
+      return {
+        request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
+        verdict: {
+          requestId: request.id,
+          installationId: input.installationId,
+          reviewId: input.reviewId,
+          requirementHash: requirementHashFor(input.requirement),
+          evidenceDigest: input.evidenceDigest,
+          verifierSessionId: 'verifier-session',
+          verifierVersion: VERIFIER_VERSION,
+          decision: 'verified',
+          evidence: ['completed turn'],
+          conditions: [],
+          createdAt: completedAt,
+        },
+      }
+    },
+  }
+}
 
 const temporary: string[] = []
 
@@ -23,7 +55,7 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
   return {
     schemaVersion: 1,
     id: `review_${'a'.repeat(64)}`,
-    policyVersion: 'v2-2026-08-15',
+    policyVersion: POLICY_VERSION,
     createdAt: '2026-08-15T00:00:00.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
     requirement: 'calculator',
@@ -87,15 +119,16 @@ describe('lifecycle validation', () => {
       targetProfile: 'trial',
       retention: 'temporary',
     })).toThrow(/requires a non-empty verificationTask/u)
-    expect(installTesting.verificationTask({
+    expect(() => installTesting.verificationTask({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
-    })).toBeUndefined()
+    })).toThrow(/requires a non-empty verificationTask/u)
     expect(() => installTesting.verificationExpectation({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
+      verificationTask: 'test calculator',
       verificationExpectedText: '42',
     }, undefined)).toThrow(/requires a verificationTask/u)
   })
@@ -259,6 +292,7 @@ describe('lifecycle validation', () => {
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
+      verificationTask: 'test calculator',
     }, execution())
 
     expect(result).toMatchObject({
@@ -304,7 +338,9 @@ describe('lifecycle validation', () => {
       profileSourceMatches: async () => true,
       verify: async () => loadVerification,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, approvingVerifier(),
+    )
     const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'web',
@@ -337,6 +373,7 @@ describe('lifecycle validation', () => {
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
+      verificationTask: 'test calculator',
     }, execution())
 
     expect(result).toMatchObject({
@@ -471,7 +508,7 @@ describe('lifecycle validation', () => {
       loaded: false,
       verified: false,
       removed: false,
-      restartRequired: true,
+      restartRequired: false,
     })
     expect(result.verification.reason).toContain('could not complete')
     await expect(store.getInstallation(result.id)).resolves.toMatchObject({ id: result.id, verified: false })

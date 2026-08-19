@@ -5,8 +5,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
+import type { AuthorizationDecisionInput, ReviewerVerdictDecision } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
+import { EvolutionError } from '../../src/errors.js'
+import { assertUseThisReceipt } from '../../src/lifecycle/decide.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
+import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION, type SemanticReviewerHost } from '../../src/semantic-reviewer.js'
 import { StateStore } from '../../src/state/store.js'
 
 const temporary: string[] = []
@@ -96,9 +100,35 @@ function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: st
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
 }
 
-async function resumeWith(service: CapabilityEvolutionService, guard: CreationGuard, turn: ToolRunContext, workflowId: string, interruptId: string, text: string) {
+async function resumeWith(
+  service: CapabilityEvolutionService,
+  guard: CreationGuard,
+  turn: ToolRunContext,
+  workflowId: string,
+  interruptId: string,
+  text: string,
+  decision: AuthorizationDecisionInput,
+) {
   remember(guard, turn.agent, text)
-  return service.resume({ workflowId, interruptId }, turn)
+  return service.resume({ workflowId, interruptId, decision }, turn)
+}
+
+async function navigateWith(
+  service: CapabilityEvolutionService,
+  guard: CreationGuard,
+  turn: ToolRunContext,
+  workflowId: string,
+  interruptId: string,
+  kind: 'review_candidates' | 'search_more' | 'reuse_local' | 'stop',
+  candidateIds: string[] = [],
+  reviewMode: 'fixed' | 'adaptive' = 'fixed',
+) {
+  remember(guard, turn.agent, `请${kind}`)
+  return service.resume({
+    workflowId,
+    interruptId,
+    navigation: { kind, candidateIds, reviewMode },
+  }, turn)
 }
 
 function capableSandbox(_stateDir: string) {
@@ -190,6 +220,7 @@ function ghRunner(files: Record<string, string>) {
 const grokBundle = {
   'package.json': JSON.stringify({
     name: 'dsh-xai',
+    license: 'MIT',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
   }, null, 2),
@@ -201,6 +232,37 @@ const grokBundle = {
 const grokHighRisk = {
   ...grokBundle,
   'lib/index.js': "import { spawn } from 'node:child_process'\nexport function apply() { spawn('echo') }\n",
+}
+
+function reviewerHost(decision: ReviewerVerdictDecision): SemanticReviewerHost {
+  return {
+    async run(input) {
+      const request = mintReviewerRequest({
+        workflowId: input.workflowId,
+        review: input.review,
+        snapshotDigest: input.snapshotDigest,
+        candidateDigest: input.candidateDigest,
+      })
+      const completedAt = '2026-08-19T00:00:03.000Z'
+      return {
+        request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
+        verdict: {
+          requestId: request.id,
+          reviewId: input.review.id,
+          requirementHash: requirementHashFor(input.review.requirement),
+          snapshotDigest: input.snapshotDigest,
+          candidateDigest: input.candidateDigest,
+          reviewerSessionId: 'reviewer-session',
+          reviewerVersion: REVIEWER_VERSION,
+          decision,
+          evidence: [],
+          conditions: [],
+          semanticCoverage: 'partial',
+          createdAt: completedAt,
+        },
+      }
+    },
+  }
 }
 
 describe('conversational confirmation gates', () => {
@@ -218,9 +280,9 @@ describe('conversational confirmation gates', () => {
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.authorization?.state).toBe('selection_required')
-    expect(started.workflow.cursor).toBe('await_selection')
+    expect(started.workflow.cursor).toBe('await_confirmation')
     expect(started.nextStep).toMatch(/对话|chat|ask_user|interrupt_id/u)
-    const stopped = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '先停')
+    const stopped = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
     expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-1',
@@ -266,7 +328,11 @@ describe('conversational confirmation gates', () => {
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.selectedRepositories ?? []).toEqual([])
-    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '先看 MirDie/dsh-xai')
+    const candidateId = started.workflow.candidateSnapshot!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const reviewed = await navigateWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
+    expect(reviewed.workflow.selectionReceipt).toMatchObject({ kind: 'review_candidates', candidateIds: [candidateId] })
+    expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
+    expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.resolution?.selectedRepositories).toEqual(['MirDie/dsh-xai'])
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('MirDie/dsh-xai')
@@ -288,15 +354,30 @@ describe('conversational confirmation gates', () => {
       ghRunner(grokHighRisk),
       new StateStore(root),
       guard,
+      undefined,
+      reviewerHost('uncertain'),
     )
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
-    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '审查 MirDie/dsh-xai')
+    const candidateId = started.workflow.candidateSnapshot!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const reviewed = await navigateWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.review?.fit).toBe('full')
     expect(reviewed.review?.securityRisk).toBe('high')
+    expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'process_execution',
+        severity: 'block',
+        evidenceKind: 'static_review',
+        observed: true,
+        notEstablished: expect.arrayContaining(['purpose', 'callback server behavior']),
+      }),
+    ]))
+    expect(reviewed.workflow.interrupt?.facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
     expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
-    expect(reviewed.nextStep).toMatch(/对话|chat|ask_user|interrupt_id/u)
-    const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停')
+    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).not.toContain('use_this')
+    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('modify_this')
+    expect(reviewed.nextStep).toMatch(/navigation|Host|真实用户回合/u)
+    const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
     expect(stopped.resolution?.authorization?.state).toBe('stopped')
     await expect(guard.preExecute({
       callId: 'define-high',
@@ -304,6 +385,59 @@ describe('conversational confirmation gates', () => {
       arguments: { plugin: { kind: 'new' } },
       agent: turn.agent,
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+  })
+
+  it('exposes use_this for a high-risk review with an exact approved verdict and defaults retention to temporary', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-approved-high-'))
+    temporary.push(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const store = new StateStore(root)
+    const service = new CapabilityEvolutionService(
+      marketplaceCtx([{
+        name: 'dsh-xai',
+        url: 'https://github.com/MirDie/dsh-xai',
+        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
+        stars: 2,
+      }], root),
+      config(root),
+      ghRunner(grokHighRisk),
+      store,
+      guard,
+      undefined,
+      reviewerHost('approved'),
+    )
+    service.listInstallProfiles = async () => ['web']
+    const turn = exec('session-approved-high')
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const candidateId = started.workflow.candidateSnapshot!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const reviewed = await navigateWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
+    expect(reviewed.review?.securityRisk).toBe('high')
+    expect(reviewed.review?.reviewerVerdict?.decision).toBe('approved')
+    expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
+    expect(reviewed.workflow.executionLease).toBeUndefined()
+    const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
+    expect(optionIds[0]).toBe('use_this')
+    expect(optionIds.indexOf('search_more')).toBeLessThan(optionIds.indexOf('modify_this'))
+    expect(optionIds).toContain('stop')
+    expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
+
+    service.installReviewed = async () => {
+      throw new EvolutionError('command_failed', 'focused test stop after user confirmation')
+    }
+    const confirmed = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个', {
+      action: 'use_this',
+      candidateId,
+    })
+    const stored = await store.getResolution(started.resolution!.id)
+    expect(stored.decisions).toContainEqual(expect.objectContaining({
+      action: 'use_this',
+      candidateId,
+      retention: 'temporary',
+      targetProfile: 'web',
+    }))
+    expect(() => assertUseThisReceipt(reviewed.review!, stored)).not.toThrow()
+    expect(confirmed.workflow.actionCommitment).toBeUndefined()
+    expect(confirmed.workflow.executionLease).toBeUndefined()
   })
 
   it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
@@ -320,9 +454,11 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
-    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错'))
-      .rejects.toThrow(/Could not resolve a workflow decision/i)
-    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个'))
+    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错', {
+      action: 'use_this',
+      candidateId: `candidate_${'f'.repeat(24)}`,
+    })).rejects.toThrow(/not available/i)
+    await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个', { action: 'create_new' }))
       .rejects.toThrow(/Agent|managed modify\/create|without changing/i)
     expect((await store.getResolution(started.resolution!.id)).authorization?.state).toBe('create_authorized')
     await expect(guard.preExecute({
@@ -333,7 +469,7 @@ describe('conversational confirmation gates', () => {
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
   })
 
-  it('lets a local hit still choose create-new, and binds use-this to the reviewed identity', async () => {
+  it('reuses a strict local hit without an authorization receipt, and binds use-this to the reviewed identity', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-use-'))
     temporary.push(root)
     const localTurn = exec('session-local')
@@ -349,9 +485,25 @@ describe('conversational confirmation gates', () => {
     const created = await localService.start('run a PowerShell command', localTurn)
     expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
     expect(created.resolution?.authorization?.state).toBe('selection_required')
-    await expect(resumeWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'Create new'))
-      .rejects.toThrow(/Agent|managed modify\/create|without changing/i)
-    expect((await localStore.getResolution(created.resolution!.id)).authorization?.state).toBe('create_authorized')
+    const localCandidateId = created.workflow.candidateSnapshot!.find((item) => item.localName === 'pwsh')!.id
+    const reused = await navigateWith(localService, guard, localTurn, created.workflow.id, created.workflow.interrupt!.interruptId, 'reuse_local', [localCandidateId])
+    expect(reused.resolution?.authorization?.state).toBe('reuse_local')
+    expect((await localStore.getResolution(created.resolution!.id)).decisions ?? []).toEqual([])
+    expect(reused.workflow.selectionReceipt).toMatchObject({
+      kind: 'reuse_local',
+      candidateIds: [localCandidateId],
+    })
+    expect(reused.workflow.actionCommitment).toMatchObject({
+      candidateId: localCandidateId,
+      candidateDigest: reused.workflow.selectionReceipt?.candidateDigests[localCandidateId],
+      requestedAction: 'reuse_local',
+      endpoint: { kind: 'exact_tool', name: 'pwsh' },
+    })
+    expect(reused.workflow.executionLease).toMatchObject({
+      candidateId: localCandidateId,
+      candidateDigest: reused.workflow.actionCommitment?.candidateDigest,
+      endpoint: { kind: 'exact_tool', name: 'pwsh' },
+    })
 
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
@@ -370,14 +522,26 @@ describe('conversational confirmation gates', () => {
     useService.listInstallProfiles = async () => ['web']
     const useTurn = exec('session-use')
     const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', useTurn)
-    const reviewed = await resumeWith(useService, useGuard, useTurn, resolved.workflow.id, resolved.workflow.interrupt!.interruptId, '审查 MirDie/dsh-xai')
+    const useCandidateId = resolved.workflow.candidateSnapshot!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const reviewed = await navigateWith(useService, useGuard, useTurn, resolved.workflow.id, resolved.workflow.interrupt!.interruptId, 'review_candidates', [useCandidateId])
     expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
     expect(reviewed.workflow.interrupt?.facts.installProfiles).toEqual(['web'])
-    const confirmed = await resumeWith(useService, useGuard, useTurn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个')
+    const confirmed = await resumeWith(useService, useGuard, useTurn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个', {
+      action: 'use_this',
+      candidateId: useCandidateId,
+    })
     const stored = await store.getResolution(resolved.resolution!.id)
-    expect(stored.decisions?.some((item) => item.action === 'use_this')).toBe(true)
-    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, reviewed.review!, stored)).not.toThrow()
-    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/has not chosen/i)
+    expect(stored.decisions).toContainEqual(expect.objectContaining({
+      action: 'use_this',
+      candidateId: useCandidateId,
+      retention: 'temporary',
+      targetProfile: 'web',
+      snapshotDigest: reviewed.workflow.interrupt!.snapshotDigest,
+    }))
+    expect(confirmed.workflow.actionCommitment).toBeUndefined()
+    expect(() => assertUseThisReceipt(reviewed.review!, stored)).not.toThrow()
+    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, reviewed.review!, stored)).toThrow(/current Host action commitment|has not chosen/i)
+    expect(() => useGuard.assertInstallAuthorized(useTurn.agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/current Host action commitment|has not chosen|bound to a different review/i)
     expect(confirmed.workflow.cursor === 'installed' || confirmed.workflow.cursor === 'await_confirmation').toBe(true)
   })
 
@@ -409,13 +573,122 @@ describe('conversational confirmation gates', () => {
     await expect(service.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
-    }, turn)).rejects.toThrow(/Could not resolve a workflow decision/i)
+    }, turn)).rejects.toThrow(/read-only navigation/i)
 
-    const reviewed = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '具体看看 paicat1/dsh-grok-screenshot')
+    const candidateId = started.workflow.candidateSnapshot!.find((item) => item.repository === 'paicat1/dsh-grok-screenshot')!.id
+    const reviewed = await navigateWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
+    expect(reviewed.workflow.selectionReceipt?.kind).toBe('review_candidates')
+    expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
+    expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('paicat1/dsh-grok-screenshot')
     const stored = await store.getResolution(started.resolution!.id)
     expect(stored.selectedRepositories).toEqual(['paicat1/dsh-grok-screenshot'])
-    expect(stored.decisions?.some((item) => item.action === 'inspect')).toBe(true)
+    expect(stored.decisions ?? []).toEqual([])
+  })
+
+  it('reviews multiple snapshot candidates in one navigation and mints a SelectionReceipt without a DecisionReceipt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-batch-'))
+    temporary.push(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const store = new StateStore(root)
+    const service = new CapabilityEvolutionService(
+      marketplaceCtx([
+        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
+        { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
+      ], root),
+      config(root),
+      ghRunner(grokBundle),
+      store,
+      guard,
+    )
+    service.listInstallProfiles = async () => ['web']
+    const turn = exec('session-batch')
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const ids = started.workflow.candidateSnapshot!.map((item) => item.id)
+    const reviewed = await navigateWith(
+      service,
+      guard,
+      turn,
+      started.workflow.id,
+      started.workflow.interrupt!.interruptId,
+      'review_candidates',
+      ids,
+      'fixed',
+    )
+    expect(reviewed.reviews).toHaveLength(2)
+    expect(reviewed.workflow.reviewedCandidateIds).toEqual(expect.arrayContaining(ids))
+    expect((await store.getResolution(started.resolution!.id)).decisions ?? []).toEqual([])
+    expect(reviewed.workflow.selectionReceipt).toMatchObject({ kind: 'review_candidates', candidateIds: ids })
+    expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
+    expect(reviewed.workflow.executionLease).toBeUndefined()
+
+    const selectedCandidateId = ids[1]!
+    const selectedReviewId = reviewed.workflow.reviewIdsByCandidate![selectedCandidateId]!
+    let installedReviewId: string | undefined
+    service.installReviewed = async (review) => {
+      installedReviewId = review.id
+      throw new EvolutionError('command_failed', 'focused test stop')
+    }
+    remember(guard, turn.agent, '用第 2 个')
+    const selected = await service.resume({
+      workflowId: reviewed.workflow.id,
+      interruptId: reviewed.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId: selectedCandidateId },
+    }, turn)
+    expect(installedReviewId).toBe(selectedReviewId)
+    expect(selected.workflow.lastReviewId).toBe(selectedReviewId)
+    expect((await store.getResolution(started.resolution!.id)).decisions).toContainEqual(expect.objectContaining({
+      action: 'use_this',
+      candidateId: selectedCandidateId,
+      reviewId: selectedReviewId,
+    }))
+  })
+
+  it('supports compare-another navigation from confirmation while preserving prior reviews', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-adaptive-'))
+    temporary.push(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true })
+    const store = new StateStore(root)
+    const service = new CapabilityEvolutionService(
+      marketplaceCtx([
+        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
+        { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
+        { name: 'dsh-grok-third', url: 'https://github.com/acme/dsh-grok-third', description: 'Third Grok integration', stars: 1 },
+      ], root),
+      config(root),
+      ghRunner(grokHighRisk),
+      store,
+      guard,
+      undefined,
+      reviewerHost('uncertain'),
+    )
+    const turn = exec('session-adaptive')
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const ids = started.workflow.candidateSnapshot!.map((item) => item.id)
+    const first = await navigateWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, 'review_candidates', [ids[0]!])
+    const compared = await navigateWith(service, guard, turn, first.workflow.id, first.workflow.interrupt!.interruptId, 'review_candidates', ids.slice(1), 'adaptive')
+    expect(compared.reviews).toHaveLength(3)
+    expect(compared.workflow.reviewedCandidateIds).toEqual(expect.arrayContaining(ids))
+    expect((await store.getResolution(started.resolution!.id)).decisions ?? []).toEqual([])
+
+    const selectedCandidateId = ids[1]!
+    const selectedReviewId = compared.workflow.reviewIdsByCandidate![selectedCandidateId]!
+    remember(guard, turn.agent, '在 2 上改')
+    const modified = await service.resume({
+      workflowId: compared.workflow.id,
+      interruptId: compared.workflow.interrupt!.interruptId,
+      decision: { action: 'modify_this', candidateId: selectedCandidateId },
+    }, turn)
+    expect(modified.workflow.lastReviewId).toBe(selectedReviewId)
+    expect(modified.review?.id).toBe(selectedReviewId)
+    const selectedWorkflow = await store.getWorkflow(compared.workflow.id)
+    expect(selectedWorkflow.lastReviewId).toBe(selectedReviewId)
+    expect(selectedWorkflow.lineageTipReviewId).toBe(selectedReviewId)
+    expect((await store.getResolution(started.resolution!.id)).decisions).toContainEqual(expect.objectContaining({
+      action: 'modify_this',
+      candidateId: selectedCandidateId,
+      reviewId: selectedReviewId,
+    }))
   })
 })

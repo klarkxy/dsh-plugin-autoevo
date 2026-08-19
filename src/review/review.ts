@@ -3,7 +3,14 @@ import path from 'node:path'
 import { parseDocument } from 'yaml'
 import { satisfies, valid, validRange } from 'semver'
 import type { RuntimeConfig } from '../config.js'
-import { POLICY_VERSION, type InspectedFile, type ManifestFacts, type ReviewFinding, type ReviewRecord } from '../contracts.js'
+import {
+  POLICY_VERSION,
+  type InspectedFile,
+  type ManifestFacts,
+  type MechanicalFacts,
+  type ReviewFinding,
+  type ReviewRecord,
+} from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
@@ -11,14 +18,18 @@ import type { CommandRunner } from '../process/runner.js'
 import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 
-/** Findings that must never become an installable or improvable recommendation. */
+/** Mechanical Host hard-skip findings. Regex detectors are not in this set. */
 export const HARD_SKIP_FINDING_CODES = new Set([
-  'prompt_injection',
-  'dynamic_evaluation',
   'bundle_patch_path',
   'bundle_patch_missing',
   'bundle_patch_invalid',
   'unsafe_package_name',
+])
+
+/** Lexical/regex observations that require a semantic reviewer, not a Host skip. */
+export const SEMANTIC_CONTEXT_FINDING_CODES = new Set([
+  'prompt_injection',
+  'dynamic_evaluation',
 ])
 
 interface TreeEntry {
@@ -75,6 +86,14 @@ export interface LocalReviewResult {
   record: ReviewRecord
   /** Hash of ordered, inspected content hashes. Kept outside ReviewRecord until its shared schema grows this field. */
   contentHash: string
+  /** In-process bounded snapshot for the semantic reviewer. Never persisted. */
+  files: ContentFile[]
+}
+
+export interface GithubReviewEvidence {
+  record: ReviewRecord
+  /** In-process bounded snapshot for the semantic reviewer. Never persisted. */
+  files: ContentFile[]
 }
 
 const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx', '.json', '.yaml', '.yml'])
@@ -169,6 +188,9 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
   const license = typeof pkg?.license === 'string' ? pkg.license : undefined
   const bundlePatchDeclared = typeof bundle?.patch === 'string'
   const bundlePatch = safeBundlePatchPath(bundle?.patch)
+  const expectedRoute = bundlePatch
+    ? expectedRouteFromBundlePatch(files.find((file) => file.path === bundlePatch))
+    : undefined
   return {
     kind: bundlePatchDeclared ? 'bundle' : hasSkill ? 'skill' : pkg ? 'legacy' : 'unknown',
     ...(isSafePackageName(pkg?.name) ? { packageName: pkg.name } : {}),
@@ -179,7 +201,36 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
     dependencies,
     peerDependencies,
     expectedTools,
+    ...(expectedRoute ? { expectedRoute } : {}),
   }
+}
+
+function expectedRouteFromBundlePatch(file: ContentFile | undefined): ManifestFacts['expectedRoute'] | undefined {
+  if (!file) return undefined
+  try {
+    const document = parseDocument(Buffer.from(file.content).toString('utf8'), {
+      customTags: [{
+        tag: 'tag:yaml.org,2002:js',
+        resolve: (value: string) => ({ __jsExpr: value }),
+      }],
+    })
+    if (document.errors.length > 0) return undefined
+    const patches: unknown = document.toJS()
+    if (!Array.isArray(patches)) return undefined
+    for (const item of patches) {
+      const patch = record(item)
+      if (patch?.id !== 'agent-default-model') continue
+      const config = record(patch.config)
+      if (typeof config?.provider !== 'string' || !config.provider) continue
+      return {
+        provider: config.provider,
+        ...(typeof config.model === 'string' && config.model ? { model: config.model } : {}),
+      }
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 function finding(code: string, severity: ReviewFinding['severity'], source: string, detail: string, sourceHash: string): ReviewFinding {
@@ -280,6 +331,7 @@ function evaluateFit(requirement: string, manifest: ManifestFacts, files: readon
   for (const anchor of anchors) {
     const label = anchor.aliases.find((alias) => requirementNorm.includes(alias)) ?? anchor.aliases[0] ?? anchor.key
     const present = anchor.aliases.some((alias) => alias && haystack.includes(alias))
+      || (anchor.key === 'execution' && manifest.kind === 'bundle')
     const explicitlyUnsupported = anchor.aliases.some((alias) => {
       if (!alias) return false
       const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -299,11 +351,101 @@ function recommendReview(input: {
   securityRisk: ReviewRecord['securityRisk']
   compatible: ReviewRecord['compatibility']['status']
   findings: readonly ReviewFinding[]
+  materializable: boolean
 }): ReviewRecord['recommendation'] {
-  if (input.truncated || input.kind !== 'bundle' || input.fit === 'none') return 'skip'
-  if (input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))) return 'skip'
-  if (input.fit === 'full' && input.compatible === 'compatible' && input.securityRisk !== 'high') return 'use'
+  if (input.truncated || input.kind !== 'bundle' || input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))) {
+    return 'skip'
+  }
+  if (!input.materializable) return 'skip'
+  if (input.fit === 'full' && input.compatible === 'compatible' && input.securityRisk === 'low') return 'use'
   return 'modify'
+}
+
+function isMechanicalFacts(value: object): value is MechanicalFacts {
+  return 'staticRisk' in value && 'semanticContextRequired' in value && 'truncated' in value
+}
+
+export function needsSemanticReviewer(
+  review: MechanicalFacts | Pick<ReviewRecord, 'fit' | 'securityRisk' | 'compatibility' | 'findings' | 'mechanicalFacts'>,
+): boolean {
+  if (isMechanicalFacts(review)) {
+    return review.staticRisk === 'high'
+      || review.fit !== 'full'
+      || review.compatibility.status !== 'compatible'
+      || review.semanticContextRequired
+  }
+  if (review.mechanicalFacts) return needsSemanticReviewer(review.mechanicalFacts)
+  return review.securityRisk === 'high'
+    || review.fit !== 'full'
+    || review.compatibility.status !== 'compatible'
+    || review.findings.some((item) => SEMANTIC_CONTEXT_FINDING_CODES.has(item.code))
+}
+
+function mechanicalMaterializable(input: {
+  truncated?: boolean
+  kind: ManifestFacts['kind']
+  packageName?: string
+  findings: readonly ReviewFinding[]
+}): boolean {
+  return !input.truncated
+    && input.kind === 'bundle'
+    && Boolean(input.packageName)
+    && !input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))
+}
+
+function mintInstallSpec(input: {
+  truncated?: boolean
+  materializable: boolean
+  sourceSnapshot: ReviewRecord['sourceSnapshot']
+  packageName?: string
+}): string | null {
+  if (!input.materializable || input.truncated || !input.packageName) return null
+  if (input.sourceSnapshot.kind !== 'github') return null
+  return `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
+}
+
+function mechanicalFactsFrom(input: {
+  fit: ReviewRecord['fit']
+  missingCapabilities: string[]
+  staticRisk: ReviewRecord['securityRisk']
+  compatibility: ReviewRecord['compatibility']
+  manifest: ManifestFacts
+  truncated: boolean
+  findings: readonly ReviewFinding[]
+  materializable: boolean
+  installSpec: string | null
+}): MechanicalFacts {
+  const semanticContextRequired = input.findings.some((item) => SEMANTIC_CONTEXT_FINDING_CODES.has(item.code))
+  const evidenceHashes = [...new Set(input.findings.map((item) => item.evidenceHash).filter((item): item is string => Boolean(item)))]
+    .sort((left, right) => left.localeCompare(right))
+  return {
+    fit: input.fit,
+    missingCapabilities: input.missingCapabilities,
+    staticRisk: input.staticRisk,
+    compatibility: input.compatibility,
+    manifest: {
+      kind: input.manifest.kind,
+      ...(input.manifest.packageName ? { packageName: input.manifest.packageName } : {}),
+      ...(input.manifest.packageVersion ? { packageVersion: input.manifest.packageVersion } : {}),
+      ...(input.manifest.bundlePatch ? { bundlePatch: input.manifest.bundlePatch } : {}),
+      materializable: input.materializable,
+      installSpec: input.installSpec,
+    },
+    truncated: input.truncated,
+    findings: input.findings.map((item) => ({
+      code: item.code,
+      severity: item.severity,
+      source: item.source,
+      ...(item.evidenceHash ? { evidenceHash: item.evidenceHash } : {}),
+    })),
+    evidenceHashes,
+    semanticContextRequired,
+    ...(!input.materializable
+      ? { directUseHostBoundary: 'not_materializable' as const }
+      : input.compatibility.status === 'incompatible'
+        ? { directUseHostBoundary: 'incompatible' as const }
+        : {}),
+  }
 }
 
 /** Evaluates already-bounded content without returning any third-party source text. */
@@ -333,13 +475,38 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
   const compatible = compatibility(manifest, input.runtimeVersion)
   const license = manifest.license ?? null
   const maintained = input.maintained ?? false
+  const sortedFindings = findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source))
+  const materializable = mechanicalMaterializable({
+    ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
+    kind: manifest.kind,
+    ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
+    findings: sortedFindings,
+  })
+  const installSpec = mintInstallSpec({
+    ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
+    materializable,
+    sourceSnapshot: input.sourceSnapshot,
+    ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
+  })
   const recommendation = recommendReview({
     ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
     kind: manifest.kind,
     fit,
     securityRisk,
     compatible: compatible.status,
-    findings,
+    findings: sortedFindings,
+    materializable,
+  })
+  const mechanicalFacts = mechanicalFactsFrom({
+    fit,
+    missingCapabilities,
+    staticRisk: securityRisk,
+    compatibility: compatible,
+    manifest,
+    truncated: Boolean(input.truncated),
+    findings: sortedFindings,
+    materializable,
+    installSpec,
   })
   return {
     schemaVersion: 1,
@@ -358,12 +525,10 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     license,
     compatibility: compatible,
     missingCapabilities,
-    findings: findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source)),
+    findings: sortedFindings,
     recommendation,
-    installSpec: input.truncated || compatible.status !== 'compatible' || manifest.kind !== 'bundle' || securityRisk === 'high' ? null
-      : input.sourceSnapshot.kind === 'github' && manifest.packageName
-        ? `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
-        : null,
+    installSpec,
+    mechanicalFacts,
   }
 }
 
@@ -464,6 +629,30 @@ async function githubSnapshot(options: {
   }
 }
 
+export async function reviewGithubPluginWithFiles(options: {
+  runner: CommandRunner
+  config: RuntimeConfig
+  cwd: string
+  repository: string
+  ref: string
+  resolutionId: string
+  requirement: string
+  runtimeVersion?: string
+  signal?: AbortSignal
+}): Promise<GithubReviewEvidence> {
+  const result = await githubSnapshot(options)
+  const record = evaluatePluginContent({
+    resolutionId: options.resolutionId,
+    requirement: options.requirement,
+    sourceSnapshot: result.sourceSnapshot,
+    files: result.snapshot.files,
+    truncated: result.snapshot.truncated,
+    maintained: result.maintained,
+    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
+  })
+  return { record, files: result.snapshot.files }
+}
+
 export async function reviewGithubPlugin(options: {
   runner: CommandRunner
   config: RuntimeConfig
@@ -475,16 +664,7 @@ export async function reviewGithubPlugin(options: {
   runtimeVersion?: string
   signal?: AbortSignal
 }): Promise<ReviewRecord> {
-  const result = await githubSnapshot(options)
-  return evaluatePluginContent({
-    resolutionId: options.resolutionId,
-    requirement: options.requirement,
-    sourceSnapshot: result.sourceSnapshot,
-    files: result.snapshot.files,
-    truncated: result.snapshot.truncated,
-    maintained: result.maintained,
-    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
-  })
+  return (await reviewGithubPluginWithFiles(options)).record
 }
 
 function isWithin(root: string, target: string): boolean {
@@ -592,5 +772,5 @@ export async function reviewLocalPlugin(options: {
     maintained: true,
     ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
   })
-  return { record, contentHash }
+  return { record, contentHash, files: snapshot.files }
 }

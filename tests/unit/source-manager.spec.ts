@@ -246,6 +246,32 @@ describe('SourceManager defaults and provenance', () => {
     expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBeNull()
   })
 
+  it('checkpoints interrupted child edits and resumes the same workflow cleanly', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-resume-'))
+    temporary.push(root)
+    const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
+      head: 'c'.repeat(40), branch: 'main', dirty: '',
+    }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'7'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    await writeFile(path.join(receipt.path, 'retry.js'), 'export const retry = true\n', 'utf8')
+    state.dirty = '?? retry.js\n'
+
+    const checkpoint = await manager.preserveInterruptedChild({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+    })
+    expect(checkpoint.headCommit).not.toBe(receipt.headCommit)
+    expect(state.dirty).toBe('')
+
+    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId)).resolves.toMatchObject({
+      activeWorkflowId: workflowId,
+      headCommit: checkpoint.headCommit,
+    })
+  })
+
   it('rejects untracked dependency stores before Host git add', async () => {
     expect(sourceTesting.forbiddenUntrackedPath('?? .pnpm-store/v10/files/cache\n')).toBe('.pnpm-store/v10/files/cache')
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-cache-'))

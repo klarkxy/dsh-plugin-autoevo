@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apply, name, inject, readEvolutionModeMarker } from '../../src/evolution-mode.js'
-import {
-  CREATOR_SKILL_NAME,
-  CREATOR_SKILL_PROVIDER,
-  creatorSkillRegistration,
-} from '../../src/creator-skill.js'
+import { creatorSkillRegistration } from '../../src/creator-skill.js'
 import {
   EVOLUTION_MODE_OWNER,
   EVOLUTION_MODE_PROTOCOL_VERSION,
@@ -38,18 +34,14 @@ function mockContext(overrides?: {
 describe('evolution-mode entry', () => {
   it('exports the scoped Cordis plugin name and inject list', () => {
     expect(name).toBe('autoevo-evolution-mode')
-    expect(inject).toEqual(['skills', 'systemPrompt'])
+    expect(inject).toEqual(['systemPrompt'])
   })
 
-  it('registers the AutoEvo creator skill, workflow section, and isolated mode marker', () => {
+  it('registers workflow instructions without exposing a parent Creator skill', () => {
     const { ctx, register, section, provide } = mockContext()
     apply(ctx)
 
-    expect(register).toHaveBeenCalledTimes(1)
-    const registration = register.mock.calls[0]![0]
-    expect(registration.name).toBe(CREATOR_SKILL_NAME)
-    expect(registration.provider).toBe(CREATOR_SKILL_PROVIDER)
-    expect(registration.source).toBe('runtime')
+    expect(register).not.toHaveBeenCalled()
 
     expect(section).toHaveBeenCalledTimes(1)
     const prompt = section.mock.calls[0]![0]
@@ -57,14 +49,27 @@ describe('evolution-mode entry', () => {
     expect(prompt.order).toBe(119)
     expect(prompt.text).toContain('Capability Evolution')
     expect(prompt.text).toContain('capability_workflow')
-    expect(prompt.text).toContain(CREATOR_SKILL_NAME)
+    expect(prompt.text).toContain('candidate IDs')
+    expect(prompt.text).toContain('navigation')
+    expect(prompt.text).toContain('decision')
+    expect(prompt.text).toContain('does not re-parse')
+    expect(prompt.text).toContain('candidate_id')
+    expect(prompt.text).toContain('Security findings are static observations only')
+    expect(prompt.text).toContain('callback-server behavior')
     expect(prompt.text).toContain('create_authorized')
     expect(prompt.text).toContain('managed git source')
     expect(prompt.text).toContain('workflow_id')
     expect(prompt.text).toContain('interrupt_id')
+    expect(prompt.text).toContain('never via parent-session')
     expect(prompt.text).toContain('do not inspect Cordis')
     expect(prompt.text).toContain('contributionAdvice')
     expect(prompt.text).toContain('contribute only after explicit approval')
+    expect(prompt.text).toContain('Policy V5')
+    expect(prompt.text).toContain('MechanicalFacts')
+    expect(prompt.text).toContain('semantic verifier')
+    expect(prompt.text).toContain('taskResultMatchedExpectation')
+    expect(prompt.text).toContain('use_this and search_more')
+    expect(prompt.text).not.toContain('scratch_ready')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

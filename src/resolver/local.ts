@@ -9,6 +9,27 @@ import { resolveLoadedPluginCapabilities } from './plugins.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
+function anchorStrength(anchor: ReturnType<typeof capabilityAnchors>[number], normalizedName: string, normalizedDescription: string): number {
+  let strength = 0
+  const descriptionSignals = new Set(anchor.aliases
+    .filter((alias) => normalizedDescription.includes(alias))
+    // "grok build" and "grok" are the same semantic signal. Collapse
+    // overlapping product aliases so a laundry-list mention does not become
+    // corroboration merely because one phrase contains another.
+    .map((alias) => alias.includes(anchor.key) ? anchor.key : alias))
+  const hasCorroboratingDescriptionSignals = descriptionSignals.size >= 2
+  for (const alias of anchor.aliases) {
+    if (normalizedName === alias) strength = Math.max(strength, 1)
+    else if (normalizedName.includes(alias) || alias.includes(normalizedName)) strength = Math.max(strength, 0.92)
+    if (normalizedDescription.includes(alias)
+      && !isHeavyNameDropMention(normalizedDescription, alias)
+      && (hasCorroboratingDescriptionSignals || !isNameDropMention(normalizedDescription, alias))) {
+      strength = Math.max(strength, 0.58)
+    }
+  }
+  return strength
+}
+
 export function matchConfidence(requirement: string, name: string, description: string): number {
   const anchors = capabilityAnchors(requirement)
   if (anchors.length === 0) return 0
@@ -20,23 +41,7 @@ export function matchConfidence(requirement: string, name: string, description: 
   let genericCoverage = 0
 
   for (const anchor of anchors) {
-    let strength = 0
-    const descriptionSignals = new Set(anchor.aliases
-      .filter((alias) => normalizedDescription.includes(alias))
-      // "grok build" and "grok" are the same semantic signal. Collapse
-      // overlapping product aliases so a laundry-list mention does not become
-      // corroboration merely because one phrase contains another.
-      .map((alias) => alias.includes(anchor.key) ? anchor.key : alias))
-    const hasCorroboratingDescriptionSignals = descriptionSignals.size >= 2
-    for (const alias of anchor.aliases) {
-      if (normalizedName === alias) strength = Math.max(strength, 1)
-      else if (normalizedName.includes(alias) || alias.includes(normalizedName)) strength = Math.max(strength, 0.92)
-      if (normalizedDescription.includes(alias)
-        && !isHeavyNameDropMention(normalizedDescription, alias)
-        && (hasCorroboratingDescriptionSignals || !isNameDropMention(normalizedDescription, alias))) {
-        strength = Math.max(strength, 0.58)
-      }
-    }
+    const strength = anchorStrength(anchor, normalizedName, normalizedDescription)
     if (anchor.generic) {
       genericWeight += anchor.weight
       genericCoverage += anchor.weight * strength
@@ -51,6 +56,39 @@ export function matchConfidence(requirement: string, name: string, description: 
   if (specificWeight === 0) return Math.min(0.18, genericCoverage / Math.max(genericWeight, 1))
   const genericBoost = genericWeight === 0 ? 0 : (genericCoverage / genericWeight) * 0.04
   return Math.min(0.99, specificCoverage / specificWeight + genericBoost)
+}
+
+/**
+ * A product name narrows the target, but does not establish that a local
+ * capability performs the requested operation. Keep discovery open until the
+ * candidate also matches every requested non-product capability anchor.
+ */
+export function isStrictLocalMatch(requirement: string, name: string, description: string): boolean {
+  const anchors = capabilityAnchors(requirement)
+  const materialAnchors = anchors.filter((anchor) => !anchor.generic)
+  const functionalAnchors = materialAnchors.filter((anchor) => !anchor.product)
+  if (materialAnchors.length === 0) return false
+  if (anchors.some((anchor) => anchor.product) && functionalAnchors.length === 0) return false
+
+  const normalizedName = normalizeSearchText(name)
+  const normalizedDescription = normalizeSearchText(description)
+  return materialAnchors.every((anchor) => anchorStrength(anchor, normalizedName, normalizedDescription) >= 0.58)
+}
+
+function localFit(requirement: string, candidate: Pick<LocalCapabilityCandidate, 'name' | 'description' | 'confidence'>): Pick<LocalCapabilityCandidate, 'fit' | 'matchedFacets' | 'missingFacets'> {
+  const anchors = capabilityAnchors(requirement).filter((anchor) => !anchor.generic)
+  const normalizedName = normalizeSearchText(candidate.name)
+  const normalizedDescription = normalizeSearchText(candidate.description)
+  const matchedFacets = anchors
+    .filter((anchor) => anchorStrength(anchor, normalizedName, normalizedDescription) >= 0.58)
+    .map((anchor) => anchor.key)
+  const missingFacets = anchors.filter((anchor) => !matchedFacets.includes(anchor.key)).map((anchor) => anchor.key)
+  const full = candidate.confidence >= 0.62 && isStrictLocalMatch(requirement, candidate.name, candidate.description)
+  return {
+    fit: full ? 'full' : candidate.confidence >= 0.3 ? 'partial' : 'none',
+    matchedFacets,
+    missingFacets,
+  }
 }
 
 export interface LocalResolution {
@@ -121,8 +159,11 @@ export async function resolveLocalCapabilities(
 
   candidates.push(...await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence))
 
+  for (const candidate of candidates) Object.assign(candidate, localFit(requirement, candidate))
+
   candidates.sort((left, right) => right.confidence - left.confidence || left.name.localeCompare(right.name))
-  const useful = candidates.some((candidate) => candidate.confidence >= 0.62)
+  const useful = candidates.some((candidate) => candidate.confidence >= 0.62
+    && isStrictLocalMatch(requirement, candidate.name, candidate.description))
   return {
     cwd,
     candidates: candidates.slice(0, 8),
@@ -133,4 +174,4 @@ export async function resolveLocalCapabilities(
   }
 }
 
-export const _testing = { matchConfidence }
+export const _testing = { matchConfidence, isStrictLocalMatch, localFit }

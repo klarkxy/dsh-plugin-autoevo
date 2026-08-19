@@ -1,4 +1,4 @@
-import type { InstallationRecord, ResolutionRecord, ReviewRecord, WorkflowOptionId } from '../contracts.js'
+import type { InstallationRecord, ResolutionRecord, ReviewMode, ReviewRecord, WorkflowOptionId } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import {
   confirmationFacts,
@@ -26,23 +26,15 @@ export interface NodeExecutionResult {
   node: WorkflowNodeId
   resolution?: ResolutionRecord
   review?: ReviewRecord
+  reviews?: ReviewRecord[]
+  reviewFailures?: Array<{ repository: string; code: string; message: string }>
   installation?: InstallationRecord
 }
 
 const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionId, WorkflowNodeId>>>> = {
-  await_selection: {
-    inspect: 'review_github',
-    search_more: 'discover_remote',
-    use_local: 'reuse_local',
-    create_new: 'prepare_create',
-    stop: 'stopped',
-  },
   await_confirmation: {
     use_this: 'install_verify',
     modify_this: 'prepare_modify',
-    inspect: 'review_github',
-    search_more: 'discover_remote',
-    use_local: 'reuse_local',
     create_new: 'prepare_create',
     stop: 'stopped',
   },
@@ -65,35 +57,34 @@ export function transition(cursor: WorkflowNodeId, optionId: WorkflowOptionId): 
 export function interruptPayload(
   cursor: WorkflowNodeId,
   resolution: ResolutionRecord,
-  review?: ReviewRecord,
+  reviews: ReviewRecord[] = [],
   extras: {
     lastFailure?: WorkflowRecord['lastFailure']
     installProfiles?: string[]
     pendingPath?: string
+    workflow?: WorkflowRecord
   } = {},
 ): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
   if (cursor === 'await_selection') {
     return {
       kind: 'await_selection',
-      options: optionsFor('await_selection', resolution),
-      facts: selectionFacts(resolution),
+      options: optionsFor('await_selection', resolution, reviews, extras.workflow),
+      facts: selectionFacts(resolution, extras.workflow),
     }
   }
   if (cursor === 'await_confirmation') {
-    if (!review) {
-      throw new EvolutionError('invalid_input', 'Confirmation interrupt requires a review')
-    }
     return {
       kind: 'await_confirmation',
-      options: optionsFor('await_confirmation', resolution),
-      facts: confirmationFacts(resolution, review, extras),
+      options: optionsFor('await_confirmation', resolution, reviews, extras.workflow, extras.installProfiles),
+      facts: confirmationFacts(resolution, reviews, extras.workflow, extras),
     }
   }
   if (cursor === 'await_modify_work') {
+    const review = reviews[0]
     if (review) {
       return {
         kind: 'await_modify_work',
-        options: optionsFor('await_modify_work', resolution),
+        options: optionsFor('await_modify_work', resolution, reviews, extras.workflow),
         facts: modifyWorkFacts(review),
       }
     }
@@ -102,7 +93,7 @@ export function interruptPayload(
     }
     return {
       kind: 'await_modify_work',
-      options: optionsFor('await_modify_work', resolution),
+      options: optionsFor('await_modify_work', resolution, reviews, extras.workflow),
       facts: createWorkFacts(extras.pendingPath),
     }
   }
@@ -147,14 +138,24 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
   if (resolution.remoteCandidateSource === 'marketplace-setup') {
     return { kind: 'next', node: 'ensure_market', resolution }
   }
-  return { kind: 'next', node: 'await_selection', resolution }
+  const hasFullLocal = resolution.localCandidates.some((item) => item.fit === 'full')
+  return {
+    kind: 'next',
+    node: resolution.remoteCandidates.length === 0 && !hasFullLocal ? 'await_confirmation' : 'await_selection',
+    resolution,
+  }
 }
 
 async function executeEnsureMarket(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   const { resolution, market } = await ctx.host.ensureMarket(current, ctx.exec)
   if (market.status === 'loaded') return { kind: 'next', node: 'discover_remote', resolution }
-  if (market.status === 'empty') return { kind: 'next', node: 'await_selection', resolution }
+  if (market.status === 'empty') {
+    const hasCandidates = resolution.remoteCandidates.length > 0
+      || resolution.localCandidates.some((item) => item.fit === 'full')
+    return { kind: 'next', node: hasCandidates ? 'await_selection' : 'await_confirmation', resolution }
+  }
+  if (market.status === 'blocked') return { kind: 'done', node: 'market_setup_required', resolution }
   return { kind: 'done', node: 'market_restart_required', resolution }
 }
 
@@ -163,15 +164,43 @@ async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResu
   const selected = ctx.workflow.pendingRepositories?.length
     ? ctx.workflow.pendingRepositories
     : current.selectedRepositories ?? []
-  if (selected.length !== 1 || !selected[0]) {
-    throw new EvolutionError('invalid_input', 'inspect requires exactly one repository')
+  if (selected.length < 1 || selected.length > 3) {
+    throw new EvolutionError('invalid_input', 'candidate review requires between one and three repositories')
   }
-  const repository = selected[0]
+  if (ctx.host.reviewGithubBatch) {
+    const result = await ctx.host.reviewGithubBatch(
+      current,
+      selected,
+      ctx.workflow.reviewPlan?.mode ?? 'fixed',
+      ctx.exec,
+      ctx.workflow,
+    )
+    if (result.reviews.length === 0) {
+      return {
+        kind: 'next',
+        node: 'await_confirmation',
+        resolution: result.resolution,
+        reviews: [],
+        reviewFailures: result.failures,
+      }
+    }
+    const primary = result.reviews[0]!
+    return {
+      kind: 'next',
+      node: 'await_confirmation',
+      resolution: result.resolution,
+      review: primary,
+      reviews: result.reviews,
+      reviewFailures: result.failures,
+    }
+  }
+  const repository = selected[0]!
   const { resolution, review } = await ctx.host.reviewGithub(
     current,
     repository,
     ctx.workflow.pendingRef,
     ctx.exec,
+    ctx.workflow,
   )
   return { kind: 'next', node: 'await_confirmation', resolution, review }
 }
@@ -183,7 +212,7 @@ async function executeReviewLocal(ctx: GraphContext): Promise<NodeExecutionResul
   if (!path || !baseReviewId) {
     throw new EvolutionError('invalid_input', 'Local re-review requires a checkout path and a lineage tip')
   }
-  const { resolution, review } = await ctx.host.reviewLocal(current, path, baseReviewId, ctx.exec)
+  const { resolution, review } = await ctx.host.reviewLocal(current, path, baseReviewId, ctx.exec, ctx.workflow)
   return { kind: 'next', node: 'await_confirmation', resolution, review }
 }
 
@@ -199,9 +228,15 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
   }
   delete ctx.workflow.lastFailure
   try {
-    const installation = await ctx.host.installReviewed(review, install, ctx.exec)
+    const installation = await ctx.host.installReviewed(review, install, ctx.exec, ctx.workflow)
     if (installation.installOutcome === 'verified' && installation.verified && installation.installed) {
-      return { kind: 'done', node: 'installed', resolution: current, review, installation }
+      return {
+        kind: 'done',
+        node: installation.restartRequired ? 'restart_required' : 'installed',
+        resolution: current,
+        review,
+        installation,
+      }
     }
     ctx.workflow.lastFailure = {
       code: installation.installOutcome ?? 'recovery_required',
@@ -231,7 +266,24 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
     throw new EvolutionError('invalid_input', 'modify_this requires a review')
   }
   if (ctx.host.prepareModify) {
-    const prepared = await ctx.host.prepareModify(current, review, ctx.exec, ctx.workflow)
+    let prepared: Awaited<ReturnType<NonNullable<WorkflowHost['prepareModify']>>>
+    try {
+      prepared = await ctx.host.prepareModify(current, review, ctx.exec, ctx.workflow)
+    } catch (error) {
+      if (error instanceof EvolutionError && error.details.recoveryRequired === true) {
+        ctx.workflow.lastFailure = { code: error.code, message: error.message }
+        return { kind: 'done', node: 'recovery_required', resolution: current, review }
+      }
+      if (ctx.exec.signal?.aborted
+        || (error instanceof EvolutionError
+          && error.code !== 'command_failed'
+          && error.code !== 'review_rejected')) throw error
+      ctx.workflow.lastFailure = {
+        code: error instanceof EvolutionError ? error.code : 'command_failed',
+        message: error instanceof Error ? error.message : String(error),
+      }
+      return { kind: 'next', node: 'await_confirmation', resolution: current, review }
+    }
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
     }
@@ -249,7 +301,31 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
 async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   if (ctx.host.prepareCreate) {
-    const prepared = await ctx.host.prepareCreate(current, ctx.exec, ctx.workflow)
+    let prepared: Awaited<ReturnType<NonNullable<WorkflowHost['prepareCreate']>>>
+    try {
+      prepared = await ctx.host.prepareCreate(current, ctx.exec, ctx.workflow)
+    } catch (error) {
+      if (error instanceof EvolutionError && error.details.recoveryRequired === true) {
+        const review = ctx.workflow.lastReviewId
+          ? await ctx.host.getReview(ctx.workflow.lastReviewId)
+          : undefined
+        ctx.workflow.lastFailure = { code: error.code, message: error.message }
+        return { kind: 'done', node: 'recovery_required', resolution: current, ...(review ? { review } : {}) }
+      }
+      if (ctx.exec.signal?.aborted
+        || (error instanceof EvolutionError
+          && error.code !== 'command_failed'
+          && error.code !== 'review_rejected')) throw error
+      const review = ctx.workflow.lastReviewId
+        ? await ctx.host.getReview(ctx.workflow.lastReviewId)
+        : undefined
+      if (!review) throw error
+      ctx.workflow.lastFailure = {
+        code: error instanceof EvolutionError ? error.code : 'command_failed',
+        message: error instanceof Error ? error.message : String(error),
+      }
+      return { kind: 'next', node: 'await_confirmation', resolution: current, review }
+    }
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
     }

@@ -105,4 +105,27 @@ describe('subprocess environment boundary', () => {
       expect(argv[0]).toBe('C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd')
     }
   })
+
+  it('reports cancellation during executable lookup instead of claiming Git is unavailable', async () => {
+    const controller = new AbortController()
+    const subprocess = {
+      resolveExecutable: async (_command: string, _env: Record<string, string>, signal: AbortSignal) => await new Promise<string>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('lookup aborted')), { once: true })
+      }),
+    } as unknown as SubprocessRuntime
+    const runner = new DshCommandRunner(subprocess, { commandTimeoutMs: 5_000 } as RuntimeConfig)
+    const running = runner.run({ argv: ['git', 'status'], cwd: process.cwd(), signal: controller.signal })
+    controller.abort()
+    await expect(running).rejects.toThrow(/git was cancelled/i)
+    await expect(running).rejects.not.toThrow(/Executable is unavailable/i)
+  })
+
+  it('retains the unavailable-executable error for a genuine lookup failure', async () => {
+    const subprocess = {
+      resolveExecutable: async () => { throw new Error('ENOENT') },
+    } as unknown as SubprocessRuntime
+    const runner = new DshCommandRunner(subprocess, { commandTimeoutMs: 5_000 } as RuntimeConfig)
+    await expect(runner.run({ argv: ['git', 'status'], cwd: process.cwd() }))
+      .rejects.toThrow(/Executable is unavailable: git/i)
+  })
 })

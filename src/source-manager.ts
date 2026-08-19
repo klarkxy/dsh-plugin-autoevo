@@ -609,6 +609,54 @@ export class SourceManager {
     await this.writeReceipt(next)
     return next
   }
+
+  /** Re-enter an already-owned managed source without resetting its lineage. */
+  async resumeWorkflowSource(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<SourceReceipt> {
+    const receipt = await this.readReceipt(sourceId)
+    if (!receipt || receipt.activeWorkflowId !== workflowId) {
+      throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
+    }
+    const lock = JSON.parse(await readFile(this.lockPath(sourceId), 'utf8')) as SourceLock
+    if (lock.workflowId !== workflowId || lock.pid !== process.pid) {
+      throw new EvolutionError('invalid_input', 'Managed source lock is not owned by this workflow instance')
+    }
+    const root = await this.assertPathContainment(sourceId)
+    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    const gitSecurityHash = await this.gitConfigHash(sourceId)
+    if (branch !== receipt.branch
+      || head.toLowerCase() !== receipt.headCommit.toLowerCase()
+      || gitSecurityHash !== receipt.gitConfigHash) {
+      throw new EvolutionError('review_rejected', 'Managed source lineage changed before the next revision')
+    }
+    await this.assertCleanTree(sourceId, signal)
+    return receipt
+  }
+
+  /** Preserve a failed child's bounded edits as a local WIP commit for retry. */
+  async preserveInterruptedChild(input: {
+    sourceId: string
+    workflowId: string
+    reviewId: string
+    signal?: AbortSignal
+  }): Promise<SourceReceipt> {
+    const root = await this.assertPathContainment(input.sourceId)
+    const pending = await this.git(root, ['status', '--porcelain'], input.signal)
+    if (!pending) {
+      const receipt = await this.readReceipt(input.sourceId)
+      if (!receipt || receipt.activeWorkflowId !== input.workflowId) {
+        throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
+      }
+      return receipt
+    }
+    return await this.finalizeChildCommit({
+      sourceId: input.sourceId,
+      workflowId: input.workflowId,
+      reviewId: input.reviewId,
+      message: `chore: preserve interrupted AutoEvo workflow ${input.workflowId}`,
+      ...(input.signal ? { signal: input.signal } : {}),
+    })
+  }
 }
 
 export const _testing = {

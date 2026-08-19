@@ -11,15 +11,41 @@ import type {
   InstallOutcome,
   ReviewRecord,
   VerificationEvidence,
+  VerificationVerdict,
+  VerifierRequest,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
+import { assertDirectUseAllowed, type InstallCommitmentBinding } from '../review/direct-use.js'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import {
+  mintVerifierRequest,
+  redactVerificationReceipt,
+  VERIFIER_VERSION,
+  verificationEvidenceDigest,
+  verificationVerdictAllowsCompletion,
+  type SemanticVerifierHost,
+} from '../semantic-verifier.js'
+import { requirementHashFor } from '../semantic-reviewer.js'
 import { hashObject } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
-import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
+import { assertOwnedTrialPath, hostMechanicalSuccess, type DshLauncher } from './launcher.js'
+import { hotLoadInstalledBundle, type HotReloadAttempt } from './hot-load.js'
 
 export type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>
-export type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext) => void | Promise<void>
+export type InstallAuthorizer = (
+  review: ReviewRecord,
+  exec: ToolRunContext,
+  binding?: InstallCommitmentBinding,
+) => void | Promise<void>
+export type ProfileHotLoader = (input: {
+  ctx: Context
+  dshHome: string
+  profile: string
+  packageName: string
+  expectedTools: readonly string[]
+  agent?: ToolRunContext['agent']
+}) => Promise<HotReloadAttempt>
 
 function validateProfile(profile: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(profile)) {
@@ -32,8 +58,8 @@ function verificationTask(input: InstallInput): string | undefined {
   if (task !== undefined && task.length > 4_000) {
     throw new EvolutionError('invalid_input', 'verificationTask must not exceed 4000 characters')
   }
-  if (input.retention === 'temporary' && !task) {
-    throw new EvolutionError('invalid_input', 'temporary installation requires a non-empty verificationTask')
+  if (!task) {
+    throw new EvolutionError('invalid_input', 'installation requires a non-empty verificationTask')
   }
   return task || undefined
 }
@@ -190,6 +216,8 @@ function outcomeAfterCommandFailure(installState: InstallationState): InstallOut
 }
 
 export class PluginInstaller {
+  private readonly hotLoader: ProfileHotLoader
+
   constructor(
     private readonly ctx: Context,
     private readonly config: RuntimeConfig,
@@ -197,7 +225,11 @@ export class PluginInstaller {
     private readonly launcher: DshLauncher,
     private readonly revalidate: ReviewRevalidator,
     private readonly authorizeInstall?: InstallAuthorizer,
-  ) {}
+    hotLoader?: ProfileHotLoader,
+    private readonly semanticVerifier?: SemanticVerifierHost,
+  ) {
+    this.hotLoader = hotLoader ?? hotLoadInstalledBundle
+  }
 
   private async removeOwnedDirectory(candidate: string, ownedRoot: string): Promise<void> {
     await mkdir(ownedRoot, { recursive: true })
@@ -209,34 +241,20 @@ export class PluginInstaller {
     }
   }
 
-  async install(input: InstallInput, exec: ToolRunContext): Promise<InstallationRecord> {
+  async install(
+    input: InstallInput,
+    exec: ToolRunContext,
+    binding?: InstallCommitmentBinding,
+  ): Promise<InstallationRecord> {
     validateProfile(input.targetProfile)
     const task = verificationTask(input)
     const expectedText = verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
-    if (this.authorizeInstall) await this.authorizeInstall(review, exec)
+    if (this.authorizeInstall) await this.authorizeInstall(review, exec, binding)
 
     const strictSpec = assertStrictInstallSpec(review)
-    const sourceCanInstall = review.sourceSnapshot.kind === 'local' || Boolean(strictSpec)
-    const userChoseUse = Boolean(this.authorizeInstall)
-    const hardSkip = review.findings.some((finding) => finding.code === 'prompt_injection' || finding.code === 'dynamic_evaluation')
-    const blocked = review.manifest.kind !== 'bundle'
-      || review.fit !== 'full'
-      || review.compatibility.status === 'incompatible'
-      || !sourceCanInstall
-      || review.findings.some((finding) => finding.code === 'review_truncated')
-      || hardSkip
-      || (!userChoseUse && (review.recommendation !== 'use' || review.securityRisk === 'high'))
-    if (blocked) {
-      throw new EvolutionError('review_rejected', 'This review does not authorize installation', {
-        recommendation: review.recommendation,
-        securityRisk: review.securityRisk,
-        compatibility: review.compatibility.status,
-        fit: review.fit,
-        manifestKind: review.manifest.kind,
-      })
-    }
+    assertDirectUseAllowed(review, binding?.workflow)
     if (!await this.revalidate(review, exec.signal)) {
       throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; resume the capability workflow to review again')
     }
@@ -309,7 +327,7 @@ export class PluginInstaller {
       installed: false,
       loaded: false,
       verified: false,
-      restartRequired: input.retention === 'persistent',
+      restartRequired: false,
       removed: false,
       verification: pendingVerification(review.manifest.expectedTools),
     }
@@ -377,6 +395,7 @@ export class PluginInstaller {
           task,
           review.manifest.expectedTools,
           expectedText,
+          review.manifest.expectedRoute,
           exec.signal,
         )
       } catch {
@@ -391,16 +410,34 @@ export class PluginInstaller {
       && (loadOnly
         ? verification.taskResultObserved
         : expectedTools.some((name) => verification.calledTools.includes(name)))
-    const verified = sourceMatched && loaded && verification.taskResultObserved && verification.taskResultMatchedExpectation !== false
-      && (loadOnly
-        || expectedTools.every((name) => verification.calledTools.includes(name)
-          && verification.resultTools.includes(name)
-          && !verification.failedTools.includes(name)))
+    const mechanical = hostMechanicalSuccess({ sourceMatched, verification })
+    const semantic = mechanical
+      ? await this.attachSemanticVerification(review, id, verification, exec)
+      : {}
+    const verified = mechanical && verificationVerdictAllowsCompletion(semantic.verdict, {
+      installationId: id,
+      reviewId: review.id,
+      requirement: review.requirement,
+      evidenceDigest: verificationEvidenceDigest(verification),
+    })
+    const hotReloadAttempt = input.retention === 'persistent' && verified
+      ? await this.hotLoader({
+          ctx: this.ctx,
+          dshHome,
+          profile: input.targetProfile,
+          packageName,
+          expectedTools: review.manifest.expectedTools,
+          ...(exec.agent ? { agent: exec.agent } : {}),
+        })
+      : undefined
+    const hotReload = hotReloadAttempt?.evidence
+    const runtimeRecoveryRequired = hotReloadAttempt?.rollbackFailed === true
     const failedTemporaryTrialRemoved = input.retention === 'temporary' && verification.attempted && !verified
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
 
     let installOutcome: InstallOutcome
-    if (verified) installOutcome = 'verified'
+    if (runtimeRecoveryRequired) installOutcome = 'recovery_required'
+    else if (verified) installOutcome = 'verified'
     else if (failedTemporaryTrialRemoved) installOutcome = 'failed_absent'
     else installOutcome = 'recovery_required'
 
@@ -410,19 +447,26 @@ export class PluginInstaller {
       ...provisional,
       installState: verified || !failedTemporaryTrialRemoved ? 'installed' : 'not_installed',
       installOutcome,
-      installed: verified,
-      loaded: verified ? loaded : false,
-      verified,
-      restartRequired: input.retention === 'persistent',
+      installed: verified && !runtimeRecoveryRequired,
+      loaded: verified && !runtimeRecoveryRequired ? loaded : false,
+      verified: verified && !runtimeRecoveryRequired,
+      restartRequired: input.retention === 'persistent' && verified && !runtimeRecoveryRequired && !hotReload?.loaded,
+      ...(semantic.request ? { verifierRequestId: semantic.request.id, verifierRequest: semantic.request } : {}),
+      ...(semantic.verdict ? { verificationVerdict: semantic.verdict } : {}),
+      ...(hotReload ? { hotReload } : {}),
       removed: failedTemporaryTrialRemoved,
       verification: failedTemporaryTrialRemoved
         ? { ...verification, reason: `${verification.reason} Failed temporary trial was removed.` }
-        : verified
-          ? verification
-          : {
-              ...verification,
-              reason: `${verification.reason} Install command finished but Loader/runtime verification did not prove the expected plugin; recovery is required.`,
-            },
+        : runtimeRecoveryRequired
+          ? { ...verification, reason: `${verification.reason} Current-process Loader activation could not be rolled back; explicit recovery is required before retry or restart.` }
+          : verified
+            ? (input.retention === 'persistent' && hotReload && !hotReload.loaded
+              ? { ...verification, reason: `${verification.reason} Current-process hot reload did not complete (${hotReload.reason}); restart is required.` }
+              : verification)
+            : {
+                ...verification,
+                reason: `${verification.reason} Install command finished but Loader/runtime verification did not prove the expected plugin; recovery is required.`,
+              },
       ...(review.sourceSnapshot.kind === 'local'
         ? {
             contributionAdvice: {
@@ -437,6 +481,14 @@ export class PluginInstaller {
     try {
       await this.store.put('installations', record)
     } catch (cause) {
+      let rollbackFailure: unknown
+      if (hotReloadAttempt?.rollback) {
+        try {
+          await hotReloadAttempt.rollback()
+        } catch (error) {
+          rollbackFailure = error
+        }
+      }
       if (input.retention === 'temporary') {
         await this.removeOwnedDirectory(trialRoot, trialsRoot)
         try {
@@ -455,10 +507,78 @@ export class PluginInstaller {
       }
       throw new EvolutionError('command_failed', 'Installation completed but final receipt persistence failed; a recovery receipt was preserved', {
         installationId: id,
-        diagnosticHash: hashObject({ cause: cause instanceof Error ? cause.message : String(cause) }),
+        diagnosticHash: hashObject({
+          cause: cause instanceof Error ? cause.message : String(cause),
+          ...(rollbackFailure ? { rollback: rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure) } : {}),
+        }),
       })
     }
     return record
+  }
+
+  private async attachSemanticVerification(
+    review: ReviewRecord,
+    installationId: string,
+    verification: VerificationEvidence,
+    exec: ToolRunContext,
+  ): Promise<{ request?: VerifierRequest; verdict?: VerificationVerdict }> {
+    if (!this.semanticVerifier || !exec.agent) return {}
+    const evidenceDigest = verificationEvidenceDigest(verification)
+    try {
+      const result = await this.semanticVerifier.run({
+        parent: exec.agent as Agent,
+        installationId,
+        reviewId: review.id,
+        requirement: review.requirement,
+        evidenceDigest,
+        receipt: redactVerificationReceipt(verification),
+        timeoutMs: this.config.commandTimeoutMs,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      if (result.request.reviewId !== review.id || result.verdict.reviewId !== review.id) {
+        throw new EvolutionError('invalid_input', 'Semantic verifier result is not bound to this review')
+      }
+      if (result.request.installationId !== installationId || result.verdict.installationId !== installationId) {
+        throw new EvolutionError('invalid_input', 'Semantic verifier result is not bound to this installation')
+      }
+      if (result.request.id !== result.verdict.requestId) {
+        throw new EvolutionError('invalid_input', 'Semantic verifier verdict is not bound to its request')
+      }
+      if (result.request.evidenceDigest !== evidenceDigest || result.verdict.evidenceDigest !== evidenceDigest) {
+        throw new EvolutionError('invalid_input', 'Semantic verifier evidence digest mismatch')
+      }
+      if (result.verdict.requirementHash !== requirementHashFor(review.requirement)) {
+        throw new EvolutionError('invalid_input', 'Semantic verifier requirement hash mismatch')
+      }
+      return result
+    } catch (error) {
+      if (error instanceof EvolutionError && (error.code === 'invalid_input' || error.code === 'review_rejected')) {
+        return {}
+      }
+      const request = mintVerifierRequest({
+        installationId,
+        reviewId: review.id,
+        requirement: review.requirement,
+        evidenceDigest,
+      })
+      const completedAt = new Date().toISOString()
+      return {
+        request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
+        verdict: {
+          requestId: request.id,
+          installationId,
+          reviewId: review.id,
+          requirementHash: requirementHashFor(review.requirement),
+          evidenceDigest,
+          verifierSessionId: 'host',
+          verifierVersion: VERIFIER_VERSION,
+          decision: 'uncertain',
+          evidence: [(error instanceof Error ? error.message : String(error)).slice(0, 300)],
+          conditions: [],
+          createdAt: completedAt,
+        },
+      }
+    }
   }
 }
 
