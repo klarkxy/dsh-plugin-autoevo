@@ -75,6 +75,7 @@ export interface RedactedVerificationReceipt {
   observedModel?: string
   routeMatchedExpectation?: boolean
   exitCode?: number | null
+  launchEvidence?: VerificationEvidence['launchEvidence']
 }
 
 export interface VerifierRunInput {
@@ -139,6 +140,7 @@ export function verificationEvidenceDigest(evidence: Pick<
   | 'observedModel'
   | 'routeMatchedExpectation'
   | 'exitCode'
+  | 'launchEvidence'
 >): string {
   return hashObject({
     expectedTools: evidence.expectedTools,
@@ -151,6 +153,7 @@ export function verificationEvidenceDigest(evidence: Pick<
     observedModel: evidence.observedModel,
     routeMatchedExpectation: evidence.routeMatchedExpectation,
     exitCode: evidence.exitCode,
+    launchEvidence: evidence.launchEvidence,
   })
 }
 
@@ -168,6 +171,7 @@ export function redactVerificationReceipt(evidence: VerificationEvidence): Redac
       ? { routeMatchedExpectation: evidence.routeMatchedExpectation }
       : {}),
     ...(evidence.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
+    ...(evidence.launchEvidence ? { launchEvidence: { ...evidence.launchEvidence } } : {}),
   }
 }
 

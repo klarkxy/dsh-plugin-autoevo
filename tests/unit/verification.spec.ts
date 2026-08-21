@@ -31,6 +31,7 @@ describe('trusted verification receipt', () => {
       calledTools: ['calculator', 'unsafe_tool'],
       resultTools: ['calculator'],
       failedTools: ['unsafe_tool'],
+      observerEventCount: 5,
       taskResultObserved: true,
       taskResultSha256: 'a'.repeat(64),
       taskResultMatchedExpectation: true,
@@ -176,6 +177,59 @@ describe('trusted verification receipt', () => {
       taskResultObserved: false,
     })
     expect(result.reason).toContain('no completed-turn final answer')
+  })
+
+  it('persists bounded launch evidence when the runner throws before any observer event', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-launch-error-'))
+    temporary.push(directory)
+    const config: RuntimeConfig = {
+      dshHome: directory,
+      stateDir: directory,
+      ghCommand: 'gh',
+      gitCommand: 'git',
+      dshCommand: 'dsh',
+      dshCommandArgs: [],
+      maxCandidates: 5,
+      maxFiles: 80,
+      maxRepositoryBytes: 1_048_576,
+      commandTimeoutMs: 30_000,
+      forwardedCredentialEnv: [],
+      verificationPatchPaths: [],
+      evolutionPreset: true,
+    }
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error('private machine-specific launch detail')
+      },
+    }
+
+    const result = await new DshLauncher(runner, config).verify(
+      directory,
+      'headless',
+      process.cwd(),
+      'sensitive task text',
+      ['calculator'],
+    )
+
+    expect(result).toMatchObject({
+      attempted: true,
+      exitCode: null,
+      taskResultObserved: false,
+      launchEvidence: {
+        attempted: true,
+        processOutcome: 'threw',
+        observerEventCount: 0,
+        failureClass: 'launch_error',
+        diagnosticHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+    })
+    expect(result.receiptPath).toBeTypeOf('string')
+    const receipt = await readFile(result.receiptPath!, 'utf8')
+    expect(receipt).toContain('host/launch')
+    expect(receipt).toContain('host/process')
+    expect(receipt).not.toContain('sensitive task text')
+    expect(receipt).not.toContain('private machine-specific launch detail')
+    expect(result.reason).toMatch(/cause is unknown/i)
   })
 
   it('generates a file-url observer overlay containing only derived verification configuration', () => {

@@ -10,10 +10,13 @@ import type {
   ReviewMode,
   ReviewRecord,
   SelectionReceipt,
+  VerificationLayerKind,
   WorkflowOptionId,
 } from '../contracts.js'
 import { isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
+import { hashObject } from '../state/hashes.js'
+import { boundedAgentText } from './sanitize.js'
 import type { WorkflowLifecycleState } from './lifecycle.js'
 
 export type { WorkflowLifecycleState }
@@ -68,6 +71,7 @@ export type WorkflowNodeId =
   | 'resolve_local'
   | 'discover_remote'
   | 'ensure_market'
+  | 'await_discovery'
   | 'await_selection'
   | 'review_github'
   | 'await_confirmation'
@@ -81,12 +85,14 @@ export type WorkflowNodeId =
   | 'market_restart_required'
   | 'market_setup_required'
   | 'installed'
+  | 'activated'
+  | 'awaiting_user_test'
   | 'restart_required'
   | 'recovery_required'
   | 'create_authorized'
   | 'modify_authorized'
 
-export type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work'
+export type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
 
 export type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery'
 
@@ -128,8 +134,15 @@ export interface CandidateSnapshotItem {
   repository?: string
   localName?: string
   localKind?: 'tool' | 'skill' | 'plugin'
-  availability?: 'available' | 'available_via_tool_search'
+  availability?: 'available' | 'available_via_tool_search' | 'installed_in_profile'
   fit?: 'full' | 'partial' | 'none'
+  installation?: {
+    source: 'host_profile_manifest'
+    profile: string
+    package_name: string
+    dependency_spec: string
+    configured_bundle: boolean
+  }
 }
 
 export interface ReviewPlan {
@@ -142,6 +155,214 @@ export interface ReviewFailure {
   candidateId: string
   code: string
   message: string
+}
+
+export interface DiscoveryBudget {
+  refinementRoundsUsed: number
+  refinementQueriesUsed: string[]
+  explicitRepositories: string[]
+  maxRefinementRounds: 2
+  maxRefinementQueries: 5
+  maxCandidates: 20
+}
+
+export interface DiscoveryRefineInput {
+  workflowId: string
+  queries?: string[]
+  repositories?: string[]
+}
+
+export interface DiscoveryPresentInput {
+  workflowId: string
+  candidateIds: string[]
+}
+
+export type DiagnosticProbe =
+  | 'discovery'
+  | 'review'
+  | 'installation'
+  | 'verification'
+  | 'managed_child'
+  | 'cleanup'
+
+export interface WorkflowDiagnoseInput {
+  workflowId: string
+  probes: DiagnosticProbe[]
+}
+
+export interface DiagnosticFact {
+  probe: DiagnosticProbe
+  status: 'pass' | 'failed' | 'unknown' | 'skipped'
+  code: string
+  summary: string
+  observed: boolean
+  evidenceHash?: string
+  facts?: Record<string, boolean | number | string | string[]>
+}
+
+export interface WorkflowDiagnosis {
+  createdAt: string
+  probes: DiagnosticProbe[]
+  facts: DiagnosticFact[]
+  budget: {
+    maxCalls: 2
+    usedCalls: number
+    maxProbes: 8
+    usedProbes: number
+    maxRecordReads: 4
+    usedRecordReads: number
+  }
+}
+
+export interface InvalidResumeAttempt {
+  hostTurnId: string
+  fingerprint: string
+  count: number
+}
+
+export interface WorkflowRecoveryInput {
+  workflowId: string
+  /** Required for sealed recovery_required interrupts. Omit for completed-install restart. */
+  interruptId?: string
+}
+
+export interface WorkflowRecoveryRecord {
+  action: 'cleanup_and_restart'
+  hostTurnId: string
+  cleanup: 'not_required' | 'already_removed' | 'removed'
+  installationId?: string
+  restartRequired: boolean
+  restartedAsWorkflowId: string
+  completedAt: string
+}
+
+export type WorkflowFailureStage =
+  | 'discovery'
+  | 'review'
+  | 'managed_child'
+  | 'install'
+  | 'verification'
+  | 'hot_load'
+  | 'workflow'
+
+export interface WorkflowFailure {
+  stage: WorkflowFailureStage
+  code: string
+  message: string
+  retryable: boolean
+  diagnosticHash?: string
+}
+
+export interface ModificationBlocker {
+  key: string
+  kind: 'compatibility' | 'missing_capability' | 'security_finding' | 'host_boundary'
+  summary: string
+}
+
+export type ModificationCheckStatus = 'passed' | 'failed' | 'skipped' | 'unknown' | 'unavailable'
+
+export interface ModificationCheckEvidence {
+  source: 'host_observed' | 'child_reported' | 'unknown'
+  status: ModificationCheckStatus
+  summary: string
+}
+
+export interface ModificationAttemptEvidence {
+  attempt: number
+  childSessionId: string
+  commit: string
+  changedFiles: string[]
+  changedFilesTruncated: boolean
+  postReviewId: string
+  completionMarkerObserved: boolean
+  checks: ModificationCheckEvidence
+}
+
+/** Compact/interrupt facts for a child or Host check. Distinguishes unavailable tools from assertion failure. */
+export function modificationCheckModelFacts(
+  checks: ModificationCheckEvidence | undefined,
+): Record<string, unknown> | undefined {
+  if (!checks) return undefined
+  return {
+    source: checks.source,
+    status: checks.status,
+    summary: boundedAgentText(checks.summary, 300),
+    ...(checks.status === 'unavailable' ? {
+      meaning: 'Checks could not run because the local toolchain was unavailable; the plugin is not verified.',
+    } : {}),
+  }
+}
+
+export interface ModificationOutcome {
+  contractVersion: 1
+  policyVersion: string
+  baselineReviewId: string
+  instructionHash?: string
+  baselineRuntimeVersion: string | null
+  maxAttempts: 2
+  automaticCorrectionUsed: boolean
+  status: 'resolved' | 'unresolved' | 'indeterminate'
+  attempts: ModificationAttemptEvidence[]
+  resolvedBlockers: ModificationBlocker[]
+  unresolvedBlockers: ModificationBlocker[]
+  introducedBlockers: ModificationBlocker[]
+}
+
+export interface ConsumedVerificationAttempt {
+  reviewId: string
+  sourceIdentity: string
+  layer: string
+  fixtureDigest?: string
+}
+
+export const INSTALL_SUCCESS_OUTCOMES = ['verified', 'activated', 'awaiting_user_test'] as const
+
+export const COMPLETED_CLEANUP_NODES: ReadonlySet<WorkflowNodeId> = new Set([
+  'installed',
+  'activated',
+  'awaiting_user_test',
+  'restart_required',
+])
+
+export function reviewSourceIdentity(review: Pick<ReviewRecord, 'sourceSnapshot'>): string {
+  const source = review.sourceSnapshot
+  return source.kind === 'github'
+    ? `github:${source.repository.toLowerCase()}#${source.commit}`
+    : `local:${source.statusHash}`
+}
+
+export function verificationAttemptKey(
+  review: Pick<ReviewRecord, 'id' | 'sourceSnapshot' | 'runtimeSurface'>,
+  extras: { layer?: string; fixtureDigest?: string } = {},
+): string {
+  return hashObject({
+    reviewId: review.id,
+    sourceIdentity: reviewSourceIdentity(review),
+    layer: extras.layer ?? review.runtimeSurface?.verificationLayer ?? 'unspecified',
+    ...(extras.fixtureDigest ? { fixtureDigest: extras.fixtureDigest } : {}),
+  })
+}
+
+export function sameVerificationAttempt(
+  attempt: ConsumedVerificationAttempt,
+  review: Pick<ReviewRecord, 'id' | 'sourceSnapshot' | 'runtimeSurface'>,
+  extras: { layer?: VerificationLayerKind | string; fixtureDigest?: string } = {},
+): boolean {
+  if (attempt.reviewId !== review.id) return false
+  if (attempt.sourceIdentity !== reviewSourceIdentity(review)) return false
+  const layer = extras.layer ?? review.runtimeSurface?.verificationLayer
+  if (layer && attempt.layer !== 'unspecified' && layer !== 'unspecified' && attempt.layer !== layer) {
+    return false
+  }
+  if (attempt.fixtureDigest && extras.fixtureDigest && attempt.fixtureDigest !== extras.fixtureDigest) {
+    return false
+  }
+  return true
+}
+
+export function modificationAttemptsExhausted(outcome: ModificationOutcome | undefined): boolean {
+  if (!outcome || outcome.status === 'resolved') return false
+  return outcome.attempts.length >= outcome.maxAttempts || outcome.introducedBlockers.length > 0
 }
 
 export interface WorkflowRecord {
@@ -165,6 +386,9 @@ export interface WorkflowRecord {
   lastReviewId?: string
   lastInstallationId?: string
   forceRemoteDiscovery?: boolean
+  /** Host-verified candidates available for model curation before Gate 1. */
+  discoveryPool?: CandidateSnapshotItem[]
+  discoveryBudget?: DiscoveryBudget
   candidateSnapshot?: CandidateSnapshotItem[]
   seenCandidateIds?: string[]
   rejectedCandidateIds?: string[]
@@ -181,8 +405,32 @@ export interface WorkflowRecord {
   pendingPath?: string
   pendingInstall?: WorkflowPendingInstall
   managedSourceId?: string
-  lastFailure?: { code: string; message: string }
+  modificationOutcome?: ModificationOutcome
+  lastFailure?: WorkflowFailure
+  lastDiagnosis?: WorkflowDiagnosis
+  invalidResumeAttempt?: InvalidResumeAttempt
+  consumedVerificationAttempts?: ConsumedVerificationAttempt[]
+  completionTurnId?: string
+  recovery?: WorkflowRecoveryRecord
+  recoveredFromWorkflowId?: string
   error?: { code: string; message: string }
+}
+
+export type WorkflowViewStatus = 'progressed' | 'parked' | 'invalid_resume'
+
+export interface AgentShortlistItem {
+  index: number
+  candidate_id: string
+  name: string
+  repository?: string
+  why?: string
+  fit?: string
+  recommendation?: string
+}
+
+export interface AgentLegalActions {
+  navigation: WorkflowOptionId[]
+  decision: WorkflowOptionId[]
 }
 
 export interface WorkflowView {
@@ -193,7 +441,16 @@ export interface WorkflowView {
   review?: ReviewRecord
   reviews?: ReviewRecord[]
   installation?: InstallationRecord
+  diagnosis?: WorkflowDiagnosis
   nextStep?: string
+  /** Model-facing outcome. `parked` and `invalid_resume` are successful tool results, not errors. */
+  status?: WorkflowViewStatus
+  phase?: InterruptKind | WorkflowNodeId
+  shortlist?: AgentShortlistItem[]
+  legal?: AgentLegalActions
+  agentDirective?: string
+  alreadyWaiting?: boolean
+  resumeHint?: string
 }
 
 export interface ValidatedResume {
@@ -218,6 +475,11 @@ export interface MarketplaceStepResult {
 export interface WorkflowHost {
   bootstrapResolution(requirement: string, exec: WorkflowExec): Promise<ResolutionRecord>
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>
+  refineRemote?(
+    resolution: ResolutionRecord,
+    input: { queries: string[]; repositories: string[] },
+    exec: WorkflowExec,
+  ): Promise<ResolutionRecord>
   ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
     resolution: ResolutionRecord
     market: MarketplaceStepResult
@@ -280,6 +542,11 @@ export interface WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>
   getInstallation(id: string): Promise<InstallationRecord>
   listInstallProfiles?(): Promise<string[]>
+  cleanupInstallation?(installationId: string, exec: WorkflowExec): Promise<{
+    installationId: string
+    removed: boolean
+    restartRequired: boolean
+  }>
   releaseManagedSource?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>
 }
 
@@ -295,12 +562,19 @@ export const INTERRUPT_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'await_modify_work',
 ])
 
+/** Model-controlled, read-only checkpoints. They are not user decision gates. */
+export const MODEL_CONTROL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
+  'await_discovery',
+])
+
 export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'reuse_local',
   'stopped',
   'market_restart_required',
   'market_setup_required',
   'installed',
+  'activated',
+  'awaiting_user_test',
   'restart_required',
   'recovery_required',
   'create_authorized',
@@ -322,7 +596,10 @@ export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
 }
 
 export function isInterruptKind(value: string | undefined): value is InterruptKind {
-  return value === 'await_selection' || value === 'await_confirmation' || value === 'await_modify_work'
+  return value === 'await_selection'
+    || value === 'await_confirmation'
+    || value === 'await_modify_work'
+    || value === 'await_recovery'
 }
 
 export function selectionFacts(resolution: ResolutionRecord, workflow?: WorkflowRecord): Record<string, unknown> {
@@ -343,6 +620,18 @@ export function selectionFacts(resolution: ResolutionRecord, workflow?: Workflow
   }
 }
 
+function compactConfirmationFindings(review: ReviewRecord): {
+  findings: ReturnType<typeof securityFindingFacts>
+  findingDetails: ReturnType<typeof securityFindingFacts>
+} {
+  const grouped = securityFindingFacts(review.findings)
+  const top = grouped.find((item) => item.severity === 'block') ?? grouped[0]
+  return {
+    findings: top ? [top] : [],
+    findingDetails: grouped,
+  }
+}
+
 export function confirmationFacts(
   resolution: ResolutionRecord,
   reviews: ReviewRecord[],
@@ -350,14 +639,24 @@ export function confirmationFacts(
   extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
 ): Record<string, unknown> {
   const review = reviews[0]
+  const compact = review ? compactConfirmationFindings(review) : undefined
+  const reviewLayer = review?.runtimeSurface?.verificationLayer
+  const lastChecks = workflow?.modificationOutcome?.attempts.at(-1)?.checks
+  const modificationChecks = modificationCheckModelFacts(lastChecks)
   return {
     ...(review ? {
       reviewId: review.id,
       fit: review.fit,
       securityRisk: review.securityRisk,
       recommendation: review.recommendation,
+      canInstall: isDirectlyUsableReview(review, workflow),
       missingCapabilities: review.missingCapabilities,
-      findings: securityFindingFacts(review.findings),
+      verificationLayer: reviewLayer ?? 'manual_runtime',
+      ...(reviewLayer === 'manual_runtime' ? {
+        installRetentionRule: 'This candidate verifies only at manual_runtime: install requires retention persistent, skips the sandboxed trial, and ends awaiting a manual user test in the target client or profile.',
+      } : {}),
+      findings: compact?.findings ?? [],
+      findingDetails: compact?.findingDetails ?? [],
       securityInterpretationRule: 'Security findings are static review observations only. Treat sources and details as observed facts; purpose, necessity, command target, runtime execution, and callback-server behavior are unknown unless separately verified. Never invent a justification for a finding.',
       sourceSnapshot: review.sourceSnapshot,
     } : {}),
@@ -370,6 +669,7 @@ export function confirmationFacts(
       compatibility: item.compatibility,
       installable: Boolean(item.installSpec),
       missingCapabilities: item.missingCapabilities,
+      verificationLayer: item.runtimeSurface?.verificationLayer ?? 'manual_runtime',
       semanticReviewRequired: needsSemanticReviewer(item),
       directUseEligible: isDirectlyUsableReview(item, workflow),
       ...(item.reviewerVerdict ? { reviewerDecision: item.reviewerVerdict.decision } : {}),
@@ -383,6 +683,11 @@ export function confirmationFacts(
     selectedRepositories: resolution.selectedRepositories ?? [],
     ...(review ? { license: review.license, compatibility: review.compatibility } : {}),
     ...(extras.lastFailure ? { lastFailure: extras.lastFailure } : {}),
+    verificationAlreadyAttempted: Boolean(
+      review && (workflow?.consumedVerificationAttempts ?? []).some((item) => sameVerificationAttempt(item, review)),
+    ),
+    modificationAttemptsExhausted: modificationAttemptsExhausted(workflow?.modificationOutcome),
+    ...(modificationChecks ? { modificationChecks } : {}),
     ...(extras.installProfiles && extras.installProfiles.length > 0
       ? { installProfiles: extras.installProfiles }
       : {}),
@@ -438,7 +743,9 @@ export function optionsFor(
         ? remoteSnapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase())?.id
         : undefined
     }
-    const usableIds = reviews.filter((item) => isDirectlyUsableReview(item, workflow))
+    const consumed = workflow?.consumedVerificationAttempts ?? []
+    const usableIds = reviews.filter((item) => isDirectlyUsableReview(item, workflow)
+      && !consumed.some((attempt) => sameVerificationAttempt(attempt, item)))
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
     const repairableIds = reviews.filter((item) => item.fit !== 'none' && item.license !== null)
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
@@ -452,7 +759,7 @@ export function optionsFor(
     if (fullLocalIds.length > 0) {
       options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: fullLocalIds })
     }
-    if (repairableIds.length > 0) {
+    if (repairableIds.length > 0 && !modificationAttemptsExhausted(workflow?.modificationOutcome)) {
       options.push({ ...WORKFLOW_OPTIONS.modify_this, candidateIds: repairableIds })
     }
     if (resolution.remoteDiscoveryComplete) options.push(WORKFLOW_OPTIONS.create_new)

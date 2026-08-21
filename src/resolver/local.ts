@@ -6,6 +6,7 @@ import { TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
 import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
 import { resolveLoadedPluginCapabilities } from './plugins.js'
+import { resolveProfilePluginCapabilities } from './profile.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
 
@@ -98,10 +99,36 @@ export interface LocalResolution {
   reasons: string[]
 }
 
+export interface LocalCapabilityOptions {
+  dshHome?: string
+  activeProfile?: string
+}
+
+function mergeProfileAndLoadedCandidates(
+  profileCandidates: readonly LocalCapabilityCandidate[],
+  loadedCandidates: readonly LocalCapabilityCandidate[],
+): LocalCapabilityCandidate[] {
+  const byName = new Map(profileCandidates.map((candidate) => [candidate.name, candidate]))
+  for (const loaded of loadedCandidates) {
+    const profile = byName.get(loaded.name)
+    byName.set(loaded.name, profile
+      ? {
+          ...profile,
+          ...loaded,
+          description: loaded.description || profile.description,
+          confidence: Math.max(profile.confidence, loaded.confidence),
+          ...(profile.profileEvidence ? { profileEvidence: profile.profileEvidence } : {}),
+        }
+      : loaded)
+  }
+  return [...byName.values()]
+}
+
 export async function resolveLocalCapabilities(
   ctx: Context,
   requirement: string,
   exec: Pick<ToolRunContext, 'agent' | 'signal'>,
+  options: LocalCapabilityOptions = {},
 ): Promise<LocalResolution> {
   const cwd = exec.agent?.session.header.cwd ?? process.cwd()
   const scope = exec.agent
@@ -157,13 +184,24 @@ export async function resolveLocalCapabilities(
     })
   }
 
-  candidates.push(...await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence))
+  const profileCandidates = options.dshHome && options.activeProfile
+    ? await resolveProfilePluginCapabilities({
+        dshHome: options.dshHome,
+        profile: options.activeProfile,
+        requirement,
+        match: matchConfidence,
+      })
+    : []
+  const loadedCandidates = await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence)
+  candidates.push(...mergeProfileAndLoadedCandidates(profileCandidates, loadedCandidates))
 
-  for (const candidate of candidates) Object.assign(candidate, localFit(requirement, candidate))
+  for (const candidate of candidates) {
+    if (candidate.fit === 'full' && candidate.profileEvidence) continue
+    Object.assign(candidate, localFit(requirement, candidate))
+  }
 
   candidates.sort((left, right) => right.confidence - left.confidence || left.name.localeCompare(right.name))
-  const useful = candidates.some((candidate) => candidate.confidence >= 0.62
-    && isStrictLocalMatch(requirement, candidate.name, candidate.description))
+  const useful = candidates.some((candidate) => candidate.confidence >= 0.62 && candidate.fit === 'full')
   return {
     cwd,
     candidates: candidates.slice(0, 8),

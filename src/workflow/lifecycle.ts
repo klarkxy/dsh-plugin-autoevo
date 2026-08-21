@@ -19,6 +19,8 @@ export type WorkflowLifecycleState =
   | 'leased'
   | 'executing'
   | 'verified'
+  | 'activated'
+  | 'awaiting_user_test'
   | 'recovery_required'
   | 'restart_required'
   | 'market_restart_required'
@@ -45,6 +47,8 @@ function reviewDecisionState(review: ReviewRecord | undefined): WorkflowLifecycl
 }
 
 function installedLifecycle(installation: InstallationRecord | undefined): WorkflowLifecycleState {
+  if (installation?.installOutcome === 'awaiting_user_test') return 'awaiting_user_test'
+  if (installation?.installOutcome === 'activated' && installation.verified !== true) return 'activated'
   if (installation?.verified === true && installation.installOutcome === 'verified') return 'verified'
   return 'recovery_required'
 }
@@ -70,6 +74,8 @@ export function lifecycleStateFor(
   if (cursor === 'market_restart_required') return 'market_restart_required'
   if (cursor === 'restart_required') return 'restart_required'
   if (cursor === 'recovery_required') return 'recovery_required'
+  if (cursor === 'awaiting_user_test') return 'awaiting_user_test'
+  if (cursor === 'activated') return 'activated'
   if (cursor === 'installed') return installedLifecycle(extras.installation)
 
   if (workflow.executionLease) return 'leased'
@@ -80,7 +86,7 @@ export function lifecycleStateFor(
   if (workflow.actionCommitment) return 'committed'
 
   if (cursor === 'review_github' || cursor === 'review_local') return 'reviewing'
-  if (cursor === 'resolve_local' || cursor === 'discover_remote' || cursor === 'ensure_market') return 'searched'
+  if (cursor === 'resolve_local' || cursor === 'discover_remote' || cursor === 'ensure_market' || cursor === 'await_discovery') return 'searched'
   if (cursor === 'await_selection') return 'selected'
   if (cursor === 'await_modify_work') return 'interrupted'
   if (cursor === 'await_confirmation') {

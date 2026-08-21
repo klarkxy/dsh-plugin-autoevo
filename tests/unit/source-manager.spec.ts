@@ -117,6 +117,9 @@ function scriptedGit(state: {
       if (joined === 'add -A') {
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       }
+      if (joined.startsWith('diff-tree --no-commit-id --name-only -r -z')) {
+        return { exitCode: 0, signal: null, stdout: 'package.json\0', stderr: '' }
+      }
       if (args.includes('commit')) {
         state.head = `commit_${(state.commits ??= []).length + 1}`.padEnd(40, '0')
         state.commits.push(state.head)

@@ -29,7 +29,6 @@ const DELEGATION_TOOLS = new Set([
   'task',
 ])
 const PLUGIN_MUTATION_TOOLS = new Set(['plugin_install', 'plugin_remove', 'dsh_plugin_add', 'dsh_plugin_remove'])
-const READ_ONLY_DISCOVERY_TOOLS = new Set(['find_dsh_plugin', 'web_search', 'web_fetch', 'skill', 'read_skill'])
 const CHILD_SUPPORT_TOOLS = new Set(['todo_write', 'todo_read'])
 const CODE_MODE_TRANSPORT_TOOL = 'run_code'
 const GIT_COMMAND_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
@@ -116,8 +115,6 @@ function hasUnsafeGitCommand(command: string): boolean {
 
 export interface ExecutionGuardOptions {
   role: ExecutionRole
-  /** Host-owned lease lookup. Absent or undefined results stay fail-closed. */
-  resolveLease?: (exec: Readonly<ToolExecution>) => ExecutionLease | undefined
 }
 
 /**
@@ -149,30 +146,19 @@ export class ExecutionGuard {
 
   private parentDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
     if (AUTOEVO_TOOLS.has(name)) return undefined
-    if (matchesSet(name, FS_READ_TOOLS)) return undefined
-    if (matchesSet(name, READ_ONLY_DISCOVERY_TOOLS)) return undefined
-    if (matchesSet(name, FS_WRITE_TOOLS)) {
-      return 'AutoEvo parent session denies filesystem write/edit; modify/create runs only in a managed workspace-write child.'
+    if (isNewCordisDefinition(exec)) {
+      return 'AutoEvo parent session denies cordis_define(kind:new); create-new continues only in a Host-launched managed git source child.'
+    }
+    if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
+      return 'AutoEvo parent session denies direct plugin install/remove tools; use capability_workflow_resume / plugin_remove.'
     }
     if (matchesSet(name, SHELL_TOOLS)) {
       const command = shellCommandText(exec.arguments)
       if (DSH_PLUGIN_MUTATION_RE.test(command)) {
         return 'AutoEvo parent session denies direct DSH plugin install/remove; use capability_workflow_resume / plugin_remove.'
       }
-      return 'AutoEvo parent session denies shell (pwsh/bash); modify/create runs only in a managed workspace-write child.'
     }
-    if (matchesSet(name, CORDIS_MUTATION_TOOLS) || isNewCordisDefinition(exec)) {
-      return 'AutoEvo parent session denies Cordis mutation/definition; create-new uses a managed git source child session.'
-    }
-    if (matchesSet(name, DELEGATION_TOOLS)) {
-      return 'AutoEvo parent session denies agent/subagent/workflow delegation; only the Host may launch the managed modify/create child.'
-    }
-    if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
-      return 'AutoEvo parent session denies direct plugin install/remove tools; use the capability workflow.'
-    }
-    const lease = this.options.resolveLease?.(exec)
-    if (leaseAllowsExecution(lease, exec)) return undefined
-    return `AutoEvo parent session denies unrecognized tool ${JSON.stringify(name)}; only AutoEvo decisions and explicit read-only discovery/review tools are allowed.`
+    return undefined
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {

@@ -7,8 +7,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import {
   POLICY_VERSION,
+  classifyRuntimeSurface,
+  type InstallOutcome,
   type ResolutionRecord,
   type ReviewRecord,
+  type VerificationLayerKind,
+  type VerificationStatus,
   type VerificationVerdict,
 } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
@@ -18,6 +22,7 @@ import {
   DshSemanticVerifierHost,
   lifecycleStateFor,
 } from '../../src/index.js'
+import { selectInstallVerificationLayer } from '../../src/host-verification-driver.js'
 import { PluginInstaller } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { assertDirectUseAllowed, isDirectlyUsableReview } from '../../src/review/direct-use.js'
@@ -155,13 +160,121 @@ function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn
   }
 }
 
-describe('Policy V5 legacy invalidation', () => {
-  it('exports Policy V5 contracts and semantic hosts for consumers', () => {
-    expect(POLICY_VERSION).toBe('5')
-    expect(exportedPolicyVersion).toBe('5')
+describe('Policy V8 legacy invalidation', () => {
+  it('exports Policy V8 contracts and semantic hosts for consumers', () => {
+    expect(POLICY_VERSION).toBe('8')
+    expect(exportedPolicyVersion).toBe('8')
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')
+    const layers: VerificationLayerKind[] = ['bundle_activation', 'tool_roundtrip', 'manual_runtime']
+    const statuses: VerificationStatus[] = [
+      'passed',
+      'pending_user_test',
+      'blocked_precondition',
+      'failed',
+      'uncertain',
+    ]
+    const outcomes: InstallOutcome[] = [
+      'pending',
+      'verified',
+      'failed_absent',
+      'recovery_required',
+      'activated',
+      'awaiting_user_test',
+    ]
+    expect(layers).toHaveLength(3)
+    expect(statuses).toHaveLength(5)
+    expect(outcomes).toContain('activated')
+    expect(outcomes).toContain('awaiting_user_test')
+    expect(classifyRuntimeSurface({
+      llmDependency: false,
+      llmRegistered: false,
+      credentialsDependency: false,
+      credentialsRegistered: false,
+      networkSignal: false,
+      environmentSignal: false,
+      processSignal: false,
+      skillOnly: false,
+      unsafeTools: false,
+      expectedTools: [],
+      toolFixtures: [],
+      kind: 'bundle',
+    })).toBe('bundle_activation')
+  })
+
+  it('requires Host-validated fixtures for tool_roundtrip and treats plugin-declared safe as manual_runtime', () => {
+    const facts = {
+      llmDependency: false,
+      llmRegistered: false,
+      credentialsDependency: false,
+      credentialsRegistered: false,
+      networkSignal: false,
+      environmentSignal: false,
+      processSignal: false,
+      skillOnly: false,
+      unsafeTools: false,
+      expectedTools: ['calculator'] as const,
+      kind: 'bundle' as const,
+    }
+    expect(classifyRuntimeSurface({
+      ...facts,
+      toolFixtures: [{ tool: 'calculator', available: true, safe: true, hostValidated: false }],
+    })).toBe('manual_runtime')
+    expect(classifyRuntimeSurface({
+      ...facts,
+      toolFixtures: [{ tool: 'calculator', available: true, safe: true, hostValidated: true }],
+    })).toBe('tool_roundtrip')
+    expect(classifyRuntimeSurface({
+      ...facts,
+      expectedTools: [],
+      toolFixtures: [],
+      llmDependency: true,
+    })).toBe('manual_runtime')
+    expect(classifyRuntimeSurface({
+      ...facts,
+      expectedTools: [],
+      toolFixtures: [],
+      environmentSignal: true,
+    })).toBe('manual_runtime')
+  })
+
+  it('selects Host verification layers without treating candidate safe:true or expectedRoute as drivers', () => {
+    const current = review()
+    expect(selectInstallVerificationLayer({
+      review: current,
+      declaredFixtures: { calculator: { safe: true } },
+    }).layer).toBe('manual_runtime')
+    expect(selectInstallVerificationLayer({
+      review: current,
+      declaredFixtures: { calculator: { arguments: { expression: '1+1' }, safe: true } },
+    })).toMatchObject({ layer: 'manual_runtime', fixtures: [] })
+    const hostAttested = review()
+    hostAttested.runtimeSurface = {
+      llmDependency: false,
+      llmRegistered: false,
+      credentialsDependency: false,
+      credentialsRegistered: false,
+      networkSignal: false,
+      environmentSignal: false,
+      processSignal: false,
+      skillOnly: false,
+      unsafeTools: false,
+      expectedTools: ['calculator'],
+      toolFixtures: [{ tool: 'calculator', available: true, safe: true, hostValidated: true }],
+      kind: 'bundle',
+      verificationLayer: 'tool_roundtrip',
+    }
+    expect(selectInstallVerificationLayer({
+      review: hostAttested,
+      declaredFixtures: { calculator: { arguments: { expression: '1+1' } } },
+    }).fixtures[0]).toEqual({ tool: 'calculator', arguments: { expression: '1+1' } })
+    const routed = review()
+    routed.manifest = { ...routed.manifest, expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' } }
+    expect(selectInstallVerificationLayer({
+      review: routed,
+      declaredFixtures: { calculator: { arguments: { expression: '1+1' } } },
+    }).layer).toBe('manual_runtime')
   })
 
   it('keeps old reviews readable but never usable for use/install', () => {
@@ -295,6 +408,14 @@ describe('Policy V5 legacy invalidation', () => {
     }
     await store.put('workflows', legacy)
 
+    const beforeForeignResume = await store.getWorkflow(legacy.id)
+    await expect(engine.resume({
+      workflowId: legacy.id,
+      interruptId,
+      decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
+    }, exec('session-foreign'))).rejects.toThrow(/different owner session/i)
+    expect(await store.getWorkflow(legacy.id)).toEqual(beforeForeignResume)
+
     const restarted = await engine.resume({
       workflowId: legacy.id,
       interruptId,
@@ -305,11 +426,16 @@ describe('Policy V5 legacy invalidation', () => {
     expect(restarted.lifecycleState).toBe('interrupted')
     expect(restarted.workflow.status).toBe('completed')
     expect(restarted.workflow.policyVersion).toBe('4')
+    expect(restarted.lifecycleState).not.toBe('verified')
     expect(restarted.workflow.interrupt).toBeUndefined()
     expect(restarted.workflow.selectionReceipt).toBeUndefined()
     expect(restarted.workflow.actionCommitment).toBeUndefined()
     expect(restarted.workflow.executionLease).toBeUndefined()
-    expect(restarted.nextStep).toMatch(/not executable/i)
+    expect(restarted.workflow.lastFailure).toMatchObject({
+      stage: 'workflow',
+      code: 'policy_restart_required',
+      retryable: false,
+    })
 
     const staleVerdict: VerificationVerdict = {
       requestId: 'verifier_legacy',
@@ -332,7 +458,72 @@ describe('Policy V5 legacy invalidation', () => {
     })).toBe(false)
   })
 
-  it('starts a fresh V5 workflow instead of replaying an unfinished old-policy one', async () => {
+  it('does not migrate unfinished V7 execution authorization onto Policy V8', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-v7-resume-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const record = resolution()
+    const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
+    const installReviewed = vi.fn(async () => {
+      throw new Error('must not install')
+    })
+    const engine = new WorkflowEngine(store, guard, {
+      ...host(store, record, applyDecision),
+      installReviewed,
+    })
+    const turn = exec()
+    const started = await engine.start('calculator', turn)
+    const legacy = await store.getWorkflow(started.workflow.id)
+    const interruptId = legacy.interrupt!.interruptId
+    legacy.policyVersion = '7'
+    legacy.actionCommitment = {
+      id: 'commit_v7',
+      selectionReceiptId: 'receipt_v7',
+      snapshotDigest: 'a'.repeat(64),
+      frozenIdentity: { kind: 'none' },
+      requestedAction: 'use_this',
+      endpoint: { kind: 'none' },
+      allowedParameterConstraints: {},
+      createdAt: '2026-08-17T00:00:00.000Z',
+    }
+    legacy.executionLease = {
+      id: 'lease_v7',
+      commitmentId: 'commit_v7',
+      selectionReceiptId: 'receipt_v7',
+      workflowId: legacy.id,
+      ownerSessionId: 'session-1',
+      bootId: 'boot_engine',
+      hostTurnId: 'turn_v7',
+      interruptId,
+      snapshotDigest: 'a'.repeat(64),
+      requestedAction: 'use_this',
+      endpoint: { kind: 'none' },
+      allowedParameterConstraints: {},
+      createdAt: '2026-08-17T00:00:00.000Z',
+    }
+    await store.put('workflows', legacy)
+
+    const restarted = await engine.resume({
+      workflowId: legacy.id,
+      interruptId,
+      decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
+    }, turn)
+    expect(applyDecision).not.toHaveBeenCalled()
+    expect(installReviewed).not.toHaveBeenCalled()
+    expect(restarted.lifecycleState).toBe('interrupted')
+    expect(restarted.workflow.status).toBe('completed')
+    expect(restarted.workflow.policyVersion).toBe('7')
+    expect(restarted.workflow.actionCommitment).toBeUndefined()
+    expect(restarted.workflow.executionLease).toBeUndefined()
+    expect(restarted.workflow.lastFailure).toMatchObject({
+      stage: 'workflow',
+      code: 'policy_restart_required',
+      retryable: false,
+    })
+  })
+
+  it('starts a fresh V8 workflow instead of replaying an unfinished old-policy one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-start-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -343,7 +534,7 @@ describe('Policy V5 legacy invalidation', () => {
     const turn = exec()
     const started = await engine.start('calculator', turn)
     const legacy = await store.getWorkflow(started.workflow.id)
-    legacy.policyVersion = '4'
+    legacy.policyVersion = '7'
     await store.put('workflows', legacy)
 
     const fresh = await engine.start('calculator', turn)

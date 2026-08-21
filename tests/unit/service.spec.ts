@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { _testing } from '../../src/service.js'
 import { hashObject } from '../../src/state/hashes.js'
+import { modificationAttemptsExhausted } from '../../src/workflow/contracts.js'
 
 function review(requestedRef: string): ReviewRecord {
   return {
@@ -54,6 +55,186 @@ describe('managed modification instruction', () => {
     const task = _testing.modificationTask(record, selected)
     expect(task).toContain(`original capability requirement: ${record.requirement}`)
     expect(task).toContain('Authenticated user modification instruction: 在这个上改：支持勾选多段指定对话，再拼成一张长截图。先不要装。')
+  })
+
+  it('passes bounded Host review blockers without prescribing an implementation path', () => {
+    const record = resolution()
+    const selected = candidateReview('acme/one', 'modify', '1')
+    selected.compatibility = {
+      status: 'incompatible',
+      reason: 'Declared peers exclude runtime 0.1.0-rc.6.',
+      runtimeVersion: '0.1.0-rc.6',
+    }
+    selected.missingCapabilities = ['multi-part capture']
+    selected.findings = [{
+      code: 'unsafe_script',
+      severity: 'block',
+      source: 'package.json',
+      detail: 'install script is present',
+    }]
+    const task = _testing.modificationTask(record, selected)
+    expect(task).toContain('Declared peers exclude runtime 0.1.0-rc.6.')
+    expect(task).toContain('multi-part capture')
+    expect(task).toContain('unsafe_script at package.json: install script is present')
+    expect(task).toContain('choose the implementation path yourself')
+    expect(task).not.toContain('edit package.json')
+  })
+
+  it('compares stable baseline blockers and separates resolved, unresolved, and introduced targets', () => {
+    const baseline = candidateReview('acme/one', 'modify', '1')
+    baseline.compatibility = { status: 'incompatible', reason: 'peer mismatch', runtimeVersion: '0.1.0-rc.6' }
+    baseline.missingCapabilities = ['capture']
+    const targets = _testing.modificationBlockers(baseline)
+    const post = structuredClone(baseline)
+    post.compatibility = { status: 'compatible', reason: 'peer match', runtimeVersion: '0.1.0-rc.6' }
+    post.findings = [{ code: 'new_block', severity: 'block', source: 'lib/index.js', detail: 'new blocker' }]
+    const delta = _testing.modificationDelta(targets, post)
+    expect(delta.resolved.map((item) => item.kind)).toEqual(['compatibility'])
+    expect(delta.unresolved.map((item) => item.kind)).toEqual(['missing_capability'])
+    expect(delta.introduced).toEqual([
+      expect.objectContaining({ kind: 'security_finding', summary: expect.stringContaining('new_block') }),
+    ])
+  })
+
+  it('labels child-only checks without promoting them to Host observations', () => {
+    expect(_testing.childCheckEvidence('Tests were not run.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
+      source: 'child_reported',
+      status: 'skipped',
+      summary: 'The managed child reported that tests were skipped.',
+    })
+    expect(_testing.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
+      source: 'child_reported',
+      status: 'passed',
+    })
+    expect(_testing.childCheckEvidence('Tests failed.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
+      source: 'child_reported',
+      status: 'failed',
+    })
+    expect(_testing.childCheckEvidence('Implemented the change.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
+      source: 'unknown',
+      status: 'unknown',
+    })
+    expect(_testing.childCheckEvidence(
+      'npm test failed because vitest was unavailable; npm run typecheck failed because tsc was unavailable; node --check lib/index.js passed.\nAUTOEVO_CHILD_COMPLETED',
+    )).toMatchObject({
+      source: 'child_reported',
+      status: 'unavailable',
+    })
+  })
+
+  it('allows one correction only for persisting original blockers and stops on scope expansion or evaluator drift', () => {
+    const baseline = candidateReview('acme/one', 'modify', '1')
+    baseline.compatibility = { status: 'incompatible', reason: 'peer mismatch', runtimeVersion: '0.1.0-rc.6' }
+    const blockers = _testing.modificationBlockers(baseline)
+    const persisting = structuredClone(baseline)
+    expect(_testing.modificationAcceptance({
+      baselineReview: baseline,
+      baselineBlockers: blockers,
+      postReview: persisting,
+      meaningfulInstruction: false,
+      attempt: 1,
+    })).toMatchObject({ status: 'unresolved', canCorrect: true })
+
+    persisting.findings = [{ code: 'new_block', severity: 'block', source: 'src/index.ts', detail: 'new blocker' }]
+    expect(_testing.modificationAcceptance({
+      baselineReview: baseline,
+      baselineBlockers: blockers,
+      postReview: persisting,
+      meaningfulInstruction: false,
+      attempt: 1,
+    })).toMatchObject({ status: 'unresolved', canCorrect: false, introduced: [expect.objectContaining({ kind: 'security_finding' })] })
+
+    const drifted = structuredClone(baseline)
+    drifted.compatibility.runtimeVersion = '0.1.0-rc.7'
+    expect(_testing.modificationAcceptance({
+      baselineReview: baseline,
+      baselineBlockers: blockers,
+      postReview: drifted,
+      meaningfulInstruction: false,
+      attempt: 1,
+    })).toMatchObject({ status: 'indeterminate', canCorrect: false })
+
+    const resolved = structuredClone(baseline)
+    resolved.compatibility = { status: 'compatible', reason: 'peer range accepted', runtimeVersion: '0.1.0-rc.6' }
+    expect(_testing.modificationAcceptance({
+      baselineReview: baseline,
+      baselineBlockers: blockers,
+      postReview: resolved,
+      meaningfulInstruction: true,
+      attempt: 1,
+    })).toMatchObject({ status: 'indeterminate', canCorrect: false, unresolved: [], introduced: [] })
+  })
+
+  it('treats a same-code blocker at a new source as newly introduced', () => {
+    const baseline = candidateReview('acme/one', 'modify', '1')
+    baseline.findings = [{ code: 'unsafe_script', severity: 'block', source: 'src/a.ts', detail: 'unsafe call' }]
+    const post = structuredClone(baseline)
+    post.findings = [{ code: 'unsafe_script', severity: 'block', source: 'src/b.ts', detail: 'unsafe call' }]
+    const result = _testing.modificationAcceptance({
+      baselineReview: baseline,
+      baselineBlockers: _testing.modificationBlockers(baseline),
+      postReview: post,
+      meaningfulInstruction: false,
+      attempt: 1,
+    })
+    expect(result).toMatchObject({
+      canCorrect: false,
+      resolved: [expect.objectContaining({ kind: 'security_finding' })],
+      unresolved: [],
+      introduced: [expect.objectContaining({ kind: 'security_finding' })],
+    })
+  })
+
+  it('does not allow a third automatic modification after the existing two-attempt bound', () => {
+    const attempt = {
+      attempt: 1,
+      childSessionId: 'child',
+      commit: 'a'.repeat(40),
+      changedFiles: ['src/index.ts'],
+      changedFilesTruncated: false,
+      postReviewId: 'review-after',
+      completionMarkerObserved: true,
+      checks: { source: 'host_observed' as const, status: 'failed' as const, summary: 'unresolved' },
+    }
+    expect(modificationAttemptsExhausted({
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: true,
+      status: 'unresolved',
+      attempts: [attempt, { ...attempt, attempt: 2 }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [{ key: 'compat', kind: 'compatibility', summary: 'still incompatible' }],
+      introducedBlockers: [],
+    })).toBe(true)
+    expect(modificationAttemptsExhausted({
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: false,
+      status: 'unresolved',
+      attempts: [attempt],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [{ key: 'new', kind: 'security_finding', summary: 'new block' }],
+    })).toBe(true)
+    expect(modificationAttemptsExhausted({
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: false,
+      status: 'resolved',
+      attempts: [attempt],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [],
+    })).toBe(false)
   })
 })
 
@@ -228,7 +409,7 @@ describe('adaptive review budget', () => {
     const repairable = candidateReview('acme/two', 'modify', '2')
     const skipped = candidateReview('acme/three', 'skip', '3')
     expect(_testing.shouldReviewAdaptiveThird('adaptive', [usable, repairable])).toBe(false)
-    expect(_testing.shouldReviewAdaptiveThird('adaptive', [repairable, skipped])).toBe(true)
+    expect(_testing.shouldReviewAdaptiveThird('adaptive', [skipped, candidateReview('acme/four', 'skip', '4')])).toBe(true)
     expect(_testing.shouldReviewAdaptiveThird('fixed', [usable])).toBe(true)
   })
 })

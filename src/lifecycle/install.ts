@@ -11,10 +11,17 @@ import type {
   InstallOutcome,
   ReviewRecord,
   VerificationEvidence,
+  VerificationLayerKind,
+  VerificationStatus,
   VerificationVerdict,
   VerifierRequest,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import {
+  hostLayerSuccess,
+  sanitizeHostVerificationEvidence,
+  selectInstallVerificationLayer,
+} from '../host-verification-driver.js'
 import { assertSafePackageName } from '../package-name.js'
 import { assertDirectUseAllowed, type InstallCommitmentBinding } from '../review/direct-use.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -23,13 +30,12 @@ import {
   redactVerificationReceipt,
   VERIFIER_VERSION,
   verificationEvidenceDigest,
-  verificationVerdictAllowsCompletion,
   type SemanticVerifierHost,
 } from '../semantic-verifier.js'
 import { requirementHashFor } from '../semantic-reviewer.js'
 import { hashObject } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
-import { assertOwnedTrialPath, hostMechanicalSuccess, type DshLauncher } from './launcher.js'
+import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 import { hotLoadInstalledBundle, type HotReloadAttempt } from './hot-load.js'
 
 export type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>
@@ -58,9 +64,6 @@ function verificationTask(input: InstallInput): string | undefined {
   if (task !== undefined && task.length > 4_000) {
     throw new EvolutionError('invalid_input', 'verificationTask must not exceed 4000 characters')
   }
-  if (!task) {
-    throw new EvolutionError('invalid_input', 'installation requires a non-empty verificationTask')
-  }
   return task || undefined
 }
 
@@ -71,19 +74,6 @@ function verificationExpectation(input: InstallInput, task: string | undefined):
   }
   if (expected && !task) throw new EvolutionError('invalid_input', 'verificationExpectedText requires a verificationTask')
   return expected || undefined
-}
-
-function emptyVerification(expectedTools: readonly string[]): VerificationEvidence {
-  return {
-    attempted: false,
-    expectedTools: [...expectedTools],
-    calledTools: [],
-    resultTools: [],
-    failedTools: [],
-    sessionFiles: [],
-    taskResultObserved: false,
-    reason: 'No verificationTask was supplied; loaded and verified remain false.',
-  }
 }
 
 function pendingVerification(expectedTools: readonly string[]): VerificationEvidence {
@@ -99,19 +89,40 @@ function pendingVerification(expectedTools: readonly string[]): VerificationEvid
   }
 }
 
-function interruptedVerification(task: string, expectedTools: readonly string[]): VerificationEvidence {
-  return {
+function interruptedVerification(
+  expectedTools: readonly string[],
+  layer: VerificationLayerKind,
+): VerificationEvidence {
+  return sanitizeHostVerificationEvidence({
     attempted: true,
-    task,
+    layer,
+    status: 'uncertain',
+    expectedTools,
     exitCode: null,
-    expectedTools: [...expectedTools],
-    calledTools: [],
-    resultTools: [],
-    failedTools: [],
-    sessionFiles: [],
-    taskResultObserved: false,
-    reason: 'Verification could not complete; no trusted tool round-trip was accepted.',
-  }
+    reason: 'Host verification could not complete; the same fixture digest will not be retried.',
+  })
+}
+
+function manualRuntimeEvidence(expectedTools: readonly string[], reason: string): VerificationEvidence {
+  return sanitizeHostVerificationEvidence({
+    attempted: false,
+    layer: 'manual_runtime',
+    status: 'pending_user_test',
+    expectedTools,
+    sourceMatched: true,
+    reason,
+  })
+}
+
+function sourceMismatchEvidence(expectedTools: readonly string[]): VerificationEvidence {
+  return sanitizeHostVerificationEvidence({
+    attempted: false,
+    layer: 'manual_runtime',
+    status: 'blocked_precondition',
+    expectedTools,
+    sourceMatched: false,
+    reason: 'The install command finished, but the target profile did not record the exact reviewed source as an active bundle.',
+  })
 }
 
 function installFailure(error: unknown): NonNullable<InstallationRecord['installFailure']> {
@@ -248,7 +259,7 @@ export class PluginInstaller {
   ): Promise<InstallationRecord> {
     validateProfile(input.targetProfile)
     const task = verificationTask(input)
-    const expectedText = verificationExpectation(input, task)
+    verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
     if (this.authorizeInstall) await this.authorizeInstall(review, exec, binding)
@@ -257,6 +268,14 @@ export class PluginInstaller {
     assertDirectUseAllowed(review, binding?.workflow)
     if (!await this.revalidate(review, exec.signal)) {
       throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; resume the capability workflow to review again')
+    }
+    const frozenLayer: VerificationLayerKind = review.runtimeSurface?.verificationLayer ?? 'manual_runtime'
+    const originallyAutomatic = frozenLayer === 'tool_roundtrip' || frozenLayer === 'bundle_activation'
+    if (frozenLayer === 'manual_runtime' && input.retention === 'temporary') {
+      throw new EvolutionError(
+        'invalid_input',
+        'manual_runtime cannot be installed as a temporary trial; reconfirm persistent retention if a user test is intended.',
+      )
     }
     const scripts = review.manifest.scripts.length > 0 ? review.manifest.scripts.join(', ') : 'none'
     const riskFindings = review.findings
@@ -315,6 +334,7 @@ export class PluginInstaller {
       id,
       createdAt,
       reviewId: review.id,
+      ...(binding?.workflow ? { workflowId: binding.workflow.id } : {}),
       targetProfile: input.targetProfile,
       retention: input.retention,
       dshHome,
@@ -374,53 +394,76 @@ export class PluginInstaller {
       packageName,
       installSpec,
     ).catch(() => false)
+    const expectedTools = review.manifest.expectedTools
     let verification: VerificationEvidence
+    let selectedLayer: VerificationLayerKind = frozenLayer
+    let automaticVerificationDegraded = false
     if (!sourceMatched) {
-      verification = {
-        attempted: false,
-        expectedTools: [...review.manifest.expectedTools],
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: false,
-        reason: 'The install command finished, but the target profile did not record the exact reviewed source as an active bundle.',
-      }
-    } else if (task) {
+      verification = sourceMismatchEvidence(expectedTools)
+    } else {
+      let declaredFixtures: Record<string, unknown> = {}
       try {
-        verification = await this.launcher.verify(
+        declaredFixtures = await this.launcher.readInstalledVerificationFixtures(
           dshHome,
           input.targetProfile,
-          cwd,
-          task,
-          review.manifest.expectedTools,
-          expectedText,
-          review.manifest.expectedRoute,
-          exec.signal,
+          packageName,
         )
       } catch {
-        verification = interruptedVerification(task, review.manifest.expectedTools)
+        declaredFixtures = {}
       }
-    } else {
-      verification = emptyVerification(review.manifest.expectedTools)
+      const selection = selectInstallVerificationLayer({ review, declaredFixtures })
+      selectedLayer = selection.layer
+      if (selection.layer === 'manual_runtime') {
+        if (originallyAutomatic && input.retention === 'temporary') {
+          automaticVerificationDegraded = true
+          verification = sanitizeHostVerificationEvidence({
+            attempted: false,
+            layer: 'manual_runtime',
+            status: 'failed',
+            expectedTools,
+            sourceMatched: true,
+            reason: `${selection.reason} Automatic verification lacked fixture, schema, or Host evidence after install.`,
+          })
+        } else {
+          verification = manualRuntimeEvidence(expectedTools, selection.reason)
+        }
+      } else {
+        try {
+          verification = await this.launcher.verifyHost({
+            dshHome,
+            profile: input.targetProfile,
+            cwd,
+            layer: selection.layer,
+            packageName,
+            expectedTools: selection.expectedTools,
+            fixtures: selection.fixtures,
+            fixtureDigest: selection.fixtureDigest,
+            ...(exec.signal ? { signal: exec.signal } : {}),
+          })
+        } catch {
+          verification = interruptedVerification(expectedTools, selection.layer)
+        }
+      }
     }
-    const expectedTools = review.manifest.expectedTools
-    const loadOnly = expectedTools.length === 0
-    const loaded = sourceMatched && verification.attempted && verification.exitCode === 0
-      && (loadOnly
-        ? verification.taskResultObserved
-        : expectedTools.some((name) => verification.calledTools.includes(name)))
-    const mechanical = hostMechanicalSuccess({ sourceMatched, verification })
-    const semantic = mechanical
-      ? await this.attachSemanticVerification(review, id, verification, exec)
-      : {}
-    const verified = mechanical && verificationVerdictAllowsCompletion(semantic.verdict, {
-      installationId: id,
-      reviewId: review.id,
-      requirement: review.requirement,
-      evidenceDigest: verificationEvidenceDigest(verification),
-    })
-    const hotReloadAttempt = input.retention === 'persistent' && verified
+    const layer = verification.layer ?? selectedLayer
+    const status: VerificationStatus = verification.status
+      ?? (layer === 'manual_runtime' ? 'pending_user_test' : 'uncertain')
+    const mechanical = sourceMatched && (
+      layer === 'manual_runtime'
+        ? status === 'pending_user_test'
+        : hostLayerSuccess({ sourceMatched, layer, verification })
+    )
+    const verified = mechanical && layer === 'tool_roundtrip' && status === 'passed'
+    const activated = mechanical && layer === 'bundle_activation' && status === 'passed'
+    const awaitingUserTest = mechanical && layer === 'manual_runtime' && status === 'pending_user_test'
+    const nonFailure = verified || activated || awaitingUserTest
+    const loaded = sourceMatched && (
+      verified
+      || activated
+      || awaitingUserTest
+      || (verification.attempted && verification.exitCode === 0)
+    )
+    const hotReloadAttempt = input.retention === 'persistent' && nonFailure
       ? await this.hotLoader({
           ctx: this.ctx,
           dshHome,
@@ -431,35 +474,44 @@ export class PluginInstaller {
         })
       : undefined
     const hotReload = hotReloadAttempt?.evidence
-    const runtimeRecoveryRequired = hotReloadAttempt?.rollbackFailed === true
-    const failedTemporaryTrialRemoved = input.retention === 'temporary' && verification.attempted && !verified
+    const runtimeRecoveryRequired = Boolean(nonFailure && hotReloadAttempt?.rollbackFailed === true)
+    const failedTemporaryTrialRemoved = input.retention === 'temporary'
+      && !nonFailure
+      && (
+        (verification.attempted && status !== 'pending_user_test')
+        || automaticVerificationDegraded
+      )
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
 
+    // Workflow currently treats only `verified` as graph success. `activated`
+    // and `awaiting_user_test` are the Host install outcomes for
+    // bundle_activation / manual_runtime; cursor mapping is a later node.
     let installOutcome: InstallOutcome
     if (runtimeRecoveryRequired) installOutcome = 'recovery_required'
     else if (verified) installOutcome = 'verified'
+    else if (activated) installOutcome = 'activated'
+    else if (awaitingUserTest) installOutcome = 'awaiting_user_test'
     else if (failedTemporaryTrialRemoved) installOutcome = 'failed_absent'
     else installOutcome = 'recovery_required'
 
     const contributionEligible = review.sourceSnapshot.kind === 'local' && verified && review.fit === 'full'
       && review.recommendation === 'use' && Boolean(review.license)
+    const success = nonFailure && !runtimeRecoveryRequired
     const record: InstallationRecord = {
       ...provisional,
-      installState: verified || !failedTemporaryTrialRemoved ? 'installed' : 'not_installed',
+      installState: failedTemporaryTrialRemoved ? 'not_installed' : 'installed',
       installOutcome,
-      installed: verified && !runtimeRecoveryRequired,
-      loaded: verified && !runtimeRecoveryRequired ? loaded : false,
+      installed: success,
+      loaded: success ? loaded : false,
       verified: verified && !runtimeRecoveryRequired,
-      restartRequired: input.retention === 'persistent' && verified && !runtimeRecoveryRequired && !hotReload?.loaded,
-      ...(semantic.request ? { verifierRequestId: semantic.request.id, verifierRequest: semantic.request } : {}),
-      ...(semantic.verdict ? { verificationVerdict: semantic.verdict } : {}),
+      restartRequired: input.retention === 'persistent' && success && !hotReload?.loaded,
       ...(hotReload ? { hotReload } : {}),
       removed: failedTemporaryTrialRemoved,
       verification: failedTemporaryTrialRemoved
         ? { ...verification, reason: `${verification.reason} Failed temporary trial was removed.` }
         : runtimeRecoveryRequired
           ? { ...verification, reason: `${verification.reason} Current-process Loader activation could not be rolled back; explicit recovery is required before retry or restart.` }
-          : verified
+          : success
             ? (input.retention === 'persistent' && hotReload && !hotReload.loaded
               ? { ...verification, reason: `${verification.reason} Current-process hot reload did not complete (${hotReload.reason}); restart is required.` }
               : verification)
@@ -507,6 +559,7 @@ export class PluginInstaller {
       }
       throw new EvolutionError('command_failed', 'Installation completed but final receipt persistence failed; a recovery receipt was preserved', {
         installationId: id,
+        recoveryRequired: true,
         diagnosticHash: hashObject({
           cause: cause instanceof Error ? cause.message : String(cause),
           ...(rollbackFailure ? { rollback: rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure) } : {}),
@@ -589,4 +642,5 @@ export const _testing = {
   assertStrictInstallSpec,
   expectedGithubInstallSpec,
   outcomeAfterCommandFailure,
+  selectInstallVerificationLayer,
 }

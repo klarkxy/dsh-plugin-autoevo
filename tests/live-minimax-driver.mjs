@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { access, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -6,7 +7,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 export const name = 'autoevo-live-minimax-driver'
 export const inject = ['agentDefaultModel', 'agents', 'sessions', 'agentPresets']
 
-const FIRST_PROMPT = '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。'
+const PROMPTS = [
+  '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。请先查现成能力。',
+  '我想在 DSH 里使用 Grok 订阅能力，请查找可复用插件并说明 OAuth 与 API 方案差异。',
+  '我需要让 DSH 使用 Grok Coding Plan 登录能力。先找现成插件，再根据证据推荐。',
+]
+const RUN_INDEX = Number(process.env.AUTOEVO_LIVE_RUN_INDEX ?? 0)
+const FIRST_PROMPT = PROMPTS[Math.abs(RUN_INDEX) % PROMPTS.length]
 const STATE_DIR = process.env.AUTOEVO_LIVE_STATE_DIR
 const OUT_DIR = process.env.AUTOEVO_LIVE_OUT_DIR
 const TURN_MS = Number(process.env.AUTOEVO_LIVE_TURN_MS ?? 480_000)
@@ -34,6 +41,7 @@ function summarize(events, firstSeq) {
       tools.push({
         type: event.type,
         name: event.data?.name ?? event.data?.toolName ?? event.data?.call?.name,
+        arguments: event.data?.arguments ?? event.data?.call?.arguments,
       })
     }
     if (event.type === 'turn/end') reason = event.data.reason
@@ -53,9 +61,9 @@ async function latestJson(directory, prefix) {
 }
 
 function pickRepository(workflow) {
-  const remotes = workflow?.interrupt?.facts?.remoteCandidates ?? []
+  const remotes = workflow?.candidateSnapshot?.filter((item) => item.kind === 'remote') ?? []
   const scored = remotes.map((item) => {
-    const hay = `${item.repository} ${item.name} ${item.description} ${(item.matchedTerms ?? []).join(' ')}`.toLowerCase()
+    const hay = `${item.repository} ${item.name}`.toLowerCase()
     let score = 0
     if (hay.includes('conv-export') || hay.includes('dsh-companion')) score += 8
     if (hay.includes('export') || hay.includes('导出')) score += 4
@@ -63,21 +71,25 @@ function pickRepository(workflow) {
     if (hay.includes('conversation') || hay.includes('会话') || hay.includes('聊天')) score += 3
     return { item, score }
   })
-  scored.sort((left, right) => right.score - left.score || right.item.stars - left.item.stars)
+  scored.sort((left, right) => right.score - left.score || left.item.index - right.item.index)
   return scored[0]?.item
 }
 
 function nextUserMessage(workflow, review) {
   if (!workflow) return undefined
   if (workflow.status === 'completed' || workflow.status === 'failed') return undefined
+  if (workflow.cursor === 'await_discovery') {
+    return '请在当前 Host 事实和剩余预算内自主补查或收敛，并给出你认为最有价值的真实短名单。'
+  }
   if (workflow.cursor === 'await_selection') {
     const candidate = pickRepository(workflow)
     if (!candidate) return '先停'
-    return `审查 ${candidate.repository}`
+    return RUN_INDEX % 3 === 2 && workflow.candidateSnapshot.length >= 3
+      ? '看看3'
+      : candidate.index === 1 ? '按你的推荐看第一个' : `看看第${candidate.index}个`
   }
   if (workflow.cursor === 'await_confirmation') {
-    if (review?.sourceSnapshot?.kind === 'local') return '先停，不安装。'
-    return '确认 modify_this：按 turn 支持不连续多选，按原顺序拼成一张长截图并保留细分隔线。采用最小合理实现，立即调用 resume；改完先重新审查，先不要装。'
+    return '先停，不安装、不修改也不新建。'
   }
   if (workflow.cursor === 'await_modify_work') return undefined
   return undefined
@@ -183,9 +195,21 @@ async function run(ctx) {
             lastFailure: workflow.lastFailure,
             interruptKind: workflow.interrupt?.kind,
             options: workflow.interrupt?.options?.map((item) => item.id),
-            remotes: (workflow.interrupt?.facts?.remoteCandidates ?? []).map((item) => item.repository),
-            fit: workflow.interrupt?.facts?.fit,
-            recommendation: workflow.interrupt?.facts?.recommendation,
+            pool: (workflow.discoveryPool ?? []).map((item) => ({
+              id: item.id,
+              index: item.index,
+              kind: item.kind,
+              fit: item.fit,
+              repository: item.repository,
+            })),
+            sealed: (workflow.candidateSnapshot ?? []).map((item) => ({
+              id: item.id,
+              index: item.index,
+              kind: item.kind,
+              fit: item.fit,
+              repository: item.repository,
+            })),
+            selectedRepositories: workflow.selectedRepositories,
           }
         : undefined,
       review: review
@@ -194,6 +218,7 @@ async function run(ctx) {
             fit: review.fit,
             recommendation: review.recommendation,
             securityRisk: review.securityRisk,
+            findingCodes: (review.findings ?? []).map((finding) => finding.code),
             repository: review.sourceSnapshot?.kind === 'github' ? review.sourceSnapshot.repository : undefined,
           }
         : undefined,
@@ -212,7 +237,7 @@ async function run(ctx) {
   }
 
   let current = await send(FIRST_PROMPT)
-  for (let step = 0; step < 4; step += 1) {
+  for (let step = 0; step < 6; step += 1) {
     const follow = nextUserMessage(current.workflow, current.review)
     if (!follow) break
     current = await send(follow)
@@ -224,6 +249,34 @@ async function run(ctx) {
   const outFile = path.join(OUT_DIR, 'transcript.json')
   await writeFile(outFile, `${JSON.stringify(transcript, null, 2)}\n`)
   process.stderr.write(`\nlive driver wrote ${outFile}\n`)
+  const allTools = transcript.turns.flatMap((turn) => turn.tools.map((tool) => tool.name)).filter(Boolean)
+  const firstWorkflow = allTools.indexOf('capability_workflow')
+  const firstPresent = allTools.indexOf('capability_workflow_present')
+  const firstResume = allTools.indexOf('capability_workflow_resume')
+  assert.equal(firstWorkflow, 0, 'the first AutoEvo tool must be capability_workflow')
+  assert.ok(firstResume > firstWorkflow, 'resume must follow a fresh user turn')
+  const publicText = transcript.turns.map((turn) => turn.assistant).join('\n')
+  assert.doesNotMatch(
+    publicText,
+    /\b(?:parked|await_[a-z_]+|agent_directive|next_step|use_this|modify_this|create_new|search_more|review_candidates|reuse_local)\b|\b(?:workflow|candidate|interrupt)_[a-z0-9_-]+|\bGate[- ]?[12]\b/iu,
+  )
+  const reviewTurn = transcript.turns.find((turn) => turn.review?.repository)
+  if (reviewTurn) {
+    assert.ok(firstPresent > firstWorkflow, 'a reviewed candidate must first be sealed from the Host pool')
+    assert.ok(firstResume > firstPresent, 'candidate review must follow shortlist presentation and a fresh user turn')
+    assert.ok(transcript.turns.length >= 3, 'the conversation must exercise discovery, candidate selection, and final decision')
+  } else {
+    const confirmationWithoutCandidate = transcript.turns.find((turn) => (
+      turn.workflow?.cursor === 'await_confirmation'
+      && turn.workflow.pool.every((candidate) => candidate.kind !== 'remote' && candidate.fit !== 'full')
+    ))
+    assert.ok(confirmationWithoutCandidate, 'an exhausted discovery with no reviewable candidate must open a stop/search gate')
+  }
+  assert.ok(transcript.turns.some((turn) => turn.workflow?.cursor === 'await_confirmation'), 'Gate 2 must be reached before stop')
+  assert.equal(current.workflow?.cursor, 'stopped', 'the fresh final stop decision must complete the workflow without mutation')
+  assert.equal(current.installation, undefined, 'the no-install live acceptance must not create an installation receipt')
+  const finalText = transcript.turns.at(-1)?.assistant ?? ''
+  assert.doesNotMatch(finalText, /恢复.*工作流|改主意.*装|下次直接.*(?:用|装)/u)
   process.stdout.write(`${JSON.stringify({
     model: transcript.model,
     turns: transcript.turns.length,

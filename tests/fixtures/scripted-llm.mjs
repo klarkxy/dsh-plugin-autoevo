@@ -32,8 +32,12 @@ const E2E_TASKS = {
   'marketplace-flow': 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.',
 }
 
-function viewResolution(value) {
-  return value?.resolution ?? value
+function viewCard(value) {
+  return value?.schema_version === 2 ? value : undefined
+}
+
+function firstCandidate(card) {
+  return card?.facts?.candidates?.[0]
 }
 
 class ScriptedAdapter extends LlmAdapter {
@@ -69,7 +73,17 @@ class ScriptedAdapter extends LlmAdapter {
       if (pairs.length === 0) {
         return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
       }
-      return { kind: 'text', text: `E2E_RESOLVE_LOCAL_OK ${JSON.stringify(pairs.at(-1)?.result)}` }
+      const card = viewCard(pairs.at(-1)?.result)
+      if (card?.state === 'discovering' && firstCandidate(card)) {
+        return {
+          kind: 'tool',
+          name: 'capability_workflow_present',
+          arguments: { workflow_id: card.workflow_id, candidate_ids: [firstCandidate(card).candidate_id] },
+        }
+      }
+      return card?.state === 'waiting_candidate_selection'
+        ? { kind: 'text', text: `E2E_RESOLVE_LOCAL_OK ${JSON.stringify(card)}` }
+        : { kind: 'text', text: `E2E_RESOLVE_LOCAL_ERROR ${JSON.stringify(card)}` }
     }
 
     if (this.config.scenario === 'adversarial-define') return this.adversarialDefine(pairs)
@@ -104,10 +118,17 @@ class ScriptedAdapter extends LlmAdapter {
       return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
     }
 
-    const resolution = viewResolution(pairs.at(-1)?.result)
-    return resolution?.decision === 'use_local'
-      ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} local=${JSON.stringify(resolution)}` }
-      : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected use_local ${JSON.stringify(resolution)}` }
+    const card = viewCard(pairs.at(-1)?.result)
+    if (card?.state === 'discovering' && firstCandidate(card)) {
+      return {
+        kind: 'tool',
+        name: 'capability_workflow_present',
+        arguments: { workflow_id: card.workflow_id, candidate_ids: [firstCandidate(card).candidate_id] },
+      }
+    }
+    return card?.state === 'waiting_candidate_selection'
+      ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} card=${JSON.stringify(card)}` }
+      : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected sealed Gate 1 ${JSON.stringify(card)}` }
   }
 
   marketplaceFlow(pairs) {
@@ -122,18 +143,24 @@ class ScriptedAdapter extends LlmAdapter {
     if (last?.isError) {
       return { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(last.result)}` }
     }
-    const resolution = viewResolution(last?.result)
-    const repositories = resolution?.remoteCandidates?.map((candidate) => candidate.repository) ?? []
-    const passed = resolution?.remoteCandidateSource === 'dsh-find-plugin'
-      && resolution?.authorization?.state === 'selection_required'
-      && resolution?.remoteDiscoveryComplete === true
-      && resolution?.queries?.some((query) => query.includes('grok build'))
+    const card = viewCard(last?.result)
+    if (card?.state === 'discovering') {
+      const candidates = card.facts?.candidates ?? []
+      const preferred = candidates.find((candidate) => /dsh-(?:grok|xai|oauth)/iu.test(candidate.repository ?? ''))
+      if (!preferred) return { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR no relevant candidate ${JSON.stringify(card)}` }
+      return {
+        kind: 'tool',
+        name: 'capability_workflow_present',
+        arguments: { workflow_id: card.workflow_id, candidate_ids: [preferred.candidate_id] },
+      }
+    }
+    const repositories = card?.facts?.sealed_candidates?.map((candidate) => candidate.repository) ?? []
+    const passed = card?.state === 'waiting_candidate_selection'
       && repositories.some((repository) => /dsh-(?:grok|xai|oauth)/iu.test(repository))
       && !repositories.includes('edison7009/EchoBird')
-      && resolution?.reasons?.some((reason) => reason.includes('hot-loaded') || reason.includes('热加载'))
     return passed
-      ? { kind: 'text', text: `E2E_MARKETPLACE_FLOW_OK ${JSON.stringify({ repositories, queries: resolution.queries })}` }
-      : { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(resolution)}` }
+      ? { kind: 'text', text: `E2E_MARKETPLACE_FLOW_OK ${JSON.stringify({ repositories, state: card.state })}` }
+      : { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(card)}` }
   }
 
 }

@@ -1,0 +1,23 @@
+{
+  "name": "dsh-tool-calculator",
+  "version": "1.0.0",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "tools": ["calculator"]
+    },
+    "autoevo": {
+      "verification": {
+        "fixtures": {
+          "calculator": {
+            "arguments": {
+              "expression": "1+1"
+            },
+            "safe": true
+          }
+        }
+      }
+    }
+  }
+}

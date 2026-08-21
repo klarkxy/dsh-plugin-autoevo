@@ -1,9 +1,48 @@
+import { spawnSync } from 'node:child_process'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { DshCommandRunner, _testing } from '../../src/process/runner.js'
 
 describe('subprocess environment boundary', () => {
+  it('preserves the Windows OS root needed for Node CSPRNG startup', () => {
+    expect(_testing.effectiveEnvironment('dsh', { DSH_HOME: 'C:\\dsh' }, {
+      SystemRoot: 'C:\\Windows',
+      WINDIR: 'C:\\Windows',
+      USER_TOKEN: 'do-not-forward',
+    }, 'win32')).toEqual({
+      DSH_HOME: 'C:\\dsh',
+      SystemRoot: 'C:\\Windows',
+      WINDIR: 'C:\\Windows',
+    })
+  })
+
+  it('canonicalizes mixed-case Windows bootstrap keys to the trusted parent value', () => {
+    expect(_testing.effectiveEnvironment('dsh', {
+      DSH_HOME: 'C:\\dsh',
+      SYSTEMROOT: 'C:\\broken',
+      windir: 'C:\\also-broken',
+    }, {
+      SystemRoot: 'C:\\Windows',
+      WINDIR: 'C:\\Windows',
+    }, 'win32')).toEqual({
+      DSH_HOME: 'C:\\dsh',
+      SystemRoot: 'C:\\Windows',
+      WINDIR: 'C:\\Windows',
+    })
+  })
+
+  it.runIf(process.platform === 'win32')('starts Node with the scrubbed Windows bootstrap environment', () => {
+    const env = _testing.effectiveEnvironment('dsh', { DSH_HOME: 'C:\\dsh' })
+    const result = spawnSync(process.execPath, [
+      '-e',
+      "process.stdout.write(String(require('node:crypto').randomBytes(8).length))",
+    ], { env, encoding: 'utf8', windowsHide: true })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe('8')
+    expect(result.stderr).toBe('')
+  })
+
   it('neutralizes orphaned ambient Git config after credential scrubbing', () => {
     expect(_testing.effectiveEnvironment('git', {}, {
       GIT_CONFIG_COUNT: '1',

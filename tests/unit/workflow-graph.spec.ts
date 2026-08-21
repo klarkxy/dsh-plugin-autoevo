@@ -201,6 +201,22 @@ describe('workflow graph transitions', () => {
 })
 
 describe('workflow graph nodes', () => {
+  it('returns control to autonomous discovery before the model seals a shortlist', async () => {
+    const current = resolution()
+    const host = {
+      async discoverRemote() {
+        return current
+      },
+    } as unknown as WorkflowHost
+    const result = await executeNode('discover_remote', {
+      host,
+      workflow: workflow('discover_remote'),
+      exec: {},
+      resolution: current,
+    })
+    expect(result).toMatchObject({ kind: 'next', node: 'await_discovery', resolution: current })
+  })
+
   it('reviews the selected GitHub repository then parks on confirmation', async () => {
     const current = resolution()
     const inspected = review()
@@ -354,15 +370,70 @@ describe('workflow graph nodes', () => {
       resolution: current,
     })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
-    expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'verify failed' })
+    expect(record.lastFailure).toEqual({
+      stage: 'install',
+      code: 'command_failed',
+      message: 'verify failed',
+      retryable: false,
+    })
+  })
+
+  it('binds a preserved installation receipt and parks at recovery when final receipt persistence fails', async () => {
+    const current = resolution()
+    const inspected = review()
+    const record = workflow('install_verify')
+    const installationId = `installation_${'f'.repeat(24)}`
+    const diagnosticHash = '9'.repeat(64)
+    const host = {
+      async latestReview() { return inspected },
+      async installReviewed() {
+        throw new EvolutionError('command_failed', 'final receipt persistence failed', {
+          recoveryRequired: true,
+          installationId,
+          diagnosticHash,
+        })
+      },
+      async getInstallation(id: string) {
+        expect(id).toBe(installationId)
+        return { id, workflowId: record.id }
+      },
+    } as unknown as WorkflowHost
+
+    const result = await executeNode('install_verify', {
+      host,
+      workflow: record,
+      exec: {},
+      resolution: current,
+    })
+
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'recovery_required',
+      installation: { id: installationId, workflowId: record.id },
+    })
+    expect(record.lastFailure).toEqual({
+      stage: 'install',
+      code: 'command_failed',
+      message: 'final receipt persistence failed',
+      retryable: false,
+      diagnosticHash,
+    })
   })
 
   it.each([
-    ['verified', true, 'done', 'installed'],
-    ['failed_absent', false, 'next', 'await_confirmation'],
-    ['recovery_required', false, 'done', 'recovery_required'],
-    ['pending', false, 'done', 'recovery_required'],
-  ] as const)('routes install outcome %s without misreporting success', async (installOutcome, verified, kind, node) => {
+    ['verified', true, true, 'done', 'installed'],
+    ['activated', true, false, 'done', 'activated'],
+    ['awaiting_user_test', true, false, 'done', 'awaiting_user_test'],
+    ['failed_absent', false, false, 'next', 'await_confirmation'],
+    ['recovery_required', false, false, 'done', 'recovery_required'],
+    ['pending', false, false, 'done', 'recovery_required'],
+  ] as const)('routes install outcome %s without misreporting success', async (
+    installOutcome,
+    installed,
+    verified,
+    kind,
+    node,
+  ) => {
     const current = resolution()
     const inspected = review()
     const host = {
@@ -371,7 +442,7 @@ describe('workflow graph nodes', () => {
         return {
           id: `installation_${'a'.repeat(24)}`,
           installOutcome,
-          installed: verified,
+          installed,
           verified,
           verification: { reason: installOutcome },
         }
@@ -384,16 +455,245 @@ describe('workflow graph nodes', () => {
       resolution: current,
     })
     expect(result).toMatchObject({ kind, node, installation: { installOutcome } })
+    if (installOutcome === 'verified') {
+      expect(result.node).not.toBe('activated')
+      expect(result.node).not.toBe('awaiting_user_test')
+    }
+    if (installOutcome === 'activated' || installOutcome === 'awaiting_user_test') {
+      expect(result.node).not.toBe('installed')
+      expect(result.node).not.toBe('recovery_required')
+    }
+  })
+
+  it('does not treat malformed activated or awaiting_user_test receipts as verified', async () => {
+    const current = resolution()
+    const inspected = review()
+    for (const installOutcome of ['activated', 'awaiting_user_test'] as const) {
+      const host = {
+        async latestReview() { return inspected },
+        async installReviewed() {
+          return {
+            id: `installation_${'a'.repeat(24)}`,
+            installOutcome,
+            installed: true,
+            verified: true,
+            verification: { reason: installOutcome, status: 'passed' },
+          }
+        },
+      } as unknown as WorkflowHost
+      const result = await executeNode('install_verify', {
+        host,
+        workflow: workflow('install_verify'),
+        exec: {},
+        resolution: current,
+      })
+      expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
+    }
+  })
+
+  it('routes failed, blocked_precondition, and uncertain verification onto explicit failure closure', async () => {
+    const current = resolution()
+    const inspected = review()
+    for (const status of ['failed', 'blocked_precondition', 'uncertain'] as const) {
+      const record = workflow('install_verify')
+      const host = {
+        async latestReview() { return inspected },
+        async installReviewed() {
+          return {
+            id: `installation_${'a'.repeat(24)}`,
+            installOutcome: 'recovery_required',
+            installed: false,
+            verified: false,
+            verification: { reason: status, status, layer: 'tool_roundtrip' },
+          }
+        },
+      } as unknown as WorkflowHost
+      const result = await executeNode('install_verify', {
+        host,
+        workflow: record,
+        exec: {},
+        resolution: current,
+      })
+      expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
+      expect(record.lastFailure).toMatchObject({
+        stage: 'verification',
+        code: status,
+        retryable: false,
+      })
+    }
+  })
+
+  it('does not re-execute install or verify for the same review, source, layer, and fixture digest', async () => {
+    const current = resolution()
+    const inspected = review()
+    const record = workflow('install_verify')
+    let installs = 0
+    const installation = {
+      id: `installation_${'a'.repeat(24)}`,
+      workflowId: record.id,
+      installOutcome: 'failed_absent' as const,
+      installed: false,
+      verified: false,
+      removed: true,
+      verification: {
+        reason: 'failed',
+        status: 'failed' as const,
+        layer: 'tool_roundtrip',
+        fixtureDigest: 'ab'.repeat(32),
+      },
+    }
+    const host = {
+      async latestReview() { return inspected },
+      async installReviewed() {
+        installs += 1
+        return installation
+      },
+      async getInstallation() { return installation },
+    } as unknown as WorkflowHost
+    const first = await executeNode('install_verify', {
+      host,
+      workflow: record,
+      exec: {},
+      resolution: current,
+    })
+    expect(first).toMatchObject({ kind: 'next', node: 'await_confirmation' })
+    expect(installs).toBe(1)
+    record.lastInstallationId = installation.id
+    const second = await executeNode('install_verify', {
+      host,
+      workflow: record,
+      exec: {},
+      resolution: current,
+    })
+    expect(installs).toBe(1)
+    expect(second).toMatchObject({ kind: 'next', node: 'await_confirmation' })
+    expect(record.lastFailure).toMatchObject({
+      code: 'verification_already_attempted',
+      retryable: false,
+    })
+  })
+
+  it('does not start another managed child after modification attempts are exhausted', async () => {
+    const current = resolution()
+    const inspected = review()
+    const record = workflow('prepare_modify')
+    record.modificationOutcome = {
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: inspected.id,
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: true,
+      status: 'unresolved',
+      attempts: [
+        {
+          attempt: 1,
+          childSessionId: 'child-1',
+          commit: 'a'.repeat(40),
+          changedFiles: ['src/index.ts'],
+          changedFilesTruncated: false,
+          postReviewId: inspected.id,
+          completionMarkerObserved: true,
+          checks: { source: 'host_observed', status: 'failed', summary: 'still incompatible' },
+        },
+        {
+          attempt: 2,
+          childSessionId: 'child-2',
+          commit: 'b'.repeat(40),
+          changedFiles: ['src/index.ts'],
+          changedFilesTruncated: false,
+          postReviewId: inspected.id,
+          completionMarkerObserved: true,
+          checks: { source: 'host_observed', status: 'failed', summary: 'still incompatible' },
+        },
+      ],
+      resolvedBlockers: [],
+      unresolvedBlockers: [{ key: 'compat', kind: 'compatibility', summary: 'peer still excludes runtime' }],
+      introducedBlockers: [],
+    }
+    let prepareCalls = 0
+    const host = {
+      async latestReview() { return inspected },
+      async prepareModify() {
+        prepareCalls += 1
+        throw new Error('must not start another child')
+      },
+    } as unknown as WorkflowHost
+    const result = await executeNode('prepare_modify', {
+      host,
+      workflow: record,
+      exec: {},
+      resolution: current,
+    })
+    expect(prepareCalls).toBe(0)
+    expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
+    expect(record.lastFailure).toMatchObject({
+      code: 'modify_attempts_exhausted',
+      retryable: false,
+    })
+  })
+
+  it('hides use_this and modify_this after the same failure evidence is closed', () => {
+    const confirmationWorkflow = workflow('await_confirmation')
+    confirmationWorkflow.reviewedCandidateIds = [confirmationWorkflow.candidateSnapshot![0]!.id]
+    confirmationWorkflow.reviewIdsByCandidate = {
+      [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
+    }
+    confirmationWorkflow.consumedVerificationAttempts = [{
+      reviewId: review().id,
+      sourceIdentity: `github:acme/one#${'c'.repeat(40)}`,
+      layer: 'unspecified',
+    }]
+    confirmationWorkflow.modificationOutcome = {
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: review().id,
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: true,
+      status: 'unresolved',
+      attempts: [{
+        attempt: 1,
+        childSessionId: 'child-1',
+        commit: 'a'.repeat(40),
+        changedFiles: [],
+        changedFilesTruncated: false,
+        postReviewId: review().id,
+        completionMarkerObserved: true,
+        checks: { source: 'unknown', status: 'unknown', summary: 'unknown' },
+      }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [{ key: 'new', kind: 'security_finding', summary: 'new block' }],
+    }
+    const confirmationReview = withApprovedVerdict(review(), confirmationWorkflow)
+    const confirmation = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
+      workflow: confirmationWorkflow,
+      installProfiles: ['web'],
+    })
+    expect(confirmation.options.map((item) => item.id)).toEqual([
+      'search_more',
+      'create_new',
+      'stop',
+    ])
   })
 
   it('parks cancelled managed work at recovery_required after the Host checkpoints edits', async () => {
     const current = resolution()
     const inspected = review()
+    const preserved = { ...inspected, id: `review_${'e'.repeat(64)}` }
+    const preservedResolution = { ...current, reasons: [...current.reasons, 'checkpointed review persisted'] }
     const controller = new AbortController()
     controller.abort()
+    const record = workflow('prepare_modify')
     const host = {
-      async latestReview() { return inspected },
+      async latestReview(_resolutionId: string, reviewId?: string) {
+        return reviewId === preserved.id ? preserved : inspected
+      },
+      async getResolution() { return preservedResolution },
       async prepareModify() {
+        record.lastReviewId = preserved.id
+        record.lineageTipReviewId = preserved.id
         throw new EvolutionError('command_failed', 'cancelled and checkpointed', {
           cancelled: true,
           recoveryRequired: true,
@@ -401,24 +701,40 @@ describe('workflow graph nodes', () => {
         })
       },
     } as unknown as WorkflowHost
-    const record = workflow('prepare_modify')
     const result = await executeNode('prepare_modify', {
       host,
       workflow: record,
       exec: { signal: controller.signal },
       resolution: current,
     })
-    expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
-    expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'cancelled and checkpointed' })
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'recovery_required',
+      resolution: { reasons: expect.arrayContaining(['checkpointed review persisted']) },
+      review: { id: preserved.id },
+    })
+    expect(record.lastFailure).toEqual({
+      stage: 'managed_child',
+      code: 'command_failed',
+      message: 'cancelled and checkpointed',
+      retryable: false,
+    })
   })
 
   it('keeps a managed modification retryable after a child failure', async () => {
     const current = resolution()
     const inspected = review()
+    const preserved = { ...inspected, id: `review_${'f'.repeat(64)}` }
+    const preservedResolution = { ...current, reasons: [...current.reasons, 'first modification review persisted'] }
     const record = workflow('prepare_modify')
     const host = {
-      async latestReview() { return inspected },
+      async latestReview(_resolutionId: string, reviewId?: string) {
+        return reviewId === preserved.id ? preserved : inspected
+      },
+      async getResolution() { return preservedResolution },
       async prepareModify() {
+        record.lastReviewId = preserved.id
+        record.lineageTipReviewId = preserved.id
         throw new Error('child failed after checkpoint')
       },
     } as unknown as WorkflowHost
@@ -428,8 +744,18 @@ describe('workflow graph nodes', () => {
       exec: {},
       resolution: current,
     })
-    expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
-    expect(record.lastFailure).toEqual({ code: 'command_failed', message: 'child failed after checkpoint' })
+    expect(result).toMatchObject({
+      kind: 'next',
+      node: 'await_confirmation',
+      resolution: { reasons: expect.arrayContaining(['first modification review persisted']) },
+      review: { id: preserved.id },
+    })
+    expect(record.lastFailure).toEqual({
+      stage: 'managed_child',
+      code: 'command_failed',
+      message: 'child failed after checkpoint',
+      retryable: false,
+    })
   })
 
   it('terminates in explicit recovery when failed child edits cannot be checkpointed safely', async () => {

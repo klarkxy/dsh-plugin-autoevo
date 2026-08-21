@@ -126,6 +126,7 @@ export function reviewerVerdictAllowsDirectUse(
 
 export function isDirectlyUsableReview(review: ReviewRecord, workflow?: ReviewCandidateContext): boolean {
   if (review.policyVersion !== POLICY_VERSION) return false
+  if (review.fit === 'none') return false
   return hostDirectUseBoundary(review) === undefined && reviewerVerdictAllowsDirectUse(review, workflow)
 }
 
@@ -159,6 +160,11 @@ export function assertDirectUseAllowed(review: ReviewRecord, workflow?: ReviewCa
       reviewId: review.id,
       policyVersion: review.policyVersion,
       expected: POLICY_VERSION,
+    })
+  }
+  if (review.fit === 'none') {
+    throw new EvolutionError('review_rejected', 'This review does not authorize installation', {
+      fit: review.fit,
     })
   }
   const boundary = hostDirectUseBoundary(review)

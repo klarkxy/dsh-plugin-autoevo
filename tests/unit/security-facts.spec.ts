@@ -52,7 +52,9 @@ describe('security finding presentation', () => {
       remoteCandidates: [],
       selectedRepositories: ['MirDie/dsh-xai'],
     } as unknown as ResolutionRecord, [review])
-    expect(facts.findings).toEqual(securityFindingFacts(duplicateProcessFindings))
+    expect(facts.findings).toEqual(securityFindingFacts(duplicateProcessFindings).slice(0, 1))
+    expect(facts.findingDetails).toEqual(securityFindingFacts(duplicateProcessFindings))
+    expect(facts.canInstall).toBe(false)
     expect(facts.securityInterpretationRule).toMatch(/static review observations only/i)
     expect(facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
   })
@@ -81,18 +83,19 @@ describe('security finding presentation', () => {
         { path: 'src/index.ts', content: Buffer.from('eval("1")') },
       ],
     })
-    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['prompt_injection', 'dynamic_evaluation']))
+    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['dynamic_evaluation']))
+    expect(record.findings.some((finding) => finding.code === 'prompt_injection')).toBe(false)
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
     expect(record.recommendation).not.toBe('skip')
     expect(record.installSpec).toMatch(/^github:acme\/calculator#/)
   })
 
-  it('flags process_execution high, partial fit, and unknown compatibility for a semantic reviewer', () => {
-    const high = {
+  it('only requires a semantic reviewer for executable eval or injection findings', () => {
+    const spawn = {
       fit: 'full' as const,
-      securityRisk: 'high' as const,
+      securityRisk: 'medium' as const,
       compatibility: { status: 'compatible' as const, reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
-      findings: [{ code: 'process_execution', severity: 'block' as const, source: 'src/bin.ts', detail: 'spawn' }],
+      findings: [{ code: 'process_execution', severity: 'warning' as const, source: 'src/bin.ts', detail: 'spawn' }],
     }
     const none = {
       fit: 'none' as const,
@@ -106,9 +109,16 @@ describe('security finding presentation', () => {
       compatibility: { status: 'unknown' as const, reason: 'no runtime', runtimeVersion: null },
       findings: [],
     }
-    expect(needsSemanticReviewer(high)).toBe(true)
-    expect(needsSemanticReviewer(none)).toBe(true)
-    expect(needsSemanticReviewer(unknown)).toBe(true)
+    const evalHit = {
+      fit: 'full' as const,
+      securityRisk: 'high' as const,
+      compatibility: { status: 'compatible' as const, reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
+      findings: [{ code: 'dynamic_evaluation', severity: 'block' as const, source: 'src/index.ts', detail: 'eval' }],
+    }
+    expect(needsSemanticReviewer(spawn)).toBe(false)
+    expect(needsSemanticReviewer(none)).toBe(false)
+    expect(needsSemanticReviewer(unknown)).toBe(false)
+    expect(needsSemanticReviewer(evalHit)).toBe(true)
   })
 
   it('does not require a semantic reviewer for low, full, compatible facts', () => {
@@ -145,6 +155,6 @@ describe('security finding presentation', () => {
     expect(record.compatibility.status).toBe('incompatible')
     expect(record.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
     expect(record.mechanicalFacts?.directUseHostBoundary).toBe('incompatible')
-    expect(needsSemanticReviewer(record)).toBe(true)
+    expect(needsSemanticReviewer(record)).toBe(false)
   })
 })

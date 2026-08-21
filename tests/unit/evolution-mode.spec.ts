@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { apply, name, inject, readEvolutionModeMarker } from '../../src/evolution-mode.js'
+import {
+  apply,
+  AUTOEVO_AUTONOMY_CONTRACT,
+  name,
+  inject,
+  readEvolutionModeMarker,
+} from '../../src/evolution-mode.js'
 import { creatorSkillRegistration } from '../../src/creator-skill.js'
 import {
   EVOLUTION_MODE_OWNER,
@@ -34,42 +40,26 @@ function mockContext(overrides?: {
 describe('evolution-mode entry', () => {
   it('exports the scoped Cordis plugin name and inject list', () => {
     expect(name).toBe('autoevo-evolution-mode')
-    expect(inject).toEqual(['systemPrompt'])
+    expect(inject).toEqual([])
   })
 
-  it('registers workflow instructions without exposing a parent Creator skill', () => {
+  it('provides only the scoped marker so the root autonomy contract is not duplicated', () => {
     const { ctx, register, section, provide } = mockContext()
     apply(ctx)
 
     expect(register).not.toHaveBeenCalled()
 
-    expect(section).toHaveBeenCalledTimes(1)
-    const prompt = section.mock.calls[0]![0]
-    expect(prompt.name).toBe('autoevo:evolution-mode')
-    expect(prompt.order).toBe(119)
-    expect(prompt.text).toContain('Capability Evolution')
-    expect(prompt.text).toContain('capability_workflow')
-    expect(prompt.text).toContain('candidate IDs')
-    expect(prompt.text).toContain('navigation')
-    expect(prompt.text).toContain('decision')
-    expect(prompt.text).toContain('does not re-parse')
-    expect(prompt.text).toContain('candidate_id')
-    expect(prompt.text).toContain('Security findings are static observations only')
-    expect(prompt.text).toContain('callback-server behavior')
-    expect(prompt.text).toContain('create_authorized')
-    expect(prompt.text).toContain('managed git source')
-    expect(prompt.text).toContain('workflow_id')
-    expect(prompt.text).toContain('interrupt_id')
-    expect(prompt.text).toContain('never via parent-session')
-    expect(prompt.text).toContain('do not inspect Cordis')
-    expect(prompt.text).toContain('contributionAdvice')
-    expect(prompt.text).toContain('contribute only after explicit approval')
-    expect(prompt.text).toContain('Policy V5')
-    expect(prompt.text).toContain('MechanicalFacts')
-    expect(prompt.text).toContain('semantic verifier')
-    expect(prompt.text).toContain('taskResultMatchedExpectation')
-    expect(prompt.text).toContain('use_this and search_more')
-    expect(prompt.text).not.toContain('scratch_ready')
+    expect(section).not.toHaveBeenCalled()
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain("user's original requirement")
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('before any other search or discovery tool')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('do not ask the user to manage discovery mechanics')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Present natural-language choices and stop when no fresh user message exists')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('question tool in the same turn is not fresh authority')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('never reproduce them in user-facing text')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('never claim success, cleanliness, resumability')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Before a long authorized modify, create, or install call')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('may take several minutes')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('this is not an extra approval gate')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

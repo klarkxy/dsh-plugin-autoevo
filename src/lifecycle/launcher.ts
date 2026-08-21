@@ -1,11 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeConfig } from '../config.js'
-import type { ReviewRecord, VerificationEvidence } from '../contracts.js'
+import type { ReviewRecord, VerificationEvidence, VerificationLayerKind, VerificationStatus } from '../contracts.js'
+import {
+  declaredVerificationFixturesFromPackage,
+  hostLayerSuccess,
+  hostVerificationOverlay,
+  sanitizeHostVerificationEvidence,
+  verificationChildEnv,
+  type HostExecutableFixture,
+} from '../host-verification-driver.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import type { CommandResult, CommandRunner } from '../process/runner.js'
+import { sha256 } from '../state/hashes.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
 
 interface SessionFile {
@@ -22,6 +31,12 @@ interface ReceiptEvidence {
   taskResultMatchedExpectation?: boolean
   observedProvider?: string
   observedModel?: string
+  observerEventCount: number
+  layer?: VerificationLayerKind
+  status?: VerificationStatus
+  sourceMatched?: boolean
+  executedCount?: number
+  completeReason?: string
 }
 
 /** Host mechanical verification truth. Substring expectation is never used here. */
@@ -70,7 +85,7 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     body = await readFile(receiptPath, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { calledTools: [], resultTools: [], failedTools: [], taskResultObserved: false }
+      return { calledTools: [], resultTools: [], failedTools: [], taskResultObserved: false, observerEventCount: 0 }
     }
     throw error
   }
@@ -80,10 +95,17 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
   const outcomes = new Map<string, boolean>()
   const called = new Set<string>()
   const successful = new Set<string>()
+  const hostFailed = new Set<string>()
   let taskResultSha256: string | undefined
   let taskResultMatchedExpectation: boolean | undefined
   let observedProvider: string | undefined
   let observedModel: string | undefined
+  let observerEventCount = 0
+  let layer: VerificationLayerKind | undefined
+  let status: VerificationStatus | undefined
+  let sourceMatched: boolean | undefined
+  let executedCount: number | undefined
+  let completeReason: string | undefined
   for (const line of body.split(/\r?\n/u)) {
     if (!line.trim()) continue
     let value: unknown
@@ -94,7 +116,38 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     }
     if (typeof value !== 'object' || value === null) continue
     const event = value as Record<string, unknown>
+    if (event.kind === 'host/complete') {
+      observerEventCount += 1
+      if (event.layer === 'bundle_activation' || event.layer === 'tool_roundtrip' || event.layer === 'manual_runtime') {
+        layer = event.layer
+      }
+      if (
+        event.status === 'passed'
+        || event.status === 'pending_user_test'
+        || event.status === 'blocked_precondition'
+        || event.status === 'failed'
+        || event.status === 'uncertain'
+      ) {
+        status = event.status
+      }
+      if (typeof event.sourceMatched === 'boolean') sourceMatched = event.sourceMatched
+      if (typeof event.executedCount === 'number' && Number.isFinite(event.executedCount)) {
+        executedCount = event.executedCount
+      }
+      if (typeof event.reason === 'string' && event.reason) completeReason = event.reason
+      if (Array.isArray(event.calledTools)) {
+        for (const name of event.calledTools) if (typeof name === 'string') called.add(name)
+      }
+      if (Array.isArray(event.resultTools)) {
+        for (const name of event.resultTools) if (typeof name === 'string') successful.add(name)
+      }
+      if (Array.isArray(event.failedTools)) {
+        for (const name of event.failedTools) if (typeof name === 'string') hostFailed.add(name)
+      }
+      continue
+    }
     if (event.kind === 'task/result' && typeof event.resultSha256 === 'string' && /^[a-f0-9]{64}$/u.test(event.resultSha256)) {
+      observerEventCount += 1
       taskResultSha256 = event.resultSha256
       taskResultMatchedExpectation = typeof event.matchedExpectation === 'boolean' ? event.matchedExpectation : undefined
       if (typeof event.provider === 'string' && event.provider.length > 0) observedProvider = event.provider
@@ -103,29 +156,38 @@ async function readReceipt(receiptPath: string): Promise<ReceiptEvidence> {
     }
     if (typeof event.callId !== 'string' || typeof event.name !== 'string') continue
     if (event.kind === 'tool/call') {
+      observerEventCount += 1
       calls.set(event.callId, event.name)
       latestCall.set(event.name, event.callId)
       called.add(event.name)
       continue
     }
     if (event.kind !== 'tool/result' || calls.get(event.callId) !== event.name) continue
+    observerEventCount += 1
     if (event.isError === false) successful.add(event.name)
     if (typeof event.isError === 'boolean') outcomes.set(event.callId, !event.isError)
   }
+  const callFailed = [...latestCall]
+    .filter(([, callId]) => outcomes.get(callId) !== true)
+    .map(([name]) => name)
+  const failedTools = [...new Set([...callFailed, ...hostFailed])].sort()
   return {
     calledTools: [...called].sort(),
     resultTools: [...successful].sort(),
     // Call order, rather than asynchronous result-arrival order, determines
     // the final attempt. A latest call without a successful result also fails.
-    failedTools: [...latestCall]
-      .filter(([, callId]) => outcomes.get(callId) !== true)
-      .map(([name]) => name)
-      .sort(),
+    failedTools,
     taskResultObserved: Boolean(taskResultSha256),
+    observerEventCount,
     ...(taskResultSha256 ? { taskResultSha256 } : {}),
     ...(taskResultMatchedExpectation !== undefined ? { taskResultMatchedExpectation } : {}),
     ...(observedProvider ? { observedProvider } : {}),
     ...(observedModel ? { observedModel } : {}),
+    ...(layer ? { layer } : {}),
+    ...(status ? { status } : {}),
+    ...(sourceMatched !== undefined ? { sourceMatched } : {}),
+    ...(executedCount !== undefined ? { executedCount } : {}),
+    ...(completeReason ? { completeReason } : {}),
   }
 }
 
@@ -300,6 +362,10 @@ export class DshLauncher {
       `${JSON.stringify(verificationOverlay(receiptPath, expectedTools, expectedText, expectedRoute), null, 2)}\n`,
       { encoding: 'utf8', flag: 'wx' },
     )
+    await writeFile(receiptPath, `${JSON.stringify({ kind: 'host/launch', version: 1, attempted: true })}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    })
 
     const patchArgs = [...this.config.verificationPatchPaths, overlayPath]
       .flatMap((patchPath) => ['--patch', patchPath])
@@ -310,7 +376,53 @@ export class DshLauncher {
       timeoutMs: Math.max(this.config.commandTimeoutMs, 180_000),
       allowFailure: true,
     }
-    const result = await this.runner.run(signal ? { ...request, signal } : request)
+    let result: CommandResult
+    try {
+      result = await this.runner.run(signal ? { ...request, signal } : request)
+    } catch (error) {
+      const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error)
+      const failureClass = signal?.aborted
+        ? 'cancelled' as const
+        : /timed?\s*out|TimeoutError/iu.test(detail)
+          ? 'timed_out' as const
+          : /spawn|launch|ENOENT|EINVAL/iu.test(detail)
+            ? 'launch_error' as const
+            : 'unknown' as const
+      const diagnosticHash = sha256(detail)
+      await appendFile(receiptPath, `\n${JSON.stringify({
+        kind: 'host/process', version: 1, outcome: 'threw', failureClass, diagnosticHash,
+      })}\n`, 'utf8')
+      const after = await collectSessionFiles(dshHome)
+      const sessionFiles = after
+        .filter((file) => !before.has(file.path) || file.modifiedAt >= startedAt)
+        .map((file) => file.path)
+      const evidence = await readReceipt(receiptPath)
+      return {
+        attempted: true,
+        task,
+        exitCode: null,
+        expectedTools: [...new Set(expectedTools)].sort(),
+        calledTools: evidence.calledTools,
+        resultTools: evidence.resultTools,
+        failedTools: evidence.failedTools,
+        sessionFiles,
+        receiptPath,
+        launchEvidence: {
+          attempted: true,
+          processOutcome: 'threw',
+          observerEventCount: evidence.observerEventCount,
+          failureClass,
+          diagnosticHash,
+        },
+        taskResultObserved: evidence.taskResultObserved,
+        reason: evidence.observerEventCount === 0
+          ? 'The DSH child launch did not return a process result and the trusted observer recorded no events; the child cause is unknown.'
+          : 'The DSH child launch did not return a process result after partial trusted observer evidence; the child cause is unknown.',
+      }
+    }
+    await appendFile(receiptPath, `\n${JSON.stringify({
+      kind: 'host/process', version: 1, outcome: 'returned', exitCode: result.exitCode, signal: result.signal,
+    })}\n`, 'utf8')
     const after = await collectSessionFiles(dshHome)
     const sessionFiles = after
       .filter((file) => !before.has(file.path) || file.modifiedAt >= startedAt)
@@ -336,6 +448,14 @@ export class DshLauncher {
       failedTools: evidence.failedTools,
       sessionFiles,
       receiptPath,
+      launchEvidence: {
+        attempted: true,
+        processOutcome: 'returned',
+        observerEventCount: evidence.observerEventCount,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        ...(result.exitCode !== 0 ? { diagnosticHash: sha256(`${result.exitCode}:${result.signal ?? ''}:${result.stderr}`) } : {}),
+      },
       taskResultObserved,
       ...(evidence.taskResultSha256 ? { taskResultSha256: evidence.taskResultSha256 } : {}),
       ...(evidence.taskResultMatchedExpectation !== undefined
@@ -353,7 +473,9 @@ export class DshLauncher {
     return {
       ...mechanical,
       reason: result.exitCode !== 0
-        ? `DSH child exited with code ${result.exitCode ?? 'null'}.`
+        ? evidence.observerEventCount === 0
+          ? `DSH child returned exit code ${result.exitCode ?? 'null'} without trusted observer events; the child cause is unknown.`
+          : `DSH child returned exit code ${result.exitCode ?? 'null'} after partial trusted observer evidence; the child cause is unknown.`
         : loadOnly && !taskResultObserved
           ? 'The child exited, but the trusted observer did not see a completed-turn final answer.'
           : !routeMatchedExpectation
@@ -366,6 +488,152 @@ export class DshLauncher {
                   ? 'The target tool round-trip succeeded, but no completed-turn final answer was observed.'
                   : `The trusted child overlay observed a matching tool/call and successful tool/result, followed by a completed-turn final answer.${diagnostic}`,
     }
+  }
+
+  async readInstalledVerificationFixtures(
+    dshHome: string,
+    profile: string,
+    packageName: string,
+  ): Promise<Record<string, unknown>> {
+    const safePackageName = assertSafePackageName(packageName)
+    const packageRoot = path.join(dshHome, 'profiles', profile, 'node_modules', ...safePackageName.split('/'))
+    try {
+      const body = await readFile(path.join(packageRoot, 'package.json'), 'utf8')
+      return declaredVerificationFixturesFromPackage(JSON.parse(body) as unknown)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
+      throw error
+    }
+  }
+
+  /**
+   * Host-owned mechanical verification. Never forwards credentials, never
+   * passes a user task, and never boots an Agent turn or default model route.
+   */
+  async verifyHost(input: {
+    dshHome: string
+    profile: string
+    cwd: string
+    layer: Exclude<VerificationLayerKind, 'manual_runtime'>
+    packageName: string
+    expectedTools: readonly string[]
+    fixtures: readonly HostExecutableFixture[]
+    fixtureDigest: string
+    signal?: AbortSignal
+  }): Promise<VerificationEvidence> {
+    const verificationRoot = path.join(this.config.stateDir, 'verifications', randomUUID())
+    const receiptPath = path.join(verificationRoot, 'host-verification.jsonl')
+    const overlayPath = path.join(verificationRoot, 'host-driver.cordis.yml')
+    await mkdir(verificationRoot, { recursive: true })
+    const observerUrl = new URL('./verification-observer.js', import.meta.url).href
+    const overlay = hostVerificationOverlay({
+      receiptPath,
+      expectedTools: input.expectedTools,
+      layer: input.layer,
+      packageName: input.packageName,
+      fixtureDigest: input.fixtureDigest,
+      fixtures: input.fixtures,
+      observerUrl,
+    })
+    await writeFile(overlayPath, `${JSON.stringify(overlay, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    await writeFile(receiptPath, `${JSON.stringify({ kind: 'host/launch', version: 1, attempted: true, layer: input.layer })}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    })
+
+    const patchArgs = [...this.config.verificationPatchPaths, overlayPath]
+      .flatMap((patchPath) => ['--patch', patchPath])
+    const request = {
+      argv: this.argv('--profile', input.profile, ...patchArgs),
+      cwd: input.cwd,
+      env: verificationChildEnv(input.dshHome),
+      timeoutMs: Math.max(this.config.commandTimeoutMs, 180_000),
+      allowFailure: true,
+    }
+    let result: CommandResult
+    try {
+      result = await this.runner.run(input.signal ? { ...request, signal: input.signal } : request)
+    } catch (error) {
+      const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error)
+      const failureClass = input.signal?.aborted
+        ? 'cancelled' as const
+        : /timed?\s*out|TimeoutError/iu.test(detail)
+          ? 'timed_out' as const
+          : /spawn|launch|ENOENT|EINVAL/iu.test(detail)
+            ? 'launch_error' as const
+            : 'unknown' as const
+      const diagnosticHash = sha256(detail)
+      await appendFile(receiptPath, `\n${JSON.stringify({
+        kind: 'host/process', version: 1, outcome: 'threw', failureClass, diagnosticHash,
+      })}\n`, 'utf8')
+      const evidence = await readReceipt(receiptPath)
+      return sanitizeHostVerificationEvidence({
+        attempted: true,
+        layer: evidence.layer ?? input.layer,
+        status: evidence.status ?? 'uncertain',
+        reason: evidence.completeReason
+          ?? (evidence.observerEventCount === 0
+            ? 'The DSH child launch did not return a process result and Host recorded no events; the child cause is unknown.'
+            : 'The DSH child launch did not return a process result after partial Host evidence; the child cause is unknown.'),
+        expectedTools: input.expectedTools,
+        calledTools: evidence.calledTools,
+        resultTools: evidence.resultTools,
+        failedTools: evidence.failedTools,
+        exitCode: null,
+        ...(evidence.sourceMatched !== undefined ? { sourceMatched: evidence.sourceMatched } : {}),
+        fixtureDigest: input.fixtureDigest,
+        launchEvidence: {
+          attempted: true,
+          processOutcome: 'threw',
+          observerEventCount: evidence.observerEventCount,
+          failureClass,
+          diagnosticHash,
+        },
+      })
+    }
+    await appendFile(receiptPath, `\n${JSON.stringify({
+      kind: 'host/process', version: 1, outcome: 'returned', exitCode: result.exitCode, signal: result.signal,
+    })}\n`, 'utf8')
+    const evidence = await readReceipt(receiptPath)
+    const layer = evidence.layer ?? input.layer
+    const status = evidence.status ?? (result.exitCode === 0 ? 'uncertain' : 'failed')
+    const sanitized = sanitizeHostVerificationEvidence({
+      attempted: true,
+      layer,
+      status,
+      reason: evidence.completeReason
+        ?? (result.exitCode !== 0
+          ? evidence.observerEventCount === 0
+            ? `DSH child returned exit code ${result.exitCode ?? 'null'} without Host events; the child cause is unknown.`
+            : `DSH child returned exit code ${result.exitCode ?? 'null'} after partial Host evidence; the child cause is unknown.`
+          : layer === 'bundle_activation'
+            ? 'Host loaded the reviewed bundle and Loader/Fiber settled without an Agent turn.'
+            : 'Host executed expected tools once through ToolRuntime.execute.'),
+      expectedTools: input.expectedTools,
+      calledTools: evidence.calledTools,
+      resultTools: evidence.resultTools,
+      failedTools: evidence.failedTools,
+      exitCode: result.exitCode,
+      sourceMatched: evidence.sourceMatched ?? true,
+      fixtureDigest: input.fixtureDigest,
+      launchEvidence: {
+        attempted: true,
+        processOutcome: 'returned',
+        observerEventCount: evidence.observerEventCount,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        ...(result.exitCode !== 0 ? { diagnosticHash: sha256(`${result.exitCode}:${result.signal ?? ''}`) } : {}),
+      },
+    })
+    const succeeded = hostLayerSuccess({
+      sourceMatched: sanitized.sourceMatched === true,
+      layer: input.layer,
+      verification: sanitized,
+    })
+    if (succeeded && !sanitized.reason) {
+      return { ...sanitized, reason: 'Host mechanical verification passed.' }
+    }
+    return sanitized
   }
 }
 
@@ -381,4 +649,4 @@ export async function assertOwnedTrialPath(candidate: string, trialsRoot: string
   return resolvedCandidate
 }
 
-export const _testing = { readReceipt, verificationOverlay, hostMechanicalSuccess }
+export const _testing = { readReceipt, verificationOverlay, hostMechanicalSuccess, hostLayerSuccess }

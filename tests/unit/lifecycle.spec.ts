@@ -10,40 +10,8 @@ import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
-import { requirementHashFor } from '../../src/semantic-reviewer.js'
-import { mintVerifierRequest, VERIFIER_VERSION, type SemanticVerifierHost } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
 import { _testing as snapshotTesting } from '../../src/lifecycle/snapshot.js'
-
-function approvingVerifier(): SemanticVerifierHost {
-  return {
-    async run(input) {
-      const request = mintVerifierRequest({
-        installationId: input.installationId,
-        reviewId: input.reviewId,
-        requirement: input.requirement,
-        evidenceDigest: input.evidenceDigest,
-      })
-      const completedAt = '2026-08-19T00:00:10.000Z'
-      return {
-        request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
-        verdict: {
-          requestId: request.id,
-          installationId: input.installationId,
-          reviewId: input.reviewId,
-          requirementHash: requirementHashFor(input.requirement),
-          evidenceDigest: input.evidenceDigest,
-          verifierSessionId: 'verifier-session',
-          verifierVersion: VERIFIER_VERSION,
-          decision: 'verified',
-          evidence: ['completed turn'],
-          conditions: [],
-          createdAt: completedAt,
-        },
-      }
-    },
-  }
-}
 
 const temporary: string[] = []
 
@@ -81,6 +49,34 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
   }
 }
 
+function attestedSurface(expectedTools: readonly string[] = ['calculator']): NonNullable<ReviewRecord['runtimeSurface']> {
+  return {
+    llmDependency: false,
+    llmRegistered: false,
+    credentialsDependency: false,
+    credentialsRegistered: false,
+    networkSignal: false,
+    environmentSignal: false,
+    processSignal: false,
+    skillOnly: false,
+    unsafeTools: false,
+    expectedTools: [...expectedTools],
+    toolFixtures: expectedTools.map((tool) => ({
+      tool, available: true, safe: true, hostValidated: true,
+    })),
+    kind: 'bundle',
+    verificationLayer: expectedTools.length > 0 ? 'tool_roundtrip' : 'bundle_activation',
+  }
+}
+
+function attestedReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
+  const current = review(overrides)
+  return {
+    ...current,
+    runtimeSurface: overrides.runtimeSurface ?? attestedSurface(current.manifest.expectedTools),
+  }
+}
+
 function config(root: string): RuntimeConfig {
   return {
     dshHome: path.join(root, 'persistent-dsh-home'),
@@ -113,17 +109,23 @@ describe('lifecycle validation', () => {
     expect(() => installTesting.validateProfile('a/b')).toThrow(/profile name/u)
   })
 
-  it('requires a bounded non-empty verification task for temporary trials', () => {
-    expect(() => installTesting.verificationTask({
+  it('keeps verificationTask optional and never requires it for mechanical verification', () => {
+    expect(installTesting.verificationTask({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'trial',
       retention: 'temporary',
-    })).toThrow(/requires a non-empty verificationTask/u)
-    expect(() => installTesting.verificationTask({
+    })).toBeUndefined()
+    expect(installTesting.verificationTask({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
-    })).toThrow(/requires a non-empty verificationTask/u)
+    })).toBeUndefined()
+    expect(installTesting.verificationTask({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'trial',
+      retention: 'temporary',
+      verificationTask: 'test calculator',
+    })).toBe('test calculator')
     expect(() => installTesting.verificationExpectation({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
@@ -153,11 +155,11 @@ describe('lifecycle validation', () => {
     await expect(launcher.profileSourceMatches(path.join(root, 'home'), 'trial', 'dsh-tool-calculator', `${spec}-other`)).resolves.toBe(false)
   })
 
-  it('rejects a partial candidate until it has been modified and reviewed as a full fit', async () => {
+  it('rejects a none-fit candidate for direct install', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
-    await store.put('reviews', review({ fit: 'partial', recommendation: 'modify', missingCapabilities: ['scientific notation'] }))
+    await store.put('reviews', review({ fit: 'none', recommendation: 'modify', missingCapabilities: ['scientific notation'] }))
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -174,7 +176,7 @@ describe('lifecycle validation', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
-    await store.put('reviews', review())
+    await store.put('reviews', attestedReview())
     const ctx = { get: () => ({ request: async () => 'denied' }) } as unknown as Context
     const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -192,7 +194,7 @@ describe('lifecycle validation', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
-    await store.put('reviews', review())
+    await store.put('reviews', attestedReview())
     let approvalReason = ''
     const ctx = {
       get: () => ({
@@ -204,21 +206,24 @@ describe('lifecycle validation', () => {
     } as unknown as Context
     const failedVerification: VerificationEvidence = {
       attempted: true,
-      task: 'test calculator',
-      exitCode: 0,
+      exitCode: 1,
       expectedTools: ['calculator'],
-      calledTools: [],
+      calledTools: ['calculator'],
       resultTools: [],
-      failedTools: [],
+      failedTools: ['calculator'],
       sessionFiles: [],
-      taskResultObserved: true,
-      taskResultSha256: 'd'.repeat(64),
-      reason: 'No matching tool round-trip.',
+      taskResultObserved: false,
+      layer: 'tool_roundtrip',
+      status: 'failed',
+      sourceMatched: true,
+      reason: 'Host tool execution failed; the same fixture digest will not be retried.',
     }
     const launcher = {
       install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
       profileSourceMatches: async () => true,
-      verify: async () => failedVerification,
+      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
+      verifyHost: async () => failedVerification,
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -245,7 +250,7 @@ describe('lifecycle validation', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
-    await store.put('reviews', review())
+    await store.put('reviews', attestedReview())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = { install: async () => {
       throw new EvolutionError('command_failed', 'dsh exited with code 1', {
@@ -305,7 +310,7 @@ describe('lifecycle validation', () => {
     expect(result.verification.reason).toMatch(/present, unknown, or unverifiable|recovery is required/i)
   })
 
-  it('treats a no-tool plugin as loaded and verified after a completed child turn', async () => {
+  it('activates a no-tool bundle from Host Loader evidence without a model or Agent turn', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -316,8 +321,23 @@ describe('lifecycle validation', () => {
         bundlePatch: './cordis.patch.yml',
         scripts: [],
         dependencies: [],
-        peerDependencies: { '@deepseek-ai/dsh-llm': '>=0.0.1-rc.1' },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
         expectedTools: [],
+      },
+      runtimeSurface: {
+        llmDependency: false,
+        llmRegistered: false,
+        credentialsDependency: false,
+        credentialsRegistered: false,
+        networkSignal: false,
+        environmentSignal: false,
+        processSignal: false,
+        skillOnly: false,
+        unsafeTools: false,
+        expectedTools: [],
+        toolFixtures: [],
+        kind: 'bundle',
+        verificationLayer: 'bundle_activation',
       },
     }))
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
@@ -329,32 +349,39 @@ describe('lifecycle validation', () => {
       resultTools: [],
       failedTools: [],
       sessionFiles: [],
-      taskResultObserved: true,
-      taskResultSha256: 'd'.repeat(64),
-      reason: 'load-only',
+      taskResultObserved: false,
+      layer: 'bundle_activation',
+      status: 'passed',
+      sourceMatched: true,
+      reason: 'Host loaded the reviewed bundle and Loader/Fiber settled without an Agent turn.',
     }
+    let verifyHostCalls = 0
     const launcher = {
       install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
       profileSourceMatches: async () => true,
-      verify: async () => loadVerification,
+      readInstalledVerificationFixtures: async () => ({}),
+      verifyHost: async () => {
+        verifyHostCalls += 1
+        return loadVerification
+      },
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, approvingVerifier(),
-    )
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'web',
       retention: 'persistent',
-      verificationTask: 'list installed bundles',
-      verificationExpectedText: 'dsh-subscription-auth',
     }, execution())
+    expect(verifyHostCalls).toBe(1)
     expect(result).toMatchObject({
-      installOutcome: 'verified',
+      installOutcome: 'activated',
       installed: true,
       loaded: true,
-      verified: true,
+      verified: false,
       removed: false,
+      verification: { layer: 'bundle_activation', status: 'passed' },
     })
+    expect(result.verification.task).toBeUndefined()
   })
 
   it('marks a persistent install outcome unknown when reconciliation also fails', async () => {
@@ -386,47 +413,135 @@ describe('lifecycle validation', () => {
     expect(result.verification.reason).toContain('recovery is required')
   })
 
-  it('rejects a completed child answer that misses the required expected text', async () => {
+  it('does not spawn Host verification for persistent manual_runtime and records awaiting_user_test', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
     await store.put('reviews', review())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    let verifyHostCalls = 0
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileSourceMatches: async () => true,
-      verify: async (): Promise<VerificationEvidence> => ({
-        attempted: true,
-        task: 'calculate 6 * 7',
-        exitCode: 0,
-        expectedTools: ['calculator'],
-        calledTools: ['calculator'],
-        resultTools: ['calculator'],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: true,
-        taskResultSha256: 'f'.repeat(64),
-        taskResultMatchedExpectation: false,
-        reason: 'wrong result',
-      }),
+      readInstalledVerificationFixtures: async () => ({ calculator: { safe: true } }),
+      verifyHost: async () => {
+        verifyHostCalls += 1
+        throw new Error('manual_runtime must not spawn')
+      },
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
     const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
+      targetProfile: 'persistent',
+      retention: 'persistent',
       verificationTask: 'calculate 6 * 7',
       verificationExpectedText: '42',
     }, execution())
 
+    expect(verifyHostCalls).toBe(0)
+    expect(result).toMatchObject({
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      loaded: true,
+      verified: false,
+      removed: false,
+      verification: { layer: 'manual_runtime', status: 'pending_user_test' },
+    })
+    expect(JSON.stringify(result.verification)).not.toContain('calculate 6 * 7')
+  })
+
+  it('rejects a temporary manual_runtime install before approval, materialize, install, or receipt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-manual-temp-'))
+    temporary.push(root)
+    class CountingStore extends StateStore {
+      installationWrites = 0
+
+      override async put(...args: Parameters<StateStore['put']>): Promise<void> {
+        if (args[0] === 'installations') this.installationWrites += 1
+        await super.put(...args)
+      }
+    }
+    const store = new CountingStore(root)
+    await store.put('reviews', review({
+      runtimeSurface: {
+        llmDependency: false,
+        llmRegistered: false,
+        credentialsDependency: false,
+        credentialsRegistered: false,
+        networkSignal: false,
+        environmentSignal: false,
+        processSignal: false,
+        skillOnly: false,
+        unsafeTools: false,
+        expectedTools: ['calculator'],
+        toolFixtures: [{ tool: 'calculator', available: true, safe: false, hostValidated: false }],
+        kind: 'bundle',
+        verificationLayer: 'manual_runtime',
+      },
+    }))
+    let approvals = 0
+    const ctx = { get: () => ({ request: async () => { approvals += 1; return 'allowed-once' } }) } as unknown as Context
+    let installs = 0
+    let materializes = 0
+    let verifyHostCalls = 0
+    const launcher = {
+      materializeLocal: async () => { materializes += 1; throw new Error('must not materialize') },
+      install: async () => { installs += 1; throw new Error('must not install') },
+      verifyHost: async () => { verifyHostCalls += 1; throw new Error('must not verify') },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+
+    await expect(installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'trial',
+      retention: 'temporary',
+    }, execution())).rejects.toSatisfy((error: unknown) => {
+      expect(error).toMatchObject({ code: 'invalid_input' })
+      expect((error as Error).message).toMatch(/reconfirm persistent/i)
+      return true
+    })
+    expect(approvals).toBe(0)
+    expect(installs).toBe(0)
+    expect(materializes).toBe(0)
+    expect(verifyHostCalls).toBe(0)
+    expect(store.installationWrites).toBe(0)
+  })
+
+  it('removes a temporary trial that degrades from Host-attested automatic verification to manual_runtime', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-degraded-temp-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    let verifyHostCalls = 0
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => ({ calculator: { safe: true } }),
+      verifyHost: async () => {
+        verifyHostCalls += 1
+        throw new Error('degraded automatic verification must not spawn')
+      },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'trial',
+      retention: 'temporary',
+    }, execution())
+    expect(verifyHostCalls).toBe(0)
     expect(result).toMatchObject({
       installOutcome: 'failed_absent',
       installed: false,
       loaded: false,
       verified: false,
       removed: true,
+      verification: { layer: 'manual_runtime', status: 'failed' },
     })
+    expect(result.installOutcome).not.toBe('awaiting_user_test')
+    await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('uses a provisional receipt to recover from final receipt persistence failure', async () => {
@@ -444,23 +559,27 @@ describe('lifecycle validation', () => {
       }
     }
     const store = new FailingFinalStore(root)
-    await store.put('reviews', review())
+    await store.put('reviews', attestedReview())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileSourceMatches: async () => true,
-      verify: async (): Promise<VerificationEvidence> => ({
+      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
+      verifyHost: async (): Promise<VerificationEvidence> => ({
         attempted: true,
-        task: 'test calculator',
         exitCode: 0,
         expectedTools: ['calculator'],
         calledTools: ['calculator'],
         resultTools: ['calculator'],
         failedTools: [],
         sessionFiles: [],
-        taskResultObserved: true,
-        reason: 'verified',
+        taskResultObserved: false,
+        layer: 'tool_roundtrip',
+        status: 'passed',
+        sourceMatched: true,
+        reason: 'Host executed 1 expected tool(s) once through ToolRuntime.execute.',
       }),
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
@@ -475,7 +594,7 @@ describe('lifecycle validation', () => {
       throw new Error('expected receipt persistence failure')
     } catch (error) {
       installationId = String((error as { details?: { installationId?: unknown } }).details?.installationId ?? '')
-      expect(error).toMatchObject({ code: 'command_failed' })
+      expect(error).toMatchObject({ code: 'command_failed', details: { recoveryRequired: true } })
     }
     expect(installationId).toMatch(/^installation_[a-f0-9]{24}$/u)
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
@@ -486,12 +605,14 @@ describe('lifecycle validation', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
     temporary.push(root)
     const store = new StateStore(root)
-    await store.put('reviews', review())
+    await store.put('reviews', attestedReview())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileSourceMatches: async () => true,
-      verify: async () => { throw new Error('simulated verification interruption') },
+      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
+      verifyHost: async () => { throw new Error('simulated verification interruption') },
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
@@ -645,5 +766,252 @@ describe('lifecycle validation', () => {
     await expect(remover.remove({ installationId }, execution())).rejects.toThrow(/package name is unsafe/u)
     expect(approvalRequested).toBe(false)
     expect(removalCalled).toBe(false)
+  })
+
+  it('does not mark a persistent installation removed when one-time approval is denied', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-denied-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'e'.repeat(24)}`
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-15T00:00:00.000Z',
+      reviewId: `review_${'a'.repeat(64)}`,
+      workflowId: `workflow_${'d'.repeat(24)}`,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      dshHome: path.join(root, 'dsh-home'),
+      packageName: 'dsh-tool-calculator',
+      installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
+      installed: true,
+      loaded: true,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: ['calculator'],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'awaiting user test',
+      },
+    })
+    const ctx = { get: () => ({ request: async () => 'denied' }) } as unknown as Context
+    let removalCalled = false
+    const launcher = {
+      remove: async () => { removalCalled = true; return { exitCode: 0, signal: null, stdout: '', stderr: '' } },
+      hasProfileDependency: async () => true,
+    } as unknown as DshLauncher
+    const remover = new PluginRemover(ctx, config(root), store, launcher)
+
+    await expect(remover.remove({ installationId }, execution())).rejects.toMatchObject({ code: 'approval_required' })
+    expect(removalCalled).toBe(false)
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false, id: installationId })
+  })
+
+  it('calls Host tool_roundtrip once and keeps the receipt free of args, output, env, and paths', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    let verifyHostCalls = 0
+    const verifyHostArgs: unknown[] = []
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' }, safe: true } }),
+      verifyHost: async (input: unknown) => {
+        verifyHostCalls += 1
+        verifyHostArgs.push(input)
+        return {
+          attempted: true,
+          exitCode: 0,
+          expectedTools: ['calculator'],
+          calledTools: ['calculator'],
+          resultTools: ['calculator'],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: false,
+          layer: 'tool_roundtrip' as const,
+          status: 'passed' as const,
+          sourceMatched: true,
+          fixtureDigest: 'a'.repeat(64),
+          reason: 'Host executed 1 expected tool(s) once through ToolRuntime.execute.',
+        }
+      },
+      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'web',
+      retention: 'persistent',
+      verificationTask: 'calculate 6 * 7 with /Users/secret/path',
+    }, execution())
+    expect(verifyHostCalls).toBe(1)
+    expect(JSON.stringify(verifyHostArgs)).not.toContain('calculate 6 * 7')
+    expect(JSON.stringify(verifyHostArgs)).not.toContain('verificationTask')
+    expect(JSON.stringify(verifyHostArgs)).not.toContain('verificationExpectedText')
+    expect(result).toMatchObject({
+      installOutcome: 'verified',
+      verified: true,
+      verification: { layer: 'tool_roundtrip', status: 'passed' },
+    })
+    const serialized = JSON.stringify(result.verification)
+    expect(serialized).not.toContain('1+1')
+    expect(serialized).not.toContain('expression')
+    expect(serialized).not.toContain('/Users/secret/path')
+    expect(serialized).not.toContain('calculate 6 * 7')
+    expect(result.verification.sessionFiles).toEqual([])
+    expect(result.verification.receiptPath).toBeUndefined()
+    expect(result.verification.task).toBeUndefined()
+  })
+
+  it('ignores expectedRoute and never spawns when the frozen surface requires a user test', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', review({
+      manifest: {
+        ...review().manifest,
+        expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+      },
+      runtimeSurface: {
+        llmDependency: false,
+        llmRegistered: true,
+        credentialsDependency: false,
+        credentialsRegistered: false,
+        networkSignal: false,
+        environmentSignal: false,
+        processSignal: false,
+        skillOnly: false,
+        unsafeTools: false,
+        expectedTools: ['calculator'],
+        toolFixtures: [{ tool: 'calculator', available: true, safe: false, hostValidated: false }],
+        expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+        kind: 'bundle',
+        verificationLayer: 'manual_runtime',
+      },
+    }))
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    let verifyHostCalls = 0
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
+      verifyHost: async () => {
+        verifyHostCalls += 1
+        throw new Error('expectedRoute must not spawn Host verification')
+      },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const result = await installer.install({
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'answer with Grok',
+    }, execution())
+    expect(verifyHostCalls).toBe(0)
+    expect(result).toMatchObject({
+      installOutcome: 'awaiting_user_test',
+      verified: false,
+      installed: true,
+      verification: { layer: 'manual_runtime', status: 'pending_user_test' },
+    })
+  })
+
+  it('maps rollbackFailed to recovery_required for activated and awaiting_user_test', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-rollback-nonfailure-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const none = review({
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-subscription-auth',
+        bundlePatch: './cordis.patch.yml',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+        expectedTools: [],
+      },
+      runtimeSurface: {
+        llmDependency: false,
+        llmRegistered: false,
+        credentialsDependency: false,
+        credentialsRegistered: false,
+        networkSignal: false,
+        environmentSignal: false,
+        processSignal: false,
+        skillOnly: false,
+        unsafeTools: false,
+        expectedTools: [],
+        toolFixtures: [],
+        kind: 'bundle',
+        verificationLayer: 'bundle_activation',
+      },
+    })
+    await store.put('reviews', none)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => ({}),
+      verifyHost: async (): Promise<VerificationEvidence> => ({
+        attempted: true,
+        exitCode: 0,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        layer: 'bundle_activation',
+        status: 'passed',
+        sourceMatched: true,
+        reason: 'Host loaded the reviewed bundle and Loader/Fiber settled without an Agent turn.',
+      }),
+    } as unknown as DshLauncher
+    const activated = await new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+        evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
+        rollbackFailed: true,
+      }),
+    ).install({
+      reviewId: none.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())
+    expect(activated).toMatchObject({
+      installOutcome: 'recovery_required',
+      installed: false,
+      verified: false,
+      restartRequired: false,
+    })
+    expect(activated.verification.reason).toMatch(/explicit recovery/i)
+
+    await store.put('reviews', review())
+    const awaiting = await new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+        evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
+        rollbackFailed: true,
+      }),
+    ).install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())
+    expect(awaiting).toMatchObject({
+      installOutcome: 'recovery_required',
+      installed: false,
+      verified: false,
+      restartRequired: false,
+      verification: { layer: 'manual_runtime' },
+    })
+    expect(awaiting.verification.reason).toMatch(/explicit recovery/i)
   })
 })

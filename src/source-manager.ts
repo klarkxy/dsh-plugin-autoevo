@@ -32,6 +32,11 @@ export interface SourceReceipt {
   gitConfigHash: string
 }
 
+export interface FinalizedChildCommit extends SourceReceipt {
+  changedFiles: string[]
+  changedFilesTruncated: boolean
+}
+
 interface SourceLock {
   workflowId: string
   createdAt: string
@@ -546,7 +551,7 @@ export class SourceManager {
     reviewId: string
     message: string
     signal?: AbortSignal
-  }): Promise<SourceReceipt> {
+  }): Promise<FinalizedChildCommit> {
     const receipt = await this.readReceipt(input.sourceId)
     if (!receipt || receipt.activeWorkflowId !== input.workflowId) {
       throw new EvolutionError('invalid_input', 'Managed source receipt is absent or belongs to another workflow')
@@ -575,6 +580,8 @@ export class SourceManager {
       message: input.message,
       ...(input.signal ? { signal: input.signal } : {}),
     })
+    const changedOutput = await this.git(root, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', headCommit], input.signal)
+    const allChangedFiles = changedOutput.split('\0').filter(Boolean).sort((left, right) => left.localeCompare(right))
     const next: SourceReceipt = {
       ...receipt,
       headCommit,
@@ -589,7 +596,11 @@ export class SourceManager {
       headCommit,
       branch,
     } satisfies SourceLock, null, 2)}\n`, 'utf8')
-    return next
+    return {
+      ...next,
+      changedFiles: allChangedFiles.slice(0, 200),
+      changedFilesTruncated: allChangedFiles.length > 200,
+    }
   }
 
   async recordReviewedArtifact(input: {

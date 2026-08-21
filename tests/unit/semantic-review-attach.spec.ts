@@ -75,7 +75,7 @@ function highRiskReview() {
       peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
     })) },
     { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
-    { path: 'src/run.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('echo')") },
+    { path: 'src/run.ts', content: Buffer.from('export function apply() { eval("1") }') },
   ]
   const record = evaluatePluginContent({
     resolutionId: `resolution_${'b'.repeat(24)}`,
@@ -297,7 +297,7 @@ const grokFiles = {
   }, null, 2),
   'cordis.patch.yml': '- id: xai\n  name: dsh-xai\n',
   'README.md': 'xAI Grok SuperGrok OAuth for DeepSeek Harness\n',
-  'lib/index.js': "import { spawn } from 'node:child_process'\nexport function apply() { spawn('echo') }\n",
+  'lib/index.js': "export function apply() { eval('1') }\n",
 }
 
 describe('service selected review attachment', () => {

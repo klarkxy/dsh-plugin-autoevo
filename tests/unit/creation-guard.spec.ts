@@ -227,9 +227,9 @@ describe('evolution protocol automaton', () => {
     const direct = tool('find_dsh_plugin', { query: 'screenshot' })
     await expect(guard.preExecute(direct, next)).resolves.toEqual({
       kind: 'deny',
-      reason: expect.stringContaining('capability_workflow_resume'),
+      reason: expect.stringMatching(/until the user replies|Do not search/i),
     })
-    expect(guard.guard(direct)).toContain('capability_workflow_resume')
+    expect(guard.guard(direct)).toMatch(/until the user replies|Do not search/i)
     expect(next).not.toHaveBeenCalled()
 
     const nested = {
@@ -239,6 +239,77 @@ describe('evolution protocol automaton', () => {
     await expect(guard.preExecute(nested, next)).resolves.toEqual({ kind: 'allow' })
     expect(guard.guard(nested)).toBeUndefined()
     expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells the model to resume with navigation after a fresh user reply instead of waiting again', async () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('selection_required'))
+    guard.setWaiting(agent, 'await_selection', 'turn_issue')
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '看看3' }] })
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    const direct = tool('find_dsh_plugin', { query: 'dsh-xai' })
+    const denied = await guard.preExecute(direct, next)
+    expect(denied).toMatchObject({ kind: 'deny' })
+    expect(String((denied as { reason: string }).reason)).toMatch(/review_candidates/i)
+    expect(String((denied as { reason: string }).reason)).not.toMatch(/until the user replies/i)
+  })
+
+  it('blocks question-tool answers at sealed gates because they are not fresh top-level user turns', async () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('selection_required'))
+    guard.setWaiting(agent, 'await_selection', 'turn_issue')
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+
+    await expect(guard.preExecute(tool('ask_user_question'), next)).resolves.toEqual({
+      kind: 'deny',
+      reason: expect.stringMatching(/not an authenticated fresh top-level user turn/i),
+    })
+    expect(guard.guard(tool('ask_user_question'))).toMatch(/present the natural-language choices in chat and stop/i)
+    guard.setWaiting(agent, 'await_recovery', 'turn_issue')
+    expect(guard.guard(tool('ask_user'))).toMatch(/not an authenticated fresh top-level user turn/i)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('keeps recovery discovery violations on the recovery tool before and after a fresh reply', () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('selection_required'))
+    guard.setWaiting(agent, 'await_recovery', 'turn_issue')
+
+    for (const name of ['find_dsh_plugin', 'web_search']) {
+      const beforeReply = guard.guard(tool(name))
+      expect(beforeReply).toMatch(/cleanup-and-restart choice/i)
+      expect(beforeReply).not.toMatch(/review_candidates|capability_workflow_resume/i)
+    }
+
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '清理并重新开始' }] })
+    for (const name of ['find_dsh_plugin', 'web_search']) {
+      const afterReply = guard.guard(tool(name))
+      expect(afterReply).toMatch(/capability_workflow_recover/i)
+      expect(afterReply).not.toMatch(/review_candidates|capability_workflow_resume/i)
+    }
+  })
+
+  it('does not keep the sealed recovery protocol after a completed installation', () => {
+    const guard = inModeGuard()
+    resolveAs(guard, authorization('use_review'))
+    guard.setWaiting(agent, 'await_recovery', 'turn_issue')
+    guard.setWaiting(agent, undefined)
+    expect(guard.guard(tool('web_search'))).toBeUndefined()
+    expect(guard.guard(tool('find_dsh_plugin'))).toMatch(/capability_workflow/i)
+    expect(guard.guard(tool('find_dsh_plugin'))).not.toMatch(/capability_workflow_recover/i)
+    expect(guard.guard(tool('ask_user'))).toBeUndefined()
+  })
+
+  it('tells the model to start capability_workflow before any interrupt exists', async () => {
+    const guard = inModeGuard()
+    const next = vi.fn(async () => ({ kind: 'allow' as const }))
+    const direct = tool('find_dsh_plugin', { query: 'screenshot' })
+    await expect(guard.preExecute(direct, next)).resolves.toEqual({
+      kind: 'deny',
+      reason: expect.stringContaining('capability_workflow'),
+    })
+    expect(guard.guard(direct)).toContain('Call capability_workflow')
+    expect(guard.guard(direct)).not.toContain('capability_workflow_resume')
   })
 
   it('does not intercept find_dsh_plugin outside evolution mode', async () => {

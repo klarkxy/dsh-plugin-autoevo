@@ -8,7 +8,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ExecutionLease } from '../../src/contracts.js'
-import { ExecutionGuard } from '../../src/execution-guard.js'
+import { ExecutionGuard, leaseAllowsExecution } from '../../src/execution-guard.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 import { probeWorkspaceWriteSandbox } from '../../src/sandbox-probe.js'
 
@@ -26,22 +26,37 @@ function exec(name: string, args: Record<string, unknown> = {}): ToolExecution {
 describe('parent execution boundaries', () => {
   const parent = new ExecutionGuard({ role: 'parent' })
 
-  it('allows only AutoEvo decisions and explicit read-only discovery helpers', async () => {
+  it('reuses official Creator tools and only blocks AutoEvo-owned side effects', async () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    for (const name of ['capability_workflow', 'capability_workflow_resume', 'plugin_remove', 'read', 'fs_search', 'web_search']) {
-      await expect(parent.preExecute(exec(name), next)).resolves.toEqual({ kind: 'allow' })
+    for (const call of [
+      exec('capability_workflow'),
+      exec('capability_workflow_resume'),
+      exec('plugin_remove'),
+      exec('read'),
+      exec('read_image'),
+      exec('write'),
+      exec('edit'),
+      exec('glob'),
+      exec('grep'),
+      exec('pwsh', { command: 'Get-ChildItem' }),
+      exec('todo_write'),
+      exec('get_goal'),
+      exec('create_goal'),
+      exec('job_list'),
+      exec('exit_plan_mode'),
+      exec('ask_user_question'),
+      exec('cordis_inspect_self'),
+      exec('cordis_define', { plugin: { kind: 'existing' } }),
+      exec('cordis_run'),
+      exec('subagent'),
+      exec('workflow'),
+      exec('calculator'),
+    ]) {
+      await expect(parent.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
-    expect(parent.guard(exec('mystery_writer'))).toMatch(/unrecognized tool/i)
-  })
-
-  it('denies write, shell, Cordis, delegation, plugin mutation, and aliases', () => {
-    for (const name of ['write', 'edit', 'dsh_fs_write', 'file-edit']) {
-      expect(parent.guard(exec(name))).toMatch(/filesystem write\/edit/i)
-    }
-    expect(parent.guard(exec('pwsh', { command: 'Get-ChildItem' }))).toMatch(/denies shell/i)
-    expect(parent.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
-    expect(parent.guard(exec('subagent'))).toMatch(/delegation/i)
+    expect(parent.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/kind:new/i)
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
   })
 })
 
@@ -62,85 +77,32 @@ function lease(partial: Pick<ExecutionLease, 'endpoint' | 'allowedParameterConst
   }
 }
 
-describe('parent exact-lease allowlist', () => {
-  it('denies ordinary tools when no lease resolver is configured', () => {
-    const parent = new ExecutionGuard({ role: 'parent' })
-    expect(parent.guard(exec('calculator'))).toMatch(/unrecognized tool/i)
+describe('lease matching helpers', () => {
+  it('matches an exact leased tool name', () => {
+    const current = lease({
+      endpoint: { kind: 'exact_tool', name: 'calculator' },
+      allowedParameterConstraints: {},
+    })
+    expect(leaseAllowsExecution(current, exec('calculator'))).toBe(true)
+    expect(leaseAllowsExecution(current, exec('weather'))).toBe(false)
+    expect(leaseAllowsExecution(undefined, exec('calculator'))).toBe(false)
   })
 
-  it('allows only the exact leased tool name', () => {
-    const parent = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => lease({
-        endpoint: { kind: 'exact_tool', name: 'calculator' },
-        allowedParameterConstraints: {},
-      }),
+  it('matches bridge tools only when the exact target is present in real arguments', () => {
+    const current = lease({
+      endpoint: {
+        kind: 'bridge',
+        tools: ['tool_search', 'tool_describe', 'tool_call'],
+        target: 'telegram_send',
+      },
+      allowedParameterConstraints: { exactTarget: 'telegram_send' },
     })
-    expect(parent.guard(exec('calculator'))).toBeUndefined()
-    expect(parent.guard(exec('weather'))).toMatch(/unrecognized tool/i)
-  })
-
-  it('allows bridge tools only when the exact target is present in real arguments', () => {
-    const parent = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => lease({
-        endpoint: {
-          kind: 'bridge',
-          tools: ['tool_search', 'tool_describe', 'tool_call'],
-          target: 'telegram_send',
-        },
-        allowedParameterConstraints: { exactTarget: 'telegram_send' },
-      }),
-    })
-    expect(parent.guard(exec('tool_search', { query: 'telegram_send' }))).toBeUndefined()
-    expect(parent.guard(exec('tool_describe', { name: 'telegram_send' }))).toBeUndefined()
-    expect(parent.guard(exec('tool_call', { name: 'telegram_send', arguments: { text: 'hi' } }))).toBeUndefined()
-  })
-
-  it('rejects a swapped or missing bridge target', () => {
-    const parent = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => lease({
-        endpoint: {
-          kind: 'bridge',
-          tools: ['tool_search', 'tool_describe', 'tool_call'],
-          target: 'telegram_send',
-        },
-        allowedParameterConstraints: { exactTarget: 'telegram_send' },
-      }),
-    })
-    expect(parent.guard(exec('tool_call', { name: 'weather' }))).toMatch(/unrecognized tool/i)
-    expect(parent.guard(exec('tool_search', { query: 'telegram' }))).toMatch(/unrecognized tool/i)
-    expect(parent.guard(exec('tool_describe', {}))).toMatch(/unrecognized tool/i)
-    expect(parent.guard(exec('tool_call', { arguments: { text: 'hi' } }))).toMatch(/unrecognized tool/i)
-  })
-
-  it('still denies shell and write even when a forged lease names them', () => {
-    const shell = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => lease({
-        endpoint: { kind: 'exact_tool', name: 'pwsh' },
-        allowedParameterConstraints: {},
-      }),
-    })
-    expect(shell.guard(exec('pwsh', { command: 'Get-ChildItem' }))).toMatch(/denies shell/i)
-    const write = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => lease({
-        endpoint: { kind: 'exact_tool', name: 'write' },
-        allowedParameterConstraints: {},
-      }),
-    })
-    expect(write.guard(exec('write'))).toMatch(/filesystem write\/edit/i)
-  })
-
-  it('denies ordinary tools when the resolver returns undefined for an invalid or expired lease', () => {
-    const parent = new ExecutionGuard({
-      role: 'parent',
-      resolveLease: () => undefined,
-    })
-    expect(parent.guard(exec('calculator'))).toMatch(/unrecognized tool/i)
-    expect(parent.guard(exec('tool_call', { name: 'telegram_send' }))).toMatch(/unrecognized tool/i)
+    expect(leaseAllowsExecution(current, exec('tool_search', { query: 'telegram_send' }))).toBe(true)
+    expect(leaseAllowsExecution(current, exec('tool_describe', { name: 'telegram_send' }))).toBe(true)
+    expect(leaseAllowsExecution(current, exec('tool_call', { name: 'telegram_send', arguments: { text: 'hi' } }))).toBe(true)
+    expect(leaseAllowsExecution(current, exec('tool_call', { name: 'weather' }))).toBe(false)
+    expect(leaseAllowsExecution(current, exec('tool_search', { query: 'telegram' }))).toBe(false)
+    expect(leaseAllowsExecution(current, exec('tool_describe', {}))).toBe(false)
   })
 })
 

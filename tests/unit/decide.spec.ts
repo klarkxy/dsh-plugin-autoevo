@@ -44,8 +44,7 @@ describe('resume validation', () => {
       reason: 'review complete',
     })
     expect(text).toContain('结构化 decision')
-    expect(text).toContain('不再用关键词二次猜测')
-    expect(text).toContain('修改后仍会重新审查并再次确认')
+    expect(text).toContain('审查结论')
   })
 
   it('trusts the model action for wording the old regex could not understand', () => {
@@ -102,6 +101,17 @@ describe('resume validation', () => {
     })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
   })
 
+  it('does not consume an oversized authentic user turn before validation completes', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: 'x'.repeat(2_001) }] })
+    expect(() => resolveDecisionFromModel({
+      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'grok',
+    })).toThrow(/1 to 2000 characters/i)
+    expect(() => guard.previewDecisionTurn(agent, current)).not.toThrow()
+    expect(guard.consumeDecisionTurn(agent, current).message).toHaveLength(2_001)
+  })
+
   it('defaults use_this retention to temporary unless the same confirmation selects persistent', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
@@ -131,6 +141,59 @@ describe('resume validation', () => {
     })).toMatchObject({
       optionId: 'use_this',
       install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
+    })
+  })
+
+  it('rejects temporary retention for manual_runtime candidates at the decision gate without consuming the turn', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['use_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
+    // Defaulted retention is temporary and must not reach install for a
+    // manual_runtime candidate; the fresh turn stays unconsumed so the user
+    // can reconfirm persistent at the same interrupt.
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId },
+      requirement: 'grok',
+      verificationLayer: 'manual_runtime',
+    })).toThrow(/requires persistent retention/i)
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId, retention: 'temporary' },
+      requirement: 'grok',
+      verificationLayer: 'manual_runtime',
+    })).toThrow(/requires persistent retention/i)
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      requirement: 'grok',
+      verificationLayer: 'manual_runtime',
+    })).toMatchObject({
+      optionId: 'use_this',
+      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
+    })
+  })
+
+  it('keeps the temporary default for automatically verifiable candidates', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['use_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId },
+      requirement: 'grok',
+      verificationLayer: 'tool_roundtrip',
+    })).toMatchObject({
+      optionId: 'use_this',
+      install: { targetProfile: 'web', retention: 'temporary', verificationTask: 'grok' },
     })
   })
 })

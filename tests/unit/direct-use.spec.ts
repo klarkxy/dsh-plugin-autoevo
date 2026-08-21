@@ -188,7 +188,7 @@ describe('direct use eligibility', () => {
     const base = githubReview({
       securityRisk: 'high',
       recommendation: 'modify',
-      findings: [{ code: 'process_execution', severity: 'block', source: 'src/run.ts', detail: 'spawn' }],
+      findings: [{ code: 'dynamic_evaluation', severity: 'block', source: 'src/run.ts', detail: 'eval' }],
     })
     const workflow = workflowFor(base)
     const missing = base
@@ -247,15 +247,14 @@ describe('direct use eligibility', () => {
         { path: 'src/run.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('echo')") },
       ],
     })
-    expect(record.findings.map((item) => item.code)).toEqual(expect.arrayContaining(['prompt_injection', 'process_execution']))
-    expect(record.securityRisk).toBe('high')
+    expect(record.findings.map((item) => item.code)).toEqual(expect.arrayContaining(['process_execution']))
+    expect(record.findings.some((item) => item.code === 'prompt_injection')).toBe(false)
+    expect(record.securityRisk).toBe('medium')
     expect(hostDirectUseBoundary(record)).toBeUndefined()
-    expect(() => assertDirectUseAllowed(record)).toThrow(/verdict does not authorize direct use/i)
+    expect(() => assertDirectUseAllowed(record)).not.toThrow()
 
     const workflow = workflowFor(record)
-    const approved = bindVerdict(record, 'approved', workflow)
-    expect(() => assertDirectUseAllowed(approved, workflow)).not.toThrow()
-    expect(confirmationIds(approved, workflow)).toContain('use_this')
+    expect(confirmationIds(record, workflow)).toContain('use_this')
   })
 
   it('does not let a reviewer verdict mint authorization, commitment, or a user decision', () => {

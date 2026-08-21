@@ -23,20 +23,21 @@ Never issue a broad inventory merely to explore. Inspect only the exact runtime 
 
 ## 2. New-capability state machine
 
-Before any new definition, state the concrete capability in one sentence and call `capability_workflow` with it. Treat its interrupt or terminal state as the sole authority for create_authorized. Read [the state details](references/autoevo-state.md) when a result is returned.
+Before any new definition, call `capability_workflow` with the user's original capability wording. During `discovering`, autonomously refine within the returned budget or seal 1–5 Host-pool candidates with `capability_workflow_present`. Only later fresh-user gates can authorize review or creation. Read [the state details](references/autoevo-state.md) when a result is returned.
 
 | Authorization | Required next action | New definition |
 | --- | --- | --- |
+| `discovering` | Use Host facts and bounded read-only refinement, then present 1–5 pool candidate IDs. An empty pool stays empty. | Stop |
 | `reuse_local` | The user chose an existing local tool or skill. Use it. | Stop |
-| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not call `ask_user`. Wait for the reply, then `capability_workflow_resume`. Inspect exactly one selected repository at a time. | Stop |
-| `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not call `ask_user`. Wait, then `capability_workflow_resume` (use this / improve it / create new / stop). | Stop |
-| `use_review` | The user chose to use the reviewed plugin. The workflow installs it; do not create a replacement. Reinstall or patch again on the same workflow. | Stop |
-| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then resume with the local checkout path. The workflow derives `base_review_id`. | Stop |
+| `selection_required` | Present each candidate in chat (what it is, why it matched). Do not pop `ask_user` to pick a candidate. Wait for the reply, then `capability_workflow_resume`. Inspect exactly one selected repository at a time. | Stop |
+| `confirmation_required` | Explain the review in chat (fit, risk, missing pieces). Do not pop `ask_user` to pick an action. Wait, then `capability_workflow_resume` (use this / improve it / create new / stop). | Stop |
+| `use_review` | The user chose to use the reviewed plugin. The workflow installs it; do not create a replacement. Host completion may be verified, activated, or awaiting a user test — only a Host tool-roundtrip pass is functionally verified. | Stop |
+| `modify_review` | The user chose to improve the reviewed plugin. Modify it minimally, then resume with the local checkout path. The workflow derives `base_review_id`. At most two modify attempts; after repeated failure, diagnose or let the user choose another reviewed action. | Stop |
 | `market_required` | AutoEvo installs `dsh-find-plugin` by script after approval and hot-loads it when possible. Tell the user to approve if asked. Restart DSH only if hot-load fails. Do not review the marketplace as the requested capability. | Stop |
 | `stopped` | The user stopped. Do not install or create. | Stop |
 | `create_authorized` | The user explicitly allowed one new plugin. Creation continues only in a Host-launched workspace-write child. This is not a mandate to start building. | Host child only |
 
-After `capability_workflow` parks on an interrupt, write a conversational summary and wait for the next user message. Then call `capability_workflow_resume` with that message verbatim and the matching `option_id`. Do not pop `ask_user`.
+Use professional judgment during discovery. After evidence is available, ask at most one precise clarification only when OAuth/API/Coding Plan or another material distinction changes the candidate choice; the reply may also select a candidate. Once `capability_workflow_present` opens Gate 1, explain the shortlist naturally and wait for a fresh user message before `capability_workflow_resume`. After a failed stage, use `capability_workflow_diagnose` for bounded new evidence before proposing a retry. Do not repeat the same review, source, layer, and fixture. Sealed failure recovery and completed-install cleanup/restart are distinct Host paths; call `capability_workflow_recover` only in the mode the current facts allow.
 
 Do not redefine an old requirement from memory. A fresh resolve replaces any earlier grant. A failed child-session `cordis_define(kind: "new")` may retry with the same live `create_authorized` grant; a successful one consumes it. Do not bypass a non-create_authorized result by changing wording, creating a same-named Plugin, or defining a static package.
 
@@ -56,7 +57,7 @@ For Client UI, inspect the exact target Slot before registration. Use its return
 2. Define the package. For new work, `create_authorized` continues only in the Host-launched workspace-write child; the parent session must not call `cordis_define(kind:new)`. For a named Plugin, inspect its exact base package with `cordis_inspect_self`, preserve untouched halves, then use `plugin.kind: "existing"` with its original id.
 3. Run the returned exact package id. Use `run` for first activation/restart and `update` only to move an existing Plugin to a different package.
 4. If activation awaits approval or Client loading, report that state and wait for a later system update; do not claim success or poll in the same turn.
-5. Verify the requested observable behavior on the proper Host or Client surface, including a real invocation for dynamic Tools and an actual render/interaction for Client UI.
+5. Claim only Host evidence. A Host tool-roundtrip pass is verified. Bundle activation means the bundle loaded, not that the capability was tested. Persistent manual-runtime completion awaits a user test in the target client or profile: invite that test once in natural language, then continue ordinary chat. Never treat a model judgment or semantic verifier as the success gate.
 
 ## 5. Repair, rollback, and cleanup
 

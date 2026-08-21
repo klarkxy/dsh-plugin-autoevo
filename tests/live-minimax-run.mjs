@@ -6,8 +6,11 @@ import { pathToFileURL } from 'node:url'
 import { parse } from 'yaml'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
+const modelId = process.argv[2] ?? 'minimax-m3'
+const runIndex = Number(process.argv[3] ?? 0)
+if (!/^[a-z0-9._-]{2,80}$/iu.test(modelId)) throw new Error(`invalid model id ${JSON.stringify(modelId)}`)
 const runId = new Date().toISOString().replace(/[:.]/gu, '-')
-const outDir = path.join('C:/tmp', `autoevo-live-flow-${runId}`)
+const outDir = path.join('C:/tmp', `autoevo-live-flow-${modelId.replace(/[^a-z0-9._-]/giu, '-')}-${runIndex}-${runId}`)
 const stateDir = path.join(outDir, 'state')
 const realDshHome = path.join(os.homedir(), '.dsh')
 const dshHome = path.join(outDir, 'dsh-home')
@@ -38,12 +41,12 @@ await writeFile(childModelPatch, `${JSON.stringify([
           apiKeyEnv: 'NEW_API_API_KEY',
           api: 'openai-completions',
           baseURL: 'https://newapi.klarkxy.xyz/v1',
-          models: [{ id: 'minimax-m3' }],
+          models: [{ id: modelId }],
         },
       },
     },
   },
-  { id: 'agent-default-model', config: { provider: 'new-api', model: 'minimax-m3' } },
+  { id: 'agent-default-model', config: { provider: 'new-api', model: modelId } },
 ], null, 2)}\n`)
 
 const patch = path.join(outDir, 'main.cordis.yml')
@@ -57,12 +60,12 @@ await writeFile(patch, `${JSON.stringify([
           apiKeyEnv: 'NEW_API_API_KEY',
           api: 'openai-completions',
           baseURL: 'https://newapi.klarkxy.xyz/v1',
-          models: [{ id: 'minimax-m3' }],
+          models: [{ id: modelId }],
         },
       },
     },
   },
-  { id: 'agent-default-model', config: { provider: 'new-api', model: 'minimax-m3' } },
+  { id: 'agent-default-model', config: { provider: 'new-api', model: modelId } },
   { id: 'headless-runner', disabled: true },
   {
     insert: [
@@ -97,6 +100,7 @@ const child = spawn(process.execPath, [dshBin, '--profile', 'headless', '--patch
     AUTOEVO_LIVE_STATE_DIR: stateDir,
     AUTOEVO_LIVE_OUT_DIR: outDir,
     AUTOEVO_LIVE_EVOLUTION_MODE_URL: pathToFileURL(evolutionMode).href,
+    AUTOEVO_LIVE_RUN_INDEX: String(runIndex),
     DSH_TELEMETRY_DISABLED: '1',
     NO_COLOR: '1',
   },

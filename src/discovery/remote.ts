@@ -164,12 +164,19 @@ export async function discoverRemoteCandidates(options: {
   config: RuntimeConfig
   requirement: string
   exec: ToolRunContext
+  /** Optional model-proposed read-only queries. Host normalizes and bounds them. */
+  queries?: readonly string[]
 }): Promise<RemoteDiscoveryResult> {
   const queries: string[] = []
   const reasons: string[] = []
   const finder = options.ctx.tools.get(FIND_PLUGIN_TOOL, options.exec.agent)
   if (finder) {
-    const planned = marketplaceSearchQueries(options.requirement)
+    const planned = options.queries
+      ? [...new Set(options.queries
+          .map((query) => boundedText(query, 120))
+          .filter((query) => query.length >= 2))]
+          .slice(0, 5)
+      : marketplaceSearchQueries(options.requirement)
     queries.push(...(planned.length > 0 ? planned : [findPluginQuery(options.requirement)]))
     const merged = new Map<string, RemotePluginCandidate>()
     let succeeded = 0

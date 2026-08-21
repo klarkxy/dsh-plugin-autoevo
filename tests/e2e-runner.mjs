@@ -186,21 +186,26 @@ async function runScenario() {
     // denied with the mode-specific message even before capability_workflow runs.
     assert.match(result.stdout, /AutoEvo denied new Cordis plugin creation: start or switch a blank\/new session to the Capability Evolution \(evolution\) agent preset/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL|E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
-    assert.match(result.stdout, /"decision":"use_local"/u)
+    assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
+    assert.match(result.stdout, /"policy_version":"8"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
     return {
       scenario,
       marker: expectedMarker,
       guard: 'denied cordis_define(kind:new) outside Capability Evolution mode',
       denial: 'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset',
-      resolution: 'use_local',
+      workflow: 'autonomous discovery sealed at Gate 1',
+      policyVersion: '8',
     }
   }
 
   if (scenario === 'resolve-local') {
-    assert.match(result.stdout, /"decision":"use_local"/u)
+    assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
+    assert.match(result.stdout, /"policy_version":"8"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
-    return { scenario, marker: expectedMarker, remoteSearchSkipped: true }
+    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '8' }
   }
 
   if (scenario === 'marketplace-flow') {

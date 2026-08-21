@@ -59,6 +59,9 @@ function scriptedGit(): { runner: CommandRunner; markDirty(): void } {
         if (joined === 'rev-parse HEAD') return { exitCode: 0, signal: null, stdout: `${state.head}\n`, stderr: '' }
         if (joined === 'rev-parse --abbrev-ref HEAD') return { exitCode: 0, signal: null, stdout: `${state.branch}\n`, stderr: '' }
         if (joined === 'add -A') return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        if (joined.startsWith('diff-tree --no-commit-id --name-only -r -z')) {
+          return { exitCode: 0, signal: null, stdout: 'managed-change\0', stderr: '' }
+        }
         if (args.includes('commit')) {
           state.commits += 1
           state.head = `${state.commits}`.repeat(40)
@@ -117,6 +120,7 @@ describe('managed Git creation sources', () => {
       message: 'feat: child result',
     })
     expect(committed.headCommit).not.toBe(receipt.headCommit)
+    expect(committed).toMatchObject({ changedFiles: ['managed-change'], changedFilesTruncated: false })
     const frozen = await manager.recordReviewedArtifact({
       sourceId: receipt.sourceId,
       workflowId,

@@ -190,7 +190,7 @@ describe('interrupt binding and host-turn decisions', () => {
       .rejects.toThrow(/already consumed|not waiting/i)
   })
 
-  it('rejects stale previous-turn resume without a fresh claim after the interrupt', async () => {
+  it('parks same-turn resume without consuming the interrupt or advancing', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bind-stale-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -199,12 +199,21 @@ describe('interrupt binding and host-turn decisions', () => {
     const turn = exec()
     remember(guard, turn.agent, '先停')
     const started = await engine.start('calculator', turn)
+    const interruptId = started.workflow.interrupt!.interruptId
+    const generation = started.workflow.generation
     // No new remember after interrupt: current turn equals validAfterTurnId watermark.
-    await expect(engine.resume({
+    const parked = await engine.resume({
       workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
+      interruptId,
       decision: { action: 'stop' },
-    }, turn)).rejects.toThrow(/fresh user turn|stale|previous-turn/i)
+    }, turn)
+    expect(parked.status).toBe('parked')
+    expect(parked.alreadyWaiting).toBe(true)
+    expect(parked.workflow.interrupt?.interruptId).toBe(interruptId)
+    expect(parked.workflow.generation).toBe(generation)
+    expect(parked.workflow.cursor).toBe(started.workflow.cursor)
+    expect(parked.workflow.status).toBe('interrupted')
+    expect(parked.workflow.consumedInterruptIds).toEqual([])
   })
 
   it('invalidates interrupts across boot identity changes and requires a fresh confirmation', async () => {

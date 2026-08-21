@@ -6,6 +6,7 @@ import type {
   DecisionReceipt,
   ResolutionAuthorization,
   ReviewRecord,
+  VerificationLayerKind,
   WorkflowOptionId,
 } from '../contracts.js'
 import type { CreationGuard } from '../creation-guard.js'
@@ -84,13 +85,13 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'selection_required') {
     return zh
-      ? '精简展示带序号的候选及推荐审查计划。等用户回话后，把“两个都、前两个、全部、另一个、第二个”等自然语言映射为当前快照 candidate_id，并用 navigation 调用 capability_workflow_resume。不要调用 ask_user。'
-      : 'Present a concise numbered shortlist and recommended review plan. After the user replies, map natural language such as both, the first two, all, the other one, or the second one to current snapshot candidate IDs and call capability_workflow_resume with navigation. Do not call ask_user.'
+      ? '只把 snapshot 里的真实候选写成带序号短名单，先写在对话里，然后停。每行只写序号、名字、仓库和一句话说明；candidate_id 只用于随后的 resume，不要念给用户。不要提问，不要把官方 API、自建方案或“再搜一下”写成候选。parked 是成功停牌：本回合不要再调用任何工具。等用户回话后，把“两个都、前两个、全部、另一个、第二个、看看3”等映射为 candidate_id，立刻用 navigation.review_candidates 调用 capability_workflow_resume；选候选阶段不要 use_this。不要调用 ask_user。'
+      : 'Write a numbered shortlist of real snapshot candidates in chat, then stop. Each row is index, name, repository, and one-line why; keep candidate_id for the later resume call and do not recite it. Do not ask questions, and do not invent official-API, build-it-yourself, or search-further rows. Parked is a successful stop: do not call any tools until the user replies. After the user replies, map natural language such as both, the first two, all, the other one, the second one, or look at 3 to candidate IDs and immediately call capability_workflow_resume with navigation.review_candidates. Do not send use_this at selection. Do not call ask_user.'
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '精简比较审查结论，只展示当前合法动作。安全发现只是静态观察：合并展示来源，不得推断用途、必要性、实际运行、命令目标或回调服务；事实未建立时明确说未知。用户要比较其它候选时，用 candidate_id 导航继续审查；用户明确选择安装、修改、新建或先停时，由你理解用户语义并把结构化 decision（action、必要时 candidate_id、可选 retention）传给 capability_workflow_resume。Host只校验真实新用户回合和当前 interrupt/快照边界，不再用关键词二次猜测。修改后仍会重新审查并再次确认。'
-      : 'Compare review outcomes concisely and show only legal actions. Security findings are static observations: group their sources and never infer purpose, necessity, runtime execution, command targets, or callback-server behavior; say unknown when the facts do not establish it. For another comparison, resume with candidate-ID navigation. For an explicit install, modify, create, or stop choice, interpret the user semantically and pass a structured decision (action, candidate_id when required, and optional retention) to capability_workflow_resume. The Host validates the fresh authentic turn and current interrupt/snapshot boundaries instead of re-parsing keywords. Modified sources are reviewed again before a fresh confirmation.'
+      ? '用两三句话写审查结论和风险，只展示当前合法动作，然后停。不要提问。本回合不要再调用任何工具。安全发现只是静态观察，不得推断用途。审查层为 manual_runtime 的候选只能持久安装且需用户在真实客户端手动测试，先向用户说明这一点。用户要看其它候选时用 navigation；用户明确选择安装、修改、新建或先停时提交结构化 decision，安装时按用户的持久或临时偏好提交 retention。'
+      : 'Summarize the review conclusion and risk in two or three sentences, show only legal actions, then stop. Do not ask questions. Do not call any tools until the user replies. Security findings are static observations; do not infer purpose. A candidate whose verification layer is manual_runtime can only be installed with persistent retention and requires a manual user test in a real client; tell the user before the final choice. For another candidate, use navigation. For an explicit install, modify, create, or stop choice, submit a structured decision, submitting retention from the user\'s temporary or persistent preference for installs.'
   }
   if (authorization.state === 'create_authorized') {
     return zh
@@ -219,6 +220,7 @@ function resolveInstallFromDecision(
   interrupt: InterruptPayload,
   decision: AuthorizationDecisionInput,
   requirement: string,
+  verificationLayer?: VerificationLayerKind,
 ): WorkflowPendingInstall {
   const profiles = Array.isArray(interrupt.facts.installProfiles)
     ? interrupt.facts.installProfiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -233,6 +235,15 @@ function resolveInstallFromDecision(
   const retention = decision.retention ?? 'temporary'
   if (retention !== 'temporary' && retention !== 'persistent') {
     throw new EvolutionError('invalid_input', 'decision retention must be temporary or persistent')
+  }
+  // Fail at the decision gate, while the interrupt is still open and the fresh
+  // user turn is unconsumed, instead of deep inside install where the same
+  // combination used to hard-fail the whole workflow.
+  if (verificationLayer === 'manual_runtime' && retention === 'temporary') {
+    throw new EvolutionError(
+      'invalid_input',
+      'This candidate verifies only at manual_runtime, which requires persistent retention; reconfirm persistent installation and a manual user test with the user, then resubmit the decision with retention persistent',
+    )
   }
   return {
     targetProfile,
@@ -252,16 +263,18 @@ export function resolveDecisionFromModel(input: {
   decision: AuthorizationDecisionInput
   requirement: string
   reviewId?: string
+  verificationLayer?: VerificationLayerKind
 }): ValidatedResume {
   const target = resolveDecisionTarget(input.decision, input.interrupt)
   const install = input.decision.action === 'use_this'
-    ? resolveInstallFromDecision(input.interrupt, input.decision, input.requirement)
+    ? resolveInstallFromDecision(input.interrupt, input.decision, input.requirement, input.verificationLayer)
     : undefined
-  const turn = input.guard.consumeDecisionTurn(input.agent, input.interrupt)
-  const userMessage = turn.message.normalize('NFKC').trim()
+  const preview = input.guard.previewDecisionTurn(input.agent, input.interrupt)
+  const userMessage = preview.message.normalize('NFKC').trim()
   if (!userMessage || userMessage.length > 2_000) {
     throw new EvolutionError('invalid_input', 'host user turn must contain 1 to 2000 characters')
   }
+  const turn = input.guard.consumeDecisionTurn(input.agent, input.interrupt)
   return {
     optionId: input.decision.action,
     userMessage,

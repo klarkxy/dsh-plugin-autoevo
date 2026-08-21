@@ -5,11 +5,14 @@ import { satisfies, valid, validRange } from 'semver'
 import type { RuntimeConfig } from '../config.js'
 import {
   POLICY_VERSION,
+  classifyRuntimeSurface,
   type InspectedFile,
   type ManifestFacts,
   type MechanicalFacts,
   type ReviewFinding,
   type ReviewRecord,
+  type RuntimeSurface,
+  type ToolFixtureAvailability,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
@@ -164,11 +167,181 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
 }
 
-function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
+function safeClientPath(value: string): string | undefined {
+  if (!value || value.includes('\\') || value.includes('\0')
+    || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) return undefined
+  const relative = value.replace(/^\.\//u, '')
+  const parts = relative.split('/')
+  if (parts.some((part) => part === '.' || part === '..' || part === '' || part.includes(':'))) return undefined
+  const normalized = path.posix.normalize(relative)
+  if (!normalized || normalized === '.') return undefined
+  return value.startsWith('./') ? `./${normalized}` : normalized
+}
+
+function safePlatformToken(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z][a-z0-9._-]{0,31}$/i.test(value) ? value.toLowerCase() : undefined
+}
+
+/** Freeze `dsh.client` without retaining secrets or unsafe paths. */
+function freezeClient(dsh: Record<string, unknown> | undefined): Pick<ManifestFacts, 'client' | 'clientPlatform'> {
+  if (!dsh || !Object.hasOwn(dsh, 'client') || dsh.client === undefined || dsh.client === null || dsh.client === false) {
+    return {}
+  }
+  const value = dsh.client
+  if (value === true) return { client: 'declared', clientPlatform: 'web' }
+  if (typeof value === 'string') {
+    return { client: safeClientPath(value) ?? 'declared', clientPlatform: 'web' }
+  }
+  const rec = record(value)
+  if (!rec) return { client: 'declared', clientPlatform: 'web' }
+  const entry = typeof rec.entry === 'string' ? rec.entry
+    : typeof rec.path === 'string' ? rec.path
+      : typeof rec.main === 'string' ? rec.main
+        : undefined
+  return {
+    client: entry ? safeClientPath(entry) ?? 'declared' : 'declared',
+    clientPlatform: safePlatformToken(rec.platform) ?? 'web',
+  }
+}
+
+function packageContext(files: readonly ContentFile[]): {
+  pkg?: Record<string, unknown>
+  dsh?: Record<string, unknown>
+  bundle?: Record<string, unknown>
+} {
   const packageFile = files.find((file) => file.path === 'package.json')
   const pkg = packageFile ? jsonObject(packageFile.content) : undefined
-  const dsh = pkg?.dsh && typeof pkg.dsh === 'object' && !Array.isArray(pkg.dsh) ? pkg.dsh as Record<string, unknown> : undefined
-  const bundle = dsh?.bundle && typeof dsh.bundle === 'object' && !Array.isArray(dsh.bundle) ? dsh.bundle as Record<string, unknown> : undefined
+  const dsh = record(pkg?.dsh)
+  const bundle = record(dsh?.bundle)
+  return { ...(pkg ? { pkg } : {}), ...(dsh ? { dsh } : {}), ...(bundle ? { bundle } : {}) }
+}
+
+/** Exact candidate namespace. Broad `dsh.fixtures` / `dsh.bundle.fixtures` are ignored. */
+function verificationFixtures(dsh: Record<string, unknown> | undefined): Record<string, unknown> {
+  const autoevo = record(dsh?.autoevo)
+  const verification = record(autoevo?.verification)
+  return record(verification?.fixtures) ?? {}
+}
+
+function fixtureDeclared(value: unknown): boolean {
+  if (value === true) return true
+  if (typeof value === 'string' && value) return true
+  return Boolean(record(value))
+}
+
+function toolFixturesFrom(
+  expectedTools: readonly string[],
+  dsh: Record<string, unknown> | undefined,
+): ToolFixtureAvailability[] {
+  const declared = verificationFixtures(dsh)
+  return expectedTools.map((tool) => ({
+    tool,
+    available: fixtureDeclared(declared[tool]),
+    safe: false,
+    hostValidated: false,
+  }))
+}
+
+function looksLikeLlm(value: string): boolean {
+  return /(?:^|[^a-z])llm(?:[^a-z]|$)|agent-default-model|language-model/i.test(value)
+}
+
+function looksLikeCredentials(value: string): boolean {
+  return /oauth|credential|api-key|apikey/i.test(value)
+}
+
+function patchRegistrations(file: ContentFile | undefined): {
+  llmRegistered: boolean
+  credentialsRegistered: boolean
+} {
+  if (!file) return { llmRegistered: false, credentialsRegistered: false }
+  let llmRegistered = false
+  let credentialsRegistered = false
+  const note = (value: unknown): void => {
+    if (typeof value !== 'string' || !value) return
+    if (looksLikeLlm(value)) llmRegistered = true
+    if (looksLikeCredentials(value)) credentialsRegistered = true
+  }
+  try {
+    const document = parseDocument(Buffer.from(file.content).toString('utf8'), {
+      customTags: [{
+        tag: 'tag:yaml.org,2002:js',
+        resolve: (value: string) => ({ __jsExpr: value }),
+      }],
+    })
+    if (document.errors.length > 0) return { llmRegistered, credentialsRegistered }
+    const patches: unknown = document.toJS()
+    if (!Array.isArray(patches)) return { llmRegistered, credentialsRegistered }
+    for (const item of patches) {
+      const patch = record(item)
+      if (!patch) continue
+      note(patch.id)
+      const config = record(patch.config)
+      note(config?.provider)
+      const insert = Array.isArray(patch.insert) ? patch.insert : []
+      for (const entry of insert) {
+        const row = record(entry)
+        note(row?.id)
+        note(row?.name)
+      }
+    }
+  } catch {
+    return { llmRegistered, credentialsRegistered }
+  }
+  return { llmRegistered, credentialsRegistered }
+}
+
+function dependencyNames(pkg: Record<string, unknown> | undefined, manifest: ManifestFacts): string[] {
+  return [...new Set([
+    ...manifest.dependencies,
+    ...Object.keys(manifest.peerDependencies),
+    ...Object.keys(stringRecord(pkg?.optionalDependencies)),
+  ])]
+}
+
+function findingCodes(findings: readonly ReviewFinding[]): Set<string> {
+  return new Set(findings.map((item) => item.code))
+}
+
+/** Freeze static runtime facts. Plugin fixture declarations never mint safe/hostValidated. */
+export function freezeRuntimeSurface(input: {
+  manifest: ManifestFacts
+  findings: readonly ReviewFinding[]
+  files: readonly ContentFile[]
+  truncated?: boolean
+}): RuntimeSurface {
+  const { pkg, dsh } = packageContext(input.files)
+  const patchFile = input.manifest.bundlePatch
+    ? input.files.find((file) => file.path === input.manifest.bundlePatch)
+    : undefined
+  const registrations = patchRegistrations(patchFile)
+  const names = dependencyNames(pkg, input.manifest)
+  const llmDependency = names.some((name) => name === '@deepseek-ai/dsh-llm' || name.startsWith('@deepseek-ai/dsh-llm/'))
+  const credentialsDependency = names.some((name) => looksLikeCredentials(name))
+  const codes = findingCodes(input.findings)
+  const toolFixtures = toolFixturesFrom(input.manifest.expectedTools, dsh)
+  const facts = {
+    ...(input.manifest.clientPlatform ? { clientPlatform: input.manifest.clientPlatform } : {}),
+    ...(input.manifest.expectedRoute ? { expectedRoute: input.manifest.expectedRoute } : {}),
+    llmDependency,
+    llmRegistered: registrations.llmRegistered || Boolean(input.manifest.expectedRoute),
+    credentialsDependency,
+    credentialsRegistered: registrations.credentialsRegistered,
+    networkSignal: codes.has('network_access'),
+    environmentSignal: codes.has('environment_access'),
+    processSignal: codes.has('process_execution') || codes.has('child_process'),
+    skillOnly: input.manifest.kind === 'skill',
+    unsafeTools: toolFixtures.some((item) => item.available && !item.safe),
+    expectedTools: [...input.manifest.expectedTools],
+    toolFixtures,
+    kind: input.manifest.kind,
+    truncated: Boolean(input.truncated),
+  }
+  return { ...facts, verificationLayer: classifyRuntimeSurface(facts) }
+}
+
+function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
+  const { pkg, dsh, bundle } = packageContext(files)
   const hasSkill = files.some((file) => /(^|\/)skill\.md$/i.test(file.path))
   const sourceTools = files.flatMap((file) => {
     if (!SOURCE_EXTENSIONS.has(path.posix.extname(file.path).toLowerCase())) return []
@@ -191,6 +364,7 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
   const expectedRoute = bundlePatch
     ? expectedRouteFromBundlePatch(files.find((file) => file.path === bundlePatch))
     : undefined
+  const client = freezeClient(dsh)
   return {
     kind: bundlePatchDeclared ? 'bundle' : hasSkill ? 'skill' : pkg ? 'legacy' : 'unknown',
     ...(isSafePackageName(pkg?.name) ? { packageName: pkg.name } : {}),
@@ -202,6 +376,8 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
     peerDependencies,
     expectedTools,
     ...(expectedRoute ? { expectedRoute } : {}),
+    ...(client.client ? { client: client.client } : {}),
+    ...(client.clientPlatform ? { clientPlatform: client.clientPlatform } : {}),
   }
 }
 
@@ -261,8 +437,9 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
   }
   for (const name of manifest.scripts) {
     const value = scripts[name] ?? ''
-    const remoteExecutor = /\b(?:curl|wget|powershell|cmd(?:\.exe)?|bash|sh)\b/i.test(value)
-    findings.push(finding('lifecycle_script', remoteExecutor ? 'block' : 'warning', 'package.json', `declares lifecycle script: ${name}`, packageHash))
+    const remoteDownload = /\b(?:curl|wget)\b/i.test(value)
+      || /\b(?:irm|iwr|invoke-webrequest|invoke-restmethod)\b/i.test(value)
+    findings.push(finding('lifecycle_script', remoteDownload ? 'block' : 'warning', 'package.json', `declares lifecycle script: ${name}`, packageHash))
   }
   for (const [group, dependencies] of Object.entries({
     dependencies: stringRecord(pkg?.dependencies),
@@ -278,16 +455,17 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
   for (const file of files) {
     const extension = path.posix.extname(file.path).toLowerCase()
     const executableSource = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx']).has(extension)
-    const documentation = /(^|\/)(?:skill|readme)(?:\.[^/]+)?\.md$/i.test(file.path)
     const testOnly = /(^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:spec|test)\.[cm]?[jt]sx?$/i.test(file.path)
-    if ((!executableSource && !documentation) || testOnly || file.path.endsWith('.d.ts')) continue
+    if (!executableSource || testOnly || file.path.endsWith('.d.ts')) continue
     const text = Buffer.from(file.content).toString('utf8')
     const fileHash = sha256(file.content)
     if (executableSource) {
       const childProcessImport = /(?:from\s*['"](?:node:)?child_process['"]|require\s*\(\s*['"](?:node:)?child_process['"]\s*\))/i.test(text)
       const processExecution = /\b(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(|\b\w+\.(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(/.test(text)
       if (childProcessImport) findings.push(finding('child_process', 'warning', file.path, 'imports child_process', fileHash))
-      if (childProcessImport && processExecution) findings.push(finding('process_execution', 'block', file.path, 'invokes an imported process execution API', fileHash))
+      if (childProcessImport && processExecution) {
+        findings.push(finding('process_execution', 'warning', file.path, 'invokes an imported process execution API', fileHash))
+      }
       if (/(?:\b|new\s+)(?:globalThis\.)?Function\s*\(|(?:^|[^\w.$])eval\s*\(/m.test(text)) {
         findings.push(finding('dynamic_evaluation', 'block', file.path, 'uses dynamic evaluation', fileHash))
       }
@@ -296,9 +474,9 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
         findings.push(finding('filesystem_access', 'warning', file.path, 'imports filesystem APIs', fileHash))
       }
       if (/\bfetch\s*\(|\b(?:curl|wget)\b/i.test(text)) findings.push(finding('network_access', 'warning', file.path, 'accesses network APIs', fileHash))
-    }
-    if (/ignore\s+(?:all\s+)?previous\s+instructions|system\s+message|you\s+are\s+chatgpt|do\s+not\s+obey/i.test(text)) {
-      findings.push(finding('prompt_injection', 'block', file.path, 'contains prompt-injection-like instruction text', fileHash))
+      if (/ignore\s+(?:all\s+)?previous\s+instructions|system\s+message|you\s+are\s+chatgpt|do\s+not\s+obey/i.test(text)) {
+        findings.push(finding('prompt_injection', 'block', file.path, 'contains prompt-injection-like instruction text', fileHash))
+      }
     }
   }
   return findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source))
@@ -357,7 +535,10 @@ function recommendReview(input: {
     return 'skip'
   }
   if (!input.materializable) return 'skip'
-  if (input.fit === 'full' && input.compatible === 'compatible' && input.securityRisk === 'low') return 'use'
+  if (input.compatible === 'incompatible') return 'modify'
+  if (input.fit === 'none') return 'modify'
+  if (input.securityRisk === 'high') return 'modify'
+  if (input.securityRisk === 'low' || input.securityRisk === 'medium') return 'use'
   return 'modify'
 }
 
@@ -369,16 +550,10 @@ export function needsSemanticReviewer(
   review: MechanicalFacts | Pick<ReviewRecord, 'fit' | 'securityRisk' | 'compatibility' | 'findings' | 'mechanicalFacts'>,
 ): boolean {
   if (isMechanicalFacts(review)) {
-    return review.staticRisk === 'high'
-      || review.fit !== 'full'
-      || review.compatibility.status !== 'compatible'
-      || review.semanticContextRequired
+    return review.semanticContextRequired
   }
   if (review.mechanicalFacts) return needsSemanticReviewer(review.mechanicalFacts)
-  return review.securityRisk === 'high'
-    || review.fit !== 'full'
-    || review.compatibility.status !== 'compatible'
-    || review.findings.some((item) => SEMANTIC_CONTEXT_FINDING_CODES.has(item.code))
+  return review.findings.some((item) => SEMANTIC_CONTEXT_FINDING_CODES.has(item.code))
 }
 
 function mechanicalMaterializable(input: {
@@ -508,6 +683,12 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     materializable,
     installSpec,
   })
+  const runtimeSurface = freezeRuntimeSurface({
+    manifest,
+    findings: sortedFindings,
+    files: input.files,
+    truncated: Boolean(input.truncated),
+  })
   return {
     schemaVersion: 1,
     id: input.id ?? `review_${hashObject({ policyVersion: POLICY_VERSION, requirement: input.requirement, sourceSnapshot: input.sourceSnapshot, inspectedFiles, manifest, compatible })}`,
@@ -529,6 +710,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     recommendation,
     installSpec,
     mechanicalFacts,
+    runtimeSurface,
   }
 }
 

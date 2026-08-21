@@ -1,9 +1,10 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '5'
+export const POLICY_VERSION = '8'
 
 export const TOOL_NAMES = [
   'capability_workflow',
   'capability_workflow_resume',
+  'capability_workflow_recover',
   'plugin_remove',
 ] as const
 
@@ -20,7 +21,7 @@ export type AuthorizationState =
   | 'use_review'
   | 'modify_review'
   | 'create_authorized'
-export type CandidateAvailability = 'available' | 'available_via_tool_search'
+export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 export type DecisionPhase = 'gate1' | 'gate2'
@@ -80,6 +81,14 @@ export interface LocalCapabilityCandidate {
   fit?: 'full' | 'partial' | 'none'
   matchedFacets?: string[]
   missingFacets?: string[]
+  /** Profile-manifest evidence proves install/configuration only, never runtime state. */
+  profileEvidence?: {
+    source: 'host_profile_manifest'
+    profile: string
+    packageName: string
+    dependencySpec: string
+    configuredBundle: boolean
+  }
 }
 
 export interface RemotePluginCandidate {
@@ -144,6 +153,97 @@ export interface ManifestFacts {
   expectedTools: string[]
   /** Route declared by an agent-default-model patch, when statically derivable. */
   expectedRoute?: { provider: string; model?: string }
+  /** Frozen `package.json` `dsh.client` entry. Path or `declared`; never a secret. */
+  client?: string
+  /** Frozen client platform implied by `dsh.client`. */
+  clientPlatform?: string
+}
+
+export const VERIFICATION_LAYER_KINDS = ['bundle_activation', 'tool_roundtrip', 'manual_runtime'] as const
+export type VerificationLayerKind = (typeof VERIFICATION_LAYER_KINDS)[number]
+
+export const VERIFICATION_STATUSES = [
+  'passed',
+  'pending_user_test',
+  'blocked_precondition',
+  'failed',
+  'uncertain',
+] as const
+export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number]
+
+export interface ToolFixtureAvailability {
+  tool: string
+  /** Candidate-declared fixture/arguments existence. Not a safety claim. */
+  available: boolean
+  /** Host-derived safety fact. Never copied from plugin package.json. */
+  safe: boolean
+  /** Host-derived. True only for a Host validator or Host test facts. */
+  hostValidated: boolean
+}
+
+/**
+ * Frozen non-secret static facts for verification-layer classification.
+ * These signals may only downgrade the layer; they never upgrade it.
+ * `toolFixtures.available` may come from a candidate declaration.
+ * `toolFixtures.safe` and `toolFixtures.hostValidated` are Host-derived.
+ */
+export interface RuntimeSurfaceFacts {
+  clientPlatform?: string
+  expectedRoute?: { provider: string; model?: string }
+  llmDependency: boolean
+  llmRegistered: boolean
+  credentialsDependency: boolean
+  credentialsRegistered: boolean
+  networkSignal: boolean
+  environmentSignal: boolean
+  processSignal: boolean
+  skillOnly: boolean
+  unsafeTools: boolean
+  expectedTools: readonly string[]
+  toolFixtures: readonly ToolFixtureAvailability[]
+  kind?: ManifestFacts['kind']
+  truncated?: boolean
+}
+
+export interface RuntimeSurface extends RuntimeSurfaceFacts {
+  verificationLayer: VerificationLayerKind
+}
+
+function toolHasSafeFixture(
+  tool: string,
+  fixtures: readonly ToolFixtureAvailability[],
+): boolean {
+  return fixtures.some((item) => (
+    item.tool === tool && item.available && item.safe && item.hostValidated
+  ))
+}
+
+function requiresManualRuntime(surface: RuntimeSurfaceFacts): boolean {
+  if (surface.clientPlatform) return true
+  if (surface.expectedRoute) return true
+  if (surface.credentialsDependency || surface.credentialsRegistered) return true
+  if (surface.networkSignal || surface.environmentSignal || surface.processSignal) return true
+  if (surface.skillOnly || surface.unsafeTools) return true
+  if (surface.llmDependency || surface.llmRegistered) return true
+  if (surface.toolFixtures.some((item) => item.available && !item.safe)) return true
+  if (surface.expectedTools.length === 0 && surface.expectedRoute) return true
+  return false
+}
+
+/**
+ * Static classification. Risk signals and missing Host-validated fixtures only
+ * downgrade; a plugin declaration cannot mint `tool_roundtrip`.
+ */
+export function classifyRuntimeSurface(surface: RuntimeSurfaceFacts): VerificationLayerKind {
+  if (requiresManualRuntime(surface)) return 'manual_runtime'
+  if (surface.expectedTools.length > 0) {
+    if (surface.expectedTools.every((tool) => toolHasSafeFixture(tool, surface.toolFixtures))) {
+      return 'tool_roundtrip'
+    }
+    return 'manual_runtime'
+  }
+  if (surface.kind === 'bundle' && surface.truncated !== true) return 'bundle_activation'
+  return 'manual_runtime'
 }
 
 export interface InspectedFile {
@@ -255,6 +355,8 @@ export interface ReviewRecord {
   installSpec: string | null
   /** Present on current reviews. Absent on old readable records, which are never a reviewer approval. */
   mechanicalFacts?: MechanicalFacts
+  /** Frozen static runtime surface. Absent on old readable records. */
+  runtimeSurface?: RuntimeSurface
   reviewerRequestId?: string
   reviewerRequest?: ReviewerRequest
   reviewerVerdict?: ReviewerVerdict
@@ -267,8 +369,18 @@ export interface ReviewResult extends ReviewRecord {
 
 export type InstallationRetention = 'temporary' | 'persistent'
 export type InstallationState = 'installed' | 'not_installed' | 'unknown'
-/** Public install outcome: success only after Loader/runtime verification. */
-export type InstallOutcome = 'pending' | 'verified' | 'failed_absent' | 'recovery_required'
+/**
+ * Public install outcome.
+ * `verified` remains the only Host-verified success.
+ * `activated` and `awaiting_user_test` are non-failure states and are not verified.
+ */
+export type InstallOutcome =
+  | 'pending'
+  | 'verified'
+  | 'failed_absent'
+  | 'recovery_required'
+  | 'activated'
+  | 'awaiting_user_test'
 
 export interface HotReloadEvidence {
   attempted: boolean
@@ -287,6 +399,16 @@ export interface VerificationEvidence {
   failedTools: string[]
   sessionFiles: string[]
   receiptPath?: string
+  /** Host-written process-boundary evidence. Never contains argv, prompts, output, env, or exception text. */
+  launchEvidence?: {
+    attempted: boolean
+    processOutcome: 'returned' | 'threw'
+    observerEventCount: number
+    exitCode?: number | null
+    signal?: string | null
+    failureClass?: 'cancelled' | 'timed_out' | 'launch_error' | 'unknown'
+    diagnosticHash?: string
+  }
   taskResultObserved: boolean
   taskResultSha256?: string
   /** Diagnostic substring observation only. Never Host verified truth. */
@@ -294,6 +416,11 @@ export interface VerificationEvidence {
   observedProvider?: string
   observedModel?: string
   routeMatchedExpectation?: boolean
+  layer?: VerificationLayerKind
+  status?: VerificationStatus
+  sourceMatched?: boolean
+  /** Hash of Host-executable fixtures. Never the fixture arguments themselves. */
+  fixtureDigest?: string
   reason: string
 }
 
@@ -333,6 +460,8 @@ export interface InstallationRecord {
   id: string
   createdAt: string
   reviewId: string
+  /** Current-policy installations are bound to the workflow that authorized them. */
+  workflowId?: string
   targetProfile: string
   retention: InstallationRetention
   dshHome: string
@@ -342,7 +471,7 @@ export interface InstallationRecord {
   artifactSha256?: string
   /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
   installState?: InstallationState
-  /** Fail-closed public outcome. Success is only `verified`. */
+  /** Fail-closed public outcome. Host-verified success is only `verified`. */
   installOutcome?: InstallOutcome
   installed: boolean
   loaded: boolean
@@ -371,6 +500,7 @@ export interface InstallInput {
   reviewId: string
   targetProfile: string
   retention: InstallationRetention
+  /** Optional human test prompt. Never forwarded into automatic Host verification. */
   verificationTask?: string
   verificationExpectedText?: string
   /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */

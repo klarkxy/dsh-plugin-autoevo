@@ -1,0 +1,333 @@
+import { describe, expect, it } from 'vitest'
+import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { AUTOEVO_AUTONOMY_CONTRACT } from '../../src/evolution-mode.js'
+import { isDirectlyUsableReview } from '../../src/review/direct-use.js'
+import { _testing as serviceTesting } from '../../src/service.js'
+import type { CapabilityEvolutionService } from '../../src/service.js'
+import { createTools, _testing as toolsTesting } from '../../src/tools.js'
+import {
+  confirmationFacts,
+  optionsFor,
+  type ModificationCheckEvidence,
+  type WorkflowRecord,
+} from '../../src/workflow/contracts.js'
+
+const COMMIT = 'c'.repeat(40)
+const WORKFLOW_ID = 'workflow_9c79a3d3f76bb689ceec218f'
+const INTERRUPT_ID = 'interrupt_fcce9d43-99f0-4a0b-a015-6fc4fd519bf2'
+const CANDIDATE_ID = 'candidate_secret_repo_identity'
+const INSTALLATION_ID = 'installation_secret_receipt'
+
+function tool(name: string) {
+  const found = createTools({} as CapabilityEvolutionService).find((item) => item.name === name)
+  expect(found?.presentCall).toEqual(expect.any(Function))
+  return found!
+}
+
+function presented(name: string, args: Record<string, unknown>) {
+  const view = tool(name).presentCall!(args)
+  expect(view).toEqual(expect.objectContaining({ card: 'generic', title: expect.any(String) }))
+  return view!
+}
+
+function githubReview(): ReviewRecord {
+  return {
+    schemaVersion: 1,
+    id: `review_${'a'.repeat(64)}`,
+    policyVersion: POLICY_VERSION,
+    createdAt: '2026-08-21T18:20:00.000Z',
+    resolutionId: `resolution_${'b'.repeat(24)}`,
+    requirement: 'calculator',
+    sourceSnapshot: {
+      kind: 'github',
+      repository: 'acme/one',
+      requestedRef: 'main',
+      commit: COMMIT,
+      defaultBranch: 'main',
+    },
+    inspectedFiles: [],
+    manifest: {
+      kind: 'bundle',
+      packageName: 'dsh-one',
+      scripts: [],
+      dependencies: [],
+      peerDependencies: {},
+      expectedTools: ['calculator'],
+    },
+    fit: 'full',
+    confidence: 0.8,
+    securityRisk: 'low',
+    maintained: true,
+    license: 'MIT',
+    compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
+    missingCapabilities: [],
+    findings: [],
+    recommendation: 'use',
+    installSpec: `github:acme/one#${COMMIT}`,
+  }
+}
+
+function resolution(): ResolutionRecord {
+  const id = `resolution_${'b'.repeat(24)}`
+  return {
+    schemaVersion: 2,
+    id,
+    policyVersion: POLICY_VERSION,
+    createdAt: '2026-08-21T18:20:00.000Z',
+    requirement: 'calculator',
+    cwd: 'C:/workspace',
+    decision: 'inspect_remote',
+    localCandidates: [],
+    remoteCandidates: [
+      { repository: 'acme/one', name: 'one', description: '', stars: 1, updatedAt: null, topics: [] },
+    ],
+    remoteDiscoveryComplete: true,
+    authorization: { state: 'confirmation_required', resolutionId: id, reason: 'wait' },
+    selectedRepositories: ['acme/one'],
+    queries: [],
+    reasons: [],
+  }
+}
+
+function workflowFor(review: ReviewRecord, checks: ModificationCheckEvidence): WorkflowRecord {
+  return {
+    schemaVersion: 2,
+    id: `workflow_${'d'.repeat(24)}`,
+    policyVersion: POLICY_VERSION,
+    createdAt: '2026-08-21T18:20:00.000Z',
+    updatedAt: '2026-08-21T18:20:00.000Z',
+    requirement: review.requirement,
+    status: 'interrupted',
+    cursor: 'await_confirmation',
+    generation: 1,
+    candidateSnapshot: [{
+      id: CANDIDATE_ID,
+      index: 1,
+      kind: 'remote',
+      name: 'one',
+      identity: 'acme/one',
+      repository: 'acme/one',
+      digest: 'f'.repeat(64),
+    }],
+    reviewedCandidateIds: [CANDIDATE_ID],
+    reviewIdsByCandidate: { [CANDIDATE_ID]: review.id },
+    lastReviewId: review.id,
+    modificationOutcome: {
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: review.id,
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: false,
+      status: 'resolved',
+      attempts: [{
+        attempt: 1,
+        childSessionId: 'child-session-secret',
+        commit: COMMIT,
+        changedFiles: ['src/index.ts'],
+        changedFilesTruncated: false,
+        postReviewId: review.id,
+        completionMarkerObserved: true,
+        checks,
+      }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [],
+    },
+  }
+}
+
+describe('child check classification', () => {
+  const unavailableReport = [
+    'npm test failed because vitest was unavailable',
+    'npm run typecheck failed because tsc was unavailable',
+    'node --check lib/index.js passed',
+    'AUTOEVO_CHILD_COMPLETED',
+  ].join('\n')
+
+  it('does not classify missing vitest/tsc as a test assertion failure', () => {
+    const evidence = serviceTesting.childCheckEvidence(unavailableReport)
+    expect(evidence).toMatchObject({
+      source: 'child_reported',
+      status: 'unavailable',
+    })
+    expect(evidence.status).not.toBe('failed')
+    expect(evidence.summary).toMatch(/could not run because the local toolchain was unavailable/i)
+    expect(evidence.summary).toMatch(/plugin is not verified/i)
+    expect(evidence.summary).not.toMatch(/tests failed/i)
+  })
+
+  it('classifies mixed genuine assertion failure over a missing sibling tool as failed', () => {
+    const evidence = serviceTesting.childCheckEvidence(
+      'Tests failed: expected 2 to be 3. Typecheck could not run because tsc is not recognized.\nAUTOEVO_CHILD_COMPLETED',
+    )
+    expect(evidence).toEqual({
+      source: 'child_reported',
+      status: 'failed',
+      summary: 'The managed child reported that tests failed; Host did not independently observe the command result.',
+    })
+    expect(evidence.status).not.toBe('unavailable')
+    expect(evidence.summary).not.toMatch(/toolchain was unavailable/i)
+  })
+
+  it('keeps command failures caused only by missing executables as unavailable', () => {
+    const evidence = serviceTesting.childCheckEvidence(
+      'npm test failed because vitest is not recognized; typecheck failed because tsc unavailable.\nAUTOEVO_CHILD_COMPLETED',
+    )
+    expect(evidence).toMatchObject({
+      source: 'child_reported',
+      status: 'unavailable',
+    })
+    expect(evidence.status).not.toBe('failed')
+    expect(evidence.summary).toMatch(/could not run because the local toolchain was unavailable/i)
+    expect(evidence.summary).not.toMatch(/tests failed/i)
+  })
+
+  it('keeps genuine assertion failures, pass, skipped, and unknown stable', () => {
+    expect(serviceTesting.childCheckEvidence('Tests failed: expected 2 to be 3.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
+      source: 'child_reported',
+      status: 'failed',
+      summary: 'The managed child reported that tests failed; Host did not independently observe the command result.',
+    })
+    expect(serviceTesting.childCheckEvidence('The test run failed with 2 failing assertions.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
+      source: 'child_reported',
+      status: 'failed',
+    })
+    expect(serviceTesting.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
+      source: 'child_reported',
+      status: 'passed',
+      summary: 'The managed child reported that tests passed; Host did not independently observe the command result.',
+    })
+    expect(serviceTesting.childCheckEvidence('Tests were not run.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
+      source: 'child_reported',
+      status: 'skipped',
+      summary: 'The managed child reported that tests were skipped.',
+    })
+    expect(serviceTesting.childCheckEvidence('Implemented OAuth login and committed the change.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
+      source: 'unknown',
+      status: 'unknown',
+      summary: 'Host did not independently observe a test command result.',
+    })
+  })
+})
+
+describe('tool pending presentation', () => {
+  it('maps long actions to sanitized generic titles', () => {
+    expect(presented('capability_workflow', { requirement: 'secret calculator for acme/one' })).toMatchObject({
+      card: 'generic',
+      kind: 'search',
+      title: 'Searching for reusable plugins',
+    })
+    expect(presented('capability_workflow_refine', { workflow_id: WORKFLOW_ID })).toMatchObject({
+      card: 'generic',
+      kind: 'search',
+      title: 'Refining plugin discovery',
+    })
+    expect(presented('capability_workflow_present', {
+      workflow_id: WORKFLOW_ID,
+      candidate_ids: [CANDIDATE_ID],
+    }).title).toMatch(/candidate shortlist/i)
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      navigation: { kind: 'search_more' },
+    }).title).toMatch(/searching for more/i)
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      navigation: { kind: 'review_candidates', candidate_ids: [CANDIDATE_ID] },
+    })).toMatchObject({
+      card: 'generic',
+      kind: 'read',
+      title: 'Reviewing selected plugin candidates',
+    })
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'modify_this', candidate_id: CANDIDATE_ID },
+    })).toMatchObject({
+      card: 'generic',
+      kind: 'edit',
+      title: 'AutoEvo is improving and checking the plugin; this may take several minutes',
+    })
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'create_new' },
+    }).title).toMatch(/creating a new plugin/i)
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'use_this', candidate_id: CANDIDATE_ID },
+    }).title).toMatch(/installing and verifying/i)
+    expect(presented('capability_workflow_diagnose', {
+      workflow_id: WORKFLOW_ID,
+      probes: ['managed_child'],
+    }).title).toMatch(/diagnosing/i)
+    expect(presented('capability_workflow_recover', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+    }).title).toMatch(/cleaning up and restarting/i)
+    expect(presented('plugin_remove', { installation_id: INSTALLATION_ID })).toMatchObject({
+      card: 'generic',
+      kind: 'delete',
+      title: 'Removing the selected plugin',
+    })
+  })
+
+  it('never includes supplied machine IDs, paths, decision tokens, or raw args', () => {
+    const args = {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: {
+        action: 'modify_this',
+        candidate_id: CANDIDATE_ID,
+      },
+    }
+    const view = presented('capability_workflow_resume', args)
+    expect(view).not.toHaveProperty('rawInput')
+    expect(view).not.toHaveProperty('content')
+    const blob = JSON.stringify(view)
+    expect(blob).not.toContain(WORKFLOW_ID)
+    expect(blob).not.toContain(INTERRUPT_ID)
+    expect(blob).not.toContain(CANDIDATE_ID)
+    expect(blob).not.toContain('modify_this')
+    expect(blob).not.toContain('use_this')
+    expect(blob).not.toContain('create_new')
+    expect(blob).not.toContain('acme/one')
+    expect(toolsTesting.presentCapabilityToolCall('capability_workflow_resume', args)).toEqual(view)
+  })
+})
+
+describe('post-modification confirmation after unavailable checks', () => {
+  it('keeps an otherwise eligible reviewed candidate installable', () => {
+    const review = githubReview()
+    const checks = serviceTesting.childCheckEvidence([
+      'npm test failed because vitest was unavailable',
+      'npm run typecheck failed because tsc was unavailable',
+      'AUTOEVO_CHILD_COMPLETED',
+    ].join('\n'))
+    expect(checks.status).toBe('unavailable')
+    const workflow = workflowFor(review, checks)
+    expect(isDirectlyUsableReview(review, workflow)).toBe(true)
+    const facts = confirmationFacts(resolution(), [review], workflow, { installProfiles: ['web'] })
+    expect(facts.canInstall).toBe(true)
+    expect(facts.modificationChecks).toMatchObject({
+      source: 'child_reported',
+      status: 'unavailable',
+      meaning: 'Checks could not run because the local toolchain was unavailable; the plugin is not verified.',
+    })
+    expect(optionsFor('await_confirmation', resolution(), [review], workflow, ['web']).map((item) => item.id))
+      .toContain('use_this')
+  })
+})
+
+describe('autonomy contract pre-call acknowledgement', () => {
+  it('requires a short natural-language acknowledgement without adding a gate', () => {
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Before a long authorized modify, create, or install call')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one short natural-language acknowledgement')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('may take several minutes')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('this is not an extra approval gate')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).not.toMatch(/modify_this|create_new|use_this/u)
+  })
+})

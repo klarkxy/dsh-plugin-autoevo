@@ -32,7 +32,8 @@ interface AgentGateState {
   currentTurnId?: string
   turnSequence: number
   consumedTurnIds: Set<string>
-  waitingKind?: 'await_selection' | 'await_confirmation' | 'await_modify_work'
+  waitingKind?: 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
+  interruptWatermarkTurnId?: string
   sessionId?: string
   selectionReceipt?: SelectionReceipt
   actionCommitment?: ActionCommitment
@@ -41,6 +42,7 @@ interface AgentGateState {
 
 const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
 const WEB_SEARCH_TOOL = 'web_search'
+const ASK_USER_TOOLS = new Set(['ask_user', 'ask_user_question'])
 const SHELL_TOOLS = new Set(['pwsh', 'bash'])
 const DSH_PLUGIN_ADD = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\badd\b/iu
 const SKIP_USER_TEXT = /^(?:Current runtime context\.|<system-reminder>)/u
@@ -207,10 +209,20 @@ export class CreationGuard {
   }
 
   /**
-   * Consume the latest host-owned user turn for an interrupt.
-   * Rejects missing turns, already-consumed (replay) turns, and turns at/before the interrupt watermark.
+   * True when resume must park: no claimed turn, or the claimed turn is the
+   * interrupt-issuing turn. Does not consume the turn.
    */
-  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
+  isAwaitingFreshUserTurn(agent: Agent | undefined, interrupt: InterruptPayload): boolean {
+    if (!agent) return true
+    const turnId = this.states.get(agent)?.currentTurnId
+    return !turnId || turnId === interrupt.validAfterTurnId
+  }
+
+  /**
+   * Validate and return the latest host-owned user turn without consuming it.
+   * Callers use this to finish all local validation before claiming authority.
+   */
+  previewDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
     if (!agent) {
       throw new EvolutionError('invalid_input', 'A live Agent session is required to resume a workflow decision')
     }
@@ -238,16 +250,27 @@ export class CreationGuard {
         turnId,
       })
     }
-    if (turnId === interrupt.validAfterTurnId) {
+    if (this.isAwaitingFreshUserTurn(agent, interrupt)) {
       throw new EvolutionError('invalid_input', 'Decision requires a fresh user turn after the interrupt was issued (stale/previous-turn rejected)', {
         turnId,
         validAfterTurnId: interrupt.validAfterTurnId,
       })
     }
+    return { turnId, message, sequence: state.turnSequence }
+  }
+
+  /**
+   * Consume the latest host-owned user turn after all caller-side validation.
+   * Rejects missing turns, replay, and stale turns before mutating the ledger.
+   */
+  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
+    const turn = this.previewDecisionTurn(agent, interrupt)
+    const state = agent ? this.states.get(agent) : undefined
+    if (!state) throw new EvolutionError('invalid_input', 'No host-claimed user turn is available for this decision')
     // Sequence watermark: turn ids are opaque; also compare via remembered order by requiring inequality with watermark
     // and that a new claim happened after interrupt issuance (caller reissues interrupt with current turn as watermark).
-    state.consumedTurnIds.add(turnId)
-    return { turnId, message, sequence: state.turnSequence }
+    state.consumedTurnIds.add(turn.turnId)
+    return turn
   }
 
   /**
@@ -330,7 +353,11 @@ export class CreationGuard {
     return lease
   }
 
-  setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind']): void {
+  setWaiting(
+    agent: Agent | undefined,
+    kind?: AgentGateState['waitingKind'],
+    watermarkTurnId?: string,
+  ): void {
     if (!agent) return
     const state = this.states.get(agent)
     if (!state) {
@@ -341,12 +368,18 @@ export class CreationGuard {
         turnSequence: 0,
         consumedTurnIds: new Set(),
         waitingKind: kind,
+        ...(watermarkTurnId ? { interruptWatermarkTurnId: watermarkTurnId } : {}),
         ...(sessionId ? { sessionId } : {}),
       })
       return
     }
-    if (kind) state.waitingKind = kind
-    else delete state.waitingKind
+    if (kind) {
+      state.waitingKind = kind
+      if (watermarkTurnId) state.interruptWatermarkTurnId = watermarkTurnId
+    } else {
+      delete state.waitingKind
+      delete state.interruptWatermarkTurnId
+    }
   }
 
   applyResolutionAuthorization(
@@ -475,17 +508,51 @@ export class CreationGuard {
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined {
     if (!exec.agent || !this.inEvolutionMode(exec.agent)) return undefined
     const state = this.states.get(exec.agent)
+    const discoveryOpen = state?.waitingKind === 'await_discovery'
+    const recoveryWaiting = state?.waitingKind === 'await_recovery'
     const waiting = state?.waitingKind === 'await_selection'
       || state?.waitingKind === 'await_confirmation'
+      || recoveryWaiting
       || (!state?.waitingKind && (
         state?.authorization?.state === 'selection_required'
         || state?.authorization?.state === 'confirmation_required'
       ))
+    const hasFreshReply = Boolean(
+      state?.currentTurnId
+      && state.interruptWatermarkTurnId
+      && state.currentTurnId !== state.interruptWatermarkTurnId,
+    )
+    if (ASK_USER_TOOLS.has(exec.name) && waiting) {
+      return 'AutoEvo is already waiting at a sealed user gate. Present the natural-language choices in chat and stop. A tool answer is not an authenticated fresh top-level user turn.'
+    }
     if (exec.name === FIND_PLUGIN_TOOL && exec.parent === undefined) {
-      return 'Use the current interrupt shortlist from capability_workflow. For read-only selection or comparison, call capability_workflow_resume with navigation; do not search directly.'
+      if (recoveryWaiting) {
+        return hasFreshReply
+          ? 'Recovery is pending. Do not search. Call capability_workflow_recover with the sealed workflow_id and interrupt_id to clean up the exact owned installation and start a new discovery.'
+          : 'Recovery is pending. Do not search. Present the cleanup-and-restart choice in chat and stop; call capability_workflow_recover only after the user replies in a fresh top-level turn.'
+      }
+      if (discoveryOpen) {
+        return 'Use capability_workflow_refine so the Host can budget, validate, deduplicate, and bind discovery evidence.'
+      }
+      if (waiting && hasFreshReply) {
+        return 'Discovery is finished. Do not search. The user has replied; call capability_workflow_resume with navigation.review_candidates and the selected candidate_ids. Do not send use_this at selection.'
+      }
+      if (waiting) {
+        return 'Discovery is finished. Present the current shortlist in chat. Do not search, and do not call capability_workflow_resume until the user replies.'
+      }
+      return 'Do not call find_dsh_plugin. Call capability_workflow with the user\'s original requirement.'
+    }
+    if (exec.name === WEB_SEARCH_TOOL && discoveryOpen) return undefined
+    if (exec.name === WEB_SEARCH_TOOL && recoveryWaiting) {
+      return hasFreshReply
+        ? 'Recovery is pending. Do not search. Call capability_workflow_recover with the sealed workflow_id and interrupt_id.'
+        : 'Recovery is pending. Do not search. Present the cleanup-and-restart choice and stop until the user replies in a fresh top-level turn.'
     }
     if (exec.name === WEB_SEARCH_TOOL && waiting) {
-      return 'Discovery is finished. Map the user request to candidate IDs from the current interrupt snapshot and call capability_workflow_resume with read-only navigation.'
+      if (hasFreshReply) {
+        return 'Discovery is finished. Do not search. Resume with navigation.review_candidates and the selected candidate_ids from the current shortlist.'
+      }
+      return 'Discovery is finished. If the user has not replied since the shortlist, present it and stop. After they reply, map their words to candidate IDs and call capability_workflow_resume with read-only navigation.'
     }
     if (SHELL_TOOLS.has(exec.name) && state?.authorization && isDshPluginAddCommand(shellCommandText(exec.arguments))) {
       return 'Install only via the capability workflow after review.'

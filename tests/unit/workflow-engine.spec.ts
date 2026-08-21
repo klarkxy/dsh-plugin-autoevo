@@ -3,11 +3,12 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
+import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
-import type { WorkflowHost, WorkflowRecord } from '../../src/workflow/contracts.js'
+import type { WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
 const temporary: string[] = []
 
@@ -54,43 +55,6 @@ function resolution(requirement = 'calculator'): ResolutionRecord {
   }
 }
 
-function managedReview(resolutionId: string): ReviewRecord {
-  return {
-    schemaVersion: 1,
-    id: `review_${'9'.repeat(64)}`,
-    policyVersion: POLICY_VERSION,
-    createdAt: '2026-08-17T00:01:00.000Z',
-    resolutionId,
-    requirement: 'create a calculator plugin',
-    sourceSnapshot: {
-      kind: 'local',
-      path: 'C:/managed/calculator',
-      baseReviewId: `review_${'8'.repeat(64)}`,
-      baseCommit: '7'.repeat(40),
-      statusHash: '6'.repeat(64),
-    },
-    inspectedFiles: [],
-    manifest: {
-      kind: 'bundle',
-      packageName: 'managed-calculator',
-      scripts: [],
-      dependencies: [],
-      peerDependencies: {},
-      expectedTools: ['calculator'],
-    },
-    fit: 'full',
-    confidence: 0.95,
-    securityRisk: 'low',
-    maintained: true,
-    license: 'MIT',
-    compatibility: { status: 'compatible', reason: 'verified', runtimeVersion: '0.1.0-rc.6' },
-    missingCapabilities: [],
-    findings: [],
-    recommendation: 'use',
-    installSpec: 'file:C:/managed/managed-calculator.tgz',
-  }
-}
-
 function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
   return {
     async bootstrapResolution(requirement) {
@@ -113,27 +77,14 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     async installReviewed() {
       throw new Error('not used')
     },
-    async applyDecision(current, resume) {
-      const next = {
-        ...current,
-        authorization: {
-          state: resume.optionId === 'stop' ? 'stopped' as const : current.authorization!.state,
-          resolutionId: current.id,
-          reason: resume.optionId,
-        },
-      }
-      await store.put('resolutions', next)
-      return next
+    async applyDecision(current) {
+      return current
     },
     async applyNavigation(current, navigation) {
       const next = {
         ...current,
         authorization: {
-          state: navigation.kind === 'stop'
-            ? 'stopped' as const
-            : navigation.kind === 'reuse_local'
-              ? 'reuse_local' as const
-              : current.authorization!.state,
+          state: navigation.kind === 'stop' ? 'stopped' as const : current.authorization!.state,
           resolutionId: current.id,
           reason: navigation.kind,
         },
@@ -156,79 +107,653 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
   }
 }
 
-describe('workflow engine', () => {
-  it('starts, checkpoints, and parks on await_selection with a bound interrupt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-'))
+async function startAndPresent(
+  engine: WorkflowEngine,
+  requirement: string,
+  turn: ToolRunContext,
+  count = 1,
+): Promise<{ discovery: WorkflowView; selection: WorkflowView }> {
+  const discovery = await engine.start(requirement, turn)
+  const candidateIds = discovery.workflow.discoveryPool!.slice(0, count).map((item) => item.id)
+  const selection = await engine.present({ workflowId: discovery.workflow.id, candidateIds }, turn)
+  return { discovery, selection }
+}
+
+describe('workflow engine autonomous discovery', () => {
+  it('starts at a model-controlled discovery checkpoint without an interrupt or candidate snapshot', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-discovery-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const engine = new WorkflowEngine(store, guard, host(store, record))
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, resolution()))
+
     const view = await engine.start('run a PowerShell command', exec())
-    expect(view.workflow.status).toBe('interrupted')
-    expect(view.workflow.cursor).toBe('await_selection')
-    expect(view.workflow.interrupt?.options.map((item) => item.id)).toContain('reuse_local')
-    expect(view.workflow.interrupt?.interruptId).toMatch(/^interrupt_/u)
-    expect(view.workflow.interrupt?.ownerSessionId).toBe('session-1')
-    expect(view.workflow.interrupt?.bootId).toBe('boot_engine')
-    const stored = await store.getWorkflow(view.workflow.id)
-    expect(stored.generation).toBe(1)
-    expect(stored.resolutionId).toBe(record.id)
+
+    expect(view.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_discovery', generation: 1 })
+    expect(view.workflow.interrupt).toBeUndefined()
+    expect(view.workflow.candidateSnapshot).toBeUndefined()
+    expect(view.workflow.discoveryPool).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'local', localName: 'pwsh', fit: 'full' }),
+    ]))
+    expect(view.workflow.discoveryBudget).toEqual({
+      refinementRoundsUsed: 0,
+      refinementQueriesUsed: [],
+      explicitRepositories: [],
+      maxRefinementRounds: 2,
+      maxRefinementQueries: 5,
+      maxCandidates: 20,
+    })
+    expect((await store.getWorkflow(view.workflow.id)).resolutionId).toBe(resolution().id)
   })
 
-  it('rejects a concurrent resume while the workflow is running', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-lock-'))
+  it('binds profile install/configuration evidence into local candidate snapshots', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-profile-evidence-'))
+    temporary.push(root)
+    const record = resolution('@dsh-external/dsh-conv-export')
+    record.localCandidates[0] = {
+      kind: 'plugin',
+      name: '@dsh-external/dsh-conv-export',
+      description: 'client conversation export',
+      availability: 'installed_in_profile',
+      confidence: 0.99,
+      fit: 'full',
+      profileEvidence: {
+        source: 'host_profile_manifest',
+        profile: 'web',
+        packageName: '@dsh-external/dsh-conv-export',
+        dependencySpec: 'workspace:*',
+        configuredBundle: true,
+      },
+    }
+    const store = new StateStore(root)
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const view = await engine.start(record.requirement, exec())
+    const candidate = view.workflow.discoveryPool![0]!
+    expect(candidate.installation).toEqual({
+      source: 'host_profile_manifest',
+      profile: 'web',
+      package_name: '@dsh-external/dsh-conv-export',
+      dependency_spec: 'workspace:*',
+      configured_bundle: true,
+    })
+
+    const changed = { ...record, localCandidates: [{
+      ...record.localCandidates[0]!,
+      profileEvidence: { ...record.localCandidates[0]!.profileEvidence!, configuredBundle: false },
+    }] }
+    const secondRoot = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-profile-digest-'))
+    temporary.push(secondRoot)
+    const secondStore = new StateStore(secondRoot)
+    const second = new WorkflowEngine(secondStore, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(secondStore, changed))
+    const changedView = await second.start(changed.requirement, exec('session-2'))
+    expect(changedView.workflow.discoveryPool![0]!.digest).not.toBe(candidate.digest)
+  })
+
+  it('present seals one to five pool candidates into Gate 1 and blocks same-turn resume', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-present-'))
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    let release!: () => void
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    const engine = new WorkflowEngine(store, guard, {
-      ...host(store, record),
-      async applyNavigation(current, navigation) {
-        await blocked
-        return host(store, record).applyNavigation!(current, navigation, [])
-      },
-    })
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
     const turn = exec()
-    const started = await engine.start('calculator', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先停' }] })
-    const first = engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
+    const { discovery, selection } = await startAndPresent(engine, 'calculator', turn)
+
+    expect(selection.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_selection' })
+    expect(selection.workflow.interrupt?.kind).toBe('await_selection')
+    expect(selection.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([
+      discovery.workflow.discoveryPool![0]!.id,
+    ])
+    const parked = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
       navigation: { kind: 'stop' },
     }, turn)
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)).rejects.toThrow(/already running/i)
-    release()
-    await expect(first).resolves.toMatchObject({ workflow: { cursor: 'stopped' } })
+    expect(parked).toMatchObject({ status: 'parked', alreadyWaiting: true })
+    expect(parked.workflow.consumedInterruptIds).toEqual([])
   })
 
-  it('fails closed when the run is cancelled', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-cancel-'))
+  it('rejects invalid presentation sizes, duplicate ids, and candidates outside the discovery pool', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-present-invalid-'))
     temporary.push(root)
     const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const controller = new AbortController()
-    controller.abort()
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
-    await expect(engine.start('calculator', { ...exec(), signal: controller.signal })).rejects.toThrow(/cancelled/i)
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, resolution()))
+    const discovery = await engine.start('calculator', exec())
+    const id = discovery.workflow.discoveryPool![0]!.id
+
+    await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [] }, exec())).rejects.toThrow(/one to five/i)
+    await expect(engine.present({
+      workflowId: discovery.workflow.id,
+      candidateIds: Array.from({ length: 6 }, (_, index) => `candidate_${String(index).padStart(24, '0')}`),
+    }, exec())).rejects.toThrow(/one to five/i)
+    await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [id, id] }, exec())).rejects.toThrow(/unique/i)
+    await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [`candidate_${'f'.repeat(24)}`] }, exec())).rejects.toThrow(/discovery pool/i)
+    expect((await store.getWorkflow(discovery.workflow.id)).cursor).toBe('await_discovery')
   })
 
-  it('converts an interrupted-by-restart running workflow to recovery_required without replaying side effects', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-restart-running-'))
+  it('refines only at discovery, records its budget, and fails closed at the round cap', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-refine-'))
     temporary.push(root)
     const store = new StateStore(root)
     const record = resolution()
-    const running: WorkflowRecord = {
+    record.decision = 'inspect_remote'
+    const base = host(store, record)
+    const refineRemote = vi.fn(async (current: ResolutionRecord, input: { queries: string[]; repositories: string[] }) => {
+      const next = {
+        ...current,
+        queries: [...current.queries, ...input.queries],
+        remoteCandidates: [{ repository: `acme/${input.queries[0] ?? input.repositories[0]}`, name: 'remote', description: '', stars: 1, updatedAt: null, topics: [] }],
+      }
+      await store.put('resolutions', next)
+      return next
+    })
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), { ...base, refineRemote })
+    const turn = exec()
+    const started = await engine.start('calculator', turn)
+    const first = await engine.refine({ workflowId: started.workflow.id, queries: ['calculator plugin'] }, turn)
+    const second = await engine.refine({ workflowId: started.workflow.id, repositories: ['acme/calculator'] }, turn)
+
+    expect(refineRemote).toHaveBeenCalledTimes(2)
+    expect(second.workflow).toMatchObject({ cursor: 'await_discovery', status: 'interrupted' })
+    expect(second.workflow.discoveryBudget).toMatchObject({
+      refinementRoundsUsed: 2,
+      refinementQueriesUsed: ['calculator plugin'],
+      explicitRepositories: ['acme/calculator'],
+    })
+    expect(second.workflow.discoveryPool).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'remote' })]))
+    await expect(engine.refine({ workflowId: first.workflow.id, queries: ['one more'] }, turn)).rejects.toThrow(/round budget/i)
+  })
+
+  it('enforces the five-query discovery budget before calling the Host', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-query-budget-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    const base = host(store, record)
+    const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), { ...base, refineRemote })
+    const started = await engine.start('calculator', exec())
+
+    await engine.refine({ workflowId: started.workflow.id, queries: ['one', 'two', 'three', 'four', 'five'] }, exec())
+    await expect(engine.refine({ workflowId: started.workflow.id, queries: ['six'] }, exec())).rejects.toThrow(/query budget/i)
+    expect(refineRemote).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens a stop/search gate when refinement is exhausted without a reviewable candidate', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-exhausted-empty-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
+    record.remoteDiscoveryComplete = false
+    const base = host(store, record)
+    const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
+    const engine = new WorkflowEngine(
+      store,
+      new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }),
+      { ...base, refineRemote },
+    )
+    const turn = exec()
+    const started = await engine.start('calculator', turn)
+
+    await engine.refine({ workflowId: started.workflow.id, queries: ['first'] }, turn)
+    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['second'] }, turn)
+
+    expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
+    expect(exhausted.workflow.candidateSnapshot).toEqual([])
+    expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toEqual(['search_more', 'stop'])
+  })
+
+  it('returns search_more from Gate 1 to autonomous discovery without retaining the sealed snapshot', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-search-more-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    record.decision = 'inspect_remote'
+    record.remoteCandidates = [
+      { repository: 'acme/one', name: 'one', description: '', stars: 2, updatedAt: null, topics: [] },
+      { repository: 'acme/two', name: 'two', description: '', stars: 1, updatedAt: null, topics: [] },
+    ]
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, host(store, record))
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn, 2)
+    const firstIds = selection.workflow.candidateSnapshot!.map((item) => item.id)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '再找找' }] })
+
+    const more = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'search_more' },
+    }, turn)
+
+    expect(more.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_discovery' })
+    expect(more.workflow.interrupt).toBeUndefined()
+    expect(more.workflow.candidateSnapshot).toBeUndefined()
+    expect(more.workflow.seenCandidateIds).toEqual(expect.arrayContaining(firstIds))
+    expect(more.workflow.rejectedCandidateIds).toEqual(expect.arrayContaining(firstIds))
+  })
+
+  it('permits local reuse only after Gate 1 and binds the receipt and lease to the sealed candidate', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-reuse-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn)
+    const candidate = selection.workflow.candidateSnapshot![0]!
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用已有的' }] })
+
+    const reused = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId: candidate.id },
+    }, turn)
+
+    expect(reused.workflow).toMatchObject({ status: 'completed', cursor: 'reuse_local' })
+    expect(reused.workflow.selectionReceipt).toMatchObject({ kind: 'reuse_local', candidateIds: [candidate.id] })
+    expect(reused.workflow.selectionReceipt?.candidateDigests[candidate.id]).toBe(candidate.digest)
+    expect(reused.workflow.executionLease).toMatchObject({ candidateId: candidate.id, candidateDigest: candidate.digest, endpoint: { kind: 'exact_tool', name: 'pwsh' } })
+  })
+
+  it('keeps Gate 1 candidate scope sealed for navigation and leaves authorization unconsumed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-scope-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用别的' }] })
+
+    const invalid = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'reuse_local', candidateIds: [`candidate_${'f'.repeat(24)}`] },
+    }, turn)
+
+    expect(invalid.status).toBe('invalid_resume')
+    expect(invalid.resumeHint).toMatch(/outside the current candidate snapshot/i)
+    expect((await store.getWorkflow(selection.workflow.id)).consumedInterruptIds).toEqual([])
+  })
+
+  it('blocks the duplicate invalid action fingerprint after two same-turn attempts', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-invalid-breaker-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '停' }] })
+    const input = {
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'reuse_local' as const, candidateIds: [`candidate_${'f'.repeat(24)}`] },
+    }
+
+    const first = await engine.resume(input, turn)
+    const second = await engine.resume(input, turn)
+    const blocked = await engine.resume(input, turn)
+
+    expect(first.resumeHint).not.toMatch(/Repeated invalid action/i)
+    expect(second.resumeHint).toMatch(/Repeated invalid action is blocked/i)
+    expect(blocked.resumeHint).toMatch(/^Repeated invalid action is blocked until a fresh user turn\./i)
+    expect(blocked.workflow.invalidResumeAttempt).toMatchObject({ count: 2 })
+    expect(blocked.workflow.consumedInterruptIds).toEqual([])
+  })
+
+  it('diagnoses incomplete discovery without changing the autonomous checkpoint', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-diagnose-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    record.remoteDiscoveryComplete = false
+    record.reasons = [
+      'Finder failed at C:\\Users\\Jane Doe\\token.txt; '
+      + '\\\\server\\share\\private key.txt; /home/alice/.config/token; '
+      + 'api_key=top-secret; see https://example.test/?token=abc',
+    ]
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const started = await engine.start('calculator', exec())
+
+    const diagnosed = await engine.diagnose({ workflowId: started.workflow.id, probes: ['discovery'] }, exec())
+
+    expect(diagnosed.diagnosis?.facts).toEqual([expect.objectContaining({ probe: 'discovery', status: 'failed', code: 'search_incomplete' })])
+    expect(JSON.stringify(diagnosed.diagnosis)).not.toContain('secret')
+    expect(JSON.stringify(diagnosed.diagnosis)).not.toContain('Jane Doe')
+    expect(JSON.stringify(diagnosed.diagnosis)).not.toContain('server')
+    expect(JSON.stringify(diagnosed.diagnosis)).not.toContain('/home/alice')
+    expect(JSON.stringify(diagnosed.diagnosis)).not.toContain('token=abc')
+    expect(diagnosed.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_discovery', generation: started.workflow.generation })
+    const second = await engine.diagnose({ workflowId: started.workflow.id, probes: ['review'] }, exec())
+    expect(second.diagnosis?.budget).toMatchObject({ maxCalls: 2, usedCalls: 2, maxProbes: 8, usedProbes: 2 })
+    await expect(engine.diagnose({ workflowId: started.workflow.id, probes: ['discovery'] }, exec()))
+      .rejects.toThrow(/call budget is exhausted/i)
+  })
+
+  it('cleans the exact linked installation and starts a new audited workflow after a fresh user recovery request', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-recover-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution('calculator')
+    await store.put('resolutions', record)
+    const workflowId = `workflow_${'a'.repeat(24)}`
+    const installationId = `installation_${'d'.repeat(24)}`
+    const installation: InstallationRecord = {
       schemaVersion: 1,
-      id: `workflow_${'f'.repeat(24)}`,
+      id: installationId,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      reviewId: `review_${'e'.repeat(24)}`,
+      workflowId,
+      targetProfile: 'headless',
+      retention: 'persistent',
+      dshHome: root,
+      packageName: 'dsh-plugin-demo',
+      installSpec: 'file:demo.tgz',
+      installState: 'installed',
+      installOutcome: 'recovery_required',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        exitCode: 1,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'child cause unknown',
+      },
+    }
+    await store.put('installations', installation)
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      updatedAt: '2026-08-21T00:00:00.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: process.cwd(),
+      ownerSessionId: 'session-1',
+      bootId: 'boot_previous',
+      resolutionId: record.id,
+      status: 'running',
+      cursor: 'install_verify',
+      generation: 3,
+      consumedInterruptIds: [],
+      lastInstallationId: installationId,
+    }
+    await store.put('workflows', workflow)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    const turn = exec()
+    const recoveredAfterRestart = await engine.start('calculator', turn)
+    expect(recoveredAfterRestart).toMatchObject({
+      status: 'parked',
+      alreadyWaiting: true,
+      workflow: { cursor: 'recovery_required', status: 'interrupted' },
+    })
+    expect(recoveredAfterRestart.workflow.interrupt?.kind).toBe('await_recovery')
+    await expect(engine.recover({ workflowId: workflow.id }, turn)).rejects.toThrow(/interrupt_id/i)
+
+    const sameTurn = await engine.recover({
+      workflowId: workflow.id,
+      interruptId: recoveredAfterRestart.workflow.interrupt!.interruptId,
+    }, turn)
+    expect(sameTurn).toMatchObject({ status: 'parked', alreadyWaiting: true })
+    expect(cleanupInstallation).not.toHaveBeenCalled()
+
+    const tampered = await store.getWorkflow(workflow.id)
+    tampered.lastInstallationId = `installation_${'9'.repeat(24)}`
+    await store.put('workflows', tampered)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理掉并重新开始' }] })
+    await expect(engine.recover({
+      workflowId: workflow.id,
+      interruptId: recoveredAfterRestart.workflow.interrupt!.interruptId,
+    }, turn)).rejects.toThrow(/no longer matches the sealed workflow state/i)
+    expect(cleanupInstallation).not.toHaveBeenCalled()
+
+    tampered.lastInstallationId = installationId
+    await store.put('workflows', tampered)
+
+    const restarted = await engine.recover({
+      workflowId: workflow.id,
+      interruptId: recoveredAfterRestart.workflow.interrupt!.interruptId,
+    }, turn)
+
+    expect(cleanupInstallation).toHaveBeenCalledOnce()
+    expect(cleanupInstallation).toHaveBeenCalledWith(installationId, expect.objectContaining({ agent: turn.agent }))
+    expect(restarted.workflow).toMatchObject({
+      cursor: 'await_discovery',
+      status: 'interrupted',
+      recoveredFromWorkflowId: workflow.id,
+    })
+    expect(restarted.workflow.id).not.toBe(workflow.id)
+    const old = await store.getWorkflow(workflow.id)
+    expect(old).toMatchObject({
+      status: 'completed',
+      cursor: 'recovery_required',
+      recovery: {
+        action: 'cleanup_and_restart',
+        cleanup: 'removed',
+        installationId,
+        restartRequired: true,
+        restartedAsWorkflowId: restarted.workflow.id,
+      },
+      lastFailure: { code: 'service_restart_incomplete' },
+    })
+    expect(old.interrupt).toBeUndefined()
+  })
+
+  it('restarts a completed installation from an explicit user request without forging a recovery interrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-completed-recover-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution('calculator')
+    await store.put('resolutions', record)
+    const workflowId = `workflow_${'a'.repeat(24)}`
+    const installationId = `installation_${'d'.repeat(24)}`
+    const installation: InstallationRecord = {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      reviewId: `review_${'e'.repeat(24)}`,
+      workflowId,
+      targetProfile: 'headless',
+      retention: 'persistent',
+      dshHome: root,
+      packageName: 'dsh-plugin-demo',
+      installSpec: 'file:demo.tgz',
+      installState: 'installed',
+      installOutcome: 'activated',
+      installed: true,
+      loaded: true,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'bundle activated',
+      },
+    }
+    await store.put('installations', installation)
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      updatedAt: '2026-08-21T00:00:00.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: process.cwd(),
+      ownerSessionId: 'session-1',
+      bootId: 'boot_engine',
+      resolutionId: record.id,
+      status: 'completed',
+      cursor: 'activated',
+      generation: 4,
+      consumedInterruptIds: [`interrupt_${'c'.repeat(24)}`],
+      lastInstallationId: installationId,
+      lastReviewId: `review_${'e'.repeat(24)}`,
+      selectionReceipt: { id: 'selection_old' } as unknown as NonNullable<WorkflowRecord['selectionReceipt']>,
+      actionCommitment: { id: 'commitment_old' } as unknown as NonNullable<WorkflowRecord['actionCommitment']>,
+      completionTurnId: 'turn_install',
+    }
+    await store.put('workflows', workflow)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    const turn = exec()
+
+    const sameTurn = await engine.recover({ workflowId: workflow.id }, turn)
+    expect(sameTurn).toMatchObject({ status: 'parked', alreadyWaiting: true })
+    expect(cleanupInstallation).not.toHaveBeenCalled()
+    expect((await store.listWorkflows()).map((item) => item.id)).toEqual([workflow.id])
+
+    await expect(engine.recover({
+      workflowId: workflow.id,
+      interruptId: `interrupt_${'c'.repeat(24)}`,
+    }, turn)).rejects.toThrow(/omit interrupt_id/i)
+    expect(cleanupInstallation).not.toHaveBeenCalled()
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理掉，从头开始' }] })
+    const denied = vi.fn(async () => {
+      throw new EvolutionError('approval_required', 'The removal was not approved (denied)', { outcome: 'denied' })
+    })
+    const deniedEngine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation: denied })
+    await expect(deniedEngine.recover({ workflowId: workflow.id }, turn)).rejects.toMatchObject({
+      code: 'approval_required',
+    })
+    expect(denied).toHaveBeenCalledOnce()
+    expect(await store.getWorkflow(workflow.id)).toMatchObject({
+      status: 'completed',
+      cursor: 'activated',
+      generation: 4,
+    })
+    expect((await store.getWorkflow(workflow.id)).recovery).toBeUndefined()
+    expect((await store.listWorkflows()).map((item) => item.id)).toEqual([workflow.id])
+    expect(await store.getInstallation(installationId)).toMatchObject({ removed: false })
+
+    const restarted = await engine.recover({ workflowId: workflow.id }, turn)
+    expect(cleanupInstallation).toHaveBeenCalledOnce()
+    expect(cleanupInstallation).toHaveBeenCalledWith(installationId, expect.objectContaining({ agent: turn.agent }))
+    expect(restarted.workflow.id).not.toBe(workflow.id)
+    expect(restarted.workflow).toMatchObject({
+      cursor: 'await_discovery',
+      status: 'interrupted',
+      generation: 1,
+      recoveredFromWorkflowId: workflow.id,
+    })
+    expect(restarted.workflow.lastInstallationId).toBeUndefined()
+    expect(restarted.workflow.lastReviewId).toBeUndefined()
+    expect(restarted.workflow.selectionReceipt).toBeUndefined()
+    expect(restarted.workflow.actionCommitment).toBeUndefined()
+    expect(restarted.workflow.consumedVerificationAttempts).toBeUndefined()
+    const old = await store.getWorkflow(workflow.id)
+    expect(old).toMatchObject({
+      status: 'completed',
+      cursor: 'activated',
+      lastInstallationId: installationId,
+      lastReviewId: `review_${'e'.repeat(24)}`,
+      recovery: {
+        action: 'cleanup_and_restart',
+        cleanup: 'removed',
+        installationId,
+        restartRequired: true,
+        restartedAsWorkflowId: restarted.workflow.id,
+      },
+    })
+    expect(old.interrupt).toBeUndefined()
+    expect(old.selectionReceipt).toEqual({ id: 'selection_old' })
+
+    await expect(engine.recover({ workflowId: workflow.id }, turn)).rejects.toThrow(/not waiting for a recovery decision/i)
+  })
+
+  it('rejects completed-install restart when the receipt is not the unreplaced owned success receipt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-completed-receipt-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution('calculator')
+    await store.put('resolutions', record)
+    const workflowId = `workflow_${'a'.repeat(24)}`
+    const installationId = `installation_${'d'.repeat(24)}`
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      reviewId: `review_${'e'.repeat(24)}`,
+      workflowId: `workflow_${'f'.repeat(24)}`,
+      targetProfile: 'headless',
+      retention: 'persistent',
+      dshHome: root,
+      packageName: 'dsh-plugin-demo',
+      installSpec: 'file:demo.tgz',
+      installOutcome: 'verified',
+      installed: true,
+      loaded: true,
+      verified: true,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: true,
+        reason: 'verified',
+      },
+    } satisfies InstallationRecord)
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      updatedAt: '2026-08-21T00:00:00.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: process.cwd(),
+      ownerSessionId: 'session-1',
+      bootId: 'boot_engine',
+      resolutionId: record.id,
+      status: 'completed',
+      cursor: 'installed',
+      generation: 2,
+      lastInstallationId: installationId,
+    }
+    await store.put('workflows', workflow)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: false }))
+    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    const turn = exec()
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理并重来' }] })
+    await expect(engine.recover({ workflowId }, turn)).rejects.toThrow(/not owned by this recovery workflow/i)
+    expect(cleanupInstallation).not.toHaveBeenCalled()
+    expect((await store.listWorkflows()).map((item) => item.id)).toEqual([workflowId])
+  })
+
+  it('keeps a persisted current-policy Gate 1 interrupt readable for the owning session', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-v5-compat-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    await store.put('resolutions', record)
+    const persisted: WorkflowRecord = {
+      schemaVersion: 1,
+      id: `workflow_${'a'.repeat(24)}`,
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-17T00:00:00.000Z',
       updatedAt: '2026-08-17T00:00:00.000Z',
@@ -236,367 +761,30 @@ describe('workflow engine', () => {
       requirementNormalized: 'calculator',
       cwd: process.cwd(),
       ownerSessionId: 'session-1',
-      bootId: 'boot_old',
+      bootId: 'boot_engine',
       resolutionId: record.id,
-      status: 'running',
-      cursor: 'install_verify',
-      generation: 4,
-    }
-    await store.put('workflows', running)
-    await store.put('resolutions', record)
-    const installReviewed = vi.fn()
-    const engine = new WorkflowEngine(
-      store,
-      new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_new' }),
-      { ...host(store, record), installReviewed },
-    )
-    const recovered = await engine.start('calculator', exec())
-    expect(installReviewed).not.toHaveBeenCalled()
-    expect(recovered.workflow).toMatchObject({ status: 'completed', cursor: 'recovery_required' })
-    expect(recovered.workflow.lastFailure?.code).toBe('service_restart_incomplete')
-  })
-
-  it('resumes stop from the host turn and completes', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-stop-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const engine = new WorkflowEngine(store, guard, host(store, record))
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先停' }] })
-    const stopped = await engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)
-    expect(stopped.workflow.status).toBe('completed')
-    expect(stopped.workflow.cursor).toBe('stopped')
-    expect(stopped.resolution?.authorization?.state).toBe('stopped')
-    expect(stopped.workflow.selectionReceipt).toMatchObject({ kind: 'stop', candidateIds: [] })
-    expect(stopped.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
-    expect(stopped.workflow.executionLease).toBeUndefined()
-  })
-
-  it('fails closed with a clear restart message for an unfinished prior-policy workflow', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-policy-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
-    const engine = new WorkflowEngine(store, guard, { ...host(store, record), applyDecision })
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    const legacy = await store.getWorkflow(started.workflow.id)
-    legacy.policyVersion = '4'
-    await store.put('workflows', legacy)
-    const restarted = await engine.resume({
-      workflowId: legacy.id,
-      interruptId: legacy.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)
-    expect(applyDecision).not.toHaveBeenCalled()
-    expect(restarted.lifecycleState).toBe('interrupted')
-    expect(restarted.workflow.status).toBe('completed')
-    expect(restarted.workflow.interrupt).toBeUndefined()
-    expect(restarted.nextStep).toMatch(/Policy V5|capability_workflow again/i)
-  })
-
-  it('binds a managed local review to an interrupt candidate and completes create-to-install', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-managed-install-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution('create a calculator plugin')
-    record.decision = 'inspect_remote'
-    record.localCandidates = []
-    record.remoteCandidates = []
-    record.remoteDiscoveryComplete = true
-    const review = managedReview(record.id)
-    const installation: InstallationRecord = {
-      schemaVersion: 1,
-      id: `installation_${'5'.repeat(24)}`,
-      createdAt: '2026-08-17T00:02:00.000Z',
-      reviewId: review.id,
-      targetProfile: 'web',
-      retention: 'temporary',
-      dshHome: 'C:/dsh',
-      packageName: 'managed-calculator',
-      installSpec: review.installSpec!,
-      installOutcome: 'verified',
-      installed: true,
-      loaded: true,
-      verified: true,
-      restartRequired: false,
-      removed: false,
-      verification: { attempted: true, expectedTools: ['calculator'], calledTools: ['calculator'], resultTools: ['calculator'], failedTools: [], sessionFiles: [], taskResultObserved: true, reason: 'verified' },
-    }
-    const base = host(store, record)
-    const workflowHost: WorkflowHost = {
-      ...base,
-      async listInstallProfiles() { return ['web'] },
-      async prepareCreate(current) {
-        await store.put('reviews', review)
-        return { resolution: current, review }
-      },
-      async latestReview() { return review },
-      async installReviewed() {
-        await store.put('installations', installation)
-        return installation
-      },
-    }
-    const engine = new WorkflowEngine(store, guard, workflowHost)
-    const turn = exec()
-    const started = await engine.start(record.requirement, turn)
-    expect(started.workflow.interrupt?.options.map((item) => item.id)).toContain('create_new')
-
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '重新做一个' }] })
-    const reviewed = await engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      decision: { action: 'create_new' },
-    }, turn)
-    const useOption = reviewed.workflow.interrupt?.options.find((item) => item.id === 'use_this')
-    expect(useOption?.candidateIds).toHaveLength(1)
-    expect(reviewed.workflow.candidateSnapshot?.find((item) => item.id === useOption!.candidateIds![0])).toMatchObject({
-      kind: 'local',
-      name: 'managed-calculator',
-      fit: 'full',
-    })
-    expect(reviewed.workflow.reviewIdsByCandidate?.[useOption!.candidateIds![0]!]).toBe(review.id)
-
-    let committed: WorkflowRecord | undefined
-    workflowHost.installReviewed = async (_review, _input, _exec, current) => {
-      committed = structuredClone(current)
-      await store.put('installations', installation)
-      return installation
-    }
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用这个' }] })
-    const installed = await engine.resume({
-      workflowId: reviewed.workflow.id,
-      interruptId: reviewed.workflow.interrupt!.interruptId,
-      decision: { action: 'use_this', candidateId: useOption!.candidateIds![0]! },
-    }, turn)
-    expect(committed?.actionCommitment).toMatchObject({
-      requestedAction: 'use_this',
-      reviewId: review.id,
-      retention: 'temporary',
-      endpoint: { kind: 'none' },
-    })
-    expect(committed?.executionLease).toBeUndefined()
-    expect(installed.workflow).toMatchObject({ status: 'completed', cursor: 'installed' })
-    expect(installed.workflow.actionCommitment).toBeUndefined()
-    expect(installed.workflow.executionLease).toBeUndefined()
-    expect(installed.installation).toMatchObject({ id: installation.id, verified: true })
-  })
-
-  it('rejects read-only navigation outside the current candidate snapshot without consuming authorization', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-nav-snapshot-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const engine = new WorkflowEngine(store, guard, host(store, record))
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-      decision: { action: 'stop' },
-    }, turn)).rejects.toThrow(/either navigation or decision/i)
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: {
-        kind: 'review_candidates',
-        candidateIds: [`candidate_${'f'.repeat(24)}`],
-      },
-    }, turn)).rejects.toThrow(/outside the current candidate snapshot/i)
-    expect((await store.getWorkflow(started.workflow.id)).consumedInterruptIds).toEqual([])
-  })
-
-  it('rejects navigation without a fresh host turn and rejects same-turn replay', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-fresh-turn-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)).rejects.toThrow(/No host-claimed user turn/i)
-    expect((await store.getWorkflow(started.workflow.id)).consumedInterruptIds).toEqual([])
-
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先停' }] })
-    const stopped = await engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)
-    expect(stopped.workflow.cursor).toBe('stopped')
-    expect(stopped.workflow.selectionReceipt?.kind).toBe('stop')
-
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)).rejects.toThrow(/already consumed|not waiting/i)
-  })
-
-  it('builds a mixed 3-5 local/remote snapshot whose option candidateIds stay inside it', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-mixed-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    record.decision = 'inspect_remote'
-    record.remoteDiscoveryComplete = true
-    record.localCandidates = [
-      {
-        kind: 'tool',
-        name: 'pwsh',
-        description: 'Run a PowerShell command',
-        availability: 'available',
-        confidence: 0.9,
-        fit: 'full',
-      },
-      {
-        kind: 'tool',
-        name: 'telegram_send',
-        description: 'Send Telegram messages',
-        availability: 'available_via_tool_search',
-        confidence: 0.4,
-        fit: 'partial',
-      },
-    ]
-    record.remoteCandidates = [
-      { repository: 'acme/one', name: 'one', description: '', stars: 4, updatedAt: null, topics: [] },
-      { repository: 'acme/two', name: 'two', description: '', stars: 3, updatedAt: null, topics: [] },
-      { repository: 'acme/three', name: 'three', description: '', stars: 2, updatedAt: null, topics: [] },
-      { repository: 'acme/four', name: 'four', description: '', stars: 1, updatedAt: null, topics: [] },
-    ]
-    const engine = new WorkflowEngine(store, guard, host(store, record))
-    const started = await engine.start('calculator', exec())
-    const snapshot = started.workflow.candidateSnapshot ?? []
-    expect(snapshot.length).toBeGreaterThanOrEqual(3)
-    expect(snapshot.length).toBeLessThanOrEqual(5)
-    expect(snapshot.some((item) => item.kind === 'local')).toBe(true)
-    expect(snapshot.some((item) => item.kind === 'remote')).toBe(true)
-    const optionIds = (started.workflow.interrupt?.options ?? []).flatMap((option) => option.candidateIds ?? [])
-    const snapshotIds = new Set(snapshot.map((item) => item.id))
-    expect(optionIds.every((id) => snapshotIds.has(id))).toBe(true)
-  })
-
-  it('records search_more seen ids, omits them from the next snapshot, and rejects the old interrupt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-search-more-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    record.decision = 'inspect_remote'
-    record.remoteDiscoveryComplete = true
-    record.remoteCandidates = [
-      { repository: 'acme/one', name: 'one', description: '', stars: 6, updatedAt: null, topics: [] },
-      { repository: 'acme/two', name: 'two', description: '', stars: 5, updatedAt: null, topics: [] },
-      { repository: 'acme/three', name: 'three', description: '', stars: 4, updatedAt: null, topics: [] },
-      { repository: 'acme/four', name: 'four', description: '', stars: 3, updatedAt: null, topics: [] },
-      { repository: 'acme/five', name: 'five', description: '', stars: 2, updatedAt: null, topics: [] },
-      { repository: 'acme/six', name: 'six', description: '', stars: 1, updatedAt: null, topics: [] },
-    ]
-    const engine = new WorkflowEngine(store, guard, host(store, record))
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    const firstIds = (started.workflow.candidateSnapshot ?? []).map((item) => item.id)
-    const oldInterrupt = started.workflow.interrupt!.interruptId
-    expect(firstIds.length).toBeGreaterThan(0)
-
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '再找找' }] })
-    const more = await engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: oldInterrupt,
-      navigation: { kind: 'search_more' },
-    }, turn)
-    expect(more.workflow.seenCandidateIds).toEqual(expect.arrayContaining(firstIds))
-    expect(more.workflow.rejectedCandidateIds).toEqual(expect.arrayContaining(firstIds))
-    const nextIds = (more.workflow.candidateSnapshot ?? []).map((item) => item.id)
-    for (const id of firstIds) expect(nextIds).not.toContain(id)
-    expect(more.workflow.interrupt?.interruptId).not.toBe(oldInterrupt)
-    expect(more.workflow.executionLease).toBeUndefined()
-
-    await expect(engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: oldInterrupt,
-      navigation: { kind: 'search_more' },
-    }, turn)).rejects.toThrow(/already consumed|not waiting|does not match the current workflow interrupt/i)
-  })
-
-  it('binds reuse_local receipt, commitment, and lease to the candidate digest', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-reuse-lease-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    const candidate = started.workflow.candidateSnapshot!.find((item) => item.localName === 'pwsh')!
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用已有的' }] })
-    const reused = await engine.resume({
-      workflowId: started.workflow.id,
-      interruptId: started.workflow.interrupt!.interruptId,
-      navigation: { kind: 'reuse_local', candidateIds: [candidate.id] },
-    }, turn)
-    expect(reused.workflow.selectionReceipt?.candidateDigests[candidate.id]).toBe(candidate.digest)
-    expect(reused.workflow.actionCommitment).toMatchObject({
-      candidateId: candidate.id,
-      candidateDigest: candidate.digest,
-      requestedAction: 'reuse_local',
-      endpoint: { kind: 'exact_tool', name: 'pwsh' },
-    })
-    expect(reused.workflow.executionLease).toMatchObject({
-      candidateId: candidate.id,
-      candidateDigest: candidate.digest,
-      endpoint: { kind: 'exact_tool', name: 'pwsh' },
-    })
-    expect(guard.activeExecutionLease(turn.agent)?.candidateDigest).toBe(candidate.digest)
-
-    const forged = {
-      ...reused.workflow.executionLease!,
-      candidateDigest: '9'.repeat(64),
-      endpoint: { kind: 'exact_tool' as const, name: 'weather' },
-      requestedAction: 'stop' as const,
-    }
-    expect(() => guard.grantHostSelection(
-      turn.agent,
-      reused.workflow.selectionReceipt!,
-      reused.workflow.actionCommitment!,
-      forged,
-    )).toThrow(/not bound to the current receipt and commitment/i)
-  })
-})
-
-describe('workflow record identity', () => {
-  it('uses a workflow_ id that the store accepts', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-id-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const record: WorkflowRecord = {
-      schemaVersion: 1,
-      id: `workflow_${'a'.repeat(24)}`,
-      policyVersion: POLICY_VERSION,
-      createdAt: '2026-08-17T00:00:00.000Z',
-      updatedAt: '2026-08-17T00:00:00.000Z',
-      requirement: 'calculator',
       status: 'interrupted',
       cursor: 'await_selection',
       generation: 1,
+      candidateSnapshot: [],
+      consumedInterruptIds: [],
+      interrupt: {
+        kind: 'await_selection',
+        interruptId: `interrupt_${'c'.repeat(24)}`,
+        ownerSessionId: 'session-1',
+        bootId: 'boot_engine',
+        validAfterTurnId: `turn_${'d'.repeat(24)}`,
+        snapshotDigest: 'e'.repeat(64),
+        options: [],
+        facts: {},
+      },
     }
-    await store.put('workflows', record)
-    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({ id: record.id })
+    await store.put('workflows', persisted)
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+
+    const resumed = await engine.start('calculator', exec())
+
+    expect(resumed.workflow).toMatchObject({ id: persisted.id, schemaVersion: 1, cursor: 'await_selection' })
+    expect(resumed.workflow.interrupt?.interruptId).toBe(persisted.interrupt!.interruptId)
   })
 })

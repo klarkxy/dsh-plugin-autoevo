@@ -4,6 +4,8 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { applyHostVerification, type HostDriverConfig } from './host-verification-driver.js'
+import type { VerificationLayerKind } from './contracts.js'
 
 export interface Config {
   receiptPath: string
@@ -11,6 +13,10 @@ export interface Config {
   expectedText?: string
   expectedProvider?: string
   expectedModel?: string
+  layer?: string
+  packageName?: string
+  fixtureDigest?: string
+  fixturesJson?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -19,6 +25,10 @@ export const Config: Schema<Config> = Schema.object({
   expectedText: Schema.string().default(''),
   expectedProvider: Schema.string().default(''),
   expectedModel: Schema.string().default(''),
+  layer: Schema.string().default(''),
+  packageName: Schema.string().default(''),
+  fixtureDigest: Schema.string().default(''),
+  fixturesJson: Schema.string().default(''),
 })
 
 export const name = 'dsh-plugin-autoevo-verification-observer'
@@ -44,11 +54,31 @@ function appendReceipt(receiptPath: string, event: ReceiptEvent): void {
   })
 }
 
+function hostLayer(value: string | undefined): VerificationLayerKind | undefined {
+  if (value === 'bundle_activation' || value === 'tool_roundtrip' || value === 'manual_runtime') return value
+  return undefined
+}
+
 /**
  * Trusted verification-only observer. It records call identity and outcome,
  * never tool arguments, result content, environment values, or model text.
+ * When `layer` is a Host verification layer, this entry drives Loader/tool
+ * execution instead of observing an Agent turn.
  */
 export function apply(ctx: Context, config: Config): void {
+  const layer = hostLayer(config.layer)
+  if (layer) {
+    const driverConfig: HostDriverConfig = {
+      receiptPath: config.receiptPath,
+      expectedTools: config.expectedTools,
+      layer,
+      packageName: config.packageName ?? '',
+      fixtureDigest: config.fixtureDigest ?? '',
+      ...(config.fixturesJson ? { fixturesJson: config.fixturesJson } : {}),
+    }
+    applyHostVerification(ctx, driverConfig)
+    return
+  }
   if (!path.isAbsolute(config.receiptPath)) {
     throw new Error('verification receiptPath must be absolute')
   }

@@ -19,8 +19,8 @@ export const EVOLUTION_MODE_PROTOCOL_VERSION = 1 as const
 /** Managed user-preset manifest filename under the evolution preset directory. */
 export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as const
 
-/** Template version for the bundled `presets/evolution` tree. Monotonic V9. */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '9' as const
+/** Template version for the bundled `presets/evolution` tree. */
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '12' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -46,111 +46,19 @@ export interface EvolutionPresetManifest {
 }
 
 /**
- * Exact manifests that AutoEvo itself has shipped and may therefore upgrade.
+ * The one template this unreleased line owns.
  *
- * The on-disk manifest is only an integrity record, not an authority token:
- * a user can rewrite both content and hashes.  Keep this allowlist in the
- * package so an altered manifest is preserved instead of being upgraded over.
- *
- * Includes historical pristine v1–v8 shapes plus compatibility releases.
+ * There are no legacy users to migrate. The on-disk manifest remains an
+ * integrity record rather than an authority token: anything other than this
+ * exact current template is preserved instead of being overwritten.
  */
 export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
   Object.freeze({
     owner: EVOLUTION_MODE_OWNER,
     schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '1',
+    templateVersion: EVOLUTION_PRESET_TEMPLATE_VERSION,
     files: Object.freeze({
-      'agent.cordis.yml': '1998d90fcb17ab3ca0a43e831ade6fe1f4e9513fe9efbe6777e00c417963edb5',
-      'preset.yml': '6a571f49983f3c3bdde1b70c4500a0594ecea5f67dad7a893895d2952dbda751',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '1',
-    files: Object.freeze({
-      'agent.cordis.yml': '9dfcbafa4f20267473c88c8a854f6ff0d400bf7a7a55f9cac3f5e35faa136f0f',
-      'preset.yml': '4e7c85c66dd5b22a46023b85f0f8d730ab9bb2933c31cee4b60246537488fc82',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '2',
-    files: Object.freeze({
-      'agent.cordis.yml': '50815c246fb23c6dedee57069541771b5d9b8934a49d5b3b5a043a7af278add9',
-      'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '3',
-    files: Object.freeze({
-      'agent.cordis.yml': '488bf1f349435b969967fc4c78c56d0951082ba8519027039fabe570fdf25a3a',
-      'preset.yml': 'bad59239f10692dbe91baac3e8eae13ba0492726c52d4420e6cc5e9f492c9334',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '4',
-    files: Object.freeze({
-      'agent.cordis.yml': '3e6f27a853b5c062f584214b6e4c322bdc3d3e1176e90c22a6f2c4ae9ac3596a',
-      'preset.yml': '4e7c85c66dd5b22a46023b85f0f8d730ab9bb2933c31cee4b60246537488fc82',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '5',
-    files: Object.freeze({
-      'agent.cordis.yml': 'fbe6d39d435a072e31fdcd2985481cf4dcca517f68f80e6fabf10c5ec59876a1',
-      'preset.yml': 'daac55dc543b3ab749486292240ebd8a838b177e3b2048a7ef7dfdc542a822bd',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '5',
-    files: Object.freeze({
-      'agent.cordis.yml': '56af4a141e74042b05bb10e4d0066b7d1cbb7ed701c7b845500014f2f6135f83',
-      'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '6',
-    files: Object.freeze({
-      'agent.cordis.yml': '219a29aa7c65432e722b505ef72c835cd455782c871d62fd71194259fb1dbd9d',
-      'preset.yml': 'daac55dc543b3ab749486292240ebd8a838b177e3b2048a7ef7dfdc542a822bd',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '7',
-    files: Object.freeze({
-      'agent.cordis.yml': '8b0d426d5d1e0203625087f3f0b3f3d41f01b552259129622fa207c2cf5951c3',
-      'preset.yml': 'daac55dc543b3ab749486292240ebd8a838b177e3b2048a7ef7dfdc542a822bd',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '7',
-    files: Object.freeze({
-      'agent.cordis.yml': '431053523105e7af9539d9944f486f8d239a8b752d4d748461167fc3795a2441',
-      'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
-    }),
-  }),
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: '8',
-    files: Object.freeze({
-      'agent.cordis.yml': '120467a9e9d9ae8e7f2c3ee2369083139bc73eeb40f64ebb8e9796676c7e2ff1',
+      'agent.cordis.yml': '576a62b16d24d518f7d637e09dc7217ede0d8563f7179187a1a703a1d9737d28',
       'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
     }),
   }),

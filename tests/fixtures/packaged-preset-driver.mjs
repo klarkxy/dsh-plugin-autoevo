@@ -21,7 +21,7 @@ class PackagedAdapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
-    const text = 'AUTOEVO_PACKAGED_V9_SESSION_OK'
+    const text = 'AUTOEVO_PACKAGED_V12_SESSION_OK'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -63,13 +63,37 @@ async function run(ctx, config) {
   try {
     if (ctx.agentPresets.composedPreset(handle.agent.ctx) !== 'evolution') throw new Error('agent is not composed from evolution')
     const schemas = handle.agent.ctx.tools.schemas().map((tool) => tool.name).sort()
-    for (const required of ['capability_workflow', 'capability_workflow_resume', 'plugin_remove']) {
+    for (const required of [
+      'capability_workflow',
+      'capability_workflow_diagnose',
+      'capability_workflow_present',
+      'capability_workflow_recover',
+      'capability_workflow_refine',
+      'capability_workflow_resume',
+      'plugin_remove',
+    ]) {
       if (!schemas.includes(required)) throw new Error(`missing evolution tool ${required}`)
     }
     const prompt = await handle.agent.ctx.systemPrompt.assemble({ agent: handle.agent, signal: AbortSignal.timeout(5_000) })
     const policy = prompt.sections.find((section) => section.name === 'autoevo:reuse-policy')
-    if (!policy || !/interrupt_id/u.test(policy.text) || !/workspace-write/u.test(policy.text)) {
-      throw new Error('V9 AutoEvo policy was not active in the evolution Agent')
+    if (
+      !policy
+      || !/runtime Policy V8/u.test(policy.text)
+      || !/original requirement/u.test(policy.text)
+      || !/Host-provided snapshot or pool/u.test(policy.text)
+      || !/Mechanical verification is Host-driven/u.test(policy.text)
+      || /runtime Policy V7/u.test(policy.text)
+      || /independent semantic verifier/u.test(policy.text)
+    ) {
+      throw new Error('Policy V8 AutoEvo autonomy contract was not active in the evolution Agent')
+    }
+    const recover = handle.agent.ctx.tools.schemas().find((tool) => tool.name === 'capability_workflow_recover')
+    if (!recover) throw new Error('missing capability_workflow_recover')
+    if (recover.parameters.properties.interrupt_id?.required === true) {
+      throw new Error('completed-install cleanup must keep interrupt_id optional')
+    }
+    if (Array.isArray(recover.parameters.required) && recover.parameters.required.includes('interrupt_id')) {
+      throw new Error('sealed recovery interrupt_id must remain optional for completed cleanup')
     }
     await handle.agent.whenIdle()
     const firstSeq = handle.agent.session.seq
@@ -85,11 +109,13 @@ async function run(ctx, config) {
       if (!eventTypes.includes(required)) throw new Error(`missing durable event ${required}`)
     }
     const taskResult = lastAssistantText(handle.agent.session)
-    if (taskResult !== 'AUTOEVO_PACKAGED_V9_SESSION_OK') throw new Error(`unexpected task result ${JSON.stringify(taskResult)}`)
+    if (taskResult !== 'AUTOEVO_PACKAGED_V12_SESSION_OK') throw new Error(`unexpected task result ${JSON.stringify(taskResult)}`)
     process.stdout.write(`${JSON.stringify({
       marker: taskResult,
       preset: 'evolution',
-      tools: schemas.filter((name) => name === 'capability_workflow' || name === 'capability_workflow_resume' || name === 'plugin_remove'),
+      policyVersion: '8',
+      recoverInterruptOptional: recover.parameters.properties.interrupt_id?.required !== true,
+      tools: schemas.filter((name) => name.startsWith('capability_workflow') || name === 'plugin_remove'),
       eventTypes,
     })}\n`)
   } finally {

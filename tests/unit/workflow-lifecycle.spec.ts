@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../../src/contracts.js'
+import { TERMINAL_NODES, type WorkflowRecord } from '../../src/workflow/contracts.js'
 import { lifecycleStateFor } from '../../src/workflow/lifecycle.js'
-import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
 function workflow(overrides: Partial<WorkflowRecord> = {}): WorkflowRecord {
   return {
@@ -152,5 +152,69 @@ describe('public workflow lifecycle mapping', () => {
       status: 'interrupted',
       cursor: 'await_confirmation',
     }))).toBe('interrupted')
+  })
+
+  it('maps awaiting_user_test as a normal completed lifecycle, not verified or recovery', () => {
+    expect(TERMINAL_NODES.has('awaiting_user_test')).toBe(true)
+    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'awaiting_user_test' }))).toBe('awaiting_user_test')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'awaiting_user_test' }),
+      { installation: installation(true) },
+    )).toBe('awaiting_user_test')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'installed' }),
+      {
+        installation: {
+          ...installation(false),
+          installOutcome: 'awaiting_user_test',
+          verified: false,
+        },
+      },
+    )).toBe('awaiting_user_test')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'installed' }),
+      { installation: installation(true) },
+    )).toBe('verified')
+    expect(lifecycleStateFor(workflow({
+      policyVersion: '7',
+      status: 'completed',
+      cursor: 'awaiting_user_test',
+    }))).toBe('interrupted')
+  })
+
+  it('maps activated as a completed lifecycle that is not verified or recovery', () => {
+    expect(TERMINAL_NODES.has('activated')).toBe(true)
+    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'activated' }))).toBe('activated')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'installed' }),
+      {
+        installation: {
+          ...installation(false),
+          installOutcome: 'activated',
+          installed: true,
+          loaded: true,
+          verified: false,
+        },
+      },
+    )).toBe('activated')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'activated' }),
+      { installation: installation(true) },
+    )).toBe('activated')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'installed' }),
+      { installation: installation(true) },
+    )).toBe('verified')
+    expect(lifecycleStateFor(
+      workflow({ status: 'completed', cursor: 'restart_required' }),
+      {
+        installation: {
+          ...installation(false),
+          installOutcome: 'activated',
+          installed: true,
+          verified: false,
+        },
+      },
+    )).toBe('restart_required')
   })
 })
