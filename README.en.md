@@ -17,12 +17,12 @@ English | [Chinese](README.md)
 ## Install
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.3
 ```
 
 Restart the corresponding DSH process afterward. Bundles load at process start.
 
-To upgrade, replace the tag and run the same command again, for example `#v0.5.0` to `#v0.5.1`.
+To upgrade, replace the tag and run the same command again, for example `#v0.5.2` to `#v0.5.3`.
 
 DSH forwards `plugin` operations to pnpm. Semver, Git tags, and exact commits all pin a version, but DSH does not track or hot-load new releases. After pinning a tag or commit, upgrade explicitly and restart.
 
@@ -33,14 +33,14 @@ pnpm install
 pnpm build
 New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
 npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.1.tgz"
+dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.3.tgz"
 ```
 
 The development install also uses an immutable `file:...tgz`. This avoids DSH rc.6 splitting a Windows `link:` argument whose path contains spaces. Third-party candidates likewise become owned `file:...tgz` packages.
 
 ## Capability Evolution mode
 
-After install, AutoEvo adds the **Capability Evolution** user preset (id `evolution`, template V9) by default. It is based on Creator mode: the full Creator toolset, plus community-plugin reuse, review, install, upgrade of existing capabilities, and controlled dynamic Cordis creation; an improved plugin can be contributed upstream after explicit approval. Config `evolutionPreset` defaults to `true`; `false` skips install/update and never deletes an existing preset. Policy V5 unfinished older-policy workflows are not resumable; call `capability_workflow` again to start a fresh V5 discovery.
+After install, AutoEvo creates the **Capability Evolution** user preset (id `evolution`, template V12) from scratch. It is based on Creator mode: the full Creator toolset, plus community-plugin reuse, review, install, upgrade of existing capabilities, and controlled dynamic Cordis creation; an improved plugin can be contributed upstream after explicit approval. There is no legacy-user migration path: the package trusts only the exact current V12 content and preserves every other existing or edited preset instead of overwriting it. Config `evolutionPreset` defaults to `true`; `false` skips installation and never deletes an existing preset. Runtime policy is Policy V8. A completed installation can be cleaned up and restarted only after a new top-level user request, using that workflow's owned receipt. Failed `recovery_required` still uses the sealed interrupt protocol; the two paths must not be mixed.
 
 > [!WARNING]
 > **Do not run Capability Evolution with a low-intelligence model or a model that is unreliable at tool calling.** The active LLM semantically interprets the user's final install, modify, create, or stop choice and submits a structured `decision`. The Host still validates the fresh authentic user turn, interrupt-bound action/candidate, review, session, boot, and replay boundaries, but it no longer re-parses keywords to redo the model's language understanding. A weak model can choose the wrong legal action or candidate. Use a model with reliable instruction following, context retention, and structured tool use.
@@ -53,17 +53,22 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 
 ## How it works
 
-- The parent session execution guard denies filesystem write/edit, shell, Cordis mutation/definition, agent/subagent/workflow delegation, and direct DSH plugin install/remove. Modify/create continues only in a Host-launched `workspace-write` child bound to a managed git source under `sourceDir` (default `<stateDir>/sources`). On Windows, sandbox enforcement is integrity-oriented partial isolation.
-- Inside the mode, AutoEvo pauses after discovery so the real user can pick candidates, create new, or stop. The LLM maps read-only choices to candidate IDs from the current interrupt snapshot in `navigation`. After review it pauses again; simple UI primary actions are `use_this` / `search_more`, with `modify_this` / `create_new` / `stop` in advanced/recovery. The LLM maps the fresh reply to a structured final `decision`, while the Host validates that interpretation against the authentic turn, mints the commitment/lease, and checks the current workflow boundary. A DSH approval is not that decision. MechanicalFacts are display/routing only; an explicit OR starts a clean semantic reviewer. Install outcomes are `pending | verified | failed_absent | recovery_required`.
+- The parent session reuses official Creator tools (filesystem, shell, plan, todos, subagents, Cordis inspect and existing definitions). The execution guard only denies `cordis_define(kind:new)` and unreviewed direct plugin install/remove. Community-plugin modify/create continues only in a Host-launched `workspace-write` child bound to a managed git source under `sourceDir` (default `<stateDir>/sources`). On Windows, sandbox enforcement is integrity-oriented partial isolation.
+- The Host owns facts, budgets, persistence, and side-effect authorization. `capability_workflow` returns up to 20 Host-verified candidates. Within two refinement rounds and five supplemental queries, the model may call `capability_workflow_refine`, then autonomously seals a final 1–5 item shortlist with `capability_workflow_present`. Only a fresh real user reply can select sealed candidates for review; a second fresh decision is still required before install, modify, or create. A DSH approval is separate and cannot replace that decision.
+- The model owns ranking, comparison, recommendation, natural language, and mapping replies such as “your pick”, “the other one”, or “look at 3” to scoped candidate IDs. Review results expose bounded source, exact commit, fit, confidence, compatibility, license, maintenance, missing-capability, risk, semantic-verdict, and eligibility facts instead of a prescribed reply template.
 - Security findings are static review facts, not purpose claims. Matching source/build observations are grouped for presentation; the Agent must not infer malicious intent, OAuth necessity, callback-server behavior, or any other unverified semantics from `process_execution`. Block findings remain high risk and non-installable.
 - Cancelling the parent task immediately disposes the managed child Agent. Bounded edits are checkpointed under an independent cleanup lifetime, the workflow parks at `recovery_required`, and source locks are released; cancellation is never reported as a missing executable.
+- After search, review, managed-work, install, or verification failure, `capability_workflow_diagnose` exposes only bounded redacted facts. Each failure episode allows at most two diagnostic calls and eight probes; diagnosis never retries or mutates state. After repeated verification or modify failure, present a human decision or diagnosis exit instead of looping the same attempt.
 - `plugin.kind = "existing"`, ordinary file edits, commands, tests, and repairs to existing plugins remain unaffected. The guard does not treat generic development tools as plugin creation.
 - Check tools the current Agent can see, model-invocable skills, and anything already reachable through a `tool_search` bridge.
 - When local capability is insufficient, prefer an existing [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin) in the current Agent scope. If that marketplace is missing, AutoEvo installs `dsh-find-plugin` by script after one-time approval and hot-loads it when the host allows. Restart only if hot-load fails. Do not review the marketplace as the requested capability, and do not search GitHub directly. An installed marketplace with no relevant hit means there is no reusable plugin.
 - Review the exact commit: manifest, README, and the source that matters. Results are paths, derived facts, risk codes, and content hashes.
 - Install when the review is `full + use`, risk is `low` or `medium`, the live DSH runtime is `compatible`, and the declared `dsh.bundle.patch` exists in the snapshot and parses as a Loader patch.
 - Install and remove both require a one-time DSH `allowed-once` approval.
-- Temporary trials run in an isolated DSH home. Final `verified` needs Host mechanical Loader evidence (a real `tool/call`, a matching successful `tool/result`, and a `turn/end: completed` final answer) plus an independent semantic verifier. `taskResultMatchedExpectation` is diagnostic only and does not gate success.
+- Mechanical verification is Host-driven. Do not hand verification to an ordinary model, do not let the model judge success, and do not treat an independent semantic verifier as the trusted completion gate. Compatibility semantic components may still exist; packaged behavior follows the Host three-layer result.
+- The three layers are distinct: `tool_roundtrip` passed is `verified`; `bundle_activation` passed is `activated`; persistent `manual_runtime` is `awaiting_user_test`. All three complete the workflow and do not block ordinary chat, but the last two must not be described as functionally verified. Third-party tool packages usually have no Host attestation and therefore enter `manual_runtime` / persistent; package-manifest `safe`/`risk` or candidate self-reports cannot mint `tool_roundtrip`. Temporary `manual_runtime` is rejected before install and before side-effect approval.
+- After `awaiting_user_test`, invite the user to try the capability in the target client or profile. Do not use a fixed script, and do not re-ask during later casual chat.
+- The same review / source / layer / fixture cannot be installed or verified again; modify is capped at two attempts. When the user explicitly asks to clean up and start over, completed `installed` / `restart_required` / `activated` / `awaiting_user_test` use post-install cleanup/restart. Failed `recovery_required` keeps the sealed interrupt protocol. `taskResultMatchedExpectation` is diagnostic only and does not gate success.
 - `partial` candidates get a minimal patch, upstream tests, a local re-review to `full`, then an immutable tgz.
 - Dissatisfaction with an installed community plugin goes through the same gates: the installation receipt's `reviewId` points at the upstream repository and exact commit; after the user selects that origin, review → improve-this → local re-review → pinned tgz reinstall, then remove the old installation by its receipt. Plugins created under `create_authorized` or static local plugins are upgraded as ordinary repair work.
 - After the current task is done, generic improvements can be suggested as a contribution. The installation receipt's `contributionAdvice` records eligibility; fork, push, and PR still use `git` / `gh` after another explicit approval.
@@ -74,21 +79,25 @@ After install and restart, tell the current Agent:
 
 > I need a DSH plugin that can evaluate scientific notation. Look for an existing one first.
 
-It should call `capability_workflow` first, explain the numbered candidates briefly, and map your read-only selection to candidate IDs from the current snapshot in `navigation`. For final install, modify, or create confirmation, the LLM submits a structured `decision` and the Host binds it to the fresh authentic turn. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
+It should call `capability_workflow`, autonomously refine the real discovery pool if useful, and call `capability_workflow_present` with a 1–5 item shortlist. After you pick one, the Host reviews it and stops again so you can decide whether to install. Same-turn resume is a no-op, not an error. A clear choice in ordinary language is enough; examples such as “use this” (install) or “look at the second one” (review another) are illustrations, not required passphrases. For install, modify, or create, the LLM interprets that explicit selection into a structured `decision` and the Host binds it to the fresh authentic turn. If `find_dsh_plugin` is not in the current scope, approve AutoEvo's marketplace script install. AutoEvo hot-loads it when possible; restart only if that fails.
 
 ## Agent tools
 
 | Tool | Role | Surface |
 |---|---|---|
-| `capability_workflow` | Start the fixed workflow: check local capabilities, prefer `find_dsh_plugin`, and approve a script install if the marketplace is missing. Returns an interrupt with structured options | read-only / approval when installing marketplace |
+| `capability_workflow` | Preserve the original requirement and return a bounded Host-verified discovery pool, evidence, and budgets | read-only / approval when installing marketplace |
+| `capability_workflow_refine` | Add bounded query hints or strict GitHub repository identities to the open discovery pool | read-only |
+| `capability_workflow_present` | Seal 1–5 pool candidates into the final shortlist and open Gate 1 | read-only |
 | `capability_workflow_resume` | Use `navigation` for read-only selection/review; use an LLM-interpreted structured `decision` for final confirmation, bounded by the Host to the authentic turn and current interrupt action/candidate | read-only for review; approval for install |
+| `capability_workflow_diagnose` | Read bounded redacted discovery, review, child, install, verification, and cleanup facts after failure | read-only |
+| `capability_workflow_recover` | Two distinct paths: sealed failure recovery requires the current `interrupt_id`; completed-install cleanup/restart is driven by a new top-level explicit user request and omits `interrupt_id` | authentic confirmation / one-time cleanup approval |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |
 
 AutoEvo adds these high-level tools and guards `cordis_define(kind:new)` at DSH's execution boundary; every other tool remains governed by the current Profile's Agent scope.
 
 ## Baseline
 
-Maintenance line `0.5.1`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
+Maintenance line `0.5.3`. Verified on DSH `0.1.0-rc.6`, Cordis `4.0.1`, and Node.js `>=22.19.0 \|\| >=24`. Review receipts record the actual `dsh --version`; an unknown version does not authorize installation.
 
 ```powershell
 node --version
