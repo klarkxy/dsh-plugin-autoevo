@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -53,8 +53,9 @@ function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: st
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
 }
 
-function marketplaceCtx(): Context {
+function marketplaceCtx(baseUrl: string): Context {
   return {
+    baseUrl,
     tools: {
       schemas: () => [],
       get: (name: string) => name === 'find_dsh_plugin' ? {} : undefined,
@@ -271,9 +272,12 @@ describe('interrupt binding and host-turn decisions', () => {
   it('reuses an unfinished workflow for the same session, cwd, and normalized requirement', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bind-reuse-'))
     temporary.push(root)
+    const baseUrl = path.join(root, 'dsh-home', 'profiles', 'web')
+    await mkdir(baseUrl, { recursive: true })
+    await writeFile(path.join(baseUrl, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dependencies: {} }))
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx(),
+      marketplaceCtx(baseUrl),
       config(root),
       { run: async () => ({ exitCode: 0, signal: null, stdout: '0.1.0-rc.6\n', stderr: '' }) },
       new StateStore(root),

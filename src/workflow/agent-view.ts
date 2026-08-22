@@ -1,4 +1,5 @@
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type WorkflowOptionId } from '../contracts.js'
+import { prefersChinese, rememberRequirementLanguage } from '../i18n.js'
 import { isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import {
@@ -232,22 +233,58 @@ function modificationEvidence(view: WorkflowView): Record<string, unknown> | und
   }
 }
 
-function userFacingMeaning(action: string, completedCleanup = false): string {
-  const meanings: Record<string, string> = {
-    capability_workflow_refine: '继续补充只读发现证据',
-    capability_workflow_present: '形成最终候选短名单',
+function userFacingMeaning(action: string, requirement: string, completedCleanup = false): string {
+  const zh = prefersChinese(requirement)
+  const meanings: Record<string, { en: string; zh: string }> = {
+    capability_workflow_refine: {
+      en: 'Continue gathering read-only discovery evidence',
+      zh: '继续补充只读发现证据',
+    },
+    capability_workflow_present: {
+      en: 'Form the final candidate shortlist',
+      zh: '形成最终候选短名单',
+    },
     capability_workflow_recover: completedCleanup
-      ? '用户明确要求清理并从头开始时，清理本次安装并从原始需求重新发现'
-      : '清理本次工作流拥有的安装，并从原始需求重新发现',
-    review_candidates: '审查所选候选',
-    search_more: '继续寻找其他候选',
-    reuse_local: '使用已有本地能力',
-    use_this: '直接使用已审查候选',
-    modify_this: '先改进已审查候选',
-    create_new: '从头创建新能力',
-    stop: '停止本次工作流',
+      ? {
+          en: 'When the user explicitly asks to clean up and start over, remove this installation and rediscover from the original requirement',
+          zh: '用户明确要求清理并从头开始时，清理本次安装并从原始需求重新发现',
+        }
+      : {
+          en: 'Clean up this workflow\'s installation and rediscover from the original requirement',
+          zh: '清理本次工作流拥有的安装，并从原始需求重新发现',
+        },
+    review_candidates: {
+      en: 'Review the selected candidates',
+      zh: '审查所选候选',
+    },
+    search_more: {
+      en: 'Keep looking for other candidates',
+      zh: '继续寻找其他候选',
+    },
+    reuse_local: {
+      en: 'Use an existing local capability',
+      zh: '使用已有本地能力',
+    },
+    use_this: {
+      en: 'Use the reviewed candidate as-is',
+      zh: '直接使用已审查候选',
+    },
+    modify_this: {
+      en: 'Improve the reviewed candidate first',
+      zh: '先改进已审查候选',
+    },
+    create_new: {
+      en: 'Create a new capability from scratch',
+      zh: '从头创建新能力',
+    },
+    stop: {
+      en: 'Stop this workflow',
+      zh: '停止本次工作流',
+    },
   }
-  return meanings[action] ?? '执行当前允许的操作'
+  const pair = meanings[action]
+  if (!pair) return zh ? '执行当前允许的操作' : 'Take the currently allowed action'
+  return zh ? pair.zh : pair.en
 }
 
 function channelFor(kind: string | undefined, action: WorkflowOptionId): AgentScopedAction['channel'] {
@@ -261,10 +298,11 @@ function channelFor(kind: string | undefined, action: WorkflowOptionId): AgentSc
 function interruptActions(view: WorkflowView): AgentScopedAction[] {
   const interrupt = view.workflow.interrupt
   if (!interrupt) return []
+  const requirement = view.workflow.requirement
   return interrupt.options.map((option) => ({
     channel: channelFor(interrupt.kind, option.id),
     action: option.id,
-    user_facing_meaning: userFacingMeaning(option.id),
+    user_facing_meaning: userFacingMeaning(option.id, requirement),
     ...(option.candidateIds?.length ? { candidate_ids: option.candidateIds } : {}),
   }))
 }
@@ -385,12 +423,14 @@ function completedCleanupAction(view: WorkflowView): AgentScopedAction[] {
   return [{
     channel: 'tool',
     action: 'capability_workflow_recover',
-    user_facing_meaning: userFacingMeaning('capability_workflow_recover', true),
+    user_facing_meaning: userFacingMeaning('capability_workflow_recover', view.workflow.requirement, true),
   }]
 }
 
 export function compactAgentView(view: WorkflowView): AgentWorkflowViewV2 {
+  rememberRequirementLanguage(view.workflow.id, view.workflow.requirement)
   const state = semanticState(view)
+  const requirement = view.workflow.requirement
   const budget = view.workflow.discoveryBudget
   const diagnosisBudget = view.diagnosis?.budget
   const successInstall = (INSTALL_SUCCESS_OUTCOMES as readonly string[]).includes(view.installation?.installOutcome ?? '')
@@ -413,20 +453,20 @@ export function compactAgentView(view: WorkflowView): AgentWorkflowViewV2 {
     ? [{
         channel: 'tool' as const,
         action: 'capability_workflow_recover',
-        user_facing_meaning: userFacingMeaning('capability_workflow_recover'),
+        user_facing_meaning: userFacingMeaning('capability_workflow_recover', requirement),
       }]
     : state === 'discovering'
     ? [
         ...(canRefine ? [{
           channel: 'tool' as const,
           action: 'capability_workflow_refine',
-          user_facing_meaning: userFacingMeaning('capability_workflow_refine'),
+          user_facing_meaning: userFacingMeaning('capability_workflow_refine', requirement),
         }] : []),
         ...(view.workflow.discoveryPool?.length
           ? [{
               channel: 'tool' as const,
               action: 'capability_workflow_present',
-              user_facing_meaning: userFacingMeaning('capability_workflow_present'),
+              user_facing_meaning: userFacingMeaning('capability_workflow_present', requirement),
               candidate_ids: view.workflow.discoveryPool.map((item) => item.id),
             }]
           : []),

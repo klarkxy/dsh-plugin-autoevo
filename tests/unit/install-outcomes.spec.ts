@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -16,6 +16,7 @@ import {
   type SemanticVerifierHost,
 } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
+import { sha256 } from '../../src/state/hashes.js'
 
 const temporary: string[] = []
 
@@ -333,10 +334,297 @@ describe('fail-closed install outcomes', () => {
     expect(result).toMatchObject({
       installOutcome: 'verified',
       installed: true,
+      loaded: false,
       verified: true,
       restartRequired: true,
       hotReload: { attempted: true, loaded: false, method: 'unsupported' },
     })
+  })
+
+  it('preflights the exact source in isolated headless before installing into the live profile', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const install = vi.fn(async (
+      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
+    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const verifyHost = vi.fn(async () => hostPassedEvidence)
+    const launcher = {
+      profileTargetAbsent: async () => true,
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+      undefined,
+      async () => ({ evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' } }),
+      unusedVerifier(),
+      'headless',
+    )
+    const result = await installer.install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())
+
+    expect(install).toHaveBeenCalledTimes(2)
+    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(install.mock.calls[1]?.[0]).toBe(config(root).dshHome)
+    expect(install.mock.calls[1]?.[1]).toBe('web')
+    expect(install.mock.calls[0]?.[2]).toBe(install.mock.calls[1]?.[2])
+    expect(result).toMatchObject({
+      installPhase: 'completed',
+      targetProfile: 'web',
+      installOutcome: 'verified',
+      loaded: false,
+      restartRequired: true,
+      preflight: { profile: 'headless', passed: true, sourceMatched: true },
+    })
+  })
+
+  it('does not mutate the destination when isolated headless preflight fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-fail-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const install = vi.fn(async (
+      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
+    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const launcher = {
+      profileTargetAbsent: async () => true,
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => hostFailedEvidence,
+    } as unknown as DshLauncher
+    const result = await new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+    ).install({ reviewId: review().id, targetProfile: 'web', retention: 'persistent' }, execution())
+
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(result).toMatchObject({
+      installPhase: 'completed',
+      installOutcome: 'failed_absent',
+      installState: 'not_installed',
+      installed: false,
+      preflight: { passed: false },
+    })
+  })
+
+  it('rechecks destination absence after preflight and refuses a concurrent install race', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-race-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    let absenceChecks = 0
+    const install = vi.fn(async (
+      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
+    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const launcher = {
+      profileTargetAbsent: async () => {
+        absenceChecks += 1
+        return absenceChecks === 1
+      },
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => hostPassedEvidence,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
+    expect(absenceChecks).toBe(2)
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[1]).toBe('headless')
+  })
+
+  it('uses headless only for activation preflight when the real result requires a user test', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-manual-preflight-'))
+    temporary.push(root)
+    const manual = attestedReview({
+      runtimeSurface: {
+        ...attestedSurface(),
+        networkSignal: true,
+        verificationLayer: 'manual_runtime',
+      },
+    })
+    const store = new StateStore(root)
+    await store.put('reviews', manual)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const install = vi.fn(async (
+      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
+    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const verifyHost = vi.fn(async (input: { layer: string; expectedTools: string[] }): Promise<VerificationEvidence> => {
+      expect(input).toMatchObject({ layer: 'bundle_activation', expectedTools: [] })
+      return {
+        attempted: true,
+        exitCode: 0,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        layer: 'bundle_activation',
+        status: 'passed',
+        sourceMatched: true,
+        reason: 'isolated activation passed',
+      }
+    })
+    const launcher = {
+      profileTargetAbsent: async () => true,
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => ({}),
+      verifyHost,
+    } as unknown as DshLauncher
+    const result = await new PluginInstaller(
+      ctx,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+      undefined,
+      async () => ({ evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' } }),
+      undefined,
+      'headless',
+    ).install({ reviewId: manual.id, targetProfile: 'web', retention: 'persistent' }, execution())
+
+    expect(install).toHaveBeenCalledTimes(2)
+    expect(verifyHost).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      loaded: false,
+      verified: false,
+      restartRequired: true,
+      preflight: { passed: true, verification: { layer: 'bundle_activation', status: 'passed' } },
+      verification: { layer: 'manual_runtime', status: 'pending_user_test' },
+    })
+  })
+
+  it('rehashes a managed local artifact after preflight before destination mutation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-drift-'))
+    temporary.push(root)
+    const local = attestedReview({
+      sourceSnapshot: {
+        kind: 'local',
+        path: path.join(root, 'source'),
+        baseReviewId: `review_${'b'.repeat(64)}`,
+        baseCommit: 'c'.repeat(40),
+        statusHash: 'd'.repeat(64),
+      },
+      installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
+    })
+    const store = new StateStore(root)
+    await store.put('reviews', local)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const install = vi.fn(async (
+      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
+    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    let artifact = ''
+    const launcher = {
+      profileTargetAbsent: async () => true,
+      materializeLocal: async (_review: ReviewRecord, artifactRoot: string) => {
+        await mkdir(artifactRoot, { recursive: true })
+        artifact = path.join(artifactRoot, 'package.tgz')
+        const bytes = Buffer.from('reviewed bytes')
+        await writeFile(artifact, bytes)
+        return {
+          installSpec: `file:${artifact.replaceAll('\\', '/')}`,
+          artifactRoot,
+          artifactSha256: sha256(bytes),
+        }
+      },
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => {
+        await writeFile(artifact, 'changed after preflight')
+        return hostPassedEvidence
+      },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+    )
+
+    await expect(installer.install({
+      reviewId: local.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/bytes changed between isolated preflight and destination install/i)
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[1]).toBe('headless')
+  })
+
+  it('refuses to overwrite an existing destination package before approval or preflight', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-existing-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const request = vi.fn(async () => 'allowed-once')
+    const ctx = { get: () => ({ request }) } as unknown as Context
+    const install = vi.fn()
+    const launcher = { profileTargetAbsent: async () => false, install } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
+    expect(request).not.toHaveBeenCalled()
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('rechecks the live profile owner immediately before any persistent mutation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-owner-drift-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const request = vi.fn(async () => 'allowed-once')
+    const ctx = { get: () => ({ request }) } as unknown as Context
+    const profileTargetAbsent = vi.fn(async () => true)
+    const launcher = { profileTargetAbsent } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+      undefined,
+      undefined,
+      undefined,
+      'headless',
+      async () => 'headless',
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/no longer matches the live DSH profile headless/i)
+    expect(profileTargetAbsent).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('does not pass provider, route, or expected-text into verifyHost', async () => {

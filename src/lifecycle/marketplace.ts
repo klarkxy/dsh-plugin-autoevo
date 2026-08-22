@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError, errorMessage } from '../errors.js'
+import { copy } from '../i18n.js'
 import type { DshLauncher } from './launcher.js'
 
 export const FIND_PLUGIN_PACKAGE = 'dsh-find-plugin'
@@ -19,23 +20,12 @@ export interface MarketplaceInstallResult {
   reason: string
 }
 
-function prefersChinese(text: string): boolean {
-  return /[\p{Script=Han}]/u.test(text)
-}
-
 export function marketplaceApprovalReason(requirement: string, profiles: string[]): string {
-  if (prefersChinese(requirement)) {
-    return `将把 DSH 插件市场 dsh-find-plugin 安装到 profile ${profiles.join('、')}。这是能力搜索用的基础设施，不是你要的那个能力。批准后会立刻安装，并尽量热加载到当前进程。`
-  }
-  return `Install the DSH plugin marketplace dsh-find-plugin into profile ${profiles.join(', ')}. This is search infrastructure, not the requested capability. After approval AutoEvo installs it and tries to hot-load it into this process.`
-}
-
-function copy(
-  requirement: string,
-  english: string,
-  chinese: string,
-): string {
-  return prefersChinese(requirement) ? chinese : english
+  return copy(
+    requirement,
+    `Install the DSH plugin marketplace dsh-find-plugin into profile ${profiles.join(', ')}. This is search infrastructure, not the requested capability. After approval AutoEvo installs it and tries to hot-load it into this process.`,
+    `将把 DSH 插件市场 dsh-find-plugin 安装到 profile ${profiles.join('、')}。这是能力搜索用的基础设施，不是你要的那个能力。批准后会立刻安装，并尽量热加载到当前进程。`,
+  )
 }
 
 async function requestApproval(
@@ -130,20 +120,23 @@ export async function installMarketplace(options: {
   ctx: Context
   config: RuntimeConfig
   launcher: DshLauncher
+  /** Canonical live-profile owner resolved from ctx.baseUrl by the Host. */
+  profile: string
   cwd: string
   exec: ToolRunContext
   requirement: string
 }): Promise<MarketplaceInstallResult> {
   const requirement = options.requirement
-  const profiles = await profilesWithAutoEvo(options.launcher, options.config.dshHome)
-  if (profiles.length === 0) {
+  const profiles = [options.profile]
+  if (!PROFILE_NAME.test(options.profile)
+    || !await options.launcher.hasProfileDependency(options.config.dshHome, options.profile, 'dsh-plugin-autoevo')) {
     return {
       status: 'no_profile',
-      profiles,
+      profiles: [],
       reason: copy(
         requirement,
-        'Could not find a DSH profile that already has AutoEvo; install dsh-find-plugin into that profile manually, then resolve again.',
-        '找不到已经安装 AutoEvo 的 DSH profile。请先手工把 dsh-find-plugin 装进该 profile，然后再解析。',
+        'The live DSH profile that owns this process does not record AutoEvo; refusing to select another profile for marketplace installation.',
+        '当前进程所属的 DSH profile 没有记录 AutoEvo；拒绝改选其它 profile 安装插件市场。',
       ),
     }
   }

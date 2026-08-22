@@ -32,6 +32,39 @@ function config(root: string): RuntimeConfig {
 }
 
 describe('Host-owned launcher verification', () => {
+  it('strips configured credentials from isolated preflight installation', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-install-'))
+    temporary.push(directory)
+    const previousOpenAi = process.env.OPENAI_API_KEY
+    const previousXai = process.env.XAI_API_KEY
+    process.env.OPENAI_API_KEY = 'secret-openai'
+    process.env.XAI_API_KEY = 'secret-xai'
+    const requests: CommandRequest[] = []
+    try {
+      const runner: CommandRunner = {
+        async run(request) {
+          requests.push(request)
+          return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        },
+      }
+      const launcher = new DshLauncher(runner, config(directory))
+      await launcher.install(directory, 'headless', 'github:acme/tool#commit', process.cwd(), undefined, {
+        forwardCredentials: false,
+      })
+      await launcher.install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+      expect(requests[0]?.env?.OPENAI_API_KEY).toBeUndefined()
+      expect(requests[0]?.env?.XAI_API_KEY).toBeUndefined()
+      expect(requests[1]?.env?.OPENAI_API_KEY).toBe('secret-openai')
+      expect(requests[1]?.env?.XAI_API_KEY).toBe('secret-xai')
+    } finally {
+      if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY
+      else process.env.OPENAI_API_KEY = previousOpenAi
+      if (previousXai === undefined) delete process.env.XAI_API_KEY
+      else process.env.XAI_API_KEY = previousXai
+    }
+  })
+
   it('boots bundle_activation without a task, route, credentials, or Agent prompt', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-host-'))
     temporary.push(directory)
@@ -46,9 +79,16 @@ describe('Host-owned launcher verification', () => {
           captured = request
           const patchIndex = request.argv.lastIndexOf('--patch')
           const overlay = JSON.parse(await readFile(request.argv[patchIndex + 1]!, 'utf8')) as Array<{
-            insert: Array<{ config: { receiptPath: string; layer?: string } }>
+            id?: string
+            disabled?: boolean
+            insert?: Array<{ config: { receiptPath: string; layer?: string } }>
           }>
-          const receiptPath = overlay[0]!.insert[0]!.config.receiptPath
+          expect(overlay).toEqual(expect.arrayContaining([
+            { id: 'headless-startup', disabled: true },
+            { id: 'headless-runner', disabled: true },
+          ]))
+          const observer = overlay.find((entry) => entry.insert)?.insert?.[0]
+          const receiptPath = observer!.config.receiptPath
           await writeFile(receiptPath, `${JSON.stringify({
             kind: 'host/complete',
             layer: 'bundle_activation',
@@ -110,8 +150,9 @@ describe('Host-owned launcher verification', () => {
         expect(overlayText).not.toContain('expectedProvider')
         expect(overlayText).not.toContain('xai-oauth')
         expect(overlayText).not.toContain('verificationTask')
-        const overlay = JSON.parse(overlayText) as Array<{ insert: Array<{ config: { receiptPath: string } }> }>
-        await writeFile(overlay[0]!.insert[0]!.config.receiptPath, `${JSON.stringify({
+        const overlay = JSON.parse(overlayText) as Array<{ insert?: Array<{ config: { receiptPath: string } }> }>
+        const observer = overlay.find((entry) => entry.insert)?.insert?.[0]
+        await writeFile(observer!.config.receiptPath, `${JSON.stringify({
           kind: 'host/complete',
           layer: 'tool_roundtrip',
           status: 'passed',

@@ -241,11 +241,13 @@ export class DshLauncher {
     return [this.config.dshCommand, ...this.config.dshCommandArgs, ...args]
   }
 
-  private childEnv(dshHome: string): NodeJS.ProcessEnv {
+  private childEnv(dshHome: string, forwardCredentials = true): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { DSH_HOME: dshHome }
-    for (const name of this.config.forwardedCredentialEnv) {
-      const value = process.env[name]
-      if (value !== undefined) env[name] = value
+    if (forwardCredentials) {
+      for (const name of this.config.forwardedCredentialEnv) {
+        const value = process.env[name]
+        if (value !== undefined) env[name] = value
+      }
     }
     return env
   }
@@ -256,12 +258,13 @@ export class DshLauncher {
     spec: string,
     cwd: string,
     signal?: AbortSignal,
+    options?: { forwardCredentials?: boolean },
   ): Promise<CommandResult> {
     await mkdir(dshHome, { recursive: true })
     const request = {
       argv: this.argv('plugin', '--profile', profile, 'add', '--save-exact', spec),
       cwd,
-      env: this.childEnv(dshHome),
+      env: this.childEnv(dshHome, options?.forwardCredentials !== false),
       timeoutMs: Math.max(this.config.commandTimeoutMs, 120_000),
     }
     return this.runner.run(signal ? { ...request, signal } : request)

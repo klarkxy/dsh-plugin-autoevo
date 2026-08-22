@@ -469,6 +469,15 @@ export interface InstallationRecord {
   installSpec: string
   ownedArtifactRoot?: string
   artifactSha256?: string
+  /** Crash-recovery journal for the two-phase isolated-preflight/install flow. */
+  installPhase?: 'prepared' | 'preflight_running' | 'preflight_passed' | 'destination_installing' | 'completed'
+  /** Isolated Host evidence. This never means the live destination process loaded the bundle. */
+  preflight?: {
+    profile: string
+    passed: boolean
+    sourceMatched: boolean
+    verification: VerificationEvidence
+  }
   /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
   installState?: InstallationState
   /** Fail-closed public outcome. Host-verified success is only `verified`. */

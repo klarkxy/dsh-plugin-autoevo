@@ -420,6 +420,15 @@ interface InstallationRecord {
   installSpec: string;
   ownedArtifactRoot?: string;
   artifactSha256?: string;
+  /** Crash-recovery journal for the two-phase isolated-preflight/install flow. */
+  installPhase?: 'prepared' | 'preflight_running' | 'preflight_passed' | 'destination_installing' | 'completed';
+  /** Isolated Host evidence. This never means the live destination process loaded the bundle. */
+  preflight?: {
+    profile: string;
+    passed: boolean;
+    sourceMatched: boolean;
+    verification: VerificationEvidence;
+  };
   /** Present on v0.1.1+ receipts. Older v0.1.0 receipts are inferred from `installed`. */
   installState?: InstallationState;
   /** Fail-closed public outcome. Host-verified success is only `verified`. */
@@ -1184,7 +1193,9 @@ declare class DshLauncher {
   materializeLocal(review: ReviewRecord, artifactRoot: string, signal?: AbortSignal): Promise<MaterializedLocalPackage>;
   private argv;
   private childEnv;
-  install(dshHome: string, profile: string, spec: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
+  install(dshHome: string, profile: string, spec: string, cwd: string, signal?: AbortSignal, options?: {
+    forwardCredentials?: boolean;
+  }): Promise<CommandResult>;
   remove(dshHome: string, profile: string, packageName: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   hasProfileDependency(dshHome: string, profile: string, packageName: string): Promise<boolean>;
   /** Verify that the target profile records the exact reviewed source and loads that bundle. */
@@ -1524,9 +1535,12 @@ declare class PluginInstaller {
   private readonly revalidate;
   private readonly authorizeInstall?;
   private readonly semanticVerifier?;
+  private readonly preflightProfile?;
+  private readonly resolveDestinationProfile?;
   private readonly hotLoader;
-  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined);
+  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined, preflightProfile?: string | undefined, resolveDestinationProfile?: (() => Promise<string>) | undefined);
   private removeOwnedDirectory;
+  private assertPersistentDestination;
   install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;
   private attachSemanticVerification;
 }
@@ -1794,6 +1808,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles(): Promise<string[]>;
+  private currentProfileOwner;
   private persistReviewed;
   releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void>;
   private waitingConfirmation;

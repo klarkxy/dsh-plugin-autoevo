@@ -2,6 +2,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolCallKind, type ToolCallView, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { FORGED_RESUME_HOST_KEYS } from './contracts.js'
 import { EvolutionError } from './errors.js'
+import { copyForArgs } from './i18n.js'
 import type { CapabilityEvolutionService } from './service.js'
 import { compactAgentView } from './workflow/agent-view.js'
 import type { WorkflowView } from './workflow/contracts.js'
@@ -27,8 +28,8 @@ function recordArgs(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-function genericPendingCard(title: string, kind: ToolCallKind): ToolCallView {
-  return { card: 'generic', title, kind }
+function genericPendingCard(args: unknown, english: string, chinese: string, kind: ToolCallKind): ToolCallView {
+  return { card: 'generic', title: copyForArgs(args, english, chinese), kind }
 }
 
 function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
@@ -37,38 +38,50 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   const action = typeof decision.action === 'string' ? decision.action : ''
   const navKind = typeof navigation.kind === 'string' ? navigation.kind : ''
   if (action === 'modify_this') {
-    return genericPendingCard('AutoEvo is improving and checking the plugin; this may take several minutes', 'edit')
+    return genericPendingCard(args, 'AutoEvo is improving and checking the plugin; this may take several minutes', 'AutoEvo 正在改进并检查插件，可能需要几分钟', 'edit')
   }
   if (action === 'create_new') {
-    return genericPendingCard('AutoEvo is creating a new plugin; this may take several minutes', 'edit')
+    return genericPendingCard(args, 'AutoEvo is creating a new plugin; this may take several minutes', 'AutoEvo 正在创建新插件，可能需要几分钟', 'edit')
   }
   if (action === 'use_this') {
-    return genericPendingCard('Installing and verifying the reviewed plugin; this may take several minutes', 'execute')
+    return genericPendingCard(args, 'Installing and verifying the reviewed plugin; this may take several minutes', '正在安装并验证已审查的插件，可能需要几分钟', 'execute')
   }
   if (action === 'stop' || navKind === 'stop') {
-    return genericPendingCard('Stopping this capability request', 'other')
+    return genericPendingCard(args, 'Stopping this capability request', '正在停止本次能力请求', 'other')
   }
   if (navKind === 'review_candidates') {
-    return genericPendingCard('Reviewing selected plugin candidates', 'read')
+    return genericPendingCard(args, 'Reviewing selected plugin candidates', '正在审查选中的插件候选', 'read')
   }
   if (navKind === 'search_more') {
-    return genericPendingCard('Searching for more plugin candidates', 'search')
+    return genericPendingCard(args, 'Searching for more plugin candidates', '正在搜索更多插件候选', 'search')
   }
   if (navKind === 'reuse_local') {
-    return genericPendingCard('Checking already-installed local capabilities', 'read')
+    return genericPendingCard(args, 'Checking already-installed local capabilities', '正在检查已安装的本地能力', 'read')
   }
-  return genericPendingCard('Continuing the capability workflow', 'other')
+  return genericPendingCard(args, 'Continuing the capability workflow', '正在继续能力工作流', 'other')
 }
 
 function presentCapabilityToolCall(name: string, args: unknown): ToolCallView {
-  if (name === 'capability_workflow') return genericPendingCard('Searching for reusable plugins', 'search')
-  if (name === 'capability_workflow_refine') return genericPendingCard('Refining plugin discovery', 'search')
-  if (name === 'capability_workflow_present') return genericPendingCard('Preparing the candidate shortlist', 'search')
-  if (name === 'capability_workflow_diagnose') return genericPendingCard('Diagnosing the capability workflow', 'other')
-  if (name === 'capability_workflow_recover') return genericPendingCard('Cleaning up and restarting plugin discovery', 'other')
-  if (name === 'plugin_remove') return genericPendingCard('Removing the selected plugin', 'delete')
+  if (name === 'capability_workflow') {
+    return genericPendingCard(args, 'Searching for reusable plugins', '正在搜索可复用插件', 'search')
+  }
+  if (name === 'capability_workflow_refine') {
+    return genericPendingCard(args, 'Refining plugin discovery', '正在补充插件发现', 'search')
+  }
+  if (name === 'capability_workflow_present') {
+    return genericPendingCard(args, 'Preparing the candidate shortlist', '正在准备候选短名单', 'search')
+  }
+  if (name === 'capability_workflow_diagnose') {
+    return genericPendingCard(args, 'Diagnosing the capability workflow', '正在诊断能力工作流', 'other')
+  }
+  if (name === 'capability_workflow_recover') {
+    return genericPendingCard(args, 'Cleaning up and restarting plugin discovery', '正在清理并重新发现插件', 'other')
+  }
+  if (name === 'plugin_remove') {
+    return genericPendingCard(args, 'Removing the selected plugin', '正在移除所选插件', 'delete')
+  }
   if (name === 'capability_workflow_resume') return presentResumePendingCard(recordArgs(args))
-  return genericPendingCard('Working on the capability request', 'other')
+  return genericPendingCard(args, 'Working on the capability request', '正在处理能力请求', 'other')
 }
 
 export function createTools(service: CapabilityEvolutionService): ToolDefinition[] {

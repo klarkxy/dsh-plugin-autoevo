@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -17,7 +17,9 @@ import type {
   VerifierRequest,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { copy } from '../i18n.js'
 import {
+  fixtureDigestFor,
   hostLayerSuccess,
   sanitizeHostVerificationEvidence,
   selectInstallVerificationLayer,
@@ -33,7 +35,7 @@ import {
   type SemanticVerifierHost,
 } from '../semantic-verifier.js'
 import { requirementHashFor } from '../semantic-reviewer.js'
-import { hashObject } from '../state/hashes.js'
+import { hashObject, sha256 } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 import { hotLoadInstalledBundle, type HotReloadAttempt } from './hot-load.js'
@@ -168,6 +170,39 @@ function failedInstallation(
   }
 }
 
+function installApprovalReason(input: {
+  requirement: string
+  packageName: string
+  targetProfile: string
+  retention: string
+  preflight: boolean
+  riskPrefix: string
+  fit: string
+  securityRisk: string
+  compatibility: string
+  scripts: string
+  findings: string
+}): string {
+  const actionPlan = copy(
+    input.requirement,
+    input.preflight
+      ? `Preflight the exact reviewed ${input.packageName} in an isolated headless profile, then install it into live profile ${input.targetProfile}`
+      : input.retention === 'temporary'
+        ? `Install the exact reviewed ${input.packageName} into isolated temporary profile ${input.targetProfile}`
+        : `Install the exact reviewed ${input.packageName} into profile ${input.targetProfile}`,
+    input.preflight
+      ? `先在隔离的无头 profile 中预检已审查的 ${input.packageName}，再安装到当前 profile ${input.targetProfile}`
+      : input.retention === 'temporary'
+        ? `将已审查的 ${input.packageName} 安装到隔离的临时 profile ${input.targetProfile}`
+        : `将已审查的 ${input.packageName} 安装到 profile ${input.targetProfile}`,
+  )
+  return copy(
+    input.requirement,
+    `${input.riskPrefix}${actionPlan} (${input.retention}). Review: fit=${input.fit}, risk=${input.securityRisk}, compatibility=${input.compatibility}, lifecycleScripts=${input.scripts}, findings=${input.findings}.`,
+    `${input.riskPrefix}${actionPlan}（${input.retention}）。审查：匹配=${input.fit}，风险=${input.securityRisk}，兼容性=${input.compatibility}，生命周期脚本=${input.scripts}，发现=${input.findings}。`,
+  )
+}
+
 async function requestApproval(
   ctx: Context,
   exec: ToolRunContext,
@@ -226,6 +261,17 @@ function outcomeAfterCommandFailure(installState: InstallationState): InstallOut
   return installState === 'not_installed' ? 'failed_absent' : 'recovery_required'
 }
 
+function ownedArtifactPath(installSpec: string): string {
+  if (!installSpec.startsWith('file:')) {
+    throw new EvolutionError('review_rejected', 'Managed local installation lost its owned file specification')
+  }
+  const candidate = installSpec.slice('file:'.length)
+  if (!path.isAbsolute(candidate)) {
+    throw new EvolutionError('unsafe_path', 'Managed local installation artifact is not an absolute path')
+  }
+  return candidate
+}
+
 export class PluginInstaller {
   private readonly hotLoader: ProfileHotLoader
 
@@ -238,17 +284,39 @@ export class PluginInstaller {
     private readonly authorizeInstall?: InstallAuthorizer,
     hotLoader?: ProfileHotLoader,
     private readonly semanticVerifier?: SemanticVerifierHost,
+    private readonly preflightProfile?: string,
+    private readonly resolveDestinationProfile?: () => Promise<string>,
   ) {
     this.hotLoader = hotLoader ?? hotLoadInstalledBundle
+    if (preflightProfile) validateProfile(preflightProfile)
   }
 
   private async removeOwnedDirectory(candidate: string, ownedRoot: string): Promise<void> {
-    await mkdir(ownedRoot, { recursive: true })
     try {
       const owned = await assertOwnedTrialPath(candidate, ownedRoot)
       await rm(owned, { recursive: true, force: false })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  private async assertPersistentDestination(input: InstallInput, packageName: string): Promise<void> {
+    if (input.retention !== 'persistent') return
+    if (this.resolveDestinationProfile) {
+      const owner = await this.resolveDestinationProfile()
+      if (owner !== input.targetProfile) {
+        throw new EvolutionError(
+          'invalid_input',
+          `Install target ${input.targetProfile} no longer matches the live DSH profile ${owner}; refusing profile mutation`,
+        )
+      }
+    }
+    if (this.preflightProfile
+      && !await this.launcher.profileTargetAbsent(this.config.dshHome, input.targetProfile, packageName)) {
+      throw new EvolutionError(
+        'invalid_input',
+        `Profile ${input.targetProfile} already owns ${packageName}; refusing to overwrite or remove a user-owned installation`,
+      )
     }
   }
 
@@ -277,6 +345,7 @@ export class PluginInstaller {
         'manual_runtime cannot be installed as a temporary trial; reconfirm persistent retention if a user test is intended.',
       )
     }
+    await this.assertPersistentDestination(input, packageName)
     const scripts = review.manifest.scripts.length > 0 ? review.manifest.scripts.join(', ') : 'none'
     const riskFindings = review.findings
       .filter((finding) => finding.severity === 'block' || review.securityRisk === 'high')
@@ -286,22 +355,18 @@ export class PluginInstaller {
       ? review.findings.slice(0, 8).map((finding) => `${finding.code}:${finding.severity}`).join(', ')
       : 'none'
     const riskPrefix = review.securityRisk === 'high'
-      ? `HIGH RISK (${riskFindings.join(', ') || review.securityRisk}). `
+      ? copy(
+          review.requirement,
+          `HIGH RISK (${riskFindings.join(', ') || review.securityRisk}). `,
+          `高风险（${riskFindings.join('、') || review.securityRisk}）。`,
+        )
       : ''
-    await requestApproval(
-      this.ctx,
-      exec,
-      `${riskPrefix}Install reviewed ${packageName} into profile ${input.targetProfile} (${input.retention}). Review: fit=${review.fit}, risk=${review.securityRisk}, compatibility=${review.compatibility.status}, lifecycleScripts=${scripts}, findings=${findings}.`,
-      'capability_workflow_resume',
-    )
-
     const id = `installation_${hashObject({ reviewId: review.id, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
     const createdAt = new Date().toISOString()
     const trialRoot = this.store.trialRoot(id)
     const trialsRoot = path.join(this.store.root, 'trials')
     const artifactsRoot = path.join(this.store.root, 'artifacts')
     const dshHome = input.retention === 'temporary' ? path.join(trialRoot, 'dsh-home') : this.config.dshHome
-    if (input.retention === 'temporary') await mkdir(dshHome, { recursive: true })
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
 
     let installSpec = strictSpec
@@ -329,6 +394,31 @@ export class PluginInstaller {
     }
     if (!installSpec) throw new EvolutionError('review_rejected', 'The review did not yield an immutable installation spec')
 
+    try {
+      await requestApproval(
+        this.ctx,
+        exec,
+        installApprovalReason({
+          requirement: review.requirement,
+          packageName,
+          targetProfile: input.targetProfile,
+          retention: input.retention,
+          preflight: Boolean(this.preflightProfile && input.retention === 'persistent'),
+          riskPrefix,
+          fit: review.fit,
+          securityRisk: review.securityRisk,
+          compatibility: review.compatibility.status,
+          scripts,
+          findings,
+        }),
+        'capability_workflow_resume',
+      )
+    } catch (error) {
+      if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
+      else if (ownedArtifactRoot) await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
+      throw error
+    }
+
     const provisional: InstallationRecord = {
       schemaVersion: 1,
       id,
@@ -342,6 +432,7 @@ export class PluginInstaller {
       installSpec,
       ...(ownedArtifactRoot ? { ownedArtifactRoot } : {}),
       ...(artifactSha256 ? { artifactSha256 } : {}),
+      installPhase: 'prepared',
       installState: 'unknown',
       installOutcome: 'pending',
       installed: false,
@@ -357,6 +448,128 @@ export class PluginInstaller {
       if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
       else if (ownedArtifactRoot) await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
       throw error
+    }
+
+    let destinationJournal = provisional
+    if (this.preflightProfile && input.retention === 'persistent') {
+      const preflightHome = path.join(trialRoot, 'preflight-dsh-home')
+      await mkdir(preflightHome, { recursive: true })
+      const running: InstallationRecord = { ...provisional, installPhase: 'preflight_running' }
+      await this.store.put('installations', running)
+      try {
+        await this.launcher.install(
+          preflightHome,
+          this.preflightProfile,
+          installSpec,
+          cwd,
+          exec.signal,
+          { forwardCredentials: false },
+        )
+      } catch (error) {
+        const failure = installFailure(error)
+        const preflightFailure = failedInstallation(review.manifest.expectedTools, 'failed_absent', failure)
+        await this.removeOwnedDirectory(trialRoot, trialsRoot)
+        const failedRecord: InstallationRecord = {
+          ...running,
+          installPhase: 'completed',
+          installState: 'not_installed',
+          installOutcome: 'failed_absent',
+          installed: false,
+          removed: true,
+          installFailure: failure,
+          preflight: {
+            profile: this.preflightProfile,
+            passed: false,
+            sourceMatched: false,
+            verification: preflightFailure,
+          },
+          verification: preflightFailure,
+        }
+        await this.store.put('installations', failedRecord)
+        return failedRecord
+      }
+
+      const preflightSourceMatched = await this.launcher.profileSourceMatches(
+        preflightHome,
+        this.preflightProfile,
+        packageName,
+        installSpec,
+      ).catch(() => false)
+      let preflightVerification: VerificationEvidence
+      let preflightLayer: Exclude<VerificationLayerKind, 'manual_runtime'> = 'bundle_activation'
+      if (!preflightSourceMatched) {
+        preflightVerification = sourceMismatchEvidence(review.manifest.expectedTools)
+      } else {
+        let declaredFixtures: Record<string, unknown> = {}
+        try {
+          declaredFixtures = await this.launcher.readInstalledVerificationFixtures(
+            preflightHome,
+            this.preflightProfile,
+            packageName,
+          )
+        } catch {
+          declaredFixtures = {}
+        }
+        const selection = selectInstallVerificationLayer({ review, declaredFixtures })
+        preflightLayer = selection.layer === 'manual_runtime' ? 'bundle_activation' : selection.layer
+        try {
+          preflightVerification = await this.launcher.verifyHost({
+            dshHome: preflightHome,
+            profile: this.preflightProfile,
+            cwd,
+            layer: preflightLayer,
+            packageName,
+            expectedTools: selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
+            fixtures: selection.layer === 'manual_runtime' ? [] : selection.fixtures,
+            fixtureDigest: selection.layer === 'manual_runtime' ? fixtureDigestFor([]) : selection.fixtureDigest,
+            ...(exec.signal ? { signal: exec.signal } : {}),
+          })
+        } catch {
+          preflightVerification = interruptedVerification(
+            selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
+            preflightLayer,
+          )
+        }
+      }
+      const preflightPassed = preflightSourceMatched && hostLayerSuccess({
+        sourceMatched: preflightSourceMatched,
+        layer: preflightLayer,
+        verification: preflightVerification,
+      })
+      await this.removeOwnedDirectory(trialRoot, trialsRoot)
+      const preflightRecord: InstallationRecord = {
+        ...running,
+        installPhase: preflightPassed ? 'preflight_passed' : 'completed',
+        ...(preflightPassed ? {} : { installState: 'not_installed' as const, installOutcome: 'failed_absent' as const }),
+        removed: !preflightPassed,
+        preflight: {
+          profile: this.preflightProfile,
+          passed: preflightPassed,
+          sourceMatched: preflightSourceMatched,
+          verification: preflightVerification,
+        },
+        verification: preflightPassed ? running.verification : preflightVerification,
+      }
+      await this.store.put('installations', preflightRecord)
+      if (!preflightPassed) return preflightRecord
+      destinationJournal = preflightRecord
+    }
+
+    if (review.sourceSnapshot.kind === 'local' && artifactSha256) {
+      const currentArtifactSha256 = sha256(await readFile(ownedArtifactPath(installSpec)))
+      if (currentArtifactSha256 !== artifactSha256) {
+        throw new EvolutionError('review_expired', 'Managed source package bytes changed between isolated preflight and destination install', {
+          expectedArtifactSha256: artifactSha256,
+          actualArtifactSha256: currentArtifactSha256,
+        })
+      }
+    }
+    // The isolated phase can take minutes. Recheck ownership and absence at
+    // the actual destination mutation boundary to close profile/TOCTOU drift.
+    await this.assertPersistentDestination(input, packageName)
+    destinationJournal = { ...destinationJournal, installPhase: 'destination_installing' }
+    if (this.preflightProfile && input.retention === 'persistent') {
+      await this.store.put('installations', destinationJournal)
     }
 
     try {
@@ -377,7 +590,8 @@ export class PluginInstaller {
       }
       const installOutcome = outcomeAfterCommandFailure(installState)
       const failedRecord: InstallationRecord = {
-        ...provisional,
+        ...destinationJournal,
+        installPhase: 'completed',
         installState,
         installOutcome,
         installed: false,
@@ -457,7 +671,7 @@ export class PluginInstaller {
     const activated = mechanical && layer === 'bundle_activation' && status === 'passed'
     const awaitingUserTest = mechanical && layer === 'manual_runtime' && status === 'pending_user_test'
     const nonFailure = verified || activated || awaitingUserTest
-    const loaded = sourceMatched && (
+    const mechanicallyLoaded = sourceMatched && (
       verified
       || activated
       || awaitingUserTest
@@ -498,11 +712,17 @@ export class PluginInstaller {
       && review.recommendation === 'use' && Boolean(review.license)
     const success = nonFailure && !runtimeRecoveryRequired
     const record: InstallationRecord = {
-      ...provisional,
+      ...destinationJournal,
+      installPhase: 'completed',
       installState: failedTemporaryTrialRemoved ? 'not_installed' : 'installed',
       installOutcome,
       installed: success,
-      loaded: success ? loaded : false,
+      // Persistent installs are "loaded" only when the destination process
+      // itself activated the bundle. An isolated child or pending user test
+      // cannot make that claim for the live profile.
+      loaded: success
+        ? (input.retention === 'persistent' ? hotReload?.loaded === true : mechanicallyLoaded)
+        : false,
       verified: verified && !runtimeRecoveryRequired,
       restartRequired: input.retention === 'persistent' && success && !hotReload?.loaded,
       ...(hotReload ? { hotReload } : {}),
@@ -643,4 +863,5 @@ export const _testing = {
   expectedGithubInstallSpec,
   outcomeAfterCommandFailure,
   selectInstallVerificationLayer,
+  installApprovalReason,
 }

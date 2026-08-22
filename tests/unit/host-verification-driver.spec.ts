@@ -347,6 +347,10 @@ describe('Host verification driver', () => {
       observerUrl: 'file:///observer.js',
     })
     const text = JSON.stringify(overlay)
+    expect(overlay).toEqual(expect.arrayContaining([
+      { id: 'headless-startup', disabled: true },
+      { id: 'headless-runner', disabled: true },
+    ]))
     expect(text).toContain('tool_roundtrip')
     expect(text).not.toContain('expectedRoute')
     expect(text).not.toContain('expectedProvider')

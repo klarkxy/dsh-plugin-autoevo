@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -158,7 +159,9 @@ function capableSandbox(_stateDir: string) {
 
 function localCtx(stateDir: string): Context {
   const sandbox = capableSandbox(stateDir)
+  const baseUrl = testProfileBase(stateDir)
   return {
+    baseUrl,
     tools: {
       schemas: () => [{ name: 'pwsh', description: 'Run a PowerShell command' }],
       get: () => undefined,
@@ -177,7 +180,9 @@ function localCtx(stateDir: string): Context {
 
 function marketplaceCtx(results: Array<{ name: string, url: string, description: string, stars?: number }>, stateDir: string): Context {
   const sandbox = capableSandbox(stateDir)
+  const baseUrl = testProfileBase(stateDir)
   return {
+    baseUrl,
     tools: {
       schemas: () => [],
       get: (name: string) => name === 'find_dsh_plugin' ? { name } : undefined,
@@ -192,6 +197,13 @@ function marketplaceCtx(results: Array<{ name: string, url: string, description:
     },
     get: (name: string) => (name === 'sandbox' ? sandbox : undefined),
   } as unknown as Context
+}
+
+function testProfileBase(stateDir: string): string {
+  const baseUrl = path.join(stateDir, 'dsh-home', 'profiles', 'web')
+  mkdirSync(baseUrl, { recursive: true })
+  writeFileSync(path.join(baseUrl, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dependencies: {} }))
+  return baseUrl
 }
 
 function ghRunner(files: Record<string, string>) {

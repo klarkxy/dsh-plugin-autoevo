@@ -102,6 +102,32 @@ describe('AgentWorkflowViewV2', () => {
     expect(exhausted.allowed_actions.map((action) => action.action)).toEqual(['capability_workflow_present'])
   })
 
+  it('uses English user-facing meanings when the requirement has no Han characters', () => {
+    const workflow = baseWorkflow('await_discovery')
+    workflow.requirement = 'Use a Grok subscription in DSH'
+    workflow.discoveryPool = [candidate]
+    workflow.discoveryBudget = {
+      refinementRoundsUsed: 0,
+      refinementQueriesUsed: [],
+      explicitRepositories: [],
+      maxRefinementRounds: 2,
+      maxRefinementQueries: 5,
+      maxCandidates: 20,
+    }
+    const card = compactAgentView({
+      workflow,
+      resolution: { ...resolution(), requirement: workflow.requirement },
+      lifecycleState: 'searched',
+    })
+    expect(card.allowed_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'capability_workflow_present',
+        user_facing_meaning: 'Form the final candidate shortlist',
+      }),
+    ]))
+    expect(JSON.stringify(card.allowed_actions)).not.toMatch(/[\u4e00-\u9fff]/u)
+  })
+
   it('shows profile installation evidence without claiming runtime state or offering remote refinement', () => {
     const workflow = baseWorkflow('await_discovery')
     const local = {

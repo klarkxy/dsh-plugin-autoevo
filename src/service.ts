@@ -27,17 +27,17 @@ import {
   authorizationFromDecision,
   newDecisionReceipt,
   nextStepForAuthorization,
-  prefersChinese,
   reviewIdentity,
 } from './lifecycle/decide.js'
+import { prefersChinese } from './i18n.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
-import { installMarketplace, profilesWithAutoEvo } from './lifecycle/marketplace.js'
+import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import { DshManagedChildHost, type ManagedChildHost, type ManagedChildResult } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
-import { activeProfileFromArgv } from './resolver/profile.js'
+import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
   hostDirectUseBoundary,
@@ -640,6 +640,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
       },
       undefined,
       this.semanticVerifier,
+      'headless',
+      () => this.currentProfileOwner(),
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
     this.engine = new WorkflowEngine(store, creationGuard, this)
@@ -679,7 +681,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
-    const activeProfile = activeProfileFromArgv(process.argv.slice(2))
+    const activeProfile = await this.currentProfileOwner().catch(() => undefined)
     const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec), {
       dshHome: this.config.dshHome,
       ...(activeProfile ? { activeProfile } : {}),
@@ -800,10 +802,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
     resolution: ResolutionRecord
     market: MarketplaceStepResult
   }> {
+    const profile = await this.currentProfileOwner()
     const setup = await installMarketplace({
       ctx: this.ctx,
       config: this.config,
       launcher: this.launcher,
+      profile,
       cwd: resolution.cwd,
       exec: asToolExec(exec),
       requirement: resolution.requirement,
@@ -1490,7 +1494,15 @@ export class CapabilityEvolutionService implements WorkflowHost {
   }
 
   listInstallProfiles(): Promise<string[]> {
-    return profilesWithAutoEvo(this.launcher, this.config.dshHome)
+    return this.currentProfileOwner().then((profile) => [profile])
+  }
+
+  private currentProfileOwner(): Promise<string> {
+    return resolveCurrentProfileOwner({
+      dshHome: this.config.dshHome,
+      baseUrl: Reflect.get(this.ctx as object, 'baseUrl'),
+      argv: process.argv.slice(2),
+    })
   }
 
   private async persistReviewed(

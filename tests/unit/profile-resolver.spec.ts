@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { resolveLocalCapabilities } from '../../src/resolver/local.js'
-import { activeProfileFromArgv, resolveProfilePluginCapabilities } from '../../src/resolver/profile.js'
+import {
+  activeProfileFromArgv,
+  resolveCurrentProfileOwner,
+  resolveProfilePluginCapabilities,
+} from '../../src/resolver/profile.js'
 
 const temporary: string[] = []
 const PACKAGE = '@dsh-external/dsh-conv-export'
@@ -59,6 +63,31 @@ describe('activeProfileFromArgv', () => {
     expect(activeProfileFromArgv(['--profile', '../web'])).toBeUndefined()
     expect(activeProfileFromArgv(['--profile=web/child'])).toBeUndefined()
     expect(activeProfileFromArgv(['--profile=web', '--profile=headless'])).toBeUndefined()
+  })
+})
+
+describe('resolveCurrentProfileOwner', () => {
+  it('uses the profile that owns the live base URL even when argv has no profile flag', async () => {
+    const dshHome = await profileHome()
+    await expect(resolveCurrentProfileOwner({
+      dshHome,
+      baseUrl: path.join(dshHome, 'profiles', 'web'),
+      argv: ['web'],
+    })).resolves.toBe('web')
+  })
+
+  it('fails closed when argv conflicts with the live owner or the base URL is outside profiles', async () => {
+    const dshHome = await profileHome()
+    await expect(resolveCurrentProfileOwner({
+      dshHome,
+      baseUrl: path.join(dshHome, 'profiles', 'web'),
+      argv: ['--profile', 'headless'],
+    })).rejects.toThrow(/conflicts with the profile that owns/i)
+    await expect(resolveCurrentProfileOwner({
+      dshHome,
+      baseUrl: dshHome,
+      argv: [],
+    })).rejects.toThrow(/outside configured DSH_HOME\/profiles/i)
   })
 })
 

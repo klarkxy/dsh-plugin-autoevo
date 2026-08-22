@@ -20,6 +20,7 @@ import {
 import { hashObject } from './state/hashes.js'
 
 const HOST_OVERLAY_ID_PREFIX = 'autoevo-host-verification-'
+const HEADLESS_APP_ROW_IDS = ['headless-startup', 'headless-runner'] as const
 
 /** OS/runtime keys a verification child may inherit. Credentials are never listed. */
 export const VERIFICATION_ENV_ALLOWLIST = [
@@ -384,8 +385,15 @@ export function hostVerificationOverlay(input: {
 }): unknown[] {
   const fixtures: Record<string, Record<string, unknown>> = {}
   for (const item of input.fixtures) fixtures[item.tool] = item.arguments
-  return [{
-    insert: [{
+  return [
+    // DSH 0.1.1-rc.1 made the headless app reject an empty command line before
+    // the Host observer can finish its no-Agent activation probe. Disable only
+    // the two app-driver rows; the base Host, Loader, candidate bundle, and
+    // tool runtime still mount normally. This preserves the no-task/no-model
+    // verification boundary instead of satisfying the CLI with a fake prompt.
+    ...HEADLESS_APP_ROW_IDS.map((id) => ({ id, disabled: true })),
+    {
+      insert: [{
       id: `${HOST_OVERLAY_ID_PREFIX}${randomUUID()}`,
       name: input.observerUrl,
       config: {
@@ -396,8 +404,9 @@ export function hostVerificationOverlay(input: {
         fixtureDigest: input.fixtureDigest,
         fixturesJson: JSON.stringify(fixtures),
       },
-    }],
-  }]
+      }],
+    },
+  ]
 }
 
 function appendReceipt(receiptPath: string, event: Record<string, unknown>): void {

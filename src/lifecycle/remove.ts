@@ -5,25 +5,53 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
 import type { InstallationRecord, RemoveInput } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { copy } from '../i18n.js'
 import { assertSafePackageName } from '../package-name.js'
 import { sha256 } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 
-async function requestRemovalApproval(ctx: Context, exec: ToolRunContext, record: InstallationRecord): Promise<void> {
+export function removalApprovalReason(requirement: string, record: InstallationRecord): string {
+  return copy(
+    requirement,
+    `Remove reviewed installation ${record.id} from profile ${record.targetProfile} (${record.retention}).`,
+    `将已审查的安装 ${record.id} 从 profile ${record.targetProfile} 移除（${record.retention}）。`,
+  )
+}
+
+async function requestRemovalApproval(
+  ctx: Context,
+  store: StateStore,
+  exec: ToolRunContext,
+  record: InstallationRecord,
+): Promise<void> {
   const approval = ctx.get('approval')
   if (!approval || !exec.agent) {
     throw new EvolutionError('approval_required', 'A live DSH approval service and Agent turn are required')
   }
+  const requirement = await removalRequirement(store, record)
   const outcome = await approval.request({
     agent: exec.agent,
     toolName: 'plugin_remove',
     callId: exec.callId,
-    reason: `Remove reviewed installation ${record.id} from profile ${record.targetProfile} (${record.retention}).`,
+    reason: removalApprovalReason(requirement, record),
     signal: exec.signal,
   })
   if (outcome !== 'allowed-once') {
     throw new EvolutionError('approval_required', `The removal was not approved (${outcome})`, { outcome })
+  }
+}
+
+async function removalRequirement(store: StateStore, record: InstallationRecord): Promise<string> {
+  try {
+    return (await store.getReview(record.reviewId)).requirement
+  } catch {
+    if (!record.workflowId) return ''
+    try {
+      return (await store.getWorkflow(record.workflowId)).requirement
+    } catch {
+      return ''
+    }
   }
 }
 
@@ -61,7 +89,7 @@ export class PluginRemover {
     const packageName = record.retention === 'persistent'
       ? assertSafePackageName(record.packageName)
       : undefined
-    await requestRemovalApproval(this.ctx, exec, record)
+    await requestRemovalApproval(this.ctx, this.store, exec, record)
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
     if (record.retention === 'persistent') {
       const dependencyPresent = await this.launcher.hasProfileDependency(record.dshHome, record.targetProfile, packageName!)

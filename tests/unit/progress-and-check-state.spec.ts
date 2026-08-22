@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { rememberRequirementLanguage, _testing as i18nTesting } from '../../src/i18n.js'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { AUTOEVO_AUTONOMY_CONTRACT } from '../../src/evolution-mode.js'
 import { isDirectlyUsableReview } from '../../src/review/direct-use.js'
@@ -17,6 +18,10 @@ const WORKFLOW_ID = 'workflow_9c79a3d3f76bb689ceec218f'
 const INTERRUPT_ID = 'interrupt_fcce9d43-99f0-4a0b-a015-6fc4fd519bf2'
 const CANDIDATE_ID = 'candidate_secret_repo_identity'
 const INSTALLATION_ID = 'installation_secret_receipt'
+
+afterEach(() => {
+  i18nTesting.clearLanguageCache()
+})
 
 function tool(name: string) {
   const found = createTools({} as CapabilityEvolutionService).find((item) => item.name === name)
@@ -273,6 +278,25 @@ describe('tool pending presentation', () => {
       kind: 'delete',
       title: 'Removing the selected plugin',
     })
+  })
+
+  it('shows Chinese pending titles for a Chinese requirement', () => {
+    expect(presented('capability_workflow', { requirement: '我需要一个科学计算器' })).toMatchObject({
+      card: 'generic',
+      kind: 'search',
+      title: '正在搜索可复用插件',
+    })
+    rememberRequirementLanguage(WORKFLOW_ID, '我需要一个科学计算器')
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'use_this', candidate_id: CANDIDATE_ID },
+    }).title).toBe('正在安装并验证已审查的插件，可能需要几分钟')
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'modify_this', candidate_id: CANDIDATE_ID },
+    }).title).toBe('AutoEvo 正在改进并检查插件，可能需要几分钟')
   })
 
   it('never includes supplied machine IDs, paths, decision tokens, or raw args', () => {

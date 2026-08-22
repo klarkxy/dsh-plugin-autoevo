@@ -99,6 +99,7 @@ describe('marketplace bootstrap', () => {
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'web',
       cwd: dshHome,
       exec,
       requirement: '我需要一个能在dsh里调用codex的能力。',
@@ -126,6 +127,7 @@ describe('marketplace bootstrap', () => {
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'web',
       cwd: dshHome,
       exec,
       requirement: '我需要一个能在dsh里调用codex的能力。',
@@ -150,6 +152,7 @@ describe('marketplace bootstrap', () => {
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'web',
       cwd: dshHome,
       exec,
       requirement: '我需要一个能在dsh里调用codex的能力。',
@@ -188,6 +191,7 @@ describe('marketplace bootstrap', () => {
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'web',
       cwd: dshHome,
       exec,
       requirement: '我需要一个能在dsh里调用codex的能力。',
@@ -214,6 +218,7 @@ describe('marketplace bootstrap', () => {
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'web',
       cwd: dshHome,
       exec,
       requirement: '我需要一个能在dsh里调用codex的能力。',
@@ -224,7 +229,7 @@ describe('marketplace bootstrap', () => {
     expect(result.reason).toContain(`diagnostic=${'a'.repeat(64)}`)
   })
 
-  it('hot-loads from a successful profile when another profile install fails', async () => {
+  it('never falls back to another profile when the live owner lacks AutoEvo', async () => {
     const dshHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-market-multi-'))
     temporary.push(dshHome)
     for (const profile of ['good', 'stale']) {
@@ -235,50 +240,27 @@ describe('marketplace bootstrap', () => {
         dependencies: { 'dsh-plugin-autoevo': 'link:.' },
       }), 'utf8')
     }
-    const pluginDir = path.join(dshHome, 'profiles', 'good', 'node_modules', FIND_PLUGIN_PACKAGE)
-    await mkdir(path.join(pluginDir, 'lib'), { recursive: true })
-    await writeFile(path.join(pluginDir, 'package.json'), JSON.stringify({
-      name: FIND_PLUGIN_PACKAGE,
-      type: 'module',
-      main: './lib/index.js',
-    }), 'utf8')
-    await writeFile(path.join(pluginDir, 'lib', 'index.js'), 'export function apply(ctx) { ctx.tools.register({ name: "find_dsh_plugin" }) }\n', 'utf8')
-
-    const installed = new Set<string>()
-    const registered = new Set<string>()
-    const tools = {
-      get: vi.fn((name: string) => registered.has(name) ? { name } : undefined),
-      register: vi.fn((tool: { name: string }) => { registered.add(tool.name) }),
-    }
-    const ctx = {
-      get: vi.fn(() => ({ request: vi.fn(async () => 'allowed-once') })),
-      plugin: vi.fn((plugin: { apply?(input: { tools: typeof tools }): void }) => plugin.apply?.({ tools })),
-      tools,
-    } as unknown as Context
+    const ctx = { get: vi.fn(() => ({ request: vi.fn(async () => 'allowed-once') })) } as unknown as Context
     const launcher = {
-      hasProfileDependency: vi.fn(async (_home: string, profile: string, name: string) => {
-        if (name === 'dsh-plugin-autoevo') return true
-        return installed.has(profile)
-      }),
-      install: vi.fn(async (_home: string, profile: string) => {
-        if (profile === 'stale') throw new EvolutionError('command_failed', 'stale profile failed', { exitCode: 1 })
-        installed.add(profile)
-        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
-      }),
+      hasProfileDependency: vi.fn(async (_home: string, profile: string, name: string) => (
+        name === 'dsh-plugin-autoevo' && profile !== 'stale'
+      )),
+      install: vi.fn(),
     } as unknown as DshLauncher
 
     const result = await installMarketplace({
       ctx,
       config: { ...config, dshHome },
       launcher,
+      profile: 'stale',
       cwd: dshHome,
       exec,
       requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
     })
 
-    expect(result.status).toBe('loaded')
-    expect(result.profiles).toContain('good')
-    expect(result.reason).toContain('stale')
-    expect(result.reason).toContain('安装仍失败')
+    expect(result.status).toBe('no_profile')
+    expect(result.profiles).toEqual([])
+    expect(result.reason).toContain('拒绝改选其它 profile')
+    expect(launcher.install).not.toHaveBeenCalled()
   })
 })

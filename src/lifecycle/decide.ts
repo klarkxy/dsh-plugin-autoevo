@@ -11,12 +11,11 @@ import type {
 } from '../contracts.js'
 import type { CreationGuard } from '../creation-guard.js'
 import { EvolutionError } from '../errors.js'
+import { prefersChinese } from '../i18n.js'
 import { hashObject } from '../state/hashes.js'
 import type { InterruptPayload, ValidatedResume, WorkflowPendingInstall } from '../workflow/contracts.js'
 
-export function prefersChinese(text: string): boolean {
-  return /[\p{Script=Han}]/u.test(text)
-}
+export { prefersChinese }
 
 export function reviewIdentity(review: ReviewRecord): string {
   return review.sourceSnapshot.kind === 'github'

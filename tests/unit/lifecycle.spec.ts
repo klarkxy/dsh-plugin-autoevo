@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -278,7 +278,7 @@ describe('lifecycle validation', () => {
       },
     })
     expect(result.verification.reason).toContain(`Diagnostic sha256: ${'b'.repeat(64)}`)
-    await expect(readdir(path.join(root, 'trials'))).resolves.toEqual([])
+    await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('reconciles a persistent dependency after an ambiguous install-command failure', async () => {
@@ -376,7 +376,7 @@ describe('lifecycle validation', () => {
     expect(result).toMatchObject({
       installOutcome: 'activated',
       installed: true,
-      loaded: true,
+      loaded: false,
       verified: false,
       removed: false,
       verification: { layer: 'bundle_activation', status: 'passed' },
@@ -444,7 +444,7 @@ describe('lifecycle validation', () => {
     expect(result).toMatchObject({
       installOutcome: 'awaiting_user_test',
       installed: true,
-      loaded: true,
+      loaded: false,
       verified: false,
       removed: false,
       verification: { layer: 'manual_runtime', status: 'pending_user_test' },
