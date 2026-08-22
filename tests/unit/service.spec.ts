@@ -52,9 +52,9 @@ describe('managed modification instruction', () => {
       createdAt: '2026-08-18T00:00:00.000Z',
     }]
 
-    const task = _testing.modificationTask(record, selected)
-    expect(task).toContain(`original capability requirement: ${record.requirement}`)
-    expect(task).toContain('Authenticated user modification instruction: 在这个上改：支持勾选多段指定对话，再拼成一张长截图。先不要装。')
+    const order = _testing.modificationWorkOrder(record, selected, 'C:/managed/plugin')
+    expect(order.requirement).toBe(record.requirement)
+    expect(order.acceptanceTargets.join(' ')).toContain('Apply the authenticated user modification instruction: 在这个上改：支持勾选多段指定对话，再拼成一张长截图。先不要装。')
   })
 
   it('passes bounded Host review blockers without prescribing an implementation path', () => {
@@ -72,12 +72,12 @@ describe('managed modification instruction', () => {
       source: 'package.json',
       detail: 'install script is present',
     }]
-    const task = _testing.modificationTask(record, selected)
-    expect(task).toContain('Declared peers exclude runtime 0.1.0-rc.6.')
-    expect(task).toContain('multi-part capture')
-    expect(task).toContain('unsafe_script at package.json: install script is present')
-    expect(task).toContain('choose the implementation path yourself')
-    expect(task).not.toContain('edit package.json')
+    const order = _testing.modificationWorkOrder(record, selected, 'C:/managed/plugin')
+    expect(order.blockers.map((item) => item.summary).join(' ')).toContain('Declared peers exclude runtime 0.1.0-rc.6.')
+    expect(order.blockers.map((item) => item.summary).join(' ')).toContain('multi-part capture')
+    expect(order.blockers.map((item) => item.summary).join(' ')).toContain('unsafe_script at package.json: install script is present')
+    expect(order.acceptanceTargets.join(' ')).toContain('choose the implementation path')
+    expect(JSON.stringify(order)).not.toContain('edit package.json')
   })
 
   it('compares stable baseline blockers and separates resolved, unresolved, and introduced targets', () => {

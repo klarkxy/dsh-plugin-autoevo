@@ -313,6 +313,41 @@ describe('AgentWorkflowViewV2', () => {
     expect(JSON.stringify(card)).not.toContain('private-child-session')
   })
 
+  it('exposes only Creator verified or unavailable and never digest, session, path, or control fields', () => {
+    const workflow = baseWorkflow('await_confirmation')
+    workflow.creatorRecords = [{
+      operation: 'create',
+      status: 'verified',
+      createdAt: '2026-08-22T00:00:00.000Z',
+      receipt: {
+        contractVersion: 1,
+        presetId: 'cordis',
+        compositionSha256: 'deadbeefcreatorcompositionhash'.padEnd(64, '0'),
+        requiredToolCatalogDigest: 'feedfacecatalogdigestvalue'.padEnd(64, '1'),
+        childSessionId: 'secret-creator-child-session',
+      },
+    }]
+    workflow.pendingPath = 'C:/Users/secret/managed-source'
+    const card = compactAgentView({ workflow, resolution: resolution(), lifecycleState: 'awaiting_confirmation' })
+    expect(card.facts.creator).toEqual({ status: 'verified' })
+    const serialized = JSON.stringify(card)
+    expect(serialized).not.toContain('deadbeefcreatorcompositionhash')
+    expect(serialized).not.toContain('feedfacecatalogdigestvalue')
+    expect(serialized).not.toContain('secret-creator-child-session')
+    expect(serialized).not.toContain('C:/Users/secret/managed-source')
+    expect(serialized).not.toContain('contractVersion')
+    expect(serialized).not.toContain('compositionSha256')
+    expect(serialized).not.toContain('requiredToolCatalogDigest')
+    expect(serialized).not.toContain('childSessionId')
+
+    const unavailable = compactAgentView({
+      workflow: { ...workflow, creatorRecords: [{ operation: 'modify', status: 'unavailable', createdAt: '2026-08-22T00:00:00.000Z' }] },
+      resolution: resolution(),
+      lifecycleState: 'awaiting_confirmation',
+    })
+    expect(unavailable.facts.creator).toEqual({ status: 'unavailable' })
+  })
+
   it('redacts bounded failure facts and only advertises tools that are actually callable', () => {
     const workflow = baseWorkflow('recovery_required')
     workflow.status = 'completed'

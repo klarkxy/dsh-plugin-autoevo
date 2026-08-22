@@ -612,6 +612,58 @@ interface CommandRunner {
   resolveExecutable?(command: string, signal?: AbortSignal): Promise<string>;
 }
 //#endregion
+//#region src/creator-foundation.d.ts
+declare const CREATOR_PRESET_ID: "cordis";
+declare const CREATOR_FOUNDATION_CONTRACT_VERSION: 1;
+type CreatorOperation = 'create' | 'modify' | 'correct';
+type CreatorStatus = 'verified' | 'unavailable';
+interface CreatorWorkOrder {
+  operation: CreatorOperation;
+  requirement: string;
+  baselineReview?: {
+    reviewId: string;
+  };
+  blockers: ReadonlyArray<{
+    key: string;
+    kind: string;
+    summary: string;
+  }>;
+  allowedScope: {
+    cwd: string;
+  };
+  acceptanceTargets: readonly string[];
+}
+interface CreatorFoundationReceipt {
+  contractVersion: typeof CREATOR_FOUNDATION_CONTRACT_VERSION;
+  presetId: typeof CREATOR_PRESET_ID;
+  compositionSha256: string;
+  requiredToolCatalogDigest: string;
+  childSessionId: string;
+}
+interface CreatorRecord {
+  operation: CreatorOperation;
+  status: CreatorStatus;
+  createdAt: string;
+  receipt?: CreatorFoundationReceipt;
+}
+interface CreatorCatalog {
+  tools: string[];
+  skills: string[];
+}
+interface CreatorFoundationPreflight {
+  presetId: typeof CREATOR_PRESET_ID;
+  compositionSha256: string;
+  requiredToolCatalogDigest: string;
+  standingScope: unknown;
+  catalog: CreatorCatalog;
+}
+interface CreatorFoundation {
+  preflight(input?: {
+    signal?: AbortSignal;
+    parentCtx?: unknown;
+  }): Promise<CreatorFoundationPreflight>;
+}
+//#endregion
 //#region src/workflow/lifecycle.d.ts
 /**
  * Public workflow lifecycle presentation. Internal `cursor` names stay on the
@@ -838,6 +890,8 @@ interface WorkflowRecord {
   pendingInstall?: WorkflowPendingInstall;
   managedSourceId?: string;
   modificationOutcome?: ModificationOutcome;
+  /** Optional bounded Creator foundation records. Absent on schemaVersion 1/2 legacy JSON. */
+  creatorRecords?: CreatorRecord[];
   lastFailure?: WorkflowFailure;
   lastDiagnosis?: WorkflowDiagnosis;
   invalidResumeAttempt?: InvalidResumeAttempt;
@@ -1593,13 +1647,15 @@ declare function probeWorkspaceWriteSandbox(stack: LiveSandboxStack | undefined,
 interface ManagedChildRequest {
   parent: Agent;
   cwd: string;
-  task: string;
+  workOrder: CreatorWorkOrder;
+  preflight?: CreatorFoundationPreflight;
   signal?: AbortSignal;
 }
 interface ManagedChildResult {
   sessionId: string;
   taskResult: string;
   sandbox: Awaited<ReturnType<typeof probeWorkspaceWriteSandbox>>;
+  creator: CreatorFoundationReceipt;
 }
 interface ManagedChildHost {
   run(request: ManagedChildRequest): Promise<ManagedChildResult>;
@@ -1750,7 +1806,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly managedChild;
   private readonly semanticReviewer;
   private readonly semanticVerifier;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, semanticReviewer?: SemanticReviewerHost, semanticVerifier?: SemanticVerifierHost);
+  private readonly creatorFoundation;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, semanticReviewer?: SemanticReviewerHost, semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -1788,6 +1845,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
   private requireParentAgent;
+  private rememberCreator;
+  private preflightCreator;
   private runManagedChild;
   private preserveCancelledManagedWork;
   private reviewAndFreezeManagedSource;

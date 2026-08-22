@@ -90,7 +90,7 @@ export function interruptPayload(
       return {
         kind: 'await_modify_work',
         options: optionsFor('await_modify_work', resolution, reviews, extras.workflow),
-        facts: modifyWorkFacts(review),
+        facts: modifyWorkFacts(review, extras.workflow),
       }
     }
     if (!extras.pendingPath) {
@@ -99,7 +99,7 @@ export function interruptPayload(
     return {
       kind: 'await_modify_work',
       options: optionsFor('await_modify_work', resolution, reviews, extras.workflow),
-      facts: createWorkFacts(extras.pendingPath),
+      facts: createWorkFacts(extras.workflow),
     }
   }
   throw new EvolutionError('invalid_input', 'Not an interrupt node', { cursor })

@@ -52,7 +52,7 @@ capability_workflow
                            plugin_remove
 ```
 
-父会话复用创造模式官方工具。执行层只拒绝 `cordis_define(kind:new)` 和未审查的直接装卸。`create_new` / `modify_this` 只在 Host 拉起的托管 git 源子会话中继续（`sourceDir` 默认 `<stateDir>/sources`，sandbox 模式 `workspace-write`）。Windows 上为完整性导向的部分隔离。
+能力进化 preset 不继承创造模式。父会话负责发现、审查、授权、安装和恢复治理；`create_new` / `modify_this` / 定向纠错只在 Host 拉起的官方 `cordis` 创造模式子会话中施工（`sourceDir` 默认 `<stateDir>/sources`，sandbox 模式 `workspace-write`），绝不回退到 `code`。Creator Foundation 在克隆、初始化或写入托管源码前解析并挂载验证官方 system preset、实际 scoped 工具/技能目录和运行前提。Windows 上为完整性导向的部分隔离。
 
 托管子会话创建完成后，父取消信号不再依赖 DSH 的 creation-only signal，而由 AutoEvo 监听并立即调用 owned `AgentHandle.dispose()`。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
 
@@ -66,10 +66,10 @@ capability_workflow
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
-- `agents` / `agentPresets`：由 Host 建立并验证 `code` 子会话所有权；
+- `agents` / `agentPresets`：由 Host 建立并验证官方 `cordis` 子会话所有权、system trust、实际 composition 和 scoped catalog；
 - `sandbox` / `sandboxPolicy` / `fs`：对子会话的真实 `workspace-write` 文件与 shell 边界做启动探测。
 
-`tools` 同时承载最终执行门禁。父会话默认放行官方创造模式工具；只拒绝 `cordis_define(kind=new)` 和直接装卸。modify/create 社区插件只能由 Host 建立受管子会话；提示词不是授权边界。
+`tools` 同时承载最终执行门禁。父会话只拒绝 `cordis_define(kind=new)` 和直接装卸。受管 Creator 子会话只允许仓库文件读写、shell 测试、todo、两个官方 Creator skill 与三个 `cordis_inspect_*` 只读工具；其它能力 fail closed。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -97,7 +97,7 @@ stateDir/
 
 社区质量筛选与上报不在主线；完整实现留在 `community-quality` 分支。
 
-V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
+V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要；可选的有界 Creator 执行记录保持旧 JSON 兼容。内部 receipt 记录 composition 摘要、所需目录摘要和子会话身份，但 Agent 只看到 `verified` / `unavailable`。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
 
 `AgentWorkflowViewV2` 是唯一模型展示协议：公开语义状态、事实与证据、剩余预算、硬约束、候选作用域动作和可用工具，不公开内部图节点或规定回答句式。Policy V8 的 resolution、review、receipt、commitment 和 lease 不跨 policy 复用；不兼容的持久状态一律 fail closed。相同无效调用指纹在同一用户回合第二次后断路，但不消费 interrupt 或授权。失败后的 `capability_workflow_diagnose` 只读取关联记录，按失败事件限制为两次调用、八个探针，并脱敏路径、URL、原始 stderr 与子会话正文。
 
@@ -139,7 +139,8 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，H
 
 - [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
 - [src/creation-guard.ts](../src/creation-guard.ts)：Host 用户回合、session/boot/interrupt 绑定与 Cordis 新建拒绝。
-- [src/managed-child.ts](../src/managed-child.ts)：Host-owned 子会话、code preset、sandbox 探测和完成回执。
+- [src/creator-foundation.ts](../src/creator-foundation.ts)：官方 Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
+- [src/managed-child.ts](../src/managed-child.ts)：Host-owned `cordis` 子会话、sandbox 探测和完成回执。
 - [src/source-manager.ts](../src/source-manager.ts)：普通 Git 源、排他锁、hookless commit 与来源回执。
 - [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
 - [src/github/discovery.ts](../src/github/discovery.ts)：严格 `owner/repository` 标识校验。

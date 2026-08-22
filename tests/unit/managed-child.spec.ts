@@ -8,6 +8,14 @@ import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  CREATOR_PRESET_ID,
+  mintCreatorReceipt,
+  requiredCreatorCatalog,
+  testingCreatorPreflight,
+  testingCreatorWorkOrder,
+  _testing as creatorTesting,
+} from '../../src/creator-foundation.js'
 import { DshManagedChildHost, _testing as managedChildTesting } from '../../src/managed-child.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 
@@ -57,18 +65,38 @@ function sandboxServices(cwd: string, modes: string[]) {
   return { fs, sandbox, sandboxPolicy, runner, modes }
 }
 
+function creatorCatalogServices() {
+  const required = requiredCreatorCatalog()
+  const tools = new Set(required.tools)
+  const skills = required.skills.map((name) => ({ name }))
+  return {
+    tools: {
+      schemas: () => [...tools].map((name) => ({ name })),
+      get: (name: string) => (tools.has(name) ? { name } : undefined),
+      guard: () => undefined,
+    },
+    skills: {
+      list: async () => skills,
+    },
+  }
+}
+
 function runtime(cwd: string, owned = true, lifecycle: {
   whenIdle?: () => Promise<void>
   onDispose?: () => void
+  mountId?: string
+  composition?: string
 } = {}) {
   const modes: string[] = []
   const services = sandboxServices(cwd, modes)
+  const catalog = creatorCatalogServices()
   const disposed = vi.fn(async () => { lifecycle.onDispose?.() })
   const followups: UserMessage[] = []
   let createOptions: CreateAgentOptions | undefined
   let preExecuteInstalled = false
   let guardInstalled = false
   let composedPreset: string | undefined
+  const mountId = lifecycle.mountId ?? CREATOR_PRESET_ID
   const agents = {
     async create(options: CreateAgentOptions): Promise<AgentHandle> {
       createOptions = options
@@ -86,12 +114,23 @@ function runtime(cwd: string, owned = true, lifecycle: {
         followup(message: UserMessage) { followups.push(message) },
         async whenIdle() { await lifecycle.whenIdle?.() },
       } as unknown as Agent
-      await options.setup?.({
-        agent: child,
-        on: (name: string) => { if (name === 'tools/pre-execute') preExecuteInstalled = true },
-        tools: { guard: () => { guardInstalled = true } },
-        systemPrompt: { section: () => undefined },
-      } as unknown as Context)
+      try {
+        await options.setup?.({
+          agent: child,
+          get(name: string) {
+            if (name === 'tools') return catalog.tools
+            if (name === 'skills') return catalog.skills
+            return undefined
+          },
+          on: (name: string) => { if (name === 'tools/pre-execute') preExecuteInstalled = true },
+          tools: { ...catalog.tools, guard: () => { guardInstalled = true } },
+          skills: catalog.skills,
+          systemPrompt: { section: () => undefined },
+        } as unknown as Context)
+      } catch (error) {
+        await disposed()
+        throw error
+      }
       return { agent: child, dispose: disposed }
     },
     isOwnedBy: () => owned,
@@ -102,14 +141,43 @@ function runtime(cwd: string, owned = true, lifecycle: {
       if (name === 'sandbox') return services.sandbox
       if (name === 'sandboxPolicy') return services.sandboxPolicy
       if (name === 'fs') return services.fs
+      if (name === 'tools') return catalog.tools
+      if (name === 'skills') return catalog.skills
       if (name === 'agentPresets') return {
-        async mount() { composedPreset = 'code'; return { id: 'code' } },
+        async list() { return [{ id: CREATOR_PRESET_ID }] },
+        async resolve(id: string) {
+          return { id, trust: 'system', path: 'official-cordis.yml' }
+        },
+        async read(id: string) {
+          return id === CREATOR_PRESET_ID
+            ? lifecycle.composition ?? creatorTesting.TESTING_CORDIS_COMPOSITION
+            : ''
+        },
+        async standingKeyFor(id: string) {
+          if (id !== CREATOR_PRESET_ID) throw new Error('unmountable')
+          return 'standing-cordis'
+        },
+        async mount(_agentCtx: unknown, _id?: string) {
+          composedPreset = mountId
+          return { id: mountId, trust: 'system' }
+        },
         composedPreset() { return composedPreset },
       }
       return undefined
     },
   } as unknown as Context
   return { ctx, runner: services.runner, disposed, followups, modes, get createOptions() { return createOptions }, get preExecuteInstalled() { return preExecuteInstalled }, get guardInstalled() { return guardInstalled } }
+}
+
+function childRequest(cwd: string, extras: { signal?: AbortSignal } = {}) {
+  const preflight = testingCreatorPreflight()
+  return {
+    cwd,
+    workOrder: testingCreatorWorkOrder(cwd),
+    preflight,
+    ...(extras.signal ? { signal: extras.signal } : {}),
+    expectedReceipt: (sessionId: string) => mintCreatorReceipt(preflight, sessionId),
+  }
 }
 
 describe('real Host-managed child lifecycle', () => {
@@ -132,13 +200,15 @@ describe('real Host-managed child lifecycle', () => {
       .resolves.toEqual({ kind: 'reject' })
   })
 
-  it('creates an owned cwd-bound child, installs policy/guards before the turn, and disposes it', async () => {
+  it('creates an owned cwd-bound child on cordis, installs policy/guards before the turn, and disposes it', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-host-'))
     temporary.push(cwd)
     const live = runtime(cwd)
     const host = new DshManagedChildHost(live.ctx, live.runner)
-    const result = await host.run({ parent: parentAgent(cwd, live.ctx), cwd, task: 'implement the plugin' })
-    expect(live.createOptions?.meta).toMatchObject({ cwd, parentSession: 'parent-session', origin: 'subagent', delegationDepth: 1, agentPreset: 'code' })
+    const request = childRequest(cwd)
+    const result = await host.run({ parent: parentAgent(cwd, live.ctx), ...request })
+    expect(live.createOptions?.meta).toMatchObject({ cwd, parentSession: 'parent-session', origin: 'subagent', delegationDepth: 1, agentPreset: CREATOR_PRESET_ID })
+    expect(live.createOptions?.meta).not.toMatchObject({ agentPreset: 'code' })
     expect(live.createOptions?.agentOptions).toEqual({ provider: 'test', model: 'test-model' })
     expect(live.modes).toEqual(['workspace-write'])
     expect(live.preExecuteInstalled).toBe(true)
@@ -153,7 +223,34 @@ describe('real Host-managed child lifecycle', () => {
     expect(instruction).toContain('spawn EPERM')
     expect(instruction).toContain('Do not retry it, create alternate runners/configs')
     expect(instruction).toContain(`${managedChildTesting.CHILD_SOFT_STEP_LIMIT}-step soft budget`)
+    expect(instruction).toContain('cordis-plugin-development')
+    expect(instruction).toContain('editing-cordis-compositions')
+    expect(instruction).toContain('Do not load autoevo-plugin-creator')
     expect(result.taskResult).toMatch(/AUTOEVO_CHILD_COMPLETED$/u)
+    expect(result.creator).toEqual(request.expectedReceipt(result.sessionId))
+    expect(result.creator.presetId).toBe(CREATOR_PRESET_ID)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a code preset mount and does not fall back', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-code-'))
+    temporary.push(cwd)
+    const live = runtime(cwd, true, { mountId: 'code' })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    await expect(host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) }))
+      .rejects.toThrow(/cordis preset|code preset/i)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('rejects runtime composition drift after mounting cordis', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-drift-'))
+    temporary.push(cwd)
+    const live = runtime(cwd, true, {
+      composition: `${creatorTesting.TESTING_CORDIS_COMPOSITION}# drift\n`,
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    await expect(host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) }))
+      .rejects.toThrow(/does not match the preflight SHA-256/i)
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
@@ -162,7 +259,7 @@ describe('real Host-managed child lifecycle', () => {
     temporary.push(cwd)
     const live = runtime(cwd, false)
     const host = new DshManagedChildHost(live.ctx, live.runner)
-    await expect(host.run({ parent: parentAgent(cwd, live.ctx), cwd, task: 'implement' })).rejects.toThrow(/not owned/i)
+    await expect(host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) })).rejects.toThrow(/not owned/i)
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
@@ -179,9 +276,7 @@ describe('real Host-managed child lifecycle', () => {
     const controller = new AbortController()
     const running = host.run({
       parent: parentAgent(cwd, live.ctx),
-      cwd,
-      task: 'implement',
-      signal: controller.signal,
+      ...childRequest(cwd, { signal: controller.signal }),
     })
     await vi.waitFor(() => expect(live.followups).toHaveLength(1))
     controller.abort()

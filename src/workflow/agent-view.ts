@@ -2,6 +2,7 @@ import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type Workflow
 import { prefersChinese, rememberRequirementLanguage } from '../i18n.js'
 import { isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
+import { creatorAgentFacts } from '../creator-foundation.js'
 import {
   COMPLETED_CLEANUP_NODES,
   INSTALL_SUCCESS_OUTCOMES,
@@ -349,9 +350,11 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
   }
   if (state === 'waiting_final_decision' || state === 'recovery_required' || state === 'diagnosing') {
     const modification = modificationEvidence(view)
+    const creator = creatorAgentFacts(view.workflow.creatorRecords)
     return {
       reviews: reviewEvidence(view),
       ...(modification ? { modification } : {}),
+      ...(creator ? { creator } : {}),
       review_failures: (view.workflow.reviewFailures ?? []).map((failure) => ({
         candidate_id: failure.candidateId,
         code: failure.code,
@@ -388,7 +391,11 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
     }
   }
   if (state === 'managed_work') {
-    return { operation: view.workflow.lastReviewId ? 'modify' : 'create' }
+    const creator = creatorAgentFacts(view.workflow.creatorRecords)
+    return {
+      operation: view.workflow.lastReviewId ? 'modify' : 'create',
+      ...(creator ? { creator } : {}),
+    }
   }
   return {
     lifecycle: view.lifecycleState,

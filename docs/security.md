@@ -30,9 +30,9 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 ## 2.1 父会话边界与托管源创建
 
-AutoEvo 父会话在 `tools/pre-execute` 上只拒绝 `cordis_define(kind:new)` 和直接的 DSH plugin install/remove；创造模式的其余官方工具保持可用。真正的能力进化模式仍由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。
+AutoEvo 父会话在 `tools/pre-execute` 上拒绝 `cordis_define(kind:new)` 和直接的 DSH plugin install/remove；能力进化 preset 本身不继承创造模式。真正的能力进化模式仍由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。
 
-`create_new` / `modify_this` 只在 Host 拉起、cwd 绑定托管 git 源、sandbox 模式为 `workspace-write` 的子会话中继续。父会话不得 `cordis_define(kind:new)`。子会话再拒绝 AutoEvo 决策工具、Cordis mutation、嵌套委托、直接装卸与 git push/tag/release / gh pr。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
+`create_new` / `modify_this` / 定向纠错只在 Host 拉起、cwd 绑定托管 git 源、sandbox 模式为 `workspace-write` 的官方 system `cordis` 子会话中继续，绝不回退 `code`。源码副作用前的预检与挂载后的复检都验证 composition、scoped 工具/技能和运行前提。父会话不得 `cordis_define(kind:new)`；子会话只允许仓库文件读写、shell 测试、todo、`cordis-plugin-development`、`editing-cordis-compositions` 和三个 `cordis_inspect_*`，并拒绝 AutoEvo 决策、Cordis mutation、嵌套委托、装卸、Git 写入、依赖变更与发布部署。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
 
 父回合取消后，Host 通过 owned `AgentHandle.dispose()` 停止并 drain 子 Agent，不依赖创建阶段 signal。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock。取消、超时与真实 executable 缺失分别报告。
 

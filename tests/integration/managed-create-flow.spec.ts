@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -10,6 +10,7 @@ import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import type { ManagedChildHost } from '../../src/managed-child.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
+import { mintCreatorReceipt, testingCreatorFoundation, testingCreatorPreflight } from '../../src/creator-foundation.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
@@ -95,8 +96,11 @@ describe('managed create vertical flow', () => {
   it('runs the child, commits, reviews, and freezes a real npm tgz before confirmation', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-create-e2e-'))
     temporary.push(root)
+    const preflight = testingCreatorPreflight()
     const child: ManagedChildHost = {
       async run(request) {
+        expect(request.workOrder.operation).toBe('create')
+        expect(request.workOrder.allowedScope.cwd).toBe(path.resolve(request.cwd))
         const pkgPath = path.join(request.cwd, 'package.json')
         const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
         await writeFile(pkgPath, `${JSON.stringify({ ...pkg, license: 'MIT' }, null, 2)}\n`)
@@ -106,6 +110,7 @@ describe('managed create vertical flow', () => {
           sessionId: 'child-test',
           taskResult: 'implemented\nAUTOEVO_CHILD_COMPLETED',
           sandbox: { ok: true, mode: 'workspace-write', cwd: request.cwd, platform: process.platform, enforcement: 'partial', isolation: 'integrity-partial', note: 'test' },
+          creator: mintCreatorReceipt(preflight, 'child-test'),
         }
       },
     }
@@ -119,6 +124,9 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
     )
     const flow = workflow()
     const result = await service.prepareCreate(
@@ -135,6 +143,11 @@ describe('managed create vertical flow', () => {
     const receipt = await service.sources.readReceipt(flow.managedSourceId!)
     expect(receipt).toMatchObject({ reviewId: result.review!.id, artifactHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
     expect(receipt?.headCommit).not.toBe(receipt?.baseCommit)
+    expect(flow.creatorRecords).toEqual([expect.objectContaining({
+      operation: 'create',
+      status: 'verified',
+      receipt: expect.objectContaining({ presetId: 'cordis', childSessionId: 'child-test' }),
+    })])
     const revalidate = service as unknown as { revalidate(review: NonNullable<typeof result.review>): Promise<boolean> }
     await expect(revalidate.revalidate(result.review!)).resolves.toBe(true)
   }, 20_000)
@@ -144,6 +157,7 @@ describe('managed create vertical flow', () => {
     temporary.push(root)
     let childStarted!: () => void
     const started = new Promise<void>((resolve) => { childStarted = resolve })
+    const preflight = testingCreatorPreflight()
     const child: ManagedChildHost = {
       async run(request) {
         await writeFile(path.join(request.cwd, 'cancelled-edit.js'), 'export const preserved = true\n')
@@ -164,6 +178,9 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
     )
     const flow = workflow()
     const controller = new AbortController()
@@ -188,7 +205,45 @@ describe('managed create vertical flow', () => {
     await service.releaseManagedSource(flow, exec)
     expect((await service.sources.readReceipt(sourceId))?.activeWorkflowId).toBeNull()
     await expect(readFile(service.sources.lockPath(sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(flow.creatorRecords?.at(-1)?.status).toBe('unavailable')
     const status = await runner.run({ argv: ['git', 'status', '--porcelain'], cwd: service.sources.sourcePath(sourceId) })
     expect(status.stdout.trim()).toBe('')
+  }, 20_000)
+
+  it('does not clone, scaffold, or write sources when Creator preflight fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-preflight-fail-'))
+    temporary.push(root)
+    const runner = new NativeRunner()
+    const cfg = config(root)
+    const store = new StateStore(cfg.stateDir)
+    const child: ManagedChildHost = {
+      async run() {
+        throw new Error('child must not start')
+      },
+    }
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      child,
+      undefined,
+      undefined,
+      {
+        async preflight() {
+          throw new Error('Official Creator cordis preset is missing')
+        },
+      },
+    )
+    const flow = workflow()
+    await expect(service.prepareCreate(
+      resolution(root),
+      { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent },
+      flow,
+    )).rejects.toThrow(/cordis preset is missing/i)
+    await expect(access(cfg.sourceDir!)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(flow.managedSourceId).toBeUndefined()
+    expect(flow.creatorRecords).toEqual([expect.objectContaining({ operation: 'create', status: 'unavailable' })])
   }, 20_000)
 })

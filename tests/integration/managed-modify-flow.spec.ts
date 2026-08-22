@@ -11,6 +11,7 @@ import { CreationGuard } from '../../src/creation-guard.js'
 import type { ManagedChildHost } from '../../src/managed-child.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { reviewLocalPlugin } from '../../src/review/review.js'
+import { mintCreatorReceipt, testingCreatorFoundation, testingCreatorPreflight } from '../../src/creator-foundation.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
@@ -61,22 +62,29 @@ function config(root: string): RuntimeConfig {
 }
 
 describe('managed modify closure', () => {
-  it('uses one focused correction when the original deterministic blocker persists', async () => {
+  it.each([
+    { failCorrection: false },
+    { failCorrection: true },
+  ])('uses and accounts for one focused correction (failure=$failCorrection)', async ({ failCorrection }) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-modify-e2e-'))
     temporary.push(root)
     const runner = new NativeRunner()
     const cfg = config(root)
     const store = new StateStore(cfg.stateDir)
-    const prompts: string[] = []
+    const workOrders: Array<{ blockers: readonly unknown[]; acceptanceTargets: readonly string[] }> = []
     let childRuns = 0
+    const operations: string[] = []
+    const preflight = testingCreatorPreflight()
     const child: ManagedChildHost = {
       async run(request) {
-        prompts.push(request.task)
+        workOrders.push(request.workOrder)
+        operations.push(request.workOrder.operation)
         childRuns += 1
         if (childRuns === 1) {
           const readme = path.join(request.cwd, 'README.md')
           await writeFile(readme, `${await readFile(readme, 'utf8')}\nFirst attempt changed the wrong surface.\n`)
         } else {
+          if (failCorrection) throw new Error('focused correction failed')
           const pkgPath = path.join(request.cwd, 'package.json')
           const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
           pkg.peerDependencies['@deepseek-ai/dsh-tools'] = '>=0.1.0-rc.6 <0.2.0'
@@ -86,6 +94,7 @@ describe('managed modify closure', () => {
           sessionId: `child-${childRuns}`,
           taskResult: 'Tests were not run.\nAUTOEVO_CHILD_COMPLETED',
           sandbox: { ok: true, mode: 'workspace-write', cwd: request.cwd, platform: process.platform, enforcement: 'partial', isolation: 'integrity-partial', note: 'test' },
+          creator: mintCreatorReceipt(preflight, `child-${childRuns}`),
         }
       },
     }
@@ -96,6 +105,9 @@ describe('managed modify closure', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
     )
     const resolutionId = `resolution_${'a'.repeat(24)}`
     const workflowId = `workflow_${'b'.repeat(24)}`
@@ -163,15 +175,27 @@ describe('managed modify closure', () => {
       lastReviewId: baselineEvidence.record.id,
       lineageTipReviewId: baselineEvidence.record.id,
     }
-    const result = await service.prepareModify(
+    const pending = service.prepareModify(
       resolution,
       baselineEvidence.record,
       { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent },
       workflow,
     )
+    if (failCorrection) {
+      await expect(pending).rejects.toThrow(/Managed child failed/i)
+      expect(childRuns).toBe(2)
+      expect(operations).toEqual(['modify', 'correct'])
+      expect(workflow.creatorRecords).toEqual([
+        expect.objectContaining({ operation: 'modify', status: 'verified' }),
+        expect.objectContaining({ operation: 'correct', status: 'unavailable' }),
+      ])
+      return
+    }
+    const result = await pending
     expect(childRuns).toBe(2)
-    expect(prompts[0]).toContain('Host-observed modification targets')
-    expect(prompts[1]).toContain('single focused correction')
+    expect(operations).toEqual(['modify', 'correct'])
+    expect(workOrders[0]?.blockers.length).toBeGreaterThan(0)
+    expect(workOrders[1]?.acceptanceTargets.join(' ')).toMatch(/remaining Host-observed blockers/i)
     expect(result.review?.compatibility.status).toBe('compatible')
     expect(workflow.modificationOutcome).toMatchObject({
       contractVersion: 1,
@@ -189,5 +213,9 @@ describe('managed modify closure', () => {
     expect(workflow.lastReviewId).toBe(result.review?.id)
     expect(workflow.lineageTipReviewId).toBe(result.review?.id)
     expect(workflow.lastFailure).toBeUndefined()
+    expect(workflow.creatorRecords).toEqual([
+      expect.objectContaining({ operation: 'modify', status: 'verified' }),
+      expect.objectContaining({ operation: 'correct', status: 'verified' }),
+    ])
   }, 30_000)
 })

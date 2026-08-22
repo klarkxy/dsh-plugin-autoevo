@@ -808,9 +808,19 @@ describe('fail-closed install outcomes', () => {
     } as unknown as DshLauncher
     const verifier = unusedVerifier()
     const run = vi.spyOn(verifier, 'run')
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
-    }), verifier)
+    const hotLoader = vi.fn(async () => ({
+      evidence: { attempted: true, loaded: true, method: 'loader' as const, reason: 'hot-loaded' },
+    }))
+    const installer = new PluginInstaller(
+      ctx,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+      undefined,
+      hotLoader,
+      verifier,
+    )
     const result = await installer.install({
       reviewId: unattested.id,
       targetProfile: 'persistent',
@@ -818,10 +828,18 @@ describe('fail-closed install outcomes', () => {
     }, execution())
     expect(verifyHost).not.toHaveBeenCalled()
     expect(run).not.toHaveBeenCalled()
+    expect(hotLoader).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       installOutcome: 'awaiting_user_test',
       installed: true,
+      loaded: false,
       verified: false,
+      restartRequired: true,
+      hotReload: {
+        attempted: false,
+        loaded: false,
+        method: 'unsupported',
+      },
       verification: { layer: 'manual_runtime', status: 'pending_user_test' },
     })
   })
@@ -858,7 +876,7 @@ describe('fail-closed install outcomes', () => {
     expect(result.verification.reason).toMatch(/explicit recovery/i)
   })
 
-  it('maps rollbackFailed to recovery_required for activated and awaiting_user_test', async () => {
+  it('maps rollbackFailed to recovery_required for activated but never hot-loads awaiting_user_test', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-hot-recovery-layers-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -872,10 +890,10 @@ describe('fail-closed install outcomes', () => {
     })
     await store.put('reviews', none)
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const rollback = async () => ({
+    const rollback = vi.fn(async () => ({
       evidence: { attempted: true, loaded: false, method: 'failed' as const, reason: 'activation and rollback failed' },
       rollbackFailed: true,
-    })
+    }))
     const activatedLauncher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileSourceMatches: async () => true,
@@ -908,6 +926,7 @@ describe('fail-closed install outcomes', () => {
       restartRequired: false,
     })
     expect(activated.verification.reason).toMatch(/explicit recovery/i)
+    expect(rollback).toHaveBeenCalledTimes(1)
 
     await store.put('reviews', review())
     const awaitingLauncher = {
@@ -924,12 +943,15 @@ describe('fail-closed install outcomes', () => {
       retention: 'persistent',
     }, execution())
     expect(awaiting).toMatchObject({
-      installOutcome: 'recovery_required',
-      installed: false,
-      restartRequired: false,
-      verification: { layer: 'manual_runtime' },
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      loaded: false,
+      restartRequired: true,
+      hotReload: { attempted: false, loaded: false, method: 'unsupported' },
+      verification: { layer: 'manual_runtime', status: 'pending_user_test' },
     })
-    expect(awaiting.verification.reason).toMatch(/explicit recovery/i)
+    expect(awaiting.verification.reason).toMatch(/not activated inside the serving DSH process/i)
+    expect(rollback).toHaveBeenCalledTimes(1)
   })
 
   it('keeps verificationTask and expectedText as human prompts that never enter verifyHost', async () => {

@@ -677,16 +677,31 @@ export class PluginInstaller {
       || awaitingUserTest
       || (verification.attempted && verification.exitCode === 0)
     )
-    const hotReloadAttempt = input.retention === 'persistent' && nonFailure
-      ? await this.hotLoader({
-          ctx: this.ctx,
-          dshHome,
-          profile: input.targetProfile,
-          packageName,
-          expectedTools: review.manifest.expectedTools,
-          ...(exec.agent ? { agent: exec.agent } : {}),
-        })
-      : undefined
+    // A manual-runtime candidate is not mechanically proven against the live
+    // profile state. Loading third-party startup code into the serving DSH
+    // process can therefore terminate the Host before the final receipt is
+    // committed (for example, a detached rejected Promise cannot be contained
+    // by this call's try/catch). Keep the current Host alive and cross a clean
+    // process boundary before the user performs the required real-client test.
+    const hotReloadAttempt: HotReloadAttempt | undefined = input.retention === 'persistent' && awaitingUserTest
+      ? {
+          evidence: {
+            attempted: false,
+            loaded: false,
+            method: 'unsupported',
+            reason: 'Manual-runtime plugins are not activated inside the serving DSH process; restart is required before the real-client test.',
+          },
+        }
+      : input.retention === 'persistent' && nonFailure
+        ? await this.hotLoader({
+            ctx: this.ctx,
+            dshHome,
+            profile: input.targetProfile,
+            packageName,
+            expectedTools: review.manifest.expectedTools,
+            ...(exec.agent ? { agent: exec.agent } : {}),
+          })
+        : undefined
     const hotReload = hotReloadAttempt?.evidence
     const runtimeRecoveryRequired = Boolean(nonFailure && hotReloadAttempt?.rollbackFailed === true)
     const failedTemporaryTrialRemoved = input.retention === 'temporary'
@@ -733,7 +748,7 @@ export class PluginInstaller {
           ? { ...verification, reason: `${verification.reason} Current-process Loader activation could not be rolled back; explicit recovery is required before retry or restart.` }
           : success
             ? (input.retention === 'persistent' && hotReload && !hotReload.loaded
-              ? { ...verification, reason: `${verification.reason} Current-process hot reload did not complete (${hotReload.reason}); restart is required.` }
+              ? { ...verification, reason: `${verification.reason} Current-process activation did not complete (${hotReload.reason})` }
               : verification)
             : {
                 ...verification,

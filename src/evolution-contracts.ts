@@ -5,7 +5,7 @@
 
 export const EVOLUTION_PRESET_ID = 'evolution' as const
 export const EVOLUTION_PRESET_DISPLAY_NAME = '能力进化' as const
-export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：具备创造模式的全部能力，并提供社区插件复用、审查安装、已有能力升级和受控的托管源创建；改进过的插件可在明确批准后贡献回上游。' as const
+export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：由官方创造模式构造，由 AutoEvo 治理复用、审查、安装与升级；改进过的插件可在明确批准后贡献回上游。' as const
 
 /** Scoped Cordis service key published only behind a preset isolate realm. */
 export const EVOLUTION_MODE_SERVICE_KEY = 'autoevoEvolutionMode' as const
@@ -58,8 +58,8 @@ export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[
     schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
     templateVersion: EVOLUTION_PRESET_TEMPLATE_VERSION,
     files: Object.freeze({
-      'agent.cordis.yml': '576a62b16d24d518f7d637e09dc7217ede0d8563f7179187a1a703a1d9737d28',
-      'preset.yml': '48ddb7f319f9f93705a901c2f6f95e8d303a153fc23517f2353529a4316d601e',
+      'agent.cordis.yml': '5aff6421641bdc2eab9a36f4372331e2e795b2aa1c53df0e1f18c3b312bf514a',
+      'preset.yml': 'd51f8ab85feeb76c73de0cb091735b7ddbdad4d2b3d8adfc878dd35b6e79bbbd',
     }),
   }),
 ])

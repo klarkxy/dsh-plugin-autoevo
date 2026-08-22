@@ -112,6 +112,11 @@ describe('child execution boundaries', () => {
   it('denies decisions, mutation, delegation, publication, commits, and unknown direct tools', () => {
     expect(child.guard(exec('capability_workflow'))).toMatch(/AutoEvo decision tools/i)
     expect(child.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
+    expect(child.guard(exec('cordis_run'))).toMatch(/Cordis mutation/i)
+    expect(child.guard(exec('cordis_stop'))).toMatch(/Cordis mutation/i)
+    expect(child.guard(exec('cordis_undefine'))).toMatch(/Cordis mutation/i)
+    expect(child.guard(exec('cordis_mount'))).toMatch(/Cordis mutation/i)
+    expect(child.guard(exec('cordis_unmount'))).toMatch(/Cordis mutation/i)
     expect(child.guard(exec('subagent_fork'))).toMatch(/nested agent\/subagent\/workflow/i)
     expect(child.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
     expect(child.guard(exec('pwsh', { command: 'git push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
@@ -122,17 +127,38 @@ describe('child execution boundaries', () => {
     expect(child.guard(exec('pwsh', { command: '& (Get-Command git) push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
     expect(child.guard(exec('pwsh', { command: 'C:\\ProgramData\\Git\\git.exe push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
     expect(child.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
-    expect(child.guard(exec('bash', { command: 'pnpm publish' }))).toMatch(/publication/i)
+    expect(child.guard(exec('bash', { command: 'pnpm publish' }))).toMatch(/publication|version|release|deploy|install/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm version patch' }))).toMatch(/publication|version|release|deploy|install/i)
+    expect(child.guard(exec('bash', { command: 'pnpm run release' }))).toMatch(/publication|version|release|deploy|install/i)
+    expect(child.guard(exec('pwsh', { command: 'dsh deploy' }))).toMatch(/publication|version|release|deploy|install/i)
     expect(child.guard(exec('pwsh', { command: 'pnpm install --store-dir .pnpm-store' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('pwsh', { command: 'C:\\tools\\pnpm.cmd add left-pad' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('pwsh', { command: 'C:\\tools\\dsh.cmd plugin add unsafe' }))).toMatch(/plugin install\/remove/i)
     expect(child.guard(exec('bash', { command: 'npx vitest run' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('skill', { name: 'autoevo-plugin-creator' }))).toMatch(/official Creator skills/i)
+    expect(child.guard(exec('skill', { name: 'some-other-skill' }))).toMatch(/official Creator skills/i)
     expect(child.guard(exec('external_mutator'))).toMatch(/unrecognized tool/i)
   })
 
-  it('allows the Code Mode transport, in-repo filesystem work, shell tests, and read-only git inspection', async () => {
+  it('allows only in-repo filesystem work, shell tests, official Creator skills, inspect, and todo', async () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    for (const call of [exec('run_code'), exec('write'), exec('read'), exec('pwsh', { command: 'pnpm test' }), exec('bash', { command: 'git diff --check' })]) {
+    for (const call of [
+      exec('write'),
+      exec('read'),
+      exec('pwsh', { command: 'pnpm test' }),
+      exec('bash', { command: 'git diff --check' }),
+      exec('todo_write'),
+      exec('todo_read'),
+      exec('skill', { name: 'cordis-plugin-development' }),
+      exec('skill', { name: 'editing-cordis-compositions' }),
+      exec('cordis_inspect_list'),
+      exec('cordis_inspect_query'),
+      exec('cordis_inspect_self'),
+    ]) {
       await expect(child.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
+    expect(child.guard(exec('run_code'))).toMatch(/unrecognized tool/i)
+    expect(child.guard(exec('cordisinspectlist'))).toMatch(/unrecognized tool/i)
   })
 })
 

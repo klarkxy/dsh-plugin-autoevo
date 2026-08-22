@@ -1,6 +1,11 @@
 import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { TOOL_NAMES, type ExecutionLease } from './contracts.js'
 import { isNewCordisDefinition } from './creation-guard.js'
+import {
+  CORDIS_MUTATION_TOOL_NAMES,
+  OFFICIAL_CREATOR_SKILLS,
+  REQUIRED_INSPECT_TOOLS,
+} from './creator-foundation.js'
 
 export type ExecutionRole = 'parent' | 'child'
 
@@ -17,7 +22,8 @@ const FS_READ_TOOLS = new Set([
   'list_dir',
 ])
 const SHELL_TOOLS = new Set(['pwsh', 'bash', 'shell', 'terminal'])
-const CORDIS_MUTATION_TOOLS = new Set(['cordis_define', 'cordis_mount', 'cordis_unmount'])
+const CORDIS_MUTATION_TOOLS = new Set<string>(CORDIS_MUTATION_TOOL_NAMES)
+const CORDIS_INSPECT_TOOLS = new Set<string>(REQUIRED_INSPECT_TOOLS)
 const DELEGATION_TOOLS = new Set([
   'subagent',
   'subagent_fork',
@@ -29,14 +35,16 @@ const DELEGATION_TOOLS = new Set([
   'task',
 ])
 const PLUGIN_MUTATION_TOOLS = new Set(['plugin_install', 'plugin_remove', 'dsh_plugin_add', 'dsh_plugin_remove'])
-const CHILD_SUPPORT_TOOLS = new Set(['todo_write', 'todo_read'])
-const CODE_MODE_TRANSPORT_TOOL = 'run_code'
+const CHILD_SUPPORT_TOOLS = new Set(['todo_write', 'todo_read', 'todo'])
+const SKILL_TOOLS = new Set(['skill'])
+const OFFICIAL_CHILD_SKILLS = new Set<string>(OFFICIAL_CREATOR_SKILLS)
 const GIT_COMMAND_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const SAFE_GIT_READ_RE = /(?:^|[\s&])["']?git(?:\.exe)?["']?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b/iu
 const GH_COMMAND_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
-const DSH_PLUGIN_MUTATION_RE = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|remove|rm|uninstall)\b/iu
-const PACKAGE_PUBLICATION_RE = /(?:^|[\s;&|])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
-const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\s;&|])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
+const DSH_PLUGIN_MUTATION_RE = /(?:^|[\\/\s;&|("'`])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|remove|rm|uninstall)\b/iu
+const PACKAGE_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
+const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
+const RELEASE_DEPLOY_INSTALL_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:release|deploy)\b|dsh(?:\.cmd)?\s+(?:release|deploy|publish|install)\b)/iu
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -67,6 +75,22 @@ export function bridgeTargetFromArguments(args: unknown): string | undefined {
   if (!isRecord(args)) return undefined
   const found = new Set<string>()
   for (const key of BRIDGE_TARGET_KEYS) {
+    const value = args[key]
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (!trimmed) continue
+    found.add(trimmed)
+  }
+  if (found.size !== 1) return undefined
+  return [...found][0]
+}
+
+const SKILL_TARGET_KEYS = ['name', 'skill', 'skill_name', 'skillName'] as const
+
+export function skillTargetFromArguments(args: unknown): string | undefined {
+  if (!isRecord(args)) return undefined
+  const found = new Set<string>()
+  for (const key of SKILL_TARGET_KEYS) {
     const value = args[key]
     if (typeof value !== 'string') continue
     const trimmed = value.trim()
@@ -162,15 +186,17 @@ export class ExecutionGuard {
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
-    // DSH Code Mode reserves run_code as a presentation-only transport. Every
-    // SDK sub-dispatch re-enters tools/pre-execute and this guard with its real
-    // tool name, so allowing the wrapper grants no endpoint capability.
-    if (name === CODE_MODE_TRANSPORT_TOOL) return undefined
     if (AUTOEVO_TOOLS.has(name)) {
       return 'Managed source child session denies AutoEvo decision tools; return to the parent workflow for confirmation.'
     }
+    if (CORDIS_INSPECT_TOOLS.has(normalizeEndpointName(name))) return undefined
     if (matchesSet(name, CORDIS_MUTATION_TOOLS) || isNewCordisDefinition(exec)) {
       return 'Managed source child session denies Cordis mutation/definition.'
+    }
+    if (matchesSet(name, SKILL_TOOLS)) {
+      const target = skillTargetFromArguments(exec.arguments)
+      if (target && OFFICIAL_CHILD_SKILLS.has(target)) return undefined
+      return 'Managed source child session permits only the official Creator skills cordis-plugin-development and editing-cordis-compositions.'
     }
     if (matchesSet(name, DELEGATION_TOOLS)) {
       return 'Managed source child session denies nested agent/subagent/workflow delegation.'
@@ -186,8 +212,8 @@ export class ExecutionGuard {
       if (GH_COMMAND_RE.test(command)) {
         return 'Managed source child session denies every GitHub CLI command; publication and external coordination stay with the parent.'
       }
-      if (PACKAGE_PUBLICATION_RE.test(command)) {
-        return 'Managed source child session denies package publication and release/version commands.'
+      if (PACKAGE_PUBLICATION_RE.test(command) || RELEASE_DEPLOY_INSTALL_RE.test(command)) {
+        return 'Managed source child session denies package publication, version, release, deploy, and install commands.'
       }
       if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
         return 'Managed source child session denies dependency installation or mutation; use only the reviewed repository inputs already present.'
@@ -198,7 +224,7 @@ export class ExecutionGuard {
       return undefined
     }
     if (matchesSet(name, FS_READ_TOOLS) || matchesSet(name, FS_WRITE_TOOLS) || matchesSet(name, CHILD_SUPPORT_TOOLS)) return undefined
-    return `Managed source child session denies unrecognized tool ${JSON.stringify(name)}; only in-repo filesystem, shell testing, and read-only support tools are allowed.`
+    return `Managed source child session denies unrecognized tool ${JSON.stringify(name)}; only in-repo filesystem, shell testing, official Creator skill loads, Cordis inspect, and todo tools are allowed.`
   }
 }
 
@@ -206,6 +232,9 @@ export const _testing = {
   FS_WRITE_TOOLS,
   SHELL_TOOLS,
   DELEGATION_TOOLS,
+  CORDIS_MUTATION_TOOLS,
+  CORDIS_INSPECT_TOOLS,
+  SKILL_TOOLS,
   GIT_COMMAND_RE,
   SAFE_GIT_READ_RE,
   GH_COMMAND_RE,
@@ -213,10 +242,11 @@ export const _testing = {
   DSH_PLUGIN_MUTATION_RE,
   PACKAGE_PUBLICATION_RE,
   PACKAGE_DEPENDENCY_MUTATION_RE,
+  RELEASE_DEPLOY_INSTALL_RE,
   matchesSet,
   shellCommandText,
-  CODE_MODE_TRANSPORT_TOOL,
   normalizeEndpointName,
   bridgeTargetFromArguments,
+  skillTargetFromArguments,
   leaseAllowsExecution,
 }

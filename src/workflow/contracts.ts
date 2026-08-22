@@ -13,11 +13,14 @@ import type {
   VerificationLayerKind,
   WorkflowOptionId,
 } from '../contracts.js'
+import { creatorAgentFacts, type CreatorRecord } from '../creator-foundation.js'
 import { isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import { hashObject } from '../state/hashes.js'
 import { boundedAgentText } from './sanitize.js'
 import type { WorkflowLifecycleState } from './lifecycle.js'
+
+export type { CreatorRecord }
 
 export type { WorkflowLifecycleState }
 
@@ -406,6 +409,8 @@ export interface WorkflowRecord {
   pendingInstall?: WorkflowPendingInstall
   managedSourceId?: string
   modificationOutcome?: ModificationOutcome
+  /** Optional bounded Creator foundation records. Absent on schemaVersion 1/2 legacy JSON. */
+  creatorRecords?: CreatorRecord[]
   lastFailure?: WorkflowFailure
   lastDiagnosis?: WorkflowDiagnosis
   invalidResumeAttempt?: InvalidResumeAttempt
@@ -688,26 +693,28 @@ export function confirmationFacts(
     ),
     modificationAttemptsExhausted: modificationAttemptsExhausted(workflow?.modificationOutcome),
     ...(modificationChecks ? { modificationChecks } : {}),
+    ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
     ...(extras.installProfiles && extras.installProfiles.length > 0
       ? { installProfiles: extras.installProfiles }
       : {}),
   }
 }
 
-export function modifyWorkFacts(review: ReviewRecord): Record<string, unknown> {
+export function modifyWorkFacts(review: ReviewRecord, workflow?: WorkflowRecord): Record<string, unknown> {
   const source = review.sourceSnapshot
   return {
     reviewId: review.id,
     commit: source.kind === 'github' ? source.commit : source.baseCommit,
     instruction: 'Modification continues in a managed workspace-write child session. Wait for the next confirmation interrupt; do not supply a local path.',
-    ...(source.kind === 'github' ? { repository: source.repository } : { path: source.path }),
+    ...(source.kind === 'github' ? { repository: source.repository } : {}),
+    ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
 }
 
-export function createWorkFacts(path: string): Record<string, unknown> {
+export function createWorkFacts(workflow?: WorkflowRecord): Record<string, unknown> {
   return {
-    path,
     instruction: 'Creation continues in a managed workspace-write child session on the trusted scaffold. Wait for the next confirmation interrupt; do not call cordis_define on the parent session.',
+    ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
 }
 

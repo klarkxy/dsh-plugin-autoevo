@@ -321,6 +321,11 @@ describe('local matching', () => {
           invocation: { modelInvocable: true },
         },
         {
+          name: 'editing-cordis-compositions',
+          description: 'Edit Cordis compositions',
+          invocation: { modelInvocable: true },
+        },
+        {
           name: 'autoevo-plugin-creator',
           description: 'AutoEvo workflow for creating dynamic Cordis Plugins',
           invocation: { modelInvocable: true },

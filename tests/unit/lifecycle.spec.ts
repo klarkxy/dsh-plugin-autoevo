@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
@@ -925,7 +925,7 @@ describe('lifecycle validation', () => {
     })
   })
 
-  it('maps rollbackFailed to recovery_required for activated and awaiting_user_test', async () => {
+  it('maps rollbackFailed to recovery_required for activated but never hot-loads awaiting_user_test', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-rollback-nonfailure-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -976,11 +976,12 @@ describe('lifecycle validation', () => {
         reason: 'Host loaded the reviewed bundle and Loader/Fiber settled without an Agent turn.',
       }),
     } as unknown as DshLauncher
+    const hotLoader = vi.fn(async () => ({
+      evidence: { attempted: true, loaded: false, method: 'failed' as const, reason: 'activation and rollback failed' },
+      rollbackFailed: true,
+    }))
     const activated = await new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-        evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
-        rollbackFailed: true,
-      }),
+      ctx, config(root), store, launcher, async () => true, undefined, hotLoader,
     ).install({
       reviewId: none.id,
       targetProfile: 'web',
@@ -993,25 +994,26 @@ describe('lifecycle validation', () => {
       restartRequired: false,
     })
     expect(activated.verification.reason).toMatch(/explicit recovery/i)
+    expect(hotLoader).toHaveBeenCalledTimes(1)
 
     await store.put('reviews', review())
     const awaiting = await new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-        evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
-        rollbackFailed: true,
-      }),
+      ctx, config(root), store, launcher, async () => true, undefined, hotLoader,
     ).install({
       reviewId: review().id,
       targetProfile: 'web',
       retention: 'persistent',
     }, execution())
     expect(awaiting).toMatchObject({
-      installOutcome: 'recovery_required',
-      installed: false,
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      loaded: false,
       verified: false,
-      restartRequired: false,
-      verification: { layer: 'manual_runtime' },
+      restartRequired: true,
+      hotReload: { attempted: false, loaded: false, method: 'unsupported' },
+      verification: { layer: 'manual_runtime', status: 'pending_user_test' },
     })
-    expect(awaiting.verification.reason).toMatch(/explicit recovery/i)
+    expect(awaiting.verification.reason).toMatch(/not activated inside the serving DSH process/i)
+    expect(hotLoader).toHaveBeenCalledTimes(1)
   })
 })

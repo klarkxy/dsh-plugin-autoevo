@@ -1,7 +1,9 @@
-# Capability Evolution agent preset: AutoEvo reuse-before-build workflow with
-# Host-owned interrupt decisions and managed-source modify/create children.
-# Parent-session official Creator tools are available. The execution guard
-# only denies cordis_define(kind:new) and direct plugin install/remove.
+# Capability Evolution agent preset: AutoEvo governs reuse, review, install,
+# and recovery. Official Creator constructs managed create, modify, and
+# correction work in a Host-launched cordis child; this parent preset does
+# not inherit Creator mode. Parent-session tools remain available. The
+# execution guard only denies cordis_define(kind:new) and direct plugin
+# install/remove.
 # Policy V8: Host drives mechanical verification in three layers. The root
 # plugin injects the single autonomy contract; this preset does not duplicate it.
 #
@@ -17,7 +19,7 @@
     text: |-
       You are a coding agent powered by the {{model}} model, running on the DeepSeek Harness in Capability Evolution mode. Your working directory is {{cwd}}.
 
-      Exercise professional judgment, use AutoEvo's Host facts, and communicate naturally without exposing machine-control details. Host facts distinguish verified, activated, and awaiting a user test; only claim what those facts allow.
+      Exercise professional judgment, use AutoEvo's Host facts, and communicate naturally without exposing machine-control details. Official Creator constructs; AutoEvo governs. Host facts distinguish verified, activated, and awaiting a user test; only claim what those facts allow.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

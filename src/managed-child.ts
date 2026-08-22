@@ -7,6 +7,17 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import { setSandboxMode, type SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
+import {
+  CREATOR_PRESET_ID,
+  assertChildCreatorCatalog,
+  assertWorkOrderScope,
+  formatCreatorWorkOrder,
+  mintCreatorReceipt,
+  preflightCreatorFoundation,
+  type CreatorFoundationPreflight,
+  type CreatorFoundationReceipt,
+  type CreatorWorkOrder,
+} from './creator-foundation.js'
 import { EvolutionError } from './errors.js'
 import { ExecutionGuard } from './execution-guard.js'
 import type { CommandRunner } from './process/runner.js'
@@ -53,7 +64,8 @@ class ChildTurnBudget {
 export interface ManagedChildRequest {
   parent: Agent
   cwd: string
-  task: string
+  workOrder: CreatorWorkOrder
+  preflight?: CreatorFoundationPreflight
   signal?: AbortSignal
 }
 
@@ -61,6 +73,7 @@ export interface ManagedChildResult {
   sessionId: string
   taskResult: string
   sandbox: Awaited<ReturnType<typeof probeWorkspaceWriteSandbox>>
+  creator: CreatorFoundationReceipt
 }
 
 export interface ManagedChildHost {
@@ -73,8 +86,9 @@ interface LiveServices {
   sandboxPolicy: SandboxPolicyService
   fs: FileSystem
   agentPresets: {
-    mount(agentCtx: Context, id?: string): Promise<{ id: string }>
+    mount(agentCtx: Context, id?: string): Promise<{ id: string; trust?: string }>
     composedPreset(agentCtx: Context): string | undefined
+    read(id: string): Promise<string>
   }
 }
 
@@ -115,23 +129,26 @@ function assertCompletedTurn(agent: Agent): void {
   }
 }
 
-function childInstruction(task: string, cwd: string): string {
-  return `You are the AutoEvo managed-source implementation child.
+function childInstruction(cwd: string, workOrder: CreatorWorkOrder): string {
+  return `You are the AutoEvo managed-source implementation child on the official Creator (cordis) preset.
 
 Your exact workspace is: ${JSON.stringify(cwd)}
 
-Implement only this Host-authored task:
-${task}
+Creator work order:
+${formatCreatorWorkOrder(workOrder)}
 
 Rules enforced by the Host:
+- Official Creator constructs; AutoEvo governs. Load only cordis-plugin-development and editing-cordis-compositions. Do not load autoevo-plugin-creator.
+- Use cordis_inspect_list, cordis_inspect_query, and cordis_inspect_self when you need live runtime facts. Never call cordis_define, cordis_run, cordis_stop, cordis_undefine, cordis_mount, or cordis_unmount.
 - Work only inside the exact workspace. Do not inspect or change sibling paths.
 - Spend at most 12 model steps inspecting and make the first source edit before step 16. Do not substitute broad installed-package/runtime exploration for implementing the smallest in-repository solution.
-- Do not call AutoEvo decision tools, Cordis mutation, plugin install/remove, delegation, push, tag, release, or PR tools.
+- Do not call AutoEvo decision tools, nested delegation, plugin install/remove, gh, git writes, dependency mutation, version, publish, release, deploy, or install commands.
 - Run appropriate local tests when available. Do not run package install/add/ci/dlx/exec commands or install new dependencies from the network; the Host rejects dependency mutation.
 - Keep verification bounded: attempt the project's normal test command at most once, then one build or typecheck that does not hit the same sandbox denial.
 - On Windows, a test runner that reports spawn EPERM because confined processes cannot open piped stdio is a final sandbox limitation. Do not retry it, create alternate runners/configs, or modify test infrastructure to work around it; report the skipped test and continue to the final diff review.
 - The Host enforces a ${CHILD_SOFT_STEP_LIMIT}-step soft budget. Finish before it; after that the Host denies further tools and requires the final marker.
 - Do not commit; the Host performs the reviewed hookless unsigned commit after you return.
+- Do not install or claim success; Host re-review and freeze decide that.
 - Finish with a short result whose final line is exactly ${CHILD_RESULT_MARKER}.
 `
 }
@@ -156,6 +173,11 @@ export class DshManagedChildHost implements ManagedChildHost {
         parentDepth,
       })
     }
+    assertWorkOrderScope(request.workOrder, cwd)
+    const preflight = request.preflight ?? await preflightCreatorFoundation(this.ctx, {
+      ...(request.signal ? { signal: request.signal } : {}),
+      parentCtx: request.parent.ctx,
+    })
     const childGuard = new ExecutionGuard({ role: 'child' })
     const childBudget = new ChildTurnBudget()
     const sessionId = SessionId(`autoevo-child-${randomUUID()}`)
@@ -166,7 +188,7 @@ export class DshManagedChildHost implements ManagedChildHost {
         parentSession: request.parent.id,
         origin: 'subagent',
         delegationDepth: 1,
-        agentPreset: 'code',
+        agentPreset: CREATOR_PRESET_ID,
       },
       agentOptions: { ...request.parent.options },
       ...(request.signal ? { signal: request.signal } : {}),
@@ -176,10 +198,17 @@ export class DshManagedChildHost implements ManagedChildHost {
           throw new EvolutionError('invalid_input', 'DSH child setup did not bind the expected session identity and managed cwd')
         }
         setSandboxMode(child.session, 'workspace-write')
-        const mounted = await services.agentPresets.mount(agentCtx, 'code')
-        if (mounted.id !== 'code' || services.agentPresets.composedPreset(agentCtx) !== 'code') {
-          throw new EvolutionError('invalid_input', 'Managed child did not mount the expected code preset')
+        const mounted = await services.agentPresets.mount(agentCtx, CREATOR_PRESET_ID)
+        const composed = services.agentPresets.composedPreset(agentCtx)
+        if (mounted.id !== CREATOR_PRESET_ID || mounted.trust !== 'system' || composed !== CREATOR_PRESET_ID) {
+          throw new EvolutionError('invalid_input', 'Managed child did not mount the official Creator cordis preset; the code preset and any fallback are not permitted', {
+            mounted: mounted.id,
+            trust: mounted.trust,
+            composed,
+          })
         }
+        const mountedComposition = await services.agentPresets.read(CREATOR_PRESET_ID)
+        await assertChildCreatorCatalog(agentCtx, child, preflight, composed, mountedComposition)
         agentCtx.on('agent/pre-step', ({ messages, step }, next) => childBudget.preStep(step, messages, next))
         agentCtx.on('tools/pre-execute', (exec, next) => {
           const budgetDenial = childBudget.denialReason()
@@ -189,7 +218,7 @@ export class DshManagedChildHost implements ManagedChildHost {
         agentCtx.systemPrompt.section({
           name: 'autoevo:managed-child-boundary',
           order: 119,
-          text: 'This is a Host-owned AutoEvo managed-source child. The session cwd and workspace-write sandbox are fixed to one managed Git repository. AutoEvo decisions, Cordis mutation, delegation, plugin mutation, and publication are forbidden.',
+          text: 'This is a Host-owned AutoEvo managed-source child on the official Creator cordis preset. The session cwd and workspace-write sandbox are fixed to one managed Git repository. AutoEvo decisions, Cordis mutation, nested delegation, plugin mutation, and publication are forbidden. Official Creator constructs; AutoEvo governs.',
         })
       },
     })
@@ -216,7 +245,7 @@ export class DshManagedChildHost implements ManagedChildHost {
 
       handle.agent.followup(createUserMessage({
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
-        content: [{ type: 'text', text: childInstruction(request.task, cwd) }],
+        content: [{ type: 'text', text: childInstruction(cwd, request.workOrder) }],
       }))
       await waitForIdleOrAbort(handle, request.signal, dispose)
       assertCompletedTurn(handle.agent)
@@ -224,7 +253,13 @@ export class DshManagedChildHost implements ManagedChildHost {
       if (!taskResult.endsWith(CHILD_RESULT_MARKER)) {
         throw new EvolutionError('command_failed', 'Managed child completed without the required task-result marker')
       }
-      return { sessionId: String(handle.agent.id), taskResult, sandbox }
+      const childSessionId = String(handle.agent.id)
+      return {
+        sessionId: childSessionId,
+        taskResult,
+        sandbox,
+        creator: mintCreatorReceipt(preflight, childSessionId),
+      }
     } finally {
       await dispose()
     }

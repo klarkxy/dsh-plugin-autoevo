@@ -6,6 +6,7 @@ import { parse } from 'yaml'
 
 export const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
 export const OFFICIAL_CREATOR_SKILL_NAME = 'cordis-plugin-development'
+export const OFFICIAL_COMPOSITION_SKILL_NAME = 'editing-cordis-compositions'
 export const CREATOR_SKILL_PROVIDER = 'dsh-plugin-autoevo'
 export const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v1'
 
@@ -57,7 +58,9 @@ export function registerCreatorSkill(ctx: Context): () => void {
 }
 
 export function isWorkflowSkill(name: string): boolean {
-  return name === CREATOR_SKILL_NAME || name === OFFICIAL_CREATOR_SKILL_NAME
+  return name === CREATOR_SKILL_NAME
+    || name === OFFICIAL_CREATOR_SKILL_NAME
+    || name === OFFICIAL_COMPOSITION_SKILL_NAME
 }
 
 export const _testing = { parseCreatorSkill, CREATOR_SKILL_DIRECTORY, CREATOR_SKILL_PATH }
