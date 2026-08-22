@@ -1,3 +1,4 @@
+import { t as EVOLUTION_PRESET_ID } from "./evolution-contracts.js";
 import { LoadHookContext } from "node:module";
 import Schema from "@deepseek-ai/schemastery";
 import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
@@ -59,7 +60,7 @@ type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
-type NavigationKind = 'review_candidates' | 'search_more' | 'reuse_local' | 'stop';
+type NavigationKind = 'review_candidates' | 'search_more' | 'reuse_local' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
 interface NavigationInput {
@@ -479,8 +480,9 @@ interface AuthorizationDecisionInput {
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 interface ResumeInput {
   workflowId: string;
-  interruptId: string;
-  /** Model-interpreted read-only navigation. Never grants a side effect. */
+  /** Required at user gates. Omit for in-session `finish_managed_work`. */
+  interruptId?: string;
+  /** Model-interpreted read-only navigation. Never grants a side effect except finish_managed_work. */
   navigation?: NavigationInput;
   /** Model-interpreted final action. Host validates it against the current interrupt and fresh user turn. */
   decision?: AuthorizationDecisionInput;
@@ -613,8 +615,7 @@ interface CommandRunner {
 }
 //#endregion
 //#region src/creator-foundation.d.ts
-declare const CREATOR_PRESET_ID: "cordis";
-declare const CREATOR_FOUNDATION_CONTRACT_VERSION: 1;
+declare const CREATOR_FOUNDATION_CONTRACT_VERSION: 2;
 type CreatorOperation = 'create' | 'modify' | 'correct';
 type CreatorStatus = 'verified' | 'unavailable';
 interface CreatorWorkOrder {
@@ -635,9 +636,10 @@ interface CreatorWorkOrder {
 }
 interface CreatorFoundationReceipt {
   contractVersion: typeof CREATOR_FOUNDATION_CONTRACT_VERSION;
-  presetId: typeof CREATOR_PRESET_ID;
+  presetId: typeof EVOLUTION_PRESET_ID;
   compositionSha256: string;
   requiredToolCatalogDigest: string;
+  /** Parent session identity. Field name kept for V8 JSON compatibility. */
   childSessionId: string;
 }
 interface CreatorRecord {
@@ -651,7 +653,7 @@ interface CreatorCatalog {
   skills: string[];
 }
 interface CreatorFoundationPreflight {
-  presetId: typeof CREATOR_PRESET_ID;
+  presetId: typeof EVOLUTION_PRESET_ID;
   compositionSha256: string;
   requiredToolCatalogDigest: string;
   standingScope: unknown;
@@ -679,7 +681,7 @@ declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cu
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
 type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
@@ -887,6 +889,7 @@ interface WorkflowRecord {
   pendingRepositories?: string[];
   pendingRef?: string;
   pendingPath?: string;
+  pendingWorkOrder?: CreatorWorkOrder;
   pendingInstall?: WorkflowPendingInstall;
   managedSourceId?: string;
   modificationOutcome?: ModificationOutcome;
@@ -993,6 +996,12 @@ interface WorkflowHost {
     path?: string;
     review?: ReviewRecord;
   }>;
+  finishManagedWork?(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    review?: ReviewRecord;
+    continueConstruction?: boolean;
+  }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
   applyNavigation?(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
@@ -1028,6 +1037,7 @@ interface AgentGateState {
   selectionReceipt?: SelectionReceipt;
   actionCommitment?: ActionCommitment;
   executionLease?: ExecutionLease;
+  constructionRoot?: string;
 }
 interface UserFacingMessage {
   content?: readonly unknown[];
@@ -1054,6 +1064,8 @@ declare class CreationGuard {
   rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
   lastUserMessage(agent: Agent | undefined): string | undefined;
   currentTurnId(agent: Agent | undefined): string | undefined;
+  setConstructionRoot(agent: Agent | undefined, root: string | undefined): void;
+  constructionRoot(agent: Agent | undefined): string | undefined;
   /**
    * True when resume must park: no claimed turn, or the claimed turn is the
    * interrupt-issuing turn. Does not consume the turn.
@@ -1091,12 +1103,14 @@ declare class CreationGuard {
 }
 //#endregion
 //#region src/execution-guard.d.ts
-type ExecutionRole = 'parent' | 'child';
+type ExecutionRole = 'parent' | 'child' | 'constructor';
 interface ExecutionGuardOptions {
   role: ExecutionRole;
+  /** Absolute managed-source root. Required for constructor path scoping. */
+  allowedRoot?: string;
 }
 /**
- * Final execution-layer guard for AutoEvo parent and managed-source child sessions.
+ * Final execution-layer guard for AutoEvo parent and in-parent managed construction.
  * Prompts are not enforcement; denials here are observable and rejectable.
  */
 declare class ExecutionGuard {
@@ -1107,6 +1121,7 @@ declare class ExecutionGuard {
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
   guard(exec: Readonly<ToolExecution>): string | undefined;
   private parentDenial;
+  private constructorDenial;
   private childDenial;
 }
 //#endregion
@@ -1803,11 +1818,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   readonly sources: SourceManager;
   private readonly launcher;
   private readonly engine;
-  private readonly managedChild;
-  private readonly semanticReviewer;
-  private readonly semanticVerifier;
   private readonly creatorFoundation;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, semanticReviewer?: SemanticReviewerHost, semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -1847,7 +1859,6 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private requireParentAgent;
   private rememberCreator;
   private preflightCreator;
-  private runManagedChild;
   private preserveCancelledManagedWork;
   private reviewAndFreezeManagedSource;
   prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
@@ -1859,6 +1870,12 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     resolution: ResolutionRecord;
     path?: string;
     review?: ReviewRecord;
+  }>;
+  finishManagedWork(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    path?: string;
+    review?: ReviewRecord;
+    continueConstruction?: boolean;
   }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
   applyNavigation(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
