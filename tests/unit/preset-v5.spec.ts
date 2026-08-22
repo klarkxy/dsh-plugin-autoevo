@@ -30,29 +30,29 @@ async function tempDir(prefix: string): Promise<string> {
   return dir
 }
 
-describe('evolution preset clean-slate V12', () => {
-  it('trusts only the one current V12 template', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('12')
+describe('evolution preset clean-slate V13', () => {
+  it('trusts only the one current V13 template', () => {
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('13')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS).toEqual([{
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,
-      templateVersion: '12',
+      templateVersion: '13',
       files: {
-        'agent.cordis.yml': '5aff6421641bdc2eab9a36f4372331e2e795b2aa1c53df0e1f18c3b312bf514a',
+        'agent.cordis.yml': '521d2133694c5642e3e78fcd5ddfa7f2d7af6eab80244fdd2c22030dd586d55c',
         'preset.yml': 'd51f8ab85feeb76c73de0cb091735b7ddbdad4d2b3d8adfc878dd35b6e79bbbd',
       },
     }])
   })
 
-  it('installs V12 into a blank home and no-ops the exact current template', async () => {
+  it('installs V13 into a blank home and no-ops the exact current template', async () => {
     const root = await tempDir('autoevo-v12-fresh')
     const dshHome = path.join(root, 'dsh')
     const templateDir = path.resolve(process.cwd(), 'presets', 'evolution')
 
     const first = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(first).toMatchObject({ status: 'installed', templateVersion: '12' })
+    expect(first).toMatchObject({ status: 'installed', templateVersion: '13' })
     const second = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(second).toMatchObject({ status: 'noop', templateVersion: '12' })
+    expect(second).toMatchObject({ status: 'noop', templateVersion: '13' })
 
     const manifest = JSON.parse(await readFile(
       path.join(first.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME),
@@ -127,6 +127,6 @@ describe('evolution preset clean-slate V12', () => {
     const manifestA = JSON.parse(await readFile(path.join(a.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     const manifestB = JSON.parse(await readFile(path.join(b.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     expect(manifestA).toEqual(manifestB)
-    expect(manifestA.templateVersion).toBe('12')
+    expect(manifestA.templateVersion).toBe('13')
   })
 })

@@ -35,6 +35,7 @@ export type NavigationKind =
   | 'search_more'
   | 'reuse_local'
   | 'stop'
+  | 'finish_managed_work'
 export type ReviewMode = 'fixed' | 'adaptive'
 export type WorkflowOptionId = AuthorizationAction | NavigationKind
 
@@ -532,8 +533,9 @@ export interface AuthorizationDecisionInput {
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 export interface ResumeInput {
   workflowId: string
-  interruptId: string
-  /** Model-interpreted read-only navigation. Never grants a side effect. */
+  /** Required at user gates. Omit for in-session `finish_managed_work`. */
+  interruptId?: string
+  /** Model-interpreted read-only navigation. Never grants a side effect except finish_managed_work. */
   navigation?: NavigationInput
   /** Model-interpreted final action. Host validates it against the current interrupt and fresh user turn. */
   decision?: AuthorizationDecisionInput

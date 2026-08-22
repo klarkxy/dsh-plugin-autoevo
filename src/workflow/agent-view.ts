@@ -89,7 +89,8 @@ const HARD_CONSTRAINTS = [
   'Only installOutcome verified plus verified=true may be claimed as functionally verified. activated means the bundle loaded; awaiting_user_test means the user must test in a real client. None of those completed states block ordinary chat.',
   'A candidate whose review facts show verificationLayer manual_runtime can only be installed with persistent retention and ends awaiting a manual user test; explain this before the user makes the final install choice.',
   'Call capability_workflow_recover in two legal modes only: sealed failure recovery with the current interrupt_id, or a new top-level user request to clean up a completed installation with interrupt_id omitted. Never pass an installation id. If this tool result is waiting or a completed presentation, do not call it again in the same turn.',
-  'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, child-reported, or unknown.',
+  'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
+  'Authorized modify or create continues in this session on the Host-managed source path. Do not spawn sub-agents. After editing, call capability_workflow_resume with finish construction navigation and no new user decision.',
 ]
 
 function safeDependencySpec(value: string): string {
@@ -282,6 +283,10 @@ function userFacingMeaning(action: string, requirement: string, completedCleanup
       en: 'Stop this workflow',
       zh: '停止本次工作流',
     },
+    finish_managed_work: {
+      en: 'After editing the managed source in this session, tell Host construction is finished',
+      zh: '在当前会话改完托管源后，通知 Host 施工已完成',
+    },
   }
   const pair = meanings[action]
   if (!pair) return zh ? '执行当前允许的操作' : 'Take the currently allowed action'
@@ -392,8 +397,20 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
   }
   if (state === 'managed_work') {
     const creator = creatorAgentFacts(view.workflow.creatorRecords)
+    const workOrder = view.workflow.pendingWorkOrder
     return {
-      operation: view.workflow.lastReviewId ? 'modify' : 'create',
+      operation: workOrder?.operation ?? (view.workflow.lastReviewId ? 'modify' : 'create'),
+      managed_source: view.workflow.pendingPath,
+      ...(workOrder ? {
+        work_order: {
+          requirement: boundedText(workOrder.requirement, 400),
+          blockers: workOrder.blockers.slice(0, 12).map((item) => ({
+            kind: item.kind,
+            summary: boundedText(item.summary, 300),
+          })),
+          acceptance: workOrder.acceptanceTargets.map((item) => boundedText(item, 300)).slice(0, 12),
+        },
+      } : {}),
       ...(creator ? { creator } : {}),
     }
   }
@@ -478,6 +495,12 @@ export function compactAgentView(view: WorkflowView): AgentWorkflowViewV2 {
             }]
           : []),
       ]
+    : state === 'managed_work'
+    ? [{
+        channel: 'navigation' as const,
+        action: 'finish_managed_work',
+        user_facing_meaning: userFacingMeaning('finish_managed_work', requirement),
+      }]
     : state === 'completed' && completedCleanup.length > 0
       ? completedCleanup
       : interruptActions(view)

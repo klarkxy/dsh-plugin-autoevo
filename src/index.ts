@@ -167,16 +167,21 @@ export function apply(ctx: Context, input: Config): void {
   ctx.on('agent/inbox/claimed', (payload) => {
     creationGuard.rememberUserMessage(payload.agent, payload.message)
   })
+  const guardFor = (agent: Agent | undefined): ExecutionGuard => {
+    const root = creationGuard.constructionRoot(agent)
+    if (root) return new ExecutionGuard({ role: 'constructor', allowedRoot: root })
+    return parentExecutionGuard
+  }
   ctx.on('tools/pre-execute', (exec, next) => {
     const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))
     if (inEvolution) {
-      return parentExecutionGuard.preExecute(exec, async () => creationGuard.preExecute(exec, next))
+      return guardFor(exec.agent).preExecute(exec, async () => creationGuard.preExecute(exec, next))
     }
     return creationGuard.preExecute(exec, next)
   })
   ctx.tools.guard((exec) => {
     const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))
-    if (inEvolution) return parentExecutionGuard.guard(exec) ?? creationGuard.guard(exec)
+    if (inEvolution) return guardFor(exec.agent).guard(exec) ?? creationGuard.guard(exec)
     return creationGuard.guard(exec)
   })
   ctx.on('tools/result', (exec, result) => {

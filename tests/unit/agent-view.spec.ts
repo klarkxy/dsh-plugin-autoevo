@@ -320,8 +320,8 @@ describe('AgentWorkflowViewV2', () => {
       status: 'verified',
       createdAt: '2026-08-22T00:00:00.000Z',
       receipt: {
-        contractVersion: 1,
-        presetId: 'cordis',
+        contractVersion: 2,
+        presetId: 'evolution',
         compositionSha256: 'deadbeefcreatorcompositionhash'.padEnd(64, '0'),
         requiredToolCatalogDigest: 'feedfacecatalogdigestvalue'.padEnd(64, '1'),
         childSessionId: 'secret-creator-child-session',

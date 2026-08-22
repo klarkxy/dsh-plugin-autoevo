@@ -40,26 +40,26 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 ## 能力进化模式
 
-安装后，AutoEvo 默认会全新安装用户 Agent preset **能力进化**（id `evolution`，模板版本 V12）。官方创造模式负责构造，AutoEvo 负责治理：能力进化不继承创造模式。社区插件复用、审查安装、已有能力升级由 AutoEvo 治理；create / modify / correction 在 Host 拉起的官方 `cordis` 创造 preset 子会话中构造，从不回退到 `code`。改进过的插件可在明确批准后贡献回上游。当前没有旧用户迁移路径：发布包只认当前 V12 的精确托管内容，其他现有或手改 preset 一律保留，不会覆盖。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装，**不会**删除已有 preset。`sourceDir` 默认为 `<stateDir>/sources`，用于托管 modify/create 的普通 git 源仓库。当前运行时是 Policy V8。completed 的安装可在用户新的顶层消息明确要求清理并重来后，按工作流精确清理再开全新发现；故障 `recovery_required` 仍走 sealed interrupt，两条路径不得混同。
+安装后，AutoEvo 默认会全新安装用户 Agent preset **能力进化**（id `evolution`，模板版本 V13）。官方创造模式仍可供用户手动切换，AutoEvo 负责治理：能力进化不继承创造模式。社区插件复用、审查安装、已有能力升级由 AutoEvo 治理；create / modify / correction 在当前能力进化会话对托管源施工，Host 不再拉起子 Agent，也不回退到 `code`。改进过的插件可在明确批准后贡献回上游。当前没有旧用户迁移路径：发布包只认当前 V13 的精确托管内容，其他现有或手改 preset 一律保留，不会覆盖。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装，**不会**删除已有 preset。`sourceDir` 默认为 `<stateDir>/sources`，用于托管 modify/create 的普通 git 源仓库。当前运行时是 Policy V8。completed 的安装可在用户新的顶层消息明确要求清理并重来后，按工作流精确清理再开全新发现；故障 `recovery_required` 仍走 sealed interrupt，两条路径不得混同。
 
 > [!WARNING]
 > **不要使用智力或工具调用能力过低的 LLM 运行能力进化。** 最终安装、修改、新建和停止决定由当前 LLM 理解用户自然语言后提交为结构化 `decision`；Host 负责校验真实新用户回合、当前 interrupt 绑定的 action/candidate、review、session、boot 与防重放边界，但不会再用关键词替模型重做语义理解。弱模型可能在合法选项之间选错动作或候选。请使用具备可靠指令遵循、上下文保持和结构化工具调用能力的模型。
 
 它出现在 DSH 的用户 preset 列表里（界面标记为自定义），不是内置系统模式。首次安装或升级后先尝试热加载，只有当前进程无法完整接入时才需要重启。AutoEvo 只升级自己管理且未被改过的版本；用户改过的文件、或同名的外来目录一律保留。
 
-新建动态 Cordis 插件时，在空白/新会话中把 Agent 切到 **能力进化**。官方创造模式仍用于既有插件修复和静态开发，并作为 Host 托管构造子会话的唯一 preset；AutoEvo 治理发现、审查、授权与安装，不会在全局替换 `cordis-plugin-development`。
+新建动态 Cordis 插件时，在空白/新会话中把 Agent 切到 **能力进化**。官方创造模式仍用于既有插件修复和静态开发；AutoEvo 治理发现、审查、授权、安装，以及当前会话内的托管源施工，不会在全局替换 `cordis-plugin-development`。
 
 卸载 AutoEvo 前，先在 DSH 的 Agent preset 管理界面移除 **能力进化**，再移除插件依赖并重启。仅把 `evolutionPreset` 设为 `false` 不会删除现有目录。
 
 ## 工作方式
 
-- 父会话执行发现、审查、授权与安装治理；执行层只拒绝 `cordis_define(kind:new)` 和未审查的直接装卸。社区插件的 create / modify / correction 在 Host 拉起的官方创造模式（`cordis`）`workspace-write` 子会话中构造，固定挂载 `cordis`，从不使用 `code` 或任何 fallback。构造前先做无源码副作用的 Creator preflight。Windows 上 sandbox 是完整性导向的部分隔离，不宣称机密性或网络隔离。
+- 父会话执行发现、审查、授权、安装治理，以及用户确认后的修改/新建施工。执行层拒绝 `cordis_define(kind:new)`、直接装卸和 subagent/workflow/ralph。create / modify / correction 在当前能力进化会话里对 Host 托管 git 源施工，用户能看见改文件和测试；Host 不再 `agents.create` 子 Agent，也不把官方创造模式挂进隐藏会话。官方 `cordis` 创造模式文件不变，用户仍可手动切换。构造前先做无源码副作用的父会话施工目录预检。Windows 上 sandbox 是完整性导向的部分隔离，不宣称机密性或网络隔离。
 - Workflow 只管理事实、预算、持久状态和副作用授权。`capability_workflow` 返回最多 20 个 Host 验证候选；Agent 可在最多两轮、五个补充查询词内调用 `capability_workflow_refine` 换词或提交严格的 GitHub 仓库标识，再用 `capability_workflow_present` 自主密封 1–5 个最终候选。密封前没有用户选择 interrupt，也不会预选推荐项。
 - Agent 自主排序、比较、推荐和自然表达，并负责把“按你推荐”“两个都”“另一个”“看看3”等回答映射到密封候选 ID。只有新鲜真实用户回合选中的候选才进入只读审查；审查完成后才签发第二道决定门。
 - 审完后只展示真实合法动作。简单 UI 主操作为 `use_this` / `search_more`；`modify_this` / `create_new` / `stop` 在 advanced/recovery。用户明确选择安装、修改、新建或停止时，Agent 直接依靠 LLM 的语义理解提交结构化 `decision`：`action`、安装/修改所需的当前候选 `candidate_id`，以及安装时可选的 `retention`。Host 只验证该解释是否落在当前 interrupt 和快照边界内，铸造 commitment/lease，并把它绑定到新鲜真实用户回合；不再用正则表达式二次解析用户措辞。DSH approval 不能代替该决定。MechanicalFacts 只用于展示和路由；需要语义判断时由 Host 拉起独立 reviewer。
 - 安全 finding 是静态审查事实，不是用途判断。同类 source/build 命中会合并展示来源；Agent 不得从 `process_execution` 自行推断“恶意”“OAuth 必需”“启动回调服务”或其它未验证语义。任何 block finding 仍保持 `high` 并禁止直接安装。
-- `create_authorized` / `modify_this` 只在 Host 拉起的官方 `cordis` 子会话中继续（cwd 绑定托管源、`workspace-write`）；父会话不得 `cordis_define(kind:new)`。子会话只允许仓库文件读写、shell 测试、todo、官方 `cordis-plugin-development` 与 `editing-cordis-compositions`，以及 `cordis_inspect_list` / `query` / `self`。Agent 可见的 Creator 事实只有 verified / unavailable。
-- 用户停止父任务时，Host 会立即 dispose 正在运行的托管子 Agent。已产生的受控编辑用独立 cleanup 生命周期 checkpoint；workflow 进入 `recovery_required`，锁被释放，取消不会伪装成“git 不存在”。
+- `create_authorized` / `modify_this` 在当前会话继续（cwd 绑定托管源）；父会话不得 `cordis_define(kind:new)`，也不得派子 Agent。施工阶段只允许托管源内文件读写、shell 测试、todo、可选的官方创造技能，以及 `cordis_inspect_list` / `query` / `self`。Agent 可见的 Creator 事实只有 verified / unavailable。
+- 用户停止父任务时，没有子 Agent 可 dispose。已产生的受控编辑用独立 cleanup 生命周期 checkpoint；workflow 进入 `recovery_required`，锁被释放，取消不会伪装成“git 不存在”。
 - 安装结果为 `pending | verified | activated | awaiting_user_test | failed_absent | recovery_required`。`verified`、`activated`、`awaiting_user_test` 都是非失败完成态：workflow completed，不阻塞正常聊天。只有 Host `tool_roundtrip` passed 才是功能已验证；`activated` 只表示 bundle 已加载；`awaiting_user_test` 需要用户到目标客户端/profile 手动测试，后二者不得冒充已验证。`plugin_remove` 只卸载，不删除托管源仓库。
 - 搜索、审查、托管修改、安装或验证失败后，Agent 可调用只读 `capability_workflow_diagnose` 获取脱敏定长事实；每个失败事件最多两次诊断、合计八个探针。诊断不会重试、修改、安装或清理。重复失败后给出人类决策或诊断出口，不得原样循环。
 - 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。

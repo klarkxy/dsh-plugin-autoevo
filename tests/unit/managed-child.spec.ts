@@ -200,7 +200,17 @@ describe('real Host-managed child lifecycle', () => {
       .resolves.toEqual({ kind: 'reject' })
   })
 
-  it('creates an owned cwd-bound child on cordis, installs policy/guards before the turn, and disposes it', async () => {
+  it('refuses to create a child Agent', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-host-'))
+    temporary.push(cwd)
+    const live = runtime(cwd)
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    await expect(host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) }))
+      .rejects.toThrow(/no longer creates child Agents/i)
+    expect(live.createOptions).toBeUndefined()
+  })
+
+  it.skip('creates an owned cwd-bound child on cordis, installs policy/guards before the turn, and disposes it', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-host-'))
     temporary.push(cwd)
     const live = runtime(cwd)
@@ -232,7 +242,7 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
-  it('rejects a code preset mount and does not fall back', async () => {
+  it.skip('rejects a code preset mount and does not fall back', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-code-'))
     temporary.push(cwd)
     const live = runtime(cwd, true, { mountId: 'code' })
@@ -242,7 +252,7 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
-  it('rejects runtime composition drift after mounting cordis', async () => {
+  it.skip('rejects runtime composition drift after mounting cordis', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-drift-'))
     temporary.push(cwd)
     const live = runtime(cwd, true, {
@@ -254,7 +264,7 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
-  it('fails closed on ownership mismatch and still disposes the child', async () => {
+  it.skip('fails closed on ownership mismatch and still disposes the child', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-owner-'))
     temporary.push(cwd)
     const live = runtime(cwd, false)
@@ -263,7 +273,7 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 
-  it('disposes a running child promptly when the parent turn is cancelled', async () => {
+  it.skip('disposes a running child promptly when the parent turn is cancelled', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-cancel-'))
     temporary.push(cwd)
     let resolveIdle!: () => void

@@ -253,13 +253,13 @@ describe('tool pending presentation', () => {
     })).toMatchObject({
       card: 'generic',
       kind: 'edit',
-      title: 'AutoEvo is improving and checking the plugin; this may take several minutes',
+      title: 'Authorized in-session construction on the managed source',
     })
     expect(presented('capability_workflow_resume', {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
       decision: { action: 'create_new' },
-    }).title).toMatch(/creating a new plugin/i)
+    }).title).toMatch(/in-session creation|creating a new plugin/i)
     expect(presented('capability_workflow_resume', {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
@@ -296,7 +296,7 @@ describe('tool pending presentation', () => {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
       decision: { action: 'modify_this', candidate_id: CANDIDATE_ID },
-    }).title).toBe('AutoEvo 正在改进并检查插件，可能需要几分钟')
+    }).title).toBe('已授权，正在当前会话修改托管源')
   })
 
   it('never includes supplied machine IDs, paths, decision tokens, or raw args', () => {

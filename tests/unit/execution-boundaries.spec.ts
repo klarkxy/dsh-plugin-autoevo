@@ -48,12 +48,13 @@ describe('parent execution boundaries', () => {
       exec('cordis_inspect_self'),
       exec('cordis_define', { plugin: { kind: 'existing' } }),
       exec('cordis_run'),
-      exec('subagent'),
-      exec('workflow'),
       exec('calculator'),
     ]) {
       await expect(parent.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
+    expect(parent.guard(exec('subagent'))).toMatch(/denies subagent/i)
+    expect(parent.guard(exec('workflow'))).toMatch(/denies subagent/i)
+    expect(parent.guard(exec('ralph'))).toMatch(/denies subagent/i)
     expect(parent.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/kind:new/i)
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
@@ -103,6 +104,19 @@ describe('lease matching helpers', () => {
     expect(leaseAllowsExecution(current, exec('tool_call', { name: 'weather' }))).toBe(false)
     expect(leaseAllowsExecution(current, exec('tool_search', { query: 'telegram' }))).toBe(false)
     expect(leaseAllowsExecution(current, exec('tool_describe', {}))).toBe(false)
+  })
+})
+
+describe('constructor execution boundaries', () => {
+  const root = path.join(os.tmpdir(), 'autoevo-managed-source')
+  const constructor = new ExecutionGuard({ role: 'constructor', allowedRoot: root })
+
+  it('allows AutoEvo resume and in-root writes, and denies nested subagents and outside writes', () => {
+    expect(constructor.guard(exec('capability_workflow_resume'))).toBeUndefined()
+    expect(constructor.guard(exec('write', { path: path.join(root, 'src', 'index.ts') }))).toBeUndefined()
+    expect(constructor.guard(exec('subagent'))).toMatch(/nested agent\/subagent\/workflow|denies nested/i)
+    expect(constructor.guard(exec('write', { path: path.join(os.tmpdir(), 'outside.ts') }))).toMatch(/outside the Host-managed source/i)
+    expect(constructor.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
   })
 })
 

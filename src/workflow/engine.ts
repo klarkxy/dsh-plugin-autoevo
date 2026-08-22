@@ -1042,11 +1042,17 @@ export class WorkflowEngine {
           : undefined
         return await this.view(workflow, resolution)
       }
+      if (input.navigation?.kind === 'finish_managed_work') {
+        return await this.resumeFinishManagedWork(workflow, input, exec)
+      }
       if (workflow.status !== 'interrupted' || !workflow.interrupt || !INTERRUPT_NODES.has(workflow.cursor)) {
         throw new EvolutionError('invalid_input', 'This workflow is not waiting for a user decision', {
           status: workflow.status,
           cursor: workflow.cursor,
         })
+      }
+      if (!input.interruptId) {
+        throw new EvolutionError('invalid_input', 'interrupt_id is required at a user gate')
       }
       if (workflow.consumedInterruptIds?.includes(input.interruptId)) {
         throw new EvolutionError('invalid_input', 'This interrupt_id was already consumed (replay rejected)', {
@@ -1211,6 +1217,47 @@ export class WorkflowEngine {
       })
       return await this.runUntilPark(latest, exec, undefined, nextResolution)
     })
+  }
+
+  private async resumeFinishManagedWork(
+    workflow: WorkflowRecord,
+    input: ResumeInput,
+    exec: ToolRunContext,
+  ): Promise<WorkflowView> {
+    if (input.decision) {
+      const resolution = workflow.resolutionId
+        ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
+        : undefined
+      if (!resolution) throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
+      return await this.invalidResumeView(
+        workflow,
+        resolution,
+        exec,
+        input,
+        'Provide finish_managed_work without a final decision',
+      )
+    }
+    if (workflow.cursor !== 'await_modify_work' || workflow.status !== 'interrupted' || workflow.interrupt) {
+      throw new EvolutionError('invalid_input', 'This workflow is not waiting for in-session construction to finish', {
+        status: workflow.status,
+        cursor: workflow.cursor,
+      })
+    }
+    if (!workflow.resolutionId) {
+      throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
+    }
+    const latest = await this.store.getWorkflow(workflow.id)
+    if (latest.generation !== workflow.generation || latest.status !== 'interrupted') {
+      throw new EvolutionError('invalid_input', 'This workflow is already running or has moved on')
+    }
+    latest.generation += 1
+    latest.status = 'running'
+    delete latest.lastFailure
+    delete latest.lastDiagnosis
+    delete latest.invalidResumeAttempt
+    latest.cursor = transition(latest.cursor, 'finish_managed_work')
+    const resolution = await this.host.getResolution(latest.resolutionId!)
+    return await this.runUntilPark(latest, exec, undefined, resolution)
   }
 
   private async resumeNavigation(
@@ -1667,16 +1714,23 @@ export class WorkflowEngine {
             resolution = await this.host.getResolution(workflow.resolutionId)
           }
           if (!resolution) throw new EvolutionError('invalid_input', 'Discovery checkpoint is missing a resolution')
+          workflow.status = 'interrupted'
+          delete workflow.interrupt
+          if (workflow.cursor === 'await_modify_work') {
+            this.creationGuard.setConstructionRoot(exec.agent, workflow.pendingPath)
+            await this.checkpoint(workflow)
+            this.syncGuard(workflow, exec, guardGeneration, resolution)
+            return await this.view(workflow, resolution)
+          }
           workflow.discoveryPool = candidateSnapshotFor(
             resolution,
             excludedCandidateIds(workflow),
             DISCOVERY_POOL_MAX,
           )
           workflow.discoveryBudget ??= discoveryBudget()
-          workflow.status = 'interrupted'
-          delete workflow.interrupt
           delete workflow.candidateSnapshot
           this.clearWorkflowGrant(workflow)
+          this.creationGuard.setConstructionRoot(exec.agent, undefined)
           this.creationGuard.invalidateExecutionLease(exec.agent)
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
@@ -1684,6 +1738,7 @@ export class WorkflowEngine {
         }
 
         if (INTERRUPT_NODES.has(workflow.cursor)) {
+          this.creationGuard.setConstructionRoot(exec.agent, undefined)
           if (!resolution && workflow.resolutionId) {
             resolution = await this.host.getResolution(workflow.resolutionId)
           }

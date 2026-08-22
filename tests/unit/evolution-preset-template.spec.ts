@@ -68,7 +68,7 @@ describe('evolution preset template', () => {
   })
 
   it('trusts only the exact current clean-slate template', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('12')
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('13')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS).toEqual([{
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,

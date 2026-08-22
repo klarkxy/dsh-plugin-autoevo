@@ -80,6 +80,7 @@ export type WorkflowNodeId =
   | 'await_confirmation'
   | 'prepare_modify'
   | 'await_modify_work'
+  | 'complete_managed_work'
   | 'review_local'
   | 'install_verify'
   | 'prepare_create'
@@ -406,6 +407,7 @@ export interface WorkflowRecord {
   pendingRepositories?: string[]
   pendingRef?: string
   pendingPath?: string
+  pendingWorkOrder?: import('../creator-foundation.js').CreatorWorkOrder
   pendingInstall?: WorkflowPendingInstall
   managedSourceId?: string
   modificationOutcome?: ModificationOutcome
@@ -531,6 +533,11 @@ export interface WorkflowHost {
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }>
+  finishManagedWork?(
+    resolution: ResolutionRecord,
+    exec: WorkflowExec,
+    workflow: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord; continueConstruction?: boolean }>
   applyDecision(
     resolution: ResolutionRecord,
     resume: ValidatedResume,
@@ -564,12 +571,12 @@ export interface WorkflowExec {
 export const INTERRUPT_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'await_selection',
   'await_confirmation',
-  'await_modify_work',
 ])
 
-/** Model-controlled, read-only checkpoints. They are not user decision gates. */
+/** Model-controlled checkpoints. They are not user decision gates. */
 export const MODEL_CONTROL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'await_discovery',
+  'await_modify_work',
 ])
 
 export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
@@ -594,6 +601,7 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
   modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改', placement: 'advanced' },
+  finish_managed_work: { id: 'finish_managed_work', labelEn: 'Finish in-session construction', labelZh: '完成当前会话中的修改', placement: 'primary' },
 }
 
 export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
@@ -603,7 +611,6 @@ export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
 export function isInterruptKind(value: string | undefined): value is InterruptKind {
   return value === 'await_selection'
     || value === 'await_confirmation'
-    || value === 'await_modify_work'
     || value === 'await_recovery'
 }
 
@@ -705,7 +712,7 @@ export function modifyWorkFacts(review: ReviewRecord, workflow?: WorkflowRecord)
   return {
     reviewId: review.id,
     commit: source.kind === 'github' ? source.commit : source.baseCommit,
-    instruction: 'Modification continues in a managed workspace-write child session. Wait for the next confirmation interrupt; do not supply a local path.',
+    instruction: 'Modification continues in this session on the Host-managed source. Edit files there, then finish construction; do not install or commit.',
     ...(source.kind === 'github' ? { repository: source.repository } : {}),
     ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
@@ -713,7 +720,7 @@ export function modifyWorkFacts(review: ReviewRecord, workflow?: WorkflowRecord)
 
 export function createWorkFacts(workflow?: WorkflowRecord): Record<string, unknown> {
   return {
-    instruction: 'Creation continues in a managed workspace-write child session on the trusted scaffold. Wait for the next confirmation interrupt; do not call cordis_define on the parent session.',
+    instruction: 'Creation continues in this session on the Host-managed scaffold. Edit files there, then finish construction; do not call cordis_define or install.',
     ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
 }

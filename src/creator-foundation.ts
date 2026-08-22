@@ -1,10 +1,11 @@
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { EvolutionError } from './errors.js'
+import { EVOLUTION_PRESET_ID } from './evolution-contracts.js'
 import { hashObject, sha256 } from './state/hashes.js'
 
 export const CREATOR_PRESET_ID = 'cordis' as const
-export const CREATOR_FOUNDATION_CONTRACT_VERSION = 1 as const
+export const CREATOR_FOUNDATION_CONTRACT_VERSION = 2 as const
 export const MAX_CREATOR_RECORDS = 4 as const
 
 export const OFFICIAL_CREATOR_SKILLS = [
@@ -58,9 +59,10 @@ export interface CreatorWorkOrder {
 
 export interface CreatorFoundationReceipt {
   contractVersion: typeof CREATOR_FOUNDATION_CONTRACT_VERSION
-  presetId: typeof CREATOR_PRESET_ID
+  presetId: typeof EVOLUTION_PRESET_ID
   compositionSha256: string
   requiredToolCatalogDigest: string
+  /** Parent session identity. Field name kept for V8 JSON compatibility. */
   childSessionId: string
 }
 
@@ -77,7 +79,7 @@ export interface CreatorCatalog {
 }
 
 export interface CreatorFoundationPreflight {
-  presetId: typeof CREATOR_PRESET_ID
+  presetId: typeof EVOLUTION_PRESET_ID
   compositionSha256: string
   requiredToolCatalogDigest: string
   standingScope: unknown
@@ -129,9 +131,9 @@ function creatorUnavailable(message: string, details: Record<string, unknown> = 
 
 function rejectCodePreset(actual: string | undefined): void {
   if (actual === CODE_PRESET_ID) {
-    throw creatorUnavailable('Managed construction requires the official Creator cordis preset; the code preset is not permitted and there is no fallback', {
+    throw creatorUnavailable('Managed construction requires the Capability Evolution parent session; the code preset is not permitted and there is no fallback', {
       actual,
-      expected: CREATOR_PRESET_ID,
+      expected: EVOLUTION_PRESET_ID,
     })
   }
 }
@@ -175,7 +177,7 @@ export function requiredCreatorCatalog(platform = process.platform): CreatorCata
       'todo_write',
       ...REQUIRED_INSPECT_TOOLS,
     ],
-    skills: [...OFFICIAL_CREATOR_SKILLS],
+    skills: [],
   }
 }
 
@@ -226,7 +228,7 @@ function defaultAcceptanceTargets(operation: CreatorOperation): readonly string[
   if (operation === 'create') {
     return [
       'Host local re-review must produce an installable managed snapshot',
-      'Do not install, publish, or claim success from the child session',
+      'Do not install, publish, or claim success from this construction phase',
     ]
   }
   if (operation === 'correct') {
@@ -246,24 +248,24 @@ export function assertCreatorReceipt(
   preflight: CreatorFoundationPreflight,
 ): CreatorFoundationReceipt {
   if (!receipt) {
-    throw creatorUnavailable('Managed child did not return a verified Creator foundation receipt')
+    throw creatorUnavailable('Managed construction did not return a verified Creator foundation receipt')
   }
   rejectCodePreset(receipt.presetId)
   if (receipt.contractVersion !== CREATOR_FOUNDATION_CONTRACT_VERSION) {
-    throw creatorUnavailable('Managed child Creator foundation receipt contractVersion mismatch', {
+    throw creatorUnavailable('Managed construction Creator foundation receipt contractVersion mismatch', {
       expected: CREATOR_FOUNDATION_CONTRACT_VERSION,
       actual: receipt.contractVersion,
     })
   }
   assertNotCodePresetId(receipt.presetId)
   if (receipt.compositionSha256 !== preflight.compositionSha256) {
-    throw creatorUnavailable('Managed child composition SHA-256 does not match Creator preflight')
+    throw creatorUnavailable('Managed construction catalog digest does not match Creator preflight')
   }
   if (receipt.requiredToolCatalogDigest !== preflight.requiredToolCatalogDigest) {
-    throw creatorUnavailable('Managed child required tool catalog digest does not match Creator preflight')
+    throw creatorUnavailable('Managed construction required tool catalog digest does not match Creator preflight')
   }
   if (typeof receipt.childSessionId !== 'string' || receipt.childSessionId.trim().length === 0) {
-    throw creatorUnavailable('Managed child Creator foundation receipt is missing the child session identity')
+    throw creatorUnavailable('Managed construction Creator foundation receipt is missing the parent session identity')
   }
   return receipt
 }
@@ -274,7 +276,7 @@ export function mintCreatorReceipt(
 ): CreatorFoundationReceipt {
   return {
     contractVersion: CREATOR_FOUNDATION_CONTRACT_VERSION,
-    presetId: CREATOR_PRESET_ID,
+    presetId: EVOLUTION_PRESET_ID,
     compositionSha256: preflight.compositionSha256,
     requiredToolCatalogDigest: preflight.requiredToolCatalogDigest,
     childSessionId: String(childSessionId),
@@ -296,10 +298,10 @@ function serviceFrom(ctx: unknown, name: string): unknown {
 
 function assertNotCodePresetId(id: string): void {
   rejectCodePreset(id)
-  if (id !== CREATOR_PRESET_ID) {
-    throw creatorUnavailable('Managed construction requires the official Creator cordis preset; no other preset and no fallback is permitted', {
+  if (id !== EVOLUTION_PRESET_ID) {
+    throw creatorUnavailable('Managed construction requires the Capability Evolution parent session; no other preset and no fallback is permitted', {
       actual: id,
-      expected: CREATOR_PRESET_ID,
+      expected: EVOLUTION_PRESET_ID,
     })
   }
 }
@@ -374,7 +376,6 @@ export function assertRequiredCreatorCatalog(
   platform = process.platform,
 ): void {
   const actualTools = catalogNameSet(catalog.tools)
-  const actualSkills = new Set(catalog.skills)
   const missing: string[] = []
   if (!catalogHas(actualTools, FILE_READ_ALIASES)) missing.push('repository file read tools')
   if (!catalogHas(actualTools, FILE_WRITE_ALIASES)) missing.push('repository file write tools')
@@ -385,11 +386,8 @@ export function assertRequiredCreatorCatalog(
   for (const inspect of REQUIRED_INSPECT_TOOLS) {
     if (!catalogHas(actualTools, [inspect])) missing.push(inspect)
   }
-  for (const skill of OFFICIAL_CREATOR_SKILLS) {
-    if (!actualSkills.has(skill)) missing.push(skill)
-  }
   if (missing.length > 0) {
-    throw creatorUnavailable('Official Creator cordis catalog is missing required tools or skills', {
+    throw creatorUnavailable('Capability Evolution parent catalog is missing required construction tools', {
       missing,
     })
   }
@@ -428,23 +426,20 @@ export async function assertChildCreatorCatalog(
   childScope: unknown,
   preflight: CreatorFoundationPreflight,
   composedPreset: string | undefined,
-  mountedComposition: string,
+  _mountedComposition: string,
 ): Promise<CreatorCatalog> {
   rejectCodePreset(composedPreset)
-  if (composedPreset !== CREATOR_PRESET_ID) {
-    throw creatorUnavailable('Managed child did not compose the official Creator cordis preset; code and fallback presets are not permitted', {
+  if (composedPreset && composedPreset !== EVOLUTION_PRESET_ID) {
+    throw creatorUnavailable('Managed construction did not remain on the Capability Evolution parent session; code and fallback presets are not permitted', {
       actual: composedPreset,
-      expected: CREATOR_PRESET_ID,
+      expected: EVOLUTION_PRESET_ID,
     })
-  }
-  if (compositionSha256(mountedComposition) !== preflight.compositionSha256) {
-    throw creatorUnavailable('Managed child mounted Creator composition does not match the preflight SHA-256')
   }
   const catalog = await collectCreatorCatalog(agentCtx, childScope)
   assertRequiredCreatorCatalog(catalog)
   const digest = requiredToolCatalogDigest(requiredCreatorCatalog())
   if (digest !== preflight.requiredToolCatalogDigest) {
-    throw creatorUnavailable('Managed child required tool catalog digest does not match Creator preflight')
+    throw creatorUnavailable('Managed construction required tool catalog digest does not match Creator preflight')
   }
   return catalog
 }
@@ -453,93 +448,36 @@ export async function preflightCreatorFoundation(
   ctx: Context,
   input: { signal?: AbortSignal; parentCtx?: unknown } = {},
 ): Promise<CreatorFoundationPreflight> {
-  const agentPresets = serviceFrom(ctx, 'agentPresets') as AgentPresetsLike | undefined
-  if (!agentPresets) {
-    throw creatorUnavailable('DSH agent preset service is required to resolve the official Creator cordis preset')
+  const catalogCtx = input.parentCtx ?? ctx
+  const agentPresets = serviceFrom(catalogCtx, 'agentPresets') as AgentPresetsLike | undefined
+    ?? serviceFrom(ctx, 'agentPresets') as AgentPresetsLike | undefined
+  const composed = agentPresets?.composedPreset?.(catalogCtx)
+    ?? agentPresets?.composedPreset?.(ctx)
+  rejectCodePreset(composed)
+  if (composed && composed !== EVOLUTION_PRESET_ID) {
+    throw creatorUnavailable('Managed construction requires the Capability Evolution parent session; no other preset and no fallback is permitted', {
+      actual: composed,
+      expected: EVOLUTION_PRESET_ID,
+    })
   }
 
-  const missingRuntime = ['agents', 'sandbox', 'sandboxPolicy', 'fs', 'tools', 'skills']
-    .filter((name) => serviceFrom(ctx, name) === undefined)
-  if (input.parentCtx && serviceFrom(input.parentCtx, 'agents') === undefined) {
-    missingRuntime.push('parent agents')
-  }
+  const missingRuntime = ['tools', 'skills']
+    .filter((name) => serviceFrom(catalogCtx, name) === undefined && serviceFrom(ctx, name) === undefined)
   if (missingRuntime.length > 0) {
-    throw creatorUnavailable('Managed Creator child runtime prerequisites are unavailable', {
+    throw creatorUnavailable('Managed construction runtime prerequisites are unavailable', {
       missing: missingRuntime,
     })
   }
 
-  const roster = await rosterItems(agentPresets)
-  if (roster) {
-    const entry = roster.find((item) => item.id === CREATOR_PRESET_ID)
-    const codeEntry = roster.find((item) => item.id === CODE_PRESET_ID)
-    if (!entry) {
-      throw creatorUnavailable('Official Creator cordis preset is missing from the DSH agent preset roster', {
-        sawCodePreset: Boolean(codeEntry),
-      })
-    }
-    if (entry.broken) {
-      throw creatorUnavailable('Official Creator cordis preset composition is broken and cannot be mounted')
-    }
-  }
-
-  if (typeof agentPresets.resolve !== 'function') {
-    throw creatorUnavailable('DSH agent preset service cannot resolve the official Creator cordis preset')
-  }
-  let resolved: AgentPresetRosterItem | undefined
-  try {
-    resolved = await agentPresets.resolve(CREATOR_PRESET_ID)
-  } catch (error) {
-    throw creatorUnavailable('Official Creator cordis preset could not be resolved', {
-      cause: error instanceof Error ? error.message : String(error),
-    })
-  }
-  if (!resolved || resolved.id !== CREATOR_PRESET_ID || resolved.trust !== 'system') {
-    throw creatorUnavailable('Resolved cordis preset is not the official system Creator preset')
-  }
-  if (resolved.broken) {
-    throw creatorUnavailable('Resolved official Creator cordis preset is broken and cannot be mounted')
-  }
-
-  if (typeof agentPresets.read !== 'function') {
-    throw creatorUnavailable('DSH agent preset service cannot read the official Creator cordis composition')
-  }
-  let composition: string
-  try {
-    composition = await agentPresets.read(CREATOR_PRESET_ID)
-  } catch (error) {
-    throw creatorUnavailable('Official Creator cordis composition could not be read', {
-      cause: error instanceof Error ? error.message : String(error),
-    })
-  }
-  if (typeof composition !== 'string' || !compositionLooksMountable(composition)) {
-    throw creatorUnavailable('Official Creator cordis composition is missing, empty, or not a mountable Creator composition')
-  }
-
-  if (typeof agentPresets.standingKeyFor !== 'function') {
-    throw creatorUnavailable('Official Creator cordis preset cannot be mount-validated; standing scope is unavailable')
-  }
-  let standingScope: unknown
-  try {
-    standingScope = await agentPresets.standingKeyFor(CREATOR_PRESET_ID)
-  } catch (error) {
-    throw creatorUnavailable('Official Creator cordis composition is unmountable', {
-      cause: error instanceof Error ? error.message : String(error),
-    })
-  }
-  if (standingScope === undefined || standingScope === null || standingScope === false) {
-    throw creatorUnavailable('Official Creator cordis preset standing scope was not obtained')
-  }
-
-  const catalog = await collectCreatorCatalog(ctx, standingScope, input.signal)
+  const catalog = await collectCreatorCatalog(catalogCtx, catalogCtx, input.signal)
   assertRequiredCreatorCatalog(catalog)
   const digest = requiredToolCatalogDigest(requiredCreatorCatalog())
 
   return {
-    presetId: CREATOR_PRESET_ID,
-    compositionSha256: compositionSha256(composition),
+    presetId: EVOLUTION_PRESET_ID,
+    compositionSha256: digest,
     requiredToolCatalogDigest: digest,
-    standingScope,
+    standingScope: composed ?? EVOLUTION_PRESET_ID,
     catalog,
   }
 }
@@ -583,11 +521,12 @@ const TESTING_CORDIS_COMPOSITION = [
 
 export function testingCreatorPreflight(): CreatorFoundationPreflight {
   const required = requiredCreatorCatalog()
+  const digest = requiredToolCatalogDigest(required)
   return {
-    presetId: CREATOR_PRESET_ID,
-    compositionSha256: compositionSha256(TESTING_CORDIS_COMPOSITION),
-    requiredToolCatalogDigest: requiredToolCatalogDigest(required),
-    standingScope: 'standing-cordis',
+    presetId: EVOLUTION_PRESET_ID,
+    compositionSha256: digest,
+    requiredToolCatalogDigest: digest,
+    standingScope: EVOLUTION_PRESET_ID,
     catalog: {
       tools: [...required.tools],
       skills: [...required.skills],

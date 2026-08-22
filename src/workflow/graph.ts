@@ -45,6 +45,7 @@ const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionI
   },
   await_modify_work: {
     stop: 'stopped',
+    finish_managed_work: 'complete_managed_work',
   },
 }
 
@@ -106,7 +107,7 @@ export function interruptPayload(
 }
 
 export function interruptKind(cursor: WorkflowNodeId): InterruptKind | undefined {
-  if (cursor === 'await_selection' || cursor === 'await_confirmation' || cursor === 'await_modify_work') {
+  if (cursor === 'await_selection' || cursor === 'await_confirmation') {
     return cursor
   }
   return undefined
@@ -121,7 +122,54 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
   if (node === 'install_verify') return executeInstallVerify(ctx)
   if (node === 'prepare_modify') return executePrepareModify(ctx)
   if (node === 'prepare_create') return executePrepareCreate(ctx)
+  if (node === 'complete_managed_work') return executeCompleteManagedWork(ctx)
   throw new EvolutionError('invalid_input', 'No automatic implementation for this workflow node', { node })
+}
+
+async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecutionResult> {
+  const current = await requireResolution(ctx)
+  if (!ctx.host.finishManagedWork) {
+    throw new EvolutionError('invalid_input', 'This workflow host does not support in-session construction')
+  }
+  try {
+    const finished = await ctx.host.finishManagedWork(current, ctx.exec, ctx.workflow)
+    if (finished.path) ctx.workflow.pendingPath = finished.path
+    if (finished.continueConstruction) {
+      return { kind: 'next', node: 'await_modify_work', resolution: finished.resolution, ...(finished.review ? { review: finished.review } : {}) }
+    }
+    if (finished.review) {
+      return { kind: 'next', node: 'await_confirmation', resolution: finished.resolution, review: finished.review }
+    }
+    return { kind: 'done', node: 'modify_authorized', resolution: finished.resolution }
+  } catch (error) {
+    if (error instanceof EvolutionError && error.details.recoveryRequired === true) {
+      const review = ctx.workflow.lastReviewId
+        ? await ctx.host.getReview(ctx.workflow.lastReviewId).catch(() => undefined)
+        : undefined
+      ctx.workflow.lastFailure = {
+        stage: 'managed_child',
+        code: error.code,
+        message: error.message,
+        retryable: false,
+      }
+      return { kind: 'done', node: 'recovery_required', resolution: current, ...(review ? { review } : {}) }
+    }
+    if (ctx.exec.signal?.aborted
+      || (error instanceof EvolutionError
+        && error.code !== 'command_failed'
+        && error.code !== 'review_rejected')) throw error
+    const review = ctx.workflow.lastReviewId
+      ? await ctx.host.getReview(ctx.workflow.lastReviewId).catch(() => undefined)
+      : undefined
+    ctx.workflow.lastFailure = {
+      stage: 'managed_child',
+      code: error instanceof EvolutionError ? error.code : 'command_failed',
+      message: error instanceof Error ? error.message : String(error),
+      retryable: error instanceof EvolutionError && error.code === 'command_failed',
+    }
+    if (review) return { kind: 'next', node: 'await_confirmation', resolution: current, review }
+    throw error
+  }
 }
 
 async function executeResolveLocal(ctx: GraphContext): Promise<NodeExecutionResult> {
@@ -397,8 +445,8 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
         ? 'modify_introduced_blocker'
         : 'modify_attempts_exhausted',
       message: ctx.workflow.modificationOutcome?.introducedBlockers.length
-        ? 'Host re-review found new blocking modification targets; another child will not be started.'
-        : 'Modification already used its two Host-bounded attempts. Diagnose or choose a different reviewed action; Host will not start another child.',
+        ? 'Host re-review found new blocking modification targets; another construction round will not be started.'
+        : 'Modification already used its two Host-bounded attempts. Diagnose or choose a different reviewed action; Host will not start another construction round.',
       retryable: false,
     }
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }
@@ -450,7 +498,7 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
       return { kind: 'next', node: 'await_confirmation', resolution: prepared.resolution, review: prepared.review }
     }
     if (prepared.path) {
-      return { kind: 'next', node: 'review_local', resolution: prepared.resolution, review }
+      return { kind: 'next', node: 'await_modify_work', resolution: prepared.resolution, review }
     }
     return { kind: 'done', node: 'modify_authorized', resolution: prepared.resolution, review }
   }

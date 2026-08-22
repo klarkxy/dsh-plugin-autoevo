@@ -377,8 +377,8 @@ describe('service selected review attachment', () => {
     )
     expect(result.reviews).toHaveLength(1)
     expect(result.reviews[0]?.sourceSnapshot).toMatchObject({ repository: 'MirDie/dsh-xai' })
-    expect(result.reviews[0]?.reviewerVerdict?.decision).toBe('rejected')
-    expect(seenRepos).toEqual(['MirDie/dsh-xai'])
+    expect(result.reviews[0]?.reviewerVerdict?.decision).toBeUndefined()
+    expect(seenRepos).toEqual([])
     await expect(serviceWithStore.reviewGithubBatch(
       resolution,
       ['acme/other'],

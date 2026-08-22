@@ -159,6 +159,7 @@ describe('workflow graph transitions', () => {
     expect(transition('await_confirmation', 'use_this')).toBe('install_verify')
     expect(transition('await_confirmation', 'modify_this')).toBe('prepare_modify')
     expect(transition('await_modify_work', 'stop')).toBe('stopped')
+    expect(transition('await_modify_work', 'finish_managed_work')).toBe('complete_managed_work')
     expect(() => transition('await_selection', 'review_candidates')).toThrow(/cannot resume/i)
     expect(() => transition('await_selection', 'use_this')).toThrow(/cannot resume/i)
   })

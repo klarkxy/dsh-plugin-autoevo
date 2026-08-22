@@ -5,7 +5,6 @@ import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  CREATOR_PRESET_ID,
   appendCreatorRecord,
   assertChildCreatorCatalog,
   assertCreatorReceipt,
@@ -18,6 +17,7 @@ import {
   testingCreatorPreflight,
   _testing as creatorTesting,
 } from '../../src/creator-foundation.js'
+import { EVOLUTION_PRESET_ID } from '../../src/evolution-contracts.js'
 import { POLICY_VERSION } from '../../src/contracts.js'
 import { StateStore } from '../../src/state/store.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
@@ -47,25 +47,26 @@ function foundationCtx(options: {
   const skills = (options.skills ?? [...requiredCreatorCatalog().skills]).map((name) => ({ name }))
   const roster = options.roster === null
     ? undefined
-    : options.roster ?? [{ id: CREATOR_PRESET_ID }]
+    : options.roster ?? [{ id: EVOLUTION_PRESET_ID }]
   return {
     get(name: string) {
+      if (options.missingRuntime === name) return undefined
       if (name === 'agentPresets') {
         return {
           ...(roster ? { list: async () => roster } : {}),
           resolve: async (id: string) => {
-            if (id !== CREATOR_PRESET_ID) throw new Error('missing preset')
-            return { id, trust: options.resolvedTrust ?? 'system', path: 'official-cordis.yml' }
+            if (id !== EVOLUTION_PRESET_ID) throw new Error('missing preset')
+            return { id, trust: options.resolvedTrust ?? 'system', path: 'evolution.yml' }
           },
           read: async (id: string) => {
             if (options.readError) throw options.readError
             if (options.composition === null) return ''
-            if (id !== CREATOR_PRESET_ID) throw new Error('missing preset')
+            if (id !== EVOLUTION_PRESET_ID) throw new Error('missing preset')
             return options.composition ?? creatorTesting.TESTING_CORDIS_COMPOSITION
           },
           standingKeyFor: async (id: string) => {
             if (options.standingError) throw options.standingError
-            if (id !== CREATOR_PRESET_ID) throw new Error('unmountable')
+            if (id !== EVOLUTION_PRESET_ID) throw new Error('unmountable')
             return options.standing === undefined ? 'standing-cordis' : options.standing
           },
         }
@@ -103,17 +104,14 @@ function workflowRecord(overrides: Partial<WorkflowRecord> = {}): WorkflowRecord
 }
 
 describe('Creator foundation preflight', () => {
-  it('resolves official cordis, hashes the real composition, and validates the standing catalog', async () => {
+  it('validates the parent construction catalog and never falls back to code', async () => {
     const preflight = await preflightCreatorFoundation(foundationCtx())
-    expect(preflight.presetId).toBe(CREATOR_PRESET_ID)
+    expect(preflight.presetId).toBe(EVOLUTION_PRESET_ID)
     expect(preflight.presetId).not.toBe('code')
-    expect(preflight.compositionSha256).toBe(compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION))
+    expect(preflight.compositionSha256).toBe(requiredToolCatalogDigest())
     expect(preflight.requiredToolCatalogDigest).toBe(requiredToolCatalogDigest())
-    expect(preflight.standingScope).toBe('standing-cordis')
-    expect(preflight.catalog.skills).toEqual(expect.arrayContaining([
-      'cordis-plugin-development',
-      'editing-cordis-compositions',
-    ]))
+    expect(preflight.standingScope).toBe(EVOLUTION_PRESET_ID)
+    expect(preflight.catalog.tools).toEqual(expect.arrayContaining(requiredTools()))
   })
 
   it('is side-effect-free against managed source directories', async () => {
@@ -125,71 +123,37 @@ describe('Creator foundation preflight', () => {
     expect(await readdir(root)).toEqual([])
   })
 
-  it('rejects a missing cordis preset and never falls back to code', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({
-      roster: [{ id: 'code' }],
-    }))).rejects.toThrow(/cordis preset is missing/i)
-  })
-
-  it('rejects a broken cordis composition', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({
-      roster: [{ id: CREATOR_PRESET_ID, broken: true }],
-    }))).rejects.toThrow(/broken/i)
-  })
-
-  it('rejects a user-authored cordis preset instead of treating it as official', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({ resolvedTrust: 'user' })))
-      .rejects.toThrow(/not the official system Creator preset/i)
-  })
-
-  it('rejects an empty or unreadable composition', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({ composition: null }))).rejects.toThrow(/missing, empty, or not a mountable/i)
-    await expect(preflightCreatorFoundation(foundationCtx({
-      readError: new Error('not found'),
-    }))).rejects.toThrow(/could not be read/i)
-  })
-
-  it('rejects an unmountable composition and a missing standing scope', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({
-      standingError: new Error('row did not activate'),
-    }))).rejects.toThrow(/unmountable/i)
-    await expect(preflightCreatorFoundation(foundationCtx({ standing: null }))).rejects.toThrow(/standing scope was not obtained/i)
-  })
-
-  it('rejects catalog mismatches for inspect tools and official Creator skills', async () => {
+  it('rejects catalog mismatches for inspect tools', async () => {
     await expect(preflightCreatorFoundation(foundationCtx({
       tools: requiredTools().filter((name) => name !== 'cordis_inspect_self'),
-    }))).rejects.toThrow(/missing required tools or skills/i)
-    await expect(preflightCreatorFoundation(foundationCtx({
-      skills: ['cordis-plugin-development'],
-    }))).rejects.toThrow(/missing required tools or skills/i)
+    }))).rejects.toThrow(/missing required construction tools/i)
   })
 
-  it('never substitutes global tools for a missing scoped Creator capability', async () => {
+  it('never substitutes global tools for a missing scoped construction capability', async () => {
     await expect(preflightCreatorFoundation(foundationCtx({
       tools: requiredTools().filter((name) => name !== 'cordis_inspect_query'),
       globalTools: requiredTools(),
-    }))).rejects.toThrow(/missing required tools or skills/i)
+    }))).rejects.toThrow(/missing required construction tools/i)
   })
 
-  it('rejects missing managed-child runtime prerequisites before source work', async () => {
-    await expect(preflightCreatorFoundation(foundationCtx({ missingRuntime: 'sandbox' })))
+  it('rejects missing parent tool or skill services before source work', async () => {
+    await expect(preflightCreatorFoundation(foundationCtx({ missingRuntime: 'tools' })))
       .rejects.toThrow(/runtime prerequisites are unavailable/i)
   })
 })
 
 describe('Creator child catalog and receipt', () => {
-  it('accepts a cordis child catalog that matches preflight', async () => {
+  it('accepts an evolution parent catalog that matches preflight', async () => {
     const preflight = testingCreatorPreflight()
     const catalog = await assertChildCreatorCatalog(
       foundationCtx(),
       { child: true },
       preflight,
-      CREATOR_PRESET_ID,
+      EVOLUTION_PRESET_ID,
       creatorTesting.TESTING_CORDIS_COMPOSITION,
     )
-    expect(catalog.skills).toContain('editing-cordis-compositions')
-    const receipt = mintCreatorReceipt(preflight, 'child-session-1')
+    expect(catalog.tools).toEqual(expect.arrayContaining(requiredTools()))
+    const receipt = mintCreatorReceipt(preflight, 'parent-session-1')
     expect(assertCreatorReceipt(receipt, preflight)).toEqual(receipt)
   })
 
@@ -209,15 +173,15 @@ describe('Creator child catalog and receipt', () => {
     }, preflight)).toThrow(/does not match Creator preflight/i)
   })
 
-  it('rejects a mounted composition that drifted after preflight', async () => {
+  it('rejects a parent session that is not Capability Evolution', async () => {
     const preflight = testingCreatorPreflight()
     await expect(assertChildCreatorCatalog(
       foundationCtx(),
       { child: true },
       preflight,
-      CREATOR_PRESET_ID,
+      'code',
       `${creatorTesting.TESTING_CORDIS_COMPOSITION}# changed after preflight\n`,
-    )).rejects.toThrow(/does not match the preflight SHA-256/i)
+    )).rejects.toThrow(/code preset is not permitted/i)
   })
 })
 

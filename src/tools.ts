@@ -37,11 +37,11 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   const navigation = recordArgs(args.navigation)
   const action = typeof decision.action === 'string' ? decision.action : ''
   const navKind = typeof navigation.kind === 'string' ? navigation.kind : ''
-  if (action === 'modify_this') {
-    return genericPendingCard(args, 'AutoEvo is improving and checking the plugin; this may take several minutes', 'AutoEvo 正在改进并检查插件，可能需要几分钟', 'edit')
+  if (action === 'modify_this' || navKind === 'finish_managed_work') {
+    return genericPendingCard(args, 'Authorized in-session construction on the managed source', '已授权，正在当前会话修改托管源', 'edit')
   }
   if (action === 'create_new') {
-    return genericPendingCard(args, 'AutoEvo is creating a new plugin; this may take several minutes', 'AutoEvo 正在创建新插件，可能需要几分钟', 'edit')
+    return genericPendingCard(args, 'Authorized in-session creation on the managed source', '已授权，正在当前会话创建托管源', 'edit')
   }
   if (action === 'use_this') {
     return genericPendingCard(args, 'Installing and verifying the reviewed plugin; this may take several minutes', '正在安装并验证已审查的插件，可能需要几分钟', 'execute')
@@ -134,17 +134,17 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_resume',
-      description: 'Interpret a fresh user reply at a sealed Host gate. Use navigation for candidate review/search/local reuse, or decision for the final reviewed use/modify/create/stop choice. Host validates the current interrupt, scoped candidate IDs, review identity, replay, and authentic user turn.',
+      description: 'Interpret a fresh user reply at a sealed Host gate, or finish in-session construction after an authorized modify/create. Use navigation for candidate review/search/local reuse/finish construction, or decision for the final reviewed use/modify/create/stop choice. Host validates the current interrupt except for finish construction, which continues the already-authorized turn.',
       parameters: {
         workflow_id: { type: 'string', required: true, description: 'Workflow id returned by capability_workflow.' },
-        interrupt_id: { type: 'string', required: true, description: 'interrupt_id from the current interrupt payload.' },
+        interrupt_id: { type: 'string', description: 'interrupt_id from the current interrupt payload. Required at user gates; omit when finishing in-session construction.' },
         navigation: {
           type: 'object',
           additionalProperties: false,
           properties: {
             kind: {
               type: 'string',
-              enum: ['review_candidates', 'search_more', 'reuse_local', 'stop'],
+              enum: ['review_candidates', 'search_more', 'reuse_local', 'stop', 'finish_managed_work'],
               required: true,
             },
             candidate_ids: { type: 'array', items: { type: 'string' } },
@@ -179,7 +179,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
         rejectForgedResumeArgs(args as Record<string, unknown>)
         return compactAgentView(await service.resume({
           workflowId: args.workflow_id,
-          interruptId: args.interrupt_id,
+          ...(args.interrupt_id ? { interruptId: args.interrupt_id } : {}),
           ...(args.navigation ? {
             navigation: {
               kind: args.navigation.kind,

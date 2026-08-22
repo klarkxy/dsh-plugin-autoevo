@@ -38,6 +38,7 @@ interface AgentGateState {
   selectionReceipt?: SelectionReceipt
   actionCommitment?: ActionCommitment
   executionLease?: ExecutionLease
+  constructionRoot?: string
 }
 
 const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
@@ -129,7 +130,7 @@ function denialReason(authorization?: ResolutionAuthorization): string {
   }
   const prefix = `AutoEvo denied new Cordis plugin creation for ${authorization.resolutionId}`
   if (authorization.state === 'reuse_local') return `${prefix}: reuse the existing local capability the user chose. ${authorization.reason}`
-  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin in the managed source child session instead of cordis_define. ${authorization.reason}`
+  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin in the Host-managed source from this session instead of cordis_define. ${authorization.reason}`
   if (authorization.state === 'use_review') return `${prefix}: the user chose to use a reviewed plugin, not create a new one. ${authorization.reason}`
   if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
   if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
@@ -138,7 +139,7 @@ function denialReason(authorization?: ResolutionAuthorization): string {
     return `${prefix}: wait for marketplace setup and its hot-load attempt. Restart DSH only when the returned state explicitly says hot-load failed. Do not create a plugin. ${authorization.reason}`
   }
   if (authorization.state === 'create_authorized') {
-    return `${prefix}: create-new continues only inside a managed git source and workspace-write child session; cordis_define(kind:new) is not permitted.`
+    return `${prefix}: create-new continues as in-session work on a Host-managed git source; cordis_define(kind:new) is not permitted.`
   }
   return `${prefix}: dynamic Cordis creation is not permitted on the parent AutoEvo session.`
 }
@@ -206,6 +207,19 @@ export class CreationGuard {
   currentTurnId(agent: Agent | undefined): string | undefined {
     if (!agent) return undefined
     return this.states.get(agent)?.currentTurnId
+  }
+
+  setConstructionRoot(agent: Agent | undefined, root: string | undefined): void {
+    if (!agent) return
+    const state = this.states.get(agent)
+    if (!state) return
+    if (root && root.trim()) state.constructionRoot = root
+    else delete state.constructionRoot
+  }
+
+  constructionRoot(agent: Agent | undefined): string | undefined {
+    if (!agent) return undefined
+    return this.states.get(agent)?.constructionRoot
   }
 
   /**

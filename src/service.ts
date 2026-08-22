@@ -23,8 +23,10 @@ import type { CreationGuard } from './creation-guard.js'
 import {
   appendCreatorRecord,
   assertCreatorReceipt,
+  assertWorkOrderScope,
   createCreatorFoundation,
   createCreatorWorkOrder,
+  mintCreatorReceipt,
   type CreatorFoundation,
   type CreatorFoundationPreflight,
   type CreatorOperation,
@@ -44,7 +46,7 @@ import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
-import { DshManagedChildHost, type ManagedChildHost, type ManagedChildResult } from './managed-child.js'
+import type { ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
@@ -61,14 +63,13 @@ import {
 } from './review/index.js'
 import type { ContentFile } from './review/review.js'
 import {
-  DshSemanticReviewerHost,
   mintReviewerRequest,
   requirementHashFor,
   REVIEWER_VERSION,
   type BoundedReviewFile,
   type SemanticReviewerHost,
 } from './semantic-reviewer.js'
-import { DshSemanticVerifierHost, type SemanticVerifierHost } from './semantic-verifier.js'
+import type { SemanticVerifierHost } from './semantic-verifier.js'
 import { SourceManager, sourceIdForCreate, sourceIdForRepository, type SourceReceipt } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
@@ -626,9 +627,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
   readonly sources: SourceManager
   private readonly launcher: DshLauncher
   private readonly engine: WorkflowEngine
-  private readonly managedChild: ManagedChildHost
-  private readonly semanticReviewer: SemanticReviewerHost
-  private readonly semanticVerifier: SemanticVerifierHost
   private readonly creatorFoundation: CreatorFoundation
 
   constructor(
@@ -637,16 +635,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
-    managedChild?: ManagedChildHost,
-    semanticReviewer?: SemanticReviewerHost,
-    semanticVerifier?: SemanticVerifierHost,
+    _managedChild?: ManagedChildHost,
+    _semanticReviewer?: SemanticReviewerHost,
+    _semanticVerifier?: SemanticVerifierHost,
     creatorFoundation?: CreatorFoundation,
   ) {
     this.launcher = new DshLauncher(runner, config)
     this.sources = new SourceManager(config, runner)
-    this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
-    this.semanticReviewer = semanticReviewer ?? new DshSemanticReviewerHost(ctx)
-    this.semanticVerifier = semanticVerifier ?? new DshSemanticVerifierHost(ctx)
     this.creatorFoundation = creatorFoundation ?? createCreatorFoundation(ctx)
     this.installer = new PluginInstaller(
       ctx,
@@ -659,7 +654,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution, binding)
       },
       undefined,
-      this.semanticVerifier,
+      undefined,
       'headless',
       () => this.currentProfileOwner(),
     )
@@ -1071,7 +1066,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     workflow: WorkflowRecord,
     operation: CreatorOperation,
     status: 'verified' | 'unavailable',
-    receipt?: ManagedChildResult['creator'],
+    receipt?: import('./creator-foundation.js').CreatorFoundationReceipt,
   ): void {
     workflow.creatorRecords = appendCreatorRecord(workflow.creatorRecords, {
       operation,
@@ -1096,57 +1091,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
       workflow.updatedAt = new Date().toISOString()
       await this.store.put('workflows', workflow)
       throw error
-    }
-  }
-
-  private async runManagedChild(input: {
-    sourceId: string
-    workflowId: string
-    reviewId: string
-    cwd: string
-    workOrder: CreatorWorkOrder
-    preflight: CreatorFoundationPreflight
-    exec: WorkflowExec
-  }): Promise<ManagedChildResult> {
-    try {
-      const result = await this.managedChild.run({
-        parent: this.requireParentAgent(input.exec),
-        cwd: input.cwd,
-        workOrder: input.workOrder,
-        preflight: input.preflight,
-        ...(input.exec.signal ? { signal: input.exec.signal } : {}),
-      })
-      assertCreatorReceipt(result.creator, input.preflight)
-      return result
-    } catch (error) {
-      try {
-        // Cleanup must still checkpoint bounded edits when the child inherited an
-        // already-aborted user signal; otherwise cancellation itself can strand
-        // a dirty tree behind an unreleasable live lock.
-        const preserveSignal = input.exec.signal?.aborted ? undefined : input.exec.signal
-        await this.sources.preserveInterruptedChild({
-          sourceId: input.sourceId,
-          workflowId: input.workflowId,
-          reviewId: input.reviewId,
-          ...(preserveSignal ? { signal: preserveSignal } : {}),
-        })
-      } catch (preserveError) {
-        throw new EvolutionError(
-          'command_failed',
-          'Managed child failed and its bounded edits could not be checkpointed; explicit source recovery is required',
-          {
-            recoveryRequired: true,
-            childDiagnostic: hashObject({ cause: error instanceof Error ? error.message : String(error) }),
-            preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
-          },
-        )
-      }
-      if (input.exec.signal?.aborted) throw error
-      throw new EvolutionError(
-        'command_failed',
-        'Managed child failed; its bounded edits were checkpointed and this workflow can be retried',
-        { childDiagnostic: hashObject({ cause: error instanceof Error ? error.message : String(error) }) },
-      )
     }
   }
 
@@ -1257,126 +1201,15 @@ export class CapabilityEvolutionService implements WorkflowHost {
       throw new EvolutionError('invalid_input', 'Local modification requires a managed source receipt')
     }
     workflow.managedSourceId = sourceKey
-    let activeOperation: CreatorOperation = 'modify'
-    try {
-      const baselineBlockers = modificationBlockers(review)
-      const attempts: ModificationAttemptEvidence[] = []
-      const instruction = authenticatedModificationInstruction(resolution, review)
-      const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
-      let correctionTargets = baselineBlockers
-      let automaticCorrectionUsed = false
-      let currentReview = review
-      let currentResolution = resolution
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
-        const operation: CreatorOperation = attempt === 1 ? 'modify' : 'correct'
-        activeOperation = operation
-        const workOrder = modificationWorkOrder(
-          resolution,
-          review,
-          receipt.path,
-          correctionTargets,
-          attempt === 2,
-        )
-        const child = await this.runManagedChild({
-          sourceId: sourceKey,
-          workflowId: workflow.id,
-          reviewId: currentReview.id,
-          cwd: receipt.path,
-          workOrder,
-          preflight,
-          exec,
-        })
-        this.rememberCreator(workflow, operation, 'verified', child.creator)
-        const committed = await this.sources.finalizeChildCommit({
-          sourceId: sourceKey,
-          workflowId: workflow.id,
-          reviewId: currentReview.id,
-          message: attempt === 1
-            ? `fix: satisfy AutoEvo workflow ${workflow.id}`
-            : `fix: complete AutoEvo workflow ${workflow.id}`,
-          ...(exec.signal ? { signal: exec.signal } : {}),
-        })
-        const finalized = await this.reviewAndFreezeManagedSource({
-          resolution: currentResolution,
-          sourceId: sourceKey,
-          path: receipt.path,
-          baseReviewId: currentReview.id,
-          lineageRootCommit: receipt.baseCommit,
-          workflowId: workflow.id,
-          exec,
-        })
-        currentReview = finalized.review
-        currentResolution = finalized.resolution
-        attempts.push({
-          attempt,
-          childSessionId: child.sessionId,
-          commit: committed.headCommit,
-          changedFiles: committed.changedFiles,
-          changedFilesTruncated: committed.changedFilesTruncated,
-          postReviewId: currentReview.id,
-          completionMarkerObserved: true,
-          checks: childCheckEvidence(child.taskResult),
-        })
-        const acceptance = modificationAcceptance({
-          baselineReview: review,
-          baselineBlockers,
-          postReview: currentReview,
-          meaningfulInstruction,
-          attempt,
-        })
-        const outcome: ModificationOutcome = {
-          contractVersion: 1,
-          policyVersion: review.policyVersion,
-          baselineReviewId: review.id,
-          ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
-          baselineRuntimeVersion: review.compatibility.runtimeVersion,
-          maxAttempts: 2,
-          automaticCorrectionUsed,
-          status: acceptance.status,
-          attempts: [...attempts],
-          resolvedBlockers: acceptance.resolved,
-          unresolvedBlockers: acceptance.unresolved,
-          introducedBlockers: acceptance.introduced,
-        }
-        workflow.modificationOutcome = outcome
-        workflow.lastReviewId = currentReview.id
-        workflow.lineageTipReviewId = currentReview.id
-        if (outcome.status === 'unresolved' && !acceptance.canCorrect) {
-          workflow.lastFailure = {
-            stage: 'review',
-            code: acceptance.introduced.length > 0 ? 'modify_introduced_blocker' : 'modify_targets_unresolved',
-            message: acceptance.introduced.length > 0
-              ? `Host re-review found ${acceptance.introduced.length} new blocking modification target(s); automatic correction stopped without expanding scope.`
-              : `Host re-review still reports ${acceptance.unresolved.length} original modification target(s) after one focused correction.`,
-            retryable: false,
-          }
-        } else {
-          delete workflow.lastFailure
-        }
-        workflow.updatedAt = new Date().toISOString()
-        await this.store.put('workflows', workflow)
-        if (!acceptance.canCorrect) {
-          return { resolution: currentResolution, review: currentReview, path: receipt.path }
-        }
-        automaticCorrectionUsed = true
-        correctionTargets = acceptance.unresolved
-        workflow.modificationOutcome = { ...outcome, automaticCorrectionUsed: true }
-        workflow.updatedAt = new Date().toISOString()
-        await this.store.put('workflows', workflow)
-      }
-      throw new EvolutionError('command_failed', 'Managed modification exhausted its bounded correction loop')
-    } catch (error) {
-      this.rememberCreator(workflow, activeOperation, 'unavailable')
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      if (!exec.signal?.aborted) throw error
-      return await this.preserveCancelledManagedWork({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: review.id,
-        cause: error,
-      })
-    }
+    const parent = this.requireParentAgent(exec)
+    const workOrder = modificationWorkOrder(resolution, review, receipt.path)
+    await this.store.put('reviews', review)
+    workflow.pendingPath = receipt.path
+    workflow.pendingWorkOrder = workOrder
+    this.rememberCreator(workflow, workOrder.operation, 'verified', mintCreatorReceipt(preflight, parent.id))
+    workflow.updatedAt = new Date().toISOString()
+    await this.store.put('workflows', workflow)
+    return { resolution, path: receipt.path }
   }
 
   async prepareCreate(
@@ -1418,38 +1251,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
         acceptanceTargets: [
           'Implement the requirement on the trusted scaffold as a complete DSH plugin bundle',
           'Add focused tests or self-checks where practical',
-          'Do not install, publish, or claim success from the child session',
+          'Do not install, publish, or claim success from this construction phase',
         ],
       })
-      const child = await this.runManagedChild({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: scaffold.record.id,
-        cwd: receipt.path,
-        workOrder,
-        preflight,
-        exec,
-      })
-      this.rememberCreator(workflow, 'create', 'verified', child.creator)
+      const parent = this.requireParentAgent(exec)
+      workflow.pendingPath = receipt.path
+      workflow.pendingWorkOrder = workOrder
+      this.rememberCreator(workflow, 'create', 'verified', mintCreatorReceipt(preflight, parent.id))
       workflow.updatedAt = new Date().toISOString()
       await this.store.put('workflows', workflow)
-      await this.sources.finalizeChildCommit({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: scaffold.record.id,
-        message: `feat: implement AutoEvo workflow ${workflow.id}`,
-        ...(exec.signal ? { signal: exec.signal } : {}),
-      })
-      const finalized = await this.reviewAndFreezeManagedSource({
-        resolution,
-        sourceId: sourceKey,
-        path: receipt.path,
-        baseReviewId: scaffold.record.id,
-        lineageRootCommit: receipt.baseCommit,
-        workflowId: workflow.id,
-        exec,
-      })
-      return { ...finalized, path: receipt.path }
+      return { resolution, path: receipt.path }
     } catch (error) {
       this.rememberCreator(workflow, 'create', 'unavailable')
       workflow.updatedAt = new Date().toISOString()
@@ -1459,6 +1270,169 @@ export class CapabilityEvolutionService implements WorkflowHost {
         sourceId: sourceKey,
         workflowId: workflow.id,
         reviewId,
+        cause: error,
+      })
+    }
+  }
+
+  async finishManagedWork(
+    resolution: ResolutionRecord,
+    exec: WorkflowExec,
+    workflow: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord; continueConstruction?: boolean }> {
+    const sourceKey = workflow.managedSourceId
+    const cwd = workflow.pendingPath
+    const workOrder = workflow.pendingWorkOrder
+    if (!sourceKey || !cwd || !workOrder) {
+      throw new EvolutionError('invalid_input', 'In-session construction is missing a Host-managed source and work order')
+    }
+    if (exec.signal?.aborted) {
+      this.rememberCreator(workflow, workOrder.operation, 'unavailable')
+      workflow.updatedAt = new Date().toISOString()
+      await this.store.put('workflows', workflow)
+      return await this.preserveCancelledManagedWork({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: workOrder.baselineReview?.reviewId ?? workflow.lineageTipReviewId ?? workflow.lastReviewId ?? 'unknown',
+        cause: new EvolutionError('command_failed', 'Managed construction was cancelled'),
+      })
+    }
+    assertWorkOrderScope(workOrder, cwd)
+    const parent = this.requireParentAgent(exec)
+    const preflight = await this.preflightCreator(workflow, workOrder.operation, exec)
+    const receipt = mintCreatorReceipt(preflight, parent.id)
+    assertCreatorReceipt(receipt, preflight)
+    this.rememberCreator(workflow, workOrder.operation, 'verified', receipt)
+    const baselineReviewId = workOrder.baselineReview?.reviewId
+      ?? workflow.lineageTipReviewId
+      ?? workflow.lastReviewId
+    if (!baselineReviewId) {
+      throw new EvolutionError('invalid_input', 'In-session construction is missing a baseline review')
+    }
+    const baselineReview = await this.store.getReview(baselineReviewId)
+    const source = await this.sources.readReceipt(sourceKey)
+    if (!source || source.activeWorkflowId !== workflow.id) {
+      throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
+    }
+    try {
+      const committed = await this.sources.finalizeChildCommit({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: baselineReview.id,
+        message: workOrder.operation === 'create'
+          ? `feat: implement AutoEvo workflow ${workflow.id}`
+          : workOrder.operation === 'correct'
+            ? `fix: complete AutoEvo workflow ${workflow.id}`
+            : `fix: satisfy AutoEvo workflow ${workflow.id}`,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      const finalized = await this.reviewAndFreezeManagedSource({
+        resolution,
+        sourceId: sourceKey,
+        path: source.path,
+        baseReviewId: baselineReview.id,
+        lineageRootCommit: source.baseCommit,
+        workflowId: workflow.id,
+        exec,
+      })
+      const attempt = (workflow.modificationOutcome?.attempts.length ?? 0) + 1
+      if (workOrder.operation === 'create') {
+        delete workflow.pendingWorkOrder
+        workflow.lastReviewId = finalized.review.id
+        workflow.lineageTipReviewId = finalized.review.id
+        workflow.updatedAt = new Date().toISOString()
+        await this.store.put('workflows', workflow)
+        return { ...finalized, path: source.path }
+      }
+      const baselineBlockers = modificationBlockers(
+        workflow.modificationOutcome
+          ? await this.store.getReview(workflow.modificationOutcome.baselineReviewId)
+          : baselineReview,
+      )
+      const outcomeBaseline = workflow.modificationOutcome
+        ? await this.store.getReview(workflow.modificationOutcome.baselineReviewId)
+        : baselineReview
+      const instruction = authenticatedModificationInstruction(resolution, outcomeBaseline)
+      const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
+      const attempts: ModificationAttemptEvidence[] = [
+        ...(workflow.modificationOutcome?.attempts ?? []),
+        {
+          attempt,
+          childSessionId: parent.id,
+          commit: committed.headCommit,
+          changedFiles: committed.changedFiles,
+          changedFilesTruncated: committed.changedFilesTruncated,
+          postReviewId: finalized.review.id,
+          completionMarkerObserved: true,
+          checks: {
+            source: 'unknown',
+            status: 'unknown',
+            summary: 'Host did not independently observe a test command result.',
+          },
+        },
+      ]
+      const acceptance = modificationAcceptance({
+        baselineReview: outcomeBaseline,
+        baselineBlockers,
+        postReview: finalized.review,
+        meaningfulInstruction,
+        attempt,
+      })
+      const outcome: ModificationOutcome = {
+        contractVersion: 1,
+        policyVersion: outcomeBaseline.policyVersion,
+        baselineReviewId: outcomeBaseline.id,
+        ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
+        baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
+        maxAttempts: 2,
+        automaticCorrectionUsed: attempt > 1,
+        status: acceptance.status,
+        attempts,
+        resolvedBlockers: acceptance.resolved,
+        unresolvedBlockers: acceptance.unresolved,
+        introducedBlockers: acceptance.introduced,
+      }
+      workflow.modificationOutcome = outcome
+      workflow.lastReviewId = finalized.review.id
+      workflow.lineageTipReviewId = finalized.review.id
+      if (outcome.status === 'unresolved' && !acceptance.canCorrect) {
+        workflow.lastFailure = {
+          stage: 'review',
+          code: acceptance.introduced.length > 0 ? 'modify_introduced_blocker' : 'modify_targets_unresolved',
+          message: acceptance.introduced.length > 0
+            ? `Host re-review found ${acceptance.introduced.length} new blocking modification target(s); automatic correction stopped without expanding scope.`
+            : `Host re-review still reports ${acceptance.unresolved.length} original modification target(s) after one focused correction.`,
+          retryable: false,
+        }
+      } else {
+        delete workflow.lastFailure
+      }
+      if (acceptance.canCorrect) {
+        workflow.pendingWorkOrder = modificationWorkOrder(
+          finalized.resolution,
+          outcomeBaseline,
+          source.path,
+          acceptance.unresolved,
+          true,
+        )
+        workflow.pendingPath = source.path
+        workflow.updatedAt = new Date().toISOString()
+        await this.store.put('workflows', workflow)
+        return { ...finalized, path: source.path, continueConstruction: true }
+      }
+      delete workflow.pendingWorkOrder
+      workflow.updatedAt = new Date().toISOString()
+      await this.store.put('workflows', workflow)
+      return { ...finalized, path: source.path }
+    } catch (error) {
+      this.rememberCreator(workflow, workOrder.operation, 'unavailable')
+      workflow.updatedAt = new Date().toISOString()
+      await this.store.put('workflows', workflow)
+      if (!exec.signal?.aborted) throw error
+      return await this.preserveCancelledManagedWork({
+        sourceId: sourceKey,
+        workflowId: workflow.id,
+        reviewId: baselineReviewId,
         cause: error,
       })
     }
@@ -1601,16 +1575,11 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<ReviewRecord> {
-    const review = await attachSemanticReview({
-      host: this.semanticReviewer,
-      review: record,
-      files,
-      exec,
-      timeoutMs: this.config.commandTimeoutMs,
-      ...(workflow ? { workflow } : {}),
-    })
-    await this.store.put('reviews', review)
-    return review
+    void files
+    void exec
+    void workflow
+    await this.store.put('reviews', record)
+    return record
   }
 
   async releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void> {

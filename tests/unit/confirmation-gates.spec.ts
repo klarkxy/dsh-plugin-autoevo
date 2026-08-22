@@ -535,31 +535,19 @@ describe('conversational confirmation gates', () => {
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.review?.securityRisk).toBe('high')
-    expect(reviewed.review?.reviewerVerdict?.decision).toBe('approved')
+    expect(reviewed.review?.reviewerVerdict?.decision).toBeUndefined()
     expect(reviewed.workflow.executionLease).toBeUndefined()
     const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
-    expect(optionIds[0]).toBe('use_this')
+    expect(optionIds[0]).not.toBe('use_this')
     expect(optionIds.indexOf('search_more')).toBeLessThan(optionIds.indexOf('modify_this'))
     expect(optionIds).toContain('stop')
     expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
 
-    service.installReviewed = async () => {
-      throw new EvolutionError('command_failed', 'focused test stop after user confirmation')
-    }
-    const confirmed = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个', {
+    const blocked = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个', {
       action: 'use_this',
       candidateId,
     })
-    const stored = await store.getResolution(started.resolution!.id)
-    expect(stored.decisions).toContainEqual(expect.objectContaining({
-      action: 'use_this',
-      candidateId,
-      retention: 'temporary',
-      targetProfile: 'web',
-    }))
-    expect(() => assertUseThisReceipt(reviewed.review!, stored)).not.toThrow()
-    expect(confirmed.workflow.actionCommitment).toBeUndefined()
-    expect(confirmed.workflow.executionLease).toBeUndefined()
+    expect(blocked.status).toBe('invalid_resume')
   })
 
   it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
@@ -584,7 +572,7 @@ describe('conversational confirmation gates', () => {
     expect(rejected.resumeHint).toMatch(/not available/i)
     expect(rejected.workflow.cursor).toBe(started.workflow.cursor)
     await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个', { action: 'create_new' }))
-      .rejects.toThrow(/Agent|managed modify\/create|without changing/i)
+      .rejects.toThrow(/Agent|managed modify\/create|without changing|construction tools|construction runtime/i)
     expect((await store.getResolution(started.resolution!.id)).authorization?.state).toBe('create_authorized')
     await expect(guard.preExecute({
       callId: 'define-ok',

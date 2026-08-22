@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { TOOL_NAMES, type ExecutionLease } from './contracts.js'
 import { isNewCordisDefinition } from './creation-guard.js'
@@ -7,7 +8,7 @@ import {
   REQUIRED_INSPECT_TOOLS,
 } from './creator-foundation.js'
 
-export type ExecutionRole = 'parent' | 'child'
+export type ExecutionRole = 'parent' | 'child' | 'constructor'
 
 const AUTOEVO_TOOLS = new Set<string>(TOOL_NAMES)
 const FS_WRITE_TOOLS = new Set(['write', 'edit', 'fs_write', 'fs_edit', 'file_write', 'file_edit'])
@@ -139,10 +140,28 @@ function hasUnsafeGitCommand(command: string): boolean {
 
 export interface ExecutionGuardOptions {
   role: ExecutionRole
+  /** Absolute managed-source root. Required for constructor path scoping. */
+  allowedRoot?: string
+}
+
+function writePathFromArguments(args: unknown): string | undefined {
+  if (!isRecord(args)) return undefined
+  for (const key of ['path', 'file', 'file_path', 'filePath', 'filename', 'target']) {
+    const value = args[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function isPathInsideRoot(target: string, root: string): boolean {
+  const resolvedRoot = path.resolve(root)
+  const resolvedTarget = path.resolve(target)
+  const relative = path.relative(resolvedRoot, resolvedTarget)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 /**
- * Final execution-layer guard for AutoEvo parent and managed-source child sessions.
+ * Final execution-layer guard for AutoEvo parent and in-parent managed construction.
  * Prompts are not enforcement; denials here are observable and rejectable.
  */
 export class ExecutionGuard {
@@ -155,6 +174,7 @@ export class ExecutionGuard {
   denyReason(exec: Readonly<ToolExecution>): string | undefined {
     const name = exec.name
     if (this.options.role === 'parent') return this.parentDenial(name, exec)
+    if (this.options.role === 'constructor') return this.constructorDenial(name, exec)
     return this.childDenial(name, exec)
   }
 
@@ -170,8 +190,11 @@ export class ExecutionGuard {
 
   private parentDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
     if (AUTOEVO_TOOLS.has(name)) return undefined
+    if (matchesSet(name, DELEGATION_TOOLS)) {
+      return 'AutoEvo parent session denies subagent, workflow, and ralph delegation; keep work visible in this session.'
+    }
     if (isNewCordisDefinition(exec)) {
-      return 'AutoEvo parent session denies cordis_define(kind:new); create-new continues only in a Host-launched managed git source child.'
+      return 'AutoEvo parent session denies cordis_define(kind:new); create-new continues as in-session work on a Host-managed git source.'
     }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
       return 'AutoEvo parent session denies direct plugin install/remove tools; use capability_workflow_resume / plugin_remove.'
@@ -183,6 +206,60 @@ export class ExecutionGuard {
       }
     }
     return undefined
+  }
+
+  private constructorDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
+    if (AUTOEVO_TOOLS.has(name)) return undefined
+    if (CORDIS_INSPECT_TOOLS.has(normalizeEndpointName(name))) return undefined
+    if (matchesSet(name, CORDIS_MUTATION_TOOLS) || isNewCordisDefinition(exec)) {
+      return 'Managed construction denies Cordis mutation/definition; edit repository files in the Host-managed source instead.'
+    }
+    if (matchesSet(name, SKILL_TOOLS)) {
+      const target = skillTargetFromArguments(exec.arguments)
+      if (!target || OFFICIAL_CHILD_SKILLS.has(target)) return undefined
+      return 'Managed construction permits only the official Creator skills cordis-plugin-development and editing-cordis-compositions.'
+    }
+    if (matchesSet(name, DELEGATION_TOOLS)) {
+      return 'Managed construction denies nested agent/subagent/workflow delegation; keep edits visible in this session.'
+    }
+    if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
+      return 'Managed construction denies direct plugin install/remove.'
+    }
+    if (matchesSet(name, SHELL_TOOLS)) {
+      const command = shellCommandText(exec.arguments)
+      if (DSH_PLUGIN_MUTATION_RE.test(command)) {
+        return 'Managed construction denies direct DSH plugin install/remove.'
+      }
+      if (GH_COMMAND_RE.test(command)) {
+        return 'Managed construction denies every GitHub CLI command; publication stays with Host-governed parent tools after review.'
+      }
+      if (PACKAGE_PUBLICATION_RE.test(command) || RELEASE_DEPLOY_INSTALL_RE.test(command)) {
+        return 'Managed construction denies package publication, version, release, deploy, and install commands.'
+      }
+      if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
+        return 'Managed construction denies dependency installation or mutation; use only the reviewed repository inputs already present.'
+      }
+      if (hasUnsafeGitCommand(command)) {
+        return 'Managed construction permits only read-only git status/diff/show/log/rev-parse; the Host owns commits and publication.'
+      }
+      return undefined
+    }
+    if (matchesSet(name, FS_WRITE_TOOLS)) {
+      const allowedRoot = this.options.allowedRoot
+      if (!allowedRoot) {
+        return 'Managed construction denies filesystem writes without a Host-bound source root.'
+      }
+      const target = writePathFromArguments(exec.arguments)
+      if (!target) {
+        return 'Managed construction denies filesystem writes that do not name a path inside the managed source.'
+      }
+      if (!isPathInsideRoot(target, allowedRoot)) {
+        return 'Managed construction denies filesystem writes outside the Host-managed source repository.'
+      }
+      return undefined
+    }
+    if (matchesSet(name, FS_READ_TOOLS) || matchesSet(name, CHILD_SUPPORT_TOOLS)) return undefined
+    return `Managed construction denies unrecognized tool ${JSON.stringify(name)}; only in-repo filesystem, shell testing, official Creator skill loads, Cordis inspect, AutoEvo resume, and todo tools are allowed.`
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
@@ -232,6 +309,8 @@ export const _testing = {
   FS_WRITE_TOOLS,
   SHELL_TOOLS,
   DELEGATION_TOOLS,
+  isPathInsideRoot,
+  writePathFromArguments,
   CORDIS_MUTATION_TOOLS,
   CORDIS_INSPECT_TOOLS,
   SKILL_TOOLS,
