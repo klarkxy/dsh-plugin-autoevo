@@ -71,7 +71,7 @@ class ScriptedAdapter extends LlmAdapter {
   nextAction(pairs) {
     if (this.config.scenario === 'resolve-local') {
       if (pairs.length === 0) {
-        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
+        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
       }
       const card = viewCard(pairs.at(-1)?.result)
       if (card?.state === 'discovering' && firstCandidate(card)) {
@@ -115,7 +115,7 @@ class ScriptedAdapter extends LlmAdapter {
         || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }
       }
-      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command' } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
     }
 
     const card = viewCard(pairs.at(-1)?.result)
@@ -136,7 +136,7 @@ class ScriptedAdapter extends LlmAdapter {
       return {
         kind: 'tool',
         name: 'capability_workflow',
-        arguments: { requirement: '在 DSH 会话中调用 xAI Grok Build 的能力' },
+        arguments: { requirement: '在 DSH 会话中调用 xAI Grok Build 的能力', intent: { operation: 'discover_or_reuse', required_surface: 'any' } },
       }
     }
     const last = pairs.at(-1)

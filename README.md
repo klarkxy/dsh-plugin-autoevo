@@ -72,7 +72,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 - 进入 `awaiting_user_test` 后，自然提示用户到目标客户端/profile 手动测试；不要机械式固定话术，也不要在之后的闲聊里反复追问。
 - 同一 review / source / layer / fixture 不能重复安装或验证；modify 最多两次。用户明确要求清理并重来时，completed 的 `installed` / `restart_required` / `activated` / `awaiting_user_test` 走完成态 cleanup/restart；故障 `recovery_required` 走 sealed interrupt。`taskResultMatchedExpectation` 只是诊断字段，不作为成功门槛。
 - `partial` 候选在托管 git 源上做最小修改并跑上游测试，再本地重审为 `full`，最后打成固定 tgz 安装。
-- 对已装社区插件不满时，升级走同一套门禁：安装回执经 `reviewId` 指回上游 repository 与 exact commit，用户选中该来源后按审查 → 在这个上改 → 本地重审 → 固定 tgz 重装执行，最后按旧回执精确移除。从零创建走托管源脚手架，不恢复 `create_authorized` grant。
+- 对已装社区插件不满时，升级从 Gate 1 的已安装来源审查开始：Host 从 profile 精确 `github:owner/repo#sha`（或已有安装回执链）派生上游，用户选审查已知来源后按审查 → 在这个上改 → 本地重审 → 固定 tgz 替换执行。原样使用已有能力是另一条终态，不会变成审查或修改。同名 skill 不能冒充原生 DSH 插件或挡住插件发现。从零创建走托管源脚手架，不恢复 `create_authorized` grant。
 - 当前任务完成后再建议向上游贡献。安装回执的 `contributionAdvice` 记录是否具备建议资格；fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
 
 ## 试用
@@ -87,10 +87,10 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 | 工具 | 作用 | 环境 |
 |---|---|---|
-| `capability_workflow` | 保留用户原始需求，检查本地与市场能力，返回 Host 验证的有界发现池、证据和预算 | 只读 / 装市场时需批准 |
+| `capability_workflow` | 保留用户原始需求和结构化 intent（发现/复用/进化已装），检查本地与市场能力，返回 Host 验证的有界发现池、证据和预算 | 只读 / 装市场时需批准 |
 | `capability_workflow_refine` | 在发现阶段提交补充查询词或严格 GitHub 仓库标识；Host 校验、去重并合并候选 | 只读 |
 | `capability_workflow_present` | 从发现池密封 1–5 个最终短名单候选并开启第一道用户门 | 只读 |
-| `capability_workflow_resume` | 只读搜索/审查/复用时传 `navigation`；最终确认时由 LLM 传结构化 `decision`，Host 校验真实回合与当前 interrupt 的 action/candidate 边界 | 导航只读；安装/修改/新建需真实确认 |
+| `capability_workflow_resume` | 只读搜索/审查已装来源/复用时传 `navigation`；最终确认时由 LLM 传结构化 `decision`，Host 校验真实回合与当前 interrupt 的 action/candidate 边界 | 导航只读；安装/修改/新建需真实确认 |
 | `capability_workflow_diagnose` | 失败后读取有预算的脱敏搜索、审查、安装、验证、子会话和清理事实 | 只读 |
 | `capability_workflow_recover` | 两条互不混同的路径：sealed 故障恢复必须带当前 `interrupt_id`；completed 安装的清理重开由新的顶层用户明确要求驱动，且省略 `interrupt_id` | 需真实确认 / 一次性批准清理 |
 | `plugin_remove` | 按 installation receipt 精确卸载；不删除托管源仓库 | 需批准 |

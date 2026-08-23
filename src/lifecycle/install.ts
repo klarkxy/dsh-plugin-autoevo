@@ -9,6 +9,8 @@ import type {
   InstallInput,
   InstallationRecord,
   InstallOutcome,
+  ReplacementJournal,
+  ReplacementTarget,
   ReviewRecord,
   VerificationEvidence,
   VerificationLayerKind,
@@ -16,6 +18,7 @@ import type {
   VerificationVerdict,
   VerifierRequest,
 } from '../contracts.js'
+import { dependencySpecDigest } from '../resolver/installed-origin.js'
 import { EvolutionError } from '../errors.js'
 import { copy } from '../i18n.js'
 import {
@@ -311,12 +314,98 @@ export class PluginInstaller {
         )
       }
     }
+    if (input.replacement) {
+      await this.assertReplacementBinding(input, packageName)
+      return
+    }
     if (this.preflightProfile
       && !await this.launcher.profileTargetAbsent(this.config.dshHome, input.targetProfile, packageName)) {
       throw new EvolutionError(
         'invalid_input',
         `Profile ${input.targetProfile} already owns ${packageName}; refusing to overwrite or remove a user-owned installation`,
       )
+    }
+  }
+
+  private async assertReplacementBinding(input: InstallInput, packageName: string): Promise<void> {
+    const replacement = input.replacement
+    if (!replacement) {
+      throw new EvolutionError('invalid_input', 'Replacement binding is required for same-package persist')
+    }
+    if (input.retention !== 'persistent') {
+      throw new EvolutionError('invalid_input', 'Installed-package replacement requires persistent retention')
+    }
+    if (replacement.packageName !== packageName) {
+      throw new EvolutionError('invalid_input', 'Replacement package does not match the reviewed package')
+    }
+    if (replacement.profile !== input.targetProfile) {
+      throw new EvolutionError('invalid_input', 'Replacement profile does not match the frozen installed target')
+    }
+    if (!this.launcher.profileDependencySpec) {
+      throw new EvolutionError('invalid_input', 'This installer host cannot read the live profile dependency spec')
+    }
+    const liveSpec = await this.launcher.profileDependencySpec(
+      this.config.dshHome,
+      input.targetProfile,
+      packageName,
+    )
+    if (!liveSpec || dependencySpecDigest(liveSpec) !== replacement.oldSpecDigest || liveSpec !== replacement.oldDependencySpec) {
+      throw new EvolutionError(
+        'invalid_input',
+        'Live profile dependency spec drifted from the frozen installed target; refusing replacement',
+      )
+    }
+  }
+
+  private async resolvePredecessor(replacement: ReplacementTarget): Promise<InstallationRecord | undefined> {
+    if (replacement.predecessorInstallationId) {
+      const named = await this.store.getInstallation(replacement.predecessorInstallationId).catch(() => undefined)
+      if (named
+        && named.packageName === replacement.packageName
+        && named.targetProfile === replacement.profile
+        && !named.removed
+        && !named.supersededByInstallationId) {
+        return named
+      }
+    }
+    if (!this.store.listInstallations) return undefined
+    const records = await this.store.listInstallations()
+    return records.find((item) => item.packageName === replacement.packageName
+      && item.targetProfile === replacement.profile
+      && item.installSpec === replacement.oldDependencySpec
+      && !item.removed
+      && !item.supersededByInstallationId)
+  }
+
+  private async reconcileReplacement(input: {
+    dshHome: string
+    packageName: string
+    replacement: ReplacementTarget
+    newInstallSpec: string
+    preparedAt: string
+  }): Promise<ReplacementJournal> {
+    const newPresent = await this.launcher.profileSourceMatches(
+      input.dshHome,
+      input.replacement.profile,
+      input.packageName,
+      input.newInstallSpec,
+    ).catch(() => false)
+    const liveSpec = await this.launcher.profileDependencySpec?.(
+      input.dshHome,
+      input.replacement.profile,
+      input.packageName,
+    ).catch(() => undefined)
+    let state: ReplacementJournal['state']
+    if (newPresent) state = 'new_present'
+    else if (liveSpec === input.replacement.oldDependencySpec) state = 'old_present'
+    else if (!liveSpec) state = 'absent'
+    else state = 'unknown'
+    return {
+      state,
+      oldSpecDigest: input.replacement.oldSpecDigest,
+      newInstallSpec: input.newInstallSpec,
+      preparedAt: input.preparedAt,
+      reconciledAt: new Date().toISOString(),
     }
   }
 
@@ -441,6 +530,15 @@ export class PluginInstaller {
       restartRequired: false,
       removed: false,
       verification: pendingVerification(review.manifest.expectedTools),
+      ...(input.replacement ? {
+        predecessorInstallationId: input.replacement.predecessorInstallationId,
+        replacement: {
+          state: 'prepared' as const,
+          oldSpecDigest: input.replacement.oldSpecDigest,
+          newInstallSpec: installSpec,
+          preparedAt: createdAt,
+        },
+      } : {}),
     }
     try {
       await this.store.put('installations', provisional)
@@ -522,6 +620,7 @@ export class PluginInstaller {
             expectedTools: selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
             fixtures: selection.layer === 'manual_runtime' ? [] : selection.fixtures,
             fixtureDigest: selection.layer === 'manual_runtime' ? fixtureDigestFor([]) : selection.fixtureDigest,
+            ...(review.manifest.activatedFibers ? { activatedFibers: review.manifest.activatedFibers } : {}),
             ...(exec.signal ? { signal: exec.signal } : {}),
           })
         } catch {
@@ -649,6 +748,7 @@ export class PluginInstaller {
             cwd,
             layer: selection.layer,
             packageName,
+            ...(review.manifest.activatedFibers ? { activatedFibers: review.manifest.activatedFibers } : {}),
             expectedTools: selection.expectedTools,
             fixtures: selection.fixtures,
             fixtureDigest: selection.fixtureDigest,
@@ -725,13 +825,33 @@ export class PluginInstaller {
 
     const contributionEligible = review.sourceSnapshot.kind === 'local' && verified && review.fit === 'full'
       && review.recommendation === 'use' && Boolean(review.license)
-    const success = nonFailure && !runtimeRecoveryRequired
+    let success = nonFailure && !runtimeRecoveryRequired
+    let replacementJournal = destinationJournal.replacement
+    let predecessorInstallationId = input.replacement?.predecessorInstallationId ?? destinationJournal.predecessorInstallationId
+    if (input.replacement && input.retention === 'persistent') {
+      replacementJournal = await this.reconcileReplacement({
+        dshHome,
+        packageName,
+        replacement: input.replacement,
+        newInstallSpec: installSpec,
+        preparedAt: destinationJournal.replacement?.preparedAt ?? createdAt,
+      })
+      if (replacementJournal.state !== 'new_present') {
+        success = false
+        installOutcome = replacementJournal.state === 'absent' ? 'failed_absent' : 'recovery_required'
+      } else {
+        const predecessor = await this.resolvePredecessor(input.replacement)
+        predecessorInstallationId = predecessor?.id ?? predecessorInstallationId
+      }
+    }
     const record: InstallationRecord = {
       ...destinationJournal,
       installPhase: 'completed',
       installState: failedTemporaryTrialRemoved ? 'not_installed' : 'installed',
       installOutcome,
       installed: success,
+      ...(replacementJournal ? { replacement: replacementJournal } : {}),
+      ...(predecessorInstallationId ? { predecessorInstallationId } : {}),
       // Persistent installs are "loaded" only when the destination process
       // itself activated the bundle. An isolated child or pending user test
       // cannot make that claim for the live profile.
@@ -767,6 +887,15 @@ export class PluginInstaller {
     }
     try {
       await this.store.put('installations', record)
+      if (input.replacement && replacementJournal?.state === 'new_present' && predecessorInstallationId) {
+        const predecessor = await this.store.getInstallation(predecessorInstallationId).catch(() => undefined)
+        if (predecessor && !predecessor.supersededByInstallationId && predecessor.packageName === packageName) {
+          await this.store.put('installations', {
+            ...predecessor,
+            supersededByInstallationId: record.id,
+          })
+        }
+      }
     } catch (cause) {
       let rollbackFailure: unknown
       if (hotReloadAttempt?.rollback) {

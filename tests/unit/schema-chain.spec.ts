@@ -1,6 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it } from 'vitest'
 import { FORGED_RESUME_HOST_KEYS } from '../../src/contracts.js'
+import { parseRequestIntent } from '../../src/resolver/intent.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { resolveDecisionFromModel } from '../../src/lifecycle/decide.js'
 import { parseReviewerSubmitArgs } from '../../src/semantic-reviewer.js'
@@ -84,6 +85,12 @@ describe('model JSON to Host schema chain', () => {
       conditions: [],
       verificationVerdict: { decision: 'verified' },
     })).toThrow(/Host-owned or authorization fields/i)
+    expect(() => parseRequestIntent({ operation: 'evolve_existing', required_surface: 'native_dsh_plugin', evolutionTarget: {} })).toThrow(/unknown fields/i)
+    expect(parseRequestIntent({ operation: 'evolve_existing', required_surface: 'native_dsh_plugin', target_name: 'dsh-xai' })).toEqual({
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'dsh-xai',
+    })
     expect(FORGED_RESUME_HOST_KEYS).toEqual(expect.arrayContaining([
       'selectionReceipt',
       'actionCommitment',

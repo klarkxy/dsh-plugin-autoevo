@@ -211,6 +211,71 @@ describe('Host verification driver', () => {
     expect(result.reason).toMatch(/Loader\/Fiber settled without an Agent turn/i)
   })
 
+  it('activates a carrier bundle by insert id and name, not the npm package', async () => {
+    const ctx = {
+      loader: {
+        entries: () => [{
+          id: 'zhihu-search-mcp',
+          options: { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' },
+          fiber: { await: async () => undefined, state: 2 },
+        }],
+      },
+      tools: { get: () => undefined, execute: async () => ({ isError: true }) },
+      get: () => undefined,
+      fiber: {},
+    } as unknown as Context
+    const result = await runHostVerification(ctx, {
+      receiptPath: path.resolve('receipt.jsonl'),
+      expectedTools: [],
+      layer: 'bundle_activation',
+      packageName: 'dsh-plugin-zhihu-search',
+      fixtureDigest: fixtureDigestFor([]),
+      activatedFibersJson: JSON.stringify([{
+        id: 'zhihu-search-mcp',
+        name: '@deepseek-ai/dsh-mcp-client',
+      }]),
+    })
+    expect(result).toMatchObject({
+      layer: 'bundle_activation',
+      status: 'passed',
+      sourceMatched: true,
+      exitCode: 0,
+    })
+  })
+
+  it('does not treat another MCP client Fiber as the reviewed carrier', async () => {
+    const ctx = {
+      loader: {
+        entries: () => [{
+          id: 'other-mcp',
+          options: { id: 'other-mcp', name: '@deepseek-ai/dsh-mcp-client' },
+          fiber: { await: async () => undefined, state: 2 },
+        }],
+      },
+      tools: { get: () => undefined, execute: async () => ({ isError: true }) },
+      get: () => undefined,
+      fiber: {},
+    } as unknown as Context
+    const result = await runHostVerification(ctx, {
+      receiptPath: path.resolve('receipt.jsonl'),
+      expectedTools: [],
+      layer: 'bundle_activation',
+      packageName: 'dsh-plugin-zhihu-search',
+      fixtureDigest: fixtureDigestFor([]),
+      activatedFibersJson: JSON.stringify([{
+        id: 'zhihu-search-mcp',
+        name: '@deepseek-ai/dsh-mcp-client',
+      }]),
+    })
+    expect(result).toMatchObject({
+      layer: 'bundle_activation',
+      status: 'failed',
+      sourceMatched: false,
+      exitCode: 1,
+    })
+    expect(result.reason).toMatch(/Fiber was not present/i)
+  })
+
   it('executes a Host-validated fixture once through tools.execute and never retries', async () => {
     const calls: Array<{ name: string; arguments: unknown; agent?: unknown }> = []
     const ctx = {
@@ -352,6 +417,7 @@ describe('Host verification driver', () => {
       { id: 'headless-runner', disabled: true },
     ]))
     expect(text).toContain('tool_roundtrip')
+    expect(text).toContain('activatedFibersJson')
     expect(text).not.toContain('expectedRoute')
     expect(text).not.toContain('expectedProvider')
     expect(text).not.toContain('verificationTask')

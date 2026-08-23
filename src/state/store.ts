@@ -66,6 +66,24 @@ export class StateStore {
     return workflows
   }
 
+  async listInstallations(): Promise<InstallationRecord[]> {
+    const directory = path.join(this.root, 'installations')
+    let entries: string[]
+    try {
+      entries = await readdir(directory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const installations: InstallationRecord[] = []
+    for (const entry of entries.sort()) {
+      if (!/^installation_[a-f0-9]{16,64}\.json$/u.test(entry)) continue
+      const record = JSON.parse(await readFile(path.join(directory, entry), 'utf8')) as InstallationRecord
+      installations.push(record)
+    }
+    return installations
+  }
+
   async listReviews(resolutionId: string): Promise<ReviewRecord[]> {
     assertRecordId(resolutionId)
     const directory = path.join(this.root, 'reviews')

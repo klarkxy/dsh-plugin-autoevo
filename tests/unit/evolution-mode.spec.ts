@@ -51,6 +51,8 @@ describe('evolution-mode entry', () => {
 
     expect(section).not.toHaveBeenCalled()
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain("user's original requirement")
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('structured intent')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Never describe unchanged local reuse as review or modification')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('before any other search or discovery tool')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('do not ask the user to manage discovery mechanics')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Present natural-language choices and stop when no fresh user message exists')

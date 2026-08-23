@@ -18,6 +18,7 @@ import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
 import type { CommandRunner } from '../process/runner.js'
+import { activationTargetsFromPatch } from '../lifecycle/bundle-activation.js'
 import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 
@@ -361,15 +362,16 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
   const license = typeof pkg?.license === 'string' ? pkg.license : undefined
   const bundlePatchDeclared = typeof bundle?.patch === 'string'
   const bundlePatch = safeBundlePatchPath(bundle?.patch)
-  const expectedRoute = bundlePatch
-    ? expectedRouteFromBundlePatch(files.find((file) => file.path === bundlePatch))
-    : undefined
+  const patchFile = bundlePatch ? files.find((file) => file.path === bundlePatch) : undefined
+  const expectedRoute = expectedRouteFromBundlePatch(patchFile)
+  const activatedFibers = activatedFibersFromPatchFile(patchFile)
   const client = freezeClient(dsh)
   return {
     kind: bundlePatchDeclared ? 'bundle' : hasSkill ? 'skill' : pkg ? 'legacy' : 'unknown',
     ...(isSafePackageName(pkg?.name) ? { packageName: pkg.name } : {}),
     ...(typeof pkg?.version === 'string' ? { packageVersion: pkg.version } : {}),
     ...(bundlePatch ? { bundlePatch } : {}),
+    ...(activatedFibers.length > 0 ? { activatedFibers } : {}),
     ...(license ? { license } : {}),
     scripts,
     dependencies,
@@ -381,7 +383,7 @@ function manifestFrom(files: readonly ContentFile[]): ManifestFacts {
   }
 }
 
-function expectedRouteFromBundlePatch(file: ContentFile | undefined): ManifestFacts['expectedRoute'] | undefined {
+function parseBundlePatch(file: ContentFile | undefined): unknown {
   if (!file) return undefined
   try {
     const document = parseDocument(Buffer.from(file.content).toString('utf8'), {
@@ -391,20 +393,28 @@ function expectedRouteFromBundlePatch(file: ContentFile | undefined): ManifestFa
       }],
     })
     if (document.errors.length > 0) return undefined
-    const patches: unknown = document.toJS()
-    if (!Array.isArray(patches)) return undefined
-    for (const item of patches) {
-      const patch = record(item)
-      if (patch?.id !== 'agent-default-model') continue
-      const config = record(patch.config)
-      if (typeof config?.provider !== 'string' || !config.provider) continue
-      return {
-        provider: config.provider,
-        ...(typeof config.model === 'string' && config.model ? { model: config.model } : {}),
-      }
-    }
+    return document.toJS()
   } catch {
     return undefined
+  }
+}
+
+function activatedFibersFromPatchFile(file: ContentFile | undefined): NonNullable<ManifestFacts['activatedFibers']> {
+  return activationTargetsFromPatch(parseBundlePatch(file))
+}
+
+function expectedRouteFromBundlePatch(file: ContentFile | undefined): ManifestFacts['expectedRoute'] | undefined {
+  const patches = parseBundlePatch(file)
+  if (!Array.isArray(patches)) return undefined
+  for (const item of patches) {
+    const patch = record(item)
+    if (patch?.id !== 'agent-default-model') continue
+    const config = record(patch.config)
+    if (typeof config?.provider !== 'string' || !config.provider) continue
+    return {
+      provider: config.provider,
+      ...(typeof config.model === 'string' && config.model ? { model: config.model } : {}),
+    }
   }
   return undefined
 }

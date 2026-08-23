@@ -6,6 +6,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
+import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
@@ -593,6 +594,115 @@ describe('fail-closed install outcomes', () => {
       retention: 'persistent',
     }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
     expect(request).not.toHaveBeenCalled()
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('persists a same-package replacement when the frozen old spec still matches live profile state', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-replace-'))
+    temporary.push(root)
+    const oldSpec = `github:acme/calculator#${'c'.repeat(40)}`
+    const newCommit = 'd'.repeat(40)
+    const newSpec = `github:acme/calculator#${newCommit}`
+    const current = attestedReview({
+      sourceSnapshot: {
+        kind: 'github',
+        repository: 'acme/calculator',
+        requestedRef: newCommit,
+        commit: newCommit,
+        defaultBranch: 'main',
+      },
+      installSpec: newSpec,
+    })
+    const store = new StateStore(root)
+    await store.put('reviews', current)
+    const predecessorId = `installation_${'b'.repeat(24)}`
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: predecessorId,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      reviewId: `review_${'c'.repeat(64)}`,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: path.join(root, 'persistent-dsh-home'),
+      packageName: 'dsh-tool-calculator',
+      installSpec: oldSpec,
+      installState: 'installed',
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      loaded: false,
+      verified: false,
+      restartRequired: true,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: ['calculator'],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'predecessor',
+      },
+    })
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => false,
+      profileDependencySpec: async () => oldSpec,
+      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec === newSpec,
+      verifyHost: async () => hostPassedEvidence,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+        evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
+      }),
+      undefined,
+      'headless',
+    )
+    const result = await installer.install({
+      reviewId: current.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      replacement: {
+        profile: 'web',
+        packageName: 'dsh-tool-calculator',
+        oldSpecDigest: dependencySpecDigest(oldSpec),
+        oldDependencySpec: oldSpec,
+        predecessorInstallationId: predecessorId,
+      },
+    }, execution())
+    expect(result.replacement?.state).toBe('new_present')
+    expect(result.predecessorInstallationId).toBe(predecessorId)
+    expect((await store.getInstallation(predecessorId)).supersededByInstallationId).toBe(result.id)
+  })
+
+  it('refuses replacement when the live spec drifted from the frozen installed target', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-replace-drift-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    await store.put('reviews', attestedReview())
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const install = vi.fn()
+    const launcher = {
+      install,
+      profileTargetAbsent: async () => false,
+      profileDependencySpec: async () => 'github:acme/calculator#main',
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+    )
+    await expect(installer.install({
+      reviewId: attestedReview().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      replacement: {
+        profile: 'web',
+        packageName: 'dsh-tool-calculator',
+        oldSpecDigest: 'a'.repeat(64),
+        oldDependencySpec: `github:acme/calculator#${'c'.repeat(40)}`,
+      },
+    }, execution())).rejects.toThrow(/drifted from the frozen installed target/i)
     expect(install).not.toHaveBeenCalled()
   })
 

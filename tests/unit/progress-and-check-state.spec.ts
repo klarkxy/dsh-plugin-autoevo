@@ -218,7 +218,10 @@ describe('child check classification', () => {
 
 describe('tool pending presentation', () => {
   it('maps long actions to sanitized generic titles', () => {
-    expect(presented('capability_workflow', { requirement: 'secret calculator for acme/one' })).toMatchObject({
+    expect(presented('capability_workflow', {
+      requirement: 'secret calculator for acme/one',
+      intent: { operation: 'discover_or_reuse', required_surface: 'any' },
+    })).toMatchObject({
       card: 'generic',
       kind: 'search',
       title: 'Searching for reusable plugins',
@@ -281,7 +284,10 @@ describe('tool pending presentation', () => {
   })
 
   it('shows Chinese pending titles for a Chinese requirement', () => {
-    expect(presented('capability_workflow', { requirement: '我需要一个科学计算器' })).toMatchObject({
+    expect(presented('capability_workflow', {
+      requirement: '我需要一个科学计算器',
+      intent: { operation: 'discover_or_reuse', required_surface: 'any' },
+    })).toMatchObject({
       card: 'generic',
       kind: 'search',
       title: '正在搜索可复用插件',

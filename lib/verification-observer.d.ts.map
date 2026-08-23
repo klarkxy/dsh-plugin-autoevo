@@ -1,1 +1,1 @@
-{"version":3,"file":"verification-observer.d.ts","names":[],"sources":["../src/verification-observer.ts"],"mappings":";;;UASiB;EACf;EACA;EACA;EACA;EACA;EACA;EACA;EACA;EACA;;cAGW,QAAQ,OAAO;cAYf;cACA;;;;;;;iBAiCG,MAAM,KAAK,SAAS,QAAQ"}
+{"version":3,"file":"verification-observer.d.ts","names":[],"sources":["../src/verification-observer.ts"],"mappings":";;;UASiB;EACf;EACA;EACA;EACA;EACA;EACA;EACA;EACA;EACA;EACA;;cAGW,QAAQ,OAAO;cAaf;cACA;;;;;;;iBAiCG,MAAM,KAAK,SAAS,QAAQ"}

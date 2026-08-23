@@ -60,9 +60,44 @@ type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
-type NavigationKind = 'review_candidates' | 'search_more' | 'reuse_local' | 'stop' | 'finish_managed_work';
+type NavigationKind = 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
+type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing';
+type RequiredSurface = 'any' | 'native_dsh_plugin';
+interface RequestIntent {
+  operation: RequestOperation;
+  requiredSurface: RequiredSurface;
+  targetName?: string;
+}
+type EvolutionTargetKind = 'github_exact' | 'owned_chain';
+interface EvolutionTarget {
+  kind: EvolutionTargetKind;
+  repository: string;
+  commit: string;
+  packageName: string;
+  profile: string;
+  dependencySpec: string;
+  specDigest: string;
+  installationId?: string;
+  reviewId?: string;
+  sourceId?: string;
+}
+type ReplacementJournalState = 'prepared' | 'old_present' | 'new_present' | 'absent' | 'unknown';
+interface ReplacementTarget {
+  profile: string;
+  packageName: string;
+  oldSpecDigest: string;
+  oldDependencySpec: string;
+  predecessorInstallationId?: string;
+}
+interface ReplacementJournal {
+  state: ReplacementJournalState;
+  oldSpecDigest: string;
+  newInstallSpec: string;
+  preparedAt: string;
+  reconciledAt?: string;
+}
 interface NavigationInput {
   kind: NavigationKind;
   candidateIds?: string[];
@@ -101,8 +136,16 @@ interface LocalCapabilityCandidate {
   confidence: number;
   /** Retrieval is broad; only `full` may suppress remote discovery. */
   fit?: 'full' | 'partial' | 'none';
+  /** Anchor/name match before intent and surface adjustments. */
+  semanticFit?: 'full' | 'partial' | 'none';
+  /** Whether this candidate kind satisfies the request's required delivery surface. */
+  surfaceMatch?: boolean;
+  /** Safe to use unchanged. Distinct from request-satisfaction `fit`. */
+  reuseEligible?: boolean;
   matchedFacets?: string[];
   missingFacets?: string[];
+  /** Host-owned installed-source provenance for evolve-existing. */
+  evolutionTarget?: EvolutionTarget;
   /** Profile-manifest evidence proves install/configuration only, never runtime state. */
   profileEvidence?: {
     source: 'host_profile_manifest';
@@ -144,6 +187,8 @@ interface ResolutionRecord {
   decisions?: DecisionReceipt[];
   queries: string[];
   reasons: string[];
+  /** Structured start intent. Absent on intentless Policy V8 records. */
+  intent?: RequestIntent;
   /** Instruction for the Agent: present in chat, then call capability_workflow_resume. */
   nextStep?: string;
 }
@@ -158,11 +203,17 @@ interface ReviewFinding {
   detail: string;
   evidenceHash?: string;
 }
+interface ActivatedFiber {
+  id?: string;
+  name: string;
+}
 interface ManifestFacts {
   kind: 'bundle' | 'skill' | 'legacy' | 'unknown';
   packageName?: string;
   packageVersion?: string;
   bundlePatch?: string;
+  /** Loader insert rows this bundle activates. Carrier patches name another package. */
+  activatedFibers?: ActivatedFiber[];
   license?: string;
   scripts: string[];
   dependencies: string[];
@@ -455,6 +506,9 @@ interface InstallationRecord {
     eligible: boolean;
     reason: string;
   };
+  predecessorInstallationId?: string;
+  supersededByInstallationId?: string;
+  replacement?: ReplacementJournal;
 }
 interface InstallInput {
   reviewId: string;
@@ -465,6 +519,8 @@ interface InstallInput {
   verificationExpectedText?: string;
   /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
   expectedArtifactSha256?: string;
+  /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
+  replacement?: ReplacementTarget;
 }
 interface RemoveInput {
   installationId: string;
@@ -681,7 +737,7 @@ declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cu
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'review_existing' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
 type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
@@ -708,6 +764,7 @@ interface WorkflowPendingInstall {
   retention: InstallationRetention;
   verificationTask?: string;
   verificationExpectedText?: string;
+  replacement?: ReplacementTarget;
 }
 interface CandidateSnapshotItem {
   id: string;
@@ -721,6 +778,10 @@ interface CandidateSnapshotItem {
   localKind?: 'tool' | 'skill' | 'plugin';
   availability?: 'available' | 'available_via_tool_search' | 'installed_in_profile';
   fit?: 'full' | 'partial' | 'none';
+  semanticFit?: 'full' | 'partial' | 'none';
+  surfaceMatch?: boolean;
+  reuseEligible?: boolean;
+  evolutionTarget?: EvolutionTarget;
   installation?: {
     source: 'host_profile_manifest';
     profile: string;
@@ -906,6 +967,8 @@ interface WorkflowRecord {
     code: string;
     message: string;
   };
+  intent?: RequestIntent;
+  pendingReviewedCandidateId?: string;
 }
 type WorkflowViewStatus = 'progressed' | 'parked' | 'invalid_resume';
 interface AgentShortlistItem {
@@ -958,7 +1021,7 @@ interface MarketplaceStepResult {
   reason: string;
 }
 interface WorkflowHost {
-  bootstrapResolution(requirement: string, exec: WorkflowExec): Promise<ResolutionRecord>;
+  bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
   refineRemote?(resolution: ResolutionRecord, input: {
     queries: string[];
@@ -969,6 +1032,10 @@ interface WorkflowHost {
     market: MarketplaceStepResult;
   }>;
   reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  reviewExisting?(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
@@ -1243,6 +1310,7 @@ declare class StateStore {
   getInstallation(id: string): Promise<InstallationRecord>;
   getWorkflow(id: string): Promise<WorkflowRecord>;
   listWorkflows(): Promise<WorkflowRecord[]>;
+  listInstallations(): Promise<InstallationRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private get;
 }
@@ -1267,6 +1335,7 @@ declare class DshLauncher {
   }): Promise<CommandResult>;
   remove(dshHome: string, profile: string, packageName: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   hasProfileDependency(dshHome: string, profile: string, packageName: string): Promise<boolean>;
+  profileDependencySpec(dshHome: string, profile: string, packageName: string): Promise<string | undefined>;
   /** Verify that the target profile records the exact reviewed source and loads that bundle. */
   profileSourceMatches(dshHome: string, profile: string, packageName: string, expectedSpec: string): Promise<boolean>;
   /** Confirm absence in both the profile manifest and its visible node_modules target. */
@@ -1280,6 +1349,7 @@ declare class DshLauncher {
    * Host-owned mechanical verification. Never forwards credentials, never
    * passes a user task, and never boots an Agent turn or default model route.
    */
+  readInstalledActivationTargets(dshHome: string, profile: string, packageName: string): Promise<ActivatedFiber[]>;
   verifyHost(input: {
     dshHome: string;
     profile: string;
@@ -1289,6 +1359,7 @@ declare class DshLauncher {
     expectedTools: readonly string[];
     fixtures: readonly HostExecutableFixture[];
     fixtureDigest: string;
+    activatedFibers?: readonly ActivatedFiber[];
     signal?: AbortSignal;
   }): Promise<VerificationEvidence>;
 }
@@ -1610,6 +1681,9 @@ declare class PluginInstaller {
   constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined, preflightProfile?: string | undefined, resolveDestinationProfile?: (() => Promise<string>) | undefined);
   private removeOwnedDirectory;
   private assertPersistentDestination;
+  private assertReplacementBinding;
+  private resolvePredecessor;
+  private reconcileReplacement;
   install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;
   private attachSemanticVerification;
 }
@@ -1795,6 +1869,8 @@ declare class SourceManager {
     reviewId: string;
     artifactHash: string;
   }): Promise<SourceReceipt>;
+  inspectCompletedSource(sourceId: string, signal?: AbortSignal): Promise<SourceReceipt | undefined>;
+  claimCompletedSourceForWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<SourceReceipt>;
   /** Re-enter an already-owned managed source without resetting its lineage. */
   resumeWorkflowSource(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<SourceReceipt>;
   /** Preserve a failed child's bounded edits as a local WIP commit for retry. */
@@ -1820,7 +1896,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly engine;
   private readonly creatorFoundation;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
-  start(requirement: string, exec: ToolRunContext): Promise<WorkflowView>;
+  start(requirement: string, exec: ToolRunContext, intent?: RequestIntent): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
   present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -1828,7 +1904,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   recover(input: WorkflowRecoveryInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
   cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult>;
-  bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord>;
+  bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
   refineRemote(resolution: ResolutionRecord, input: {
     queries: string[];
@@ -1839,6 +1915,10 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     market: MarketplaceStepResult;
   }>;
   reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+    resolution: ResolutionRecord;
+    review: ReviewRecord;
+  }>;
+  reviewExisting(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;

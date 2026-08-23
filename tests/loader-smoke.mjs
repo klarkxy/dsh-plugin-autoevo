@@ -43,6 +43,13 @@ try {
   const schemas = root.tools.schemas()
   const registered = schemas.map((tool) => tool.name).sort()
   assert.deepEqual(registered, expected)
+  const startSchema = schemas.find((tool) => tool.name === 'capability_workflow')
+  assert.ok(startSchema)
+  assert.equal(startSchema.parameters.properties.intent.required, true)
+  assert.deepEqual(
+    startSchema.parameters.properties.intent.properties.operation.enum,
+    ['discover_or_reuse', 'reuse_existing', 'evolve_existing'],
+  )
   const resumeSchema = schemas.find((tool) => tool.name === 'capability_workflow_resume')
   assert.ok(resumeSchema)
   assert.equal(resumeSchema.parameters.properties.decision.additionalProperties, false)

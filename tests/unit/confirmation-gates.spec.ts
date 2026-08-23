@@ -120,7 +120,7 @@ async function navigateWith(
   turn: ToolRunContext,
   workflowId: string,
   interruptId: string,
-  kind: 'review_candidates' | 'search_more' | 'reuse_local' | 'stop',
+  kind: 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'stop',
   candidateIds: string[] = [],
   reviewMode: 'fixed' | 'adaptive' = 'fixed',
 ) {
@@ -373,7 +373,7 @@ describe('conversational confirmation gates', () => {
     expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('use_this')
   })
 
-  it('normalizes a Gate-1 direct-install interpretation into review without authorizing mutation', async () => {
+  it('rejects a Gate-1 use_this decision without consuming the interrupt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-direct-install-'))
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
@@ -405,10 +405,10 @@ describe('conversational confirmation gates', () => {
       { action: 'use_this', candidateId },
     )
 
-    expect(reviewed.workflow.cursor).toBe('await_confirmation')
-    expect(reviewed.workflow.selectionReceipt).toMatchObject({ kind: 'review_candidates', candidateIds: [candidateId] })
-    expect(reviewed.workflow.actionCommitment).toMatchObject({ requestedAction: 'review_candidates' })
-    expect(Boolean(reviewed.resolution?.decisions?.some((item) => item.phase === 'gate2'))).toBe(false)
+    expect(reviewed.status).toBe('invalid_resume')
+    expect(reviewed.workflow.cursor).toBe('await_selection')
+    expect(reviewed.workflow.interrupt?.interruptId).toBe(presented.workflow.interrupt!.interruptId)
+    expect(reviewed.workflow.consumedInterruptIds ?? []).not.toContain(presented.workflow.interrupt!.interruptId)
     expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.installation).toBeUndefined()
   })

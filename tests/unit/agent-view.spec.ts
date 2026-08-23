@@ -196,6 +196,82 @@ describe('AgentWorkflowViewV2', () => {
     expect(JSON.stringify(evidence)).not.toMatch(/loaded|activated|verified|node_modules|D:\\|C:\\|C:\/tmp|dependencies/i)
   })
 
+  it('keeps a same-name Zhihu skill visible without claiming native MCP tools or unchanged reuse', () => {
+    const workflow = baseWorkflow('await_discovery')
+    workflow.intent = { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' }
+    workflow.discoveryPool = [{
+      id: 'candidate_zhihu_skill',
+      index: 1,
+      kind: 'local',
+      name: 'zhihu-search',
+      identity: 'zhihu-search',
+      localName: 'zhihu-search',
+      localKind: 'skill',
+      availability: 'available',
+      fit: 'none',
+      surfaceMatch: false,
+      reuseEligible: false,
+      digest: 'c'.repeat(64),
+    }, {
+      id: 'candidate_zhihu_plugin',
+      index: 2,
+      kind: 'remote',
+      name: 'zhihu-search',
+      identity: 'klarkxy/zhihu-search',
+      repository: 'klarkxy/zhihu-search',
+      digest: 'd'.repeat(64),
+    }]
+    workflow.discoveryBudget = {
+      refinementRoundsUsed: 1,
+      refinementQueriesUsed: ['dsh-plugin-zhihu-search'],
+      explicitRepositories: ['klarkxy/zhihu-search'],
+      maxRefinementRounds: 2,
+      maxRefinementQueries: 5,
+      maxCandidates: 20,
+    }
+    const card = compactAgentView({
+      workflow,
+      resolution: {
+        ...resolution(),
+        requirement: '安装官方 zhihu-search DeepSeek Harness 插件',
+        localCandidates: [{
+          kind: 'skill',
+          name: 'zhihu-search',
+          description: 'Use zhihu-search proactively for Chinese web research',
+          availability: 'available',
+          confidence: 0.99,
+          fit: 'none',
+          surfaceMatch: false,
+          reuseEligible: false,
+        }],
+        remoteCandidates: [{
+          repository: 'klarkxy/zhihu-search',
+          name: 'zhihu-search',
+          description: '',
+          stars: 0,
+          updatedAt: null,
+          topics: ['dsh-plugin'],
+        }],
+      },
+      lifecycleState: 'searched',
+    })
+    const facts = JSON.stringify(card.facts)
+    expect(facts).not.toMatch(/mcp__zhihu__/i)
+    const local = (card.facts.candidates as Array<Record<string, unknown>>).find((item) => item.kind === 'local')
+    const remote = (card.facts.candidates as Array<Record<string, unknown>>).find((item) => item.kind === 'remote')
+    expect(local).toMatchObject({
+      name: 'zhihu-search',
+      local_kind: 'skill',
+      surface_match: false,
+      reuse_unchanged: false,
+    })
+    expect(remote).toMatchObject({
+      name: 'zhihu-search',
+      repository: 'klarkxy/zhihu-search',
+    })
+    expect(card.allowed_actions.map((action) => action.action)).toContain('capability_workflow_present')
+  })
+
   it('binds every Gate-1 action to the sealed visible candidate set', () => {
     const workflow = baseWorkflow('await_selection')
     workflow.candidateSnapshot = [candidate]

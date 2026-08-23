@@ -13,7 +13,7 @@ class PackagedAdapter extends LlmAdapter {
     const hasToolResult = options.messages.some((message) => message.content.some((block) => block.type === 'tool-result'))
     if (!hasToolResult) {
       const id = CallId('autoevo-packaged-capability-workflow')
-      const args = JSON.stringify({ requirement: 'run a PowerShell command' })
+      const args = JSON.stringify({ requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } })
       const block = { type: 'tool-call', id, name: 'capability_workflow', arguments: args }
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'capability_workflow', argumentsDelta: args }

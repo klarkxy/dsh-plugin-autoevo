@@ -5,12 +5,15 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { satisfies, valid, validRange } from 'semver'
 import type { RuntimeConfig } from './config.js'
 import {
+  DEFAULT_REQUEST_INTENT,
   POLICY_VERSION,
   type DecisionReceipt,
+  type EvolutionTarget,
   type InstallationRecord,
   type NavigationInput,
   type RemotePluginCandidate,
   type RemoveInput,
+  type RequestIntent,
   type ResolutionAuthorization,
   type ResolutionRecord,
   type ResumeInput,
@@ -662,8 +665,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
     this.engine = new WorkflowEngine(store, creationGuard, this)
   }
 
-  start(requirement: string, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.start(requirement, exec)
+  start(requirement: string, exec: ToolRunContext, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<WorkflowView> {
+    return this.engine.start(requirement, exec, intent)
   }
 
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
@@ -694,11 +697,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return this.remover.remove({ installationId }, asToolExec(exec))
   }
 
-  async bootstrapResolution(requirementInput: string, exec: WorkflowExec): Promise<ResolutionRecord> {
+  async bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
     const activeProfile = await this.currentProfileOwner().catch(() => undefined)
     const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec), {
       dshHome: this.config.dshHome,
+      intent,
       ...(activeProfile ? { activeProfile } : {}),
     })
     const decision: ResolutionRecord['decision'] = local.shouldDiscoverRemote ? 'none' : 'use_local'
@@ -718,6 +722,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       authorization,
       queries: [],
       reasons: [...local.reasons],
+      intent,
     }
     const waiting = withNextStep(record)
     await this.store.put('resolutions', waiting)
@@ -911,6 +916,46 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return { resolution: waiting, review }
   }
 
+  async reviewExisting(
+    resolution: ResolutionRecord,
+    target: EvolutionTarget,
+    exec: WorkflowExec,
+    workflow?: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+    const expected = workflow?.candidateSnapshot
+      ?.find((item) => item.id === workflow.pendingReviewedCandidateId)
+      ?.evolutionTarget
+    if (!expected
+      || expected.repository.toLowerCase() !== target.repository.toLowerCase()
+      || expected.commit !== target.commit
+      || expected.specDigest !== target.specDigest
+      || expected.packageName !== target.packageName
+      || expected.profile !== target.profile) {
+      throw new EvolutionError('invalid_input', 'Installed-source review must use the frozen Host evolution target')
+    }
+    validateGithubRepository(target.repository)
+    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const evidence = await reviewGithubPluginWithFiles({
+      runner: this.runner,
+      config: this.config,
+      cwd: resolution.cwd,
+      repository: target.repository,
+      ref: target.commit,
+      resolutionId: resolution.id,
+      requirement: resolution.requirement,
+      ...(runtimeVersion ? { runtimeVersion } : {}),
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    if (evidence.record.manifest.packageName && evidence.record.manifest.packageName !== target.packageName) {
+      throw new EvolutionError('invalid_input', 'Reviewed package name does not match the frozen installed package')
+    }
+    const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+    const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
+    const waiting = withNextStep(this.waitingConfirmation({ ...resolution, selectedRepositories: selected }, review, workflow))
+    await this.store.put('resolutions', waiting)
+    return { resolution: waiting, review }
+  }
+
   async reviewGithubBatch(
     resolution: ResolutionRecord,
     repositories: string[],
@@ -1046,6 +1091,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
       ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
       ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
+      ...(input.replacement ? { replacement: input.replacement } : {}),
     }, asToolExec(exec), {
       ...(workflow ? { workflow } : {}),
       ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
@@ -1192,11 +1238,18 @@ export class CapabilityEvolutionService implements WorkflowHost {
       receipt = await this.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
     } else if (review.sourceSnapshot.kind === 'github') {
       sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
-      receipt = await this.sources.materializeReviewedGithub({
-        review,
-        workflowId: workflow.id,
-        ...(exec.signal ? { signal: exec.signal } : {}),
-      })
+      const completed = await this.sources.inspectCompletedSource(sourceKey, exec.signal)
+      if (completed
+        && completed.repository?.toLowerCase() === review.sourceSnapshot.repository.toLowerCase()
+        && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()) {
+        receipt = await this.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
+      } else {
+        receipt = await this.sources.materializeReviewedGithub({
+          review,
+          workflowId: workflow.id,
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+      }
     } else {
       throw new EvolutionError('invalid_input', 'Local modification requires a managed source receipt')
     }

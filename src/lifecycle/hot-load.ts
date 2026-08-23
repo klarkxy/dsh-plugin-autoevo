@@ -12,6 +12,11 @@ import { parse } from 'yaml'
 import type { HotReloadEvidence } from '../contracts.js'
 import { errorMessage } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
+import {
+  activationTargetsFromPatch,
+  flattenLoaderOptions,
+  matchActivatedEntries,
+} from './bundle-activation.js'
 
 export interface HotReloadAttempt {
   evidence: HotReloadEvidence
@@ -126,8 +131,9 @@ export async function hotLoadInstalledBundle(input: {
   if (warnings.length > 0) {
     return { evidence: { attempted: true, loaded: false, method: 'unsupported', reason: `The bundle patch could not be applied completely: ${warnings.join('; ')}` } }
   }
-  const packageEntries = candidate.filter((entry) => entry.name === packageName)
-  if (packageEntries.length === 0) {
+  const targets = activationTargetsFromPatch(patches)
+  const matched = matchActivatedEntries(flattenLoaderOptions(candidate), { packageName, targets })
+  if (matched.length === 0) {
     return { evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'The bundle patch does not activate the reviewed package in the current Loader group.' } }
   }
 
@@ -135,9 +141,11 @@ export async function hotLoadInstalledBundle(input: {
   try {
     await owner.group.update(candidate)
     applied = true
-    for (const options of packageEntries) {
-      const entry = owner.group.tree.resolve(options.id)
-      if (!entry.fiber) throw new Error(`Loader entry ${options.id} has no active Fiber`)
+    for (const options of matched) {
+      const id = options.id ?? options.options?.id
+      if (!id) throw new Error('Loader entry has no id')
+      const entry = owner.group.tree.resolve(id)
+      if (!entry.fiber) throw new Error(`Loader entry ${id} has no active Fiber`)
       await entry.fiber.await()
     }
     if (!expectedToolsLoaded(input.ctx, input.expectedTools, input.agent)) {

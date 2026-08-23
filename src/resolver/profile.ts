@@ -229,7 +229,12 @@ export async function resolveProfilePluginCapabilities(input: {
       description: packageDescription(packageManifest) || `Profile dependency ${dependencySpec}`,
       availability: 'installed_in_profile',
       confidence,
-      ...(exact ? { fit: 'full' as const, matchedFacets: ['exact_package'], missingFacets: [] } : {}),
+      ...(exact ? {
+        semanticFit: 'full' as const,
+        fit: 'full' as const,
+        matchedFacets: ['exact_package'],
+        missingFacets: [],
+      } : {}),
       profileEvidence: {
         source: 'host_profile_manifest',
         profile: input.profile,

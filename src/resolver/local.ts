@@ -1,9 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { LocalCapabilityCandidate } from '../contracts.js'
-import { TOOL_NAMES } from '../contracts.js'
+import type { LocalCapabilityCandidate, RequestIntent } from '../contracts.js'
+import { DEFAULT_REQUEST_INTENT, TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
+import { applyIntentToCandidate, suppressesRemoteDiscovery } from './intent.js'
 import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
 import { resolveLoadedPluginCapabilities } from './plugins.js'
 import { resolveProfilePluginCapabilities } from './profile.js'
@@ -102,6 +103,7 @@ export interface LocalResolution {
 export interface LocalCapabilityOptions {
   dshHome?: string
   activeProfile?: string
+  intent?: RequestIntent
 }
 
 function mergeProfileAndLoadedCandidates(
@@ -195,13 +197,16 @@ export async function resolveLocalCapabilities(
   const loadedCandidates = await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence)
   candidates.push(...mergeProfileAndLoadedCandidates(profileCandidates, loadedCandidates))
 
+  const intent = options.intent ?? DEFAULT_REQUEST_INTENT
   for (const candidate of candidates) {
-    if (candidate.fit === 'full' && candidate.profileEvidence) continue
-    Object.assign(candidate, localFit(requirement, candidate))
+    if (!(candidate.fit === 'full' && candidate.profileEvidence)) {
+      Object.assign(candidate, localFit(requirement, candidate))
+    }
+    Object.assign(candidate, applyIntentToCandidate(candidate, intent))
   }
 
   candidates.sort((left, right) => right.confidence - left.confidence || left.name.localeCompare(right.name))
-  const useful = candidates.some((candidate) => candidate.confidence >= 0.62 && candidate.fit === 'full')
+  const useful = suppressesRemoteDiscovery(candidates)
   return {
     cwd,
     candidates: candidates.slice(0, 8),
@@ -212,4 +217,4 @@ export async function resolveLocalCapabilities(
   }
 }
 
-export const _testing = { matchConfidence, isStrictLocalMatch, localFit }
+export const _testing = { matchConfidence, isStrictLocalMatch, localFit, applyIntentToCandidate }

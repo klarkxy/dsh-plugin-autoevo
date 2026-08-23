@@ -4,6 +4,7 @@ import type {
   AuthorizationAction,
   DecisionPhase,
   DecisionReceipt,
+  EvolutionTarget,
   ResolutionAuthorization,
   ReviewRecord,
   VerificationLayerKind,
@@ -84,8 +85,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'selection_required') {
     return zh
-      ? '只把 snapshot 里的真实候选写成带序号短名单，先写在对话里，然后停。每行只写序号、名字、仓库和一句话说明；candidate_id 只用于随后的 resume，不要念给用户。不要提问，不要把官方 API、自建方案或“再搜一下”写成候选。parked 是成功停牌：本回合不要再调用任何工具。等用户回话后，把“两个都、前两个、全部、另一个、第二个、看看3”等映射为 candidate_id，立刻用 navigation.review_candidates 调用 capability_workflow_resume；选候选阶段不要 use_this。不要调用 ask_user。'
-      : 'Write a numbered shortlist of real snapshot candidates in chat, then stop. Each row is index, name, repository, and one-line why; keep candidate_id for the later resume call and do not recite it. Do not ask questions, and do not invent official-API, build-it-yourself, or search-further rows. Parked is a successful stop: do not call any tools until the user replies. After the user replies, map natural language such as both, the first two, all, the other one, the second one, or look at 3 to candidate IDs and immediately call capability_workflow_resume with navigation.review_candidates. Do not send use_this at selection. Do not call ask_user.'
+      ? '只把 snapshot 里的真实候选写成带序号短名单，先写在对话里，然后停。每行只写序号、名字、仓库和一句话说明；candidate_id 只用于随后的 resume，不要念给用户。不要提问，不要把官方 API、自建方案或“再搜一下”写成候选。parked 是成功停牌：本回合不要再调用任何工具。等用户回话后，把“两个都、前两个、全部、另一个、第二个、看看3”等映射为 candidate_id，立刻用当前 interrupt 允许的 navigation 调用 capability_workflow_resume；选候选阶段不要 use_this 或 modify_this。reuse_local 表示原样使用，不审查、不修改。不要调用 ask_user。'
+      : 'Write a numbered shortlist of real snapshot candidates in chat, then stop. Each row is index, name, repository, and one-line why; keep candidate_id for the later resume call and do not recite it. Do not ask questions, and do not invent official-API, build-it-yourself, or search-further rows. Parked is a successful stop: do not call any tools until the user replies. After the user replies, map natural language such as both, the first two, all, the other one, the second one, or look at 3 to candidate IDs and immediately call capability_workflow_resume with a currently allowed navigation. Do not send use_this or modify_this at selection. reuse_local means use unchanged: no review and no modification. Do not call ask_user.'
   }
   if (authorization.state === 'confirmation_required') {
     return zh
@@ -109,8 +110,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'reuse_local') {
     return zh
-      ? '用户选择使用已有的本地能力。直接用它。'
-      : 'The user chose the existing local capability. Use it.'
+      ? '用户选择原样使用已有的本地能力。不要审查、修改或安装。'
+      : 'The user chose the existing local capability unchanged. Do not review, modify, or install.'
   }
   if (authorization.state === 'stopped') {
     return zh
@@ -215,6 +216,17 @@ export function resolveDecisionTarget(
   }
 }
 
+function evolutionTargetFromInterrupt(
+  interrupt: InterruptPayload,
+  candidateId: string | undefined,
+): EvolutionTarget | undefined {
+  if (!candidateId || !Array.isArray(interrupt.facts.candidateSnapshot)) return undefined
+  const candidate = interrupt.facts.candidateSnapshot.find((item) => (
+    item && typeof item === 'object' && 'id' in item && (item as { id?: unknown }).id === candidateId
+  )) as { evolutionTarget?: EvolutionTarget } | undefined
+  return candidate?.evolutionTarget
+}
+
 function resolveInstallFromDecision(
   interrupt: InterruptPayload,
   decision: AuthorizationDecisionInput,
@@ -224,16 +236,29 @@ function resolveInstallFromDecision(
   const profiles = Array.isArray(interrupt.facts.installProfiles)
     ? interrupt.facts.installProfiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : []
-  const targetProfile = profiles[0]?.trim()
+  const evolutionTarget = evolutionTargetFromInterrupt(interrupt, decision.candidateId)
+  const targetProfile = (evolutionTarget?.profile ?? profiles[0])?.trim()
   if (!targetProfile) {
     throw new EvolutionError(
       'invalid_input',
       'use_this requires at least one AutoEvo-capable install profile in the interrupt facts',
     )
   }
-  const retention = decision.retention ?? 'temporary'
+  if (evolutionTarget && !profiles.includes(evolutionTarget.profile)) {
+    throw new EvolutionError(
+      'invalid_input',
+      'Replacement profile is not in the current AutoEvo-capable install profile set',
+    )
+  }
+  const retention = evolutionTarget ? 'persistent' : (decision.retention ?? 'temporary')
   if (retention !== 'temporary' && retention !== 'persistent') {
     throw new EvolutionError('invalid_input', 'decision retention must be temporary or persistent')
+  }
+  if (evolutionTarget && decision.retention === 'temporary') {
+    throw new EvolutionError(
+      'invalid_input',
+      'Replacing an installed plugin requires persistent retention',
+    )
   }
   // Fail at the decision gate, while the interrupt is still open and the fresh
   // user turn is unconsumed, instead of deep inside install where the same
@@ -248,6 +273,15 @@ function resolveInstallFromDecision(
     targetProfile,
     retention,
     verificationTask: requirement,
+    ...(evolutionTarget ? {
+      replacement: {
+        profile: evolutionTarget.profile,
+        packageName: evolutionTarget.packageName,
+        oldSpecDigest: evolutionTarget.specDigest,
+        oldDependencySpec: evolutionTarget.dependencySpec,
+        ...(evolutionTarget.installationId ? { predecessorInstallationId: evolutionTarget.installationId } : {}),
+      },
+    } : {}),
   }
 }
 

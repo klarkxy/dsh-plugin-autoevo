@@ -1,10 +1,12 @@
 import type {
   ActionCommitment,
   AuthorizationAction,
+  EvolutionTarget,
   ExecutionLease,
   InstallationRecord,
   InstallationRetention,
   NavigationInput,
+  RequestIntent,
   ResolutionRecord,
   ReviewFinding,
   ReviewMode,
@@ -77,6 +79,7 @@ export type WorkflowNodeId =
   | 'await_discovery'
   | 'await_selection'
   | 'review_github'
+  | 'review_existing'
   | 'await_confirmation'
   | 'prepare_modify'
   | 'await_modify_work'
@@ -126,6 +129,7 @@ export interface WorkflowPendingInstall {
   retention: InstallationRetention
   verificationTask?: string
   verificationExpectedText?: string
+  replacement?: import('../contracts.js').ReplacementTarget
 }
 
 export interface CandidateSnapshotItem {
@@ -140,6 +144,10 @@ export interface CandidateSnapshotItem {
   localKind?: 'tool' | 'skill' | 'plugin'
   availability?: 'available' | 'available_via_tool_search' | 'installed_in_profile'
   fit?: 'full' | 'partial' | 'none'
+  semanticFit?: 'full' | 'partial' | 'none'
+  surfaceMatch?: boolean
+  reuseEligible?: boolean
+  evolutionTarget?: EvolutionTarget
   installation?: {
     source: 'host_profile_manifest'
     profile: string
@@ -421,6 +429,8 @@ export interface WorkflowRecord {
   recovery?: WorkflowRecoveryRecord
   recoveredFromWorkflowId?: string
   error?: { code: string; message: string }
+  intent?: RequestIntent
+  pendingReviewedCandidateId?: string
 }
 
 export type WorkflowViewStatus = 'progressed' | 'parked' | 'invalid_resume'
@@ -480,7 +490,7 @@ export interface MarketplaceStepResult {
 }
 
 export interface WorkflowHost {
-  bootstrapResolution(requirement: string, exec: WorkflowExec): Promise<ResolutionRecord>
+  bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>
   refineRemote?(
     resolution: ResolutionRecord,
@@ -495,6 +505,12 @@ export interface WorkflowHost {
     resolution: ResolutionRecord,
     repository: string,
     ref: string | undefined,
+    exec: WorkflowExec,
+    workflow?: WorkflowRecord,
+  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
+  reviewExisting?(
+    resolution: ResolutionRecord,
+    target: EvolutionTarget,
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
@@ -595,8 +611,9 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   review_candidates: { id: 'review_candidates', labelEn: 'Review selected candidates', labelZh: '审查选中的候选', placement: 'primary' },
+  review_existing: { id: 'review_existing', labelEn: 'Review the installed plugin source', labelZh: '审查已安装插件的已知来源', placement: 'primary' },
   search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件', placement: 'primary' },
-  reuse_local: { id: 'reuse_local', labelEn: 'Use existing local capability', labelZh: '用已有的本地能力', placement: 'primary' },
+  reuse_local: { id: 'reuse_local', labelEn: 'Use existing local capability unchanged', labelZh: '原样使用已有本地能力', placement: 'primary' },
   create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建', placement: 'advanced' },
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
@@ -741,11 +758,17 @@ export function optionsFor(
   const remainingIds = remoteSnapshot
     .filter((item) => !(workflow?.reviewedCandidateIds ?? []).includes(item.id))
     .map((item) => item.id)
-  const fullLocalIds = snapshot
-    .filter((item) => item.kind === 'local' && item.fit === 'full')
+  const reusableLocalIds = snapshot
+    .filter((item) => item.kind === 'local' && (item.reuseEligible ?? item.fit === 'full'))
+    .map((item) => item.id)
+  const evolvableLocalIds = snapshot
+    .filter((item) => item.kind === 'local' && item.evolutionTarget)
     .map((item) => item.id)
   if (kind === 'await_selection' && remoteSnapshot.length > 0) {
     options.push({ ...WORKFLOW_OPTIONS.review_candidates, candidateIds: remoteSnapshot.map((item) => item.id) })
+  }
+  if (kind === 'await_selection' && evolvableLocalIds.length > 0) {
+    options.push({ ...WORKFLOW_OPTIONS.review_existing, candidateIds: evolvableLocalIds })
   }
   if (kind === 'await_confirmation') {
     const candidateIdFor = (review: ReviewRecord): string | undefined => {
@@ -766,12 +789,17 @@ export function optionsFor(
     if (usableIds.length > 0 && installProfiles.length > 0) {
       options.push({ ...WORKFLOW_OPTIONS.use_this, candidateIds: usableIds })
     }
-    options.push(WORKFLOW_OPTIONS.search_more)
-    if (remainingIds.length > 0) {
+    const evolvingInstalled = (workflow?.reviewedCandidateIds ?? []).some((id) => (
+      snapshot.find((item) => item.id === id)?.evolutionTarget
+    ))
+    if (!evolvingInstalled) {
+      options.push(WORKFLOW_OPTIONS.search_more)
+    }
+    if (remainingIds.length > 0 && !evolvingInstalled) {
       options.push({ ...WORKFLOW_OPTIONS.review_candidates, candidateIds: remainingIds })
     }
-    if (fullLocalIds.length > 0) {
-      options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: fullLocalIds })
+    if (reusableLocalIds.length > 0) {
+      options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: reusableLocalIds })
     }
     if (repairableIds.length > 0 && !modificationAttemptsExhausted(workflow?.modificationOutcome)) {
       options.push({ ...WORKFLOW_OPTIONS.modify_this, candidateIds: repairableIds })
@@ -780,8 +808,8 @@ export function optionsFor(
     options.push(WORKFLOW_OPTIONS.stop)
     return options
   }
-  if (fullLocalIds.length > 0) {
-    options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: fullLocalIds })
+  if (reusableLocalIds.length > 0) {
+    options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: reusableLocalIds })
   }
   options.push(WORKFLOW_OPTIONS.search_more)
   options.push(WORKFLOW_OPTIONS.stop)

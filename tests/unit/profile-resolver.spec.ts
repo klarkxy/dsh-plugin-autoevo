@@ -144,4 +144,33 @@ describe('profile capability resolver', () => {
       profileEvidence: expect.objectContaining({ configuredBundle: true }),
     })])
   })
+
+  it('does not treat an exact package mention as already-satisfying when evolving the installed plugin', async () => {
+    const dshHome = await profileHome()
+    const profileRoot = path.join(dshHome, 'profiles', 'web')
+    await writeFile(path.join(profileRoot, 'package.json'), JSON.stringify({
+      dependencies: { 'dsh-xai': `github:MirDie/dsh-xai#${'a'.repeat(40)}` },
+      dsh: { profile: { bundles: ['dsh-xai'] } },
+    }))
+    const result = await resolveLocalCapabilities(
+      emptyContext(),
+      '修改当前已安装的 dsh-xai',
+      { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+      {
+        dshHome,
+        activeProfile: 'web',
+        intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', targetName: 'dsh-xai' },
+      },
+    )
+    expect(result.shouldDiscoverRemote).toBe(true)
+    expect(result.candidates).toEqual([expect.objectContaining({
+      name: 'dsh-xai',
+      fit: 'partial',
+      reuseEligible: true,
+      evolutionTarget: expect.objectContaining({
+        kind: 'github_exact',
+        repository: 'MirDie/dsh-xai',
+      }),
+    })])
+  })
 })

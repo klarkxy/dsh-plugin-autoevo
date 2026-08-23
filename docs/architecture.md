@@ -45,6 +45,7 @@ capability_workflow
                       Host mechanical verification
          tool_roundtrip: Host-attested fixture execute → verified
          bundle_activation: load reviewed bundle, no Agent turn → activated
+           (carrier patches count the insert id+name Fiber, not the npm package name)
          manual_runtime persistent: no Host spawn → awaiting_user_test
          (temporary manual_runtime is rejected before approval)
                                   │
@@ -60,7 +61,7 @@ capability_workflow
 
 ## 3. DSH 接缝
 
-入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V8 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。主要 required services：
+入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V8 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
 
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；

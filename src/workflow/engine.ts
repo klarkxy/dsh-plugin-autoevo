@@ -2,18 +2,21 @@ import { randomUUID } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   BRIDGE_EXECUTION_TOOLS,
+  DEFAULT_REQUEST_INTENT,
   FORGED_RESUME_HOST_KEYS,
   POLICY_VERSION,
   type ActionCommitment,
   type ExecutionEndpoint,
   type ExecutionLease,
   type NavigationInput,
+  type RequestIntent,
   type ResolutionAuthorization,
   type ResolutionRecord,
   type ResumeInput,
   type ReviewRecord,
   type SelectionReceipt,
 } from '../contracts.js'
+import { intentIdentity } from '../resolver/intent.js'
 import type { CreationGuard } from '../creation-guard.js'
 import { EvolutionError } from '../errors.js'
 import {
@@ -66,22 +69,13 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
-/** At await_selection, use_this/modify_this means "review this", not install. */
-function selectionNavigationFromMisplacedDecision(
-  workflow: WorkflowRecord,
-  decision: ResumeInput['decision'],
-): NavigationInput | undefined {
-  if (workflow.cursor !== 'await_selection' || !decision) return undefined
-  if (decision.action === 'stop') return { kind: 'stop' }
-  if (decision.action !== 'use_this' && decision.action !== 'modify_this') return undefined
-  const candidateId = decision.candidateId
-  if (!candidateId) return undefined
-  const item = (workflow.candidateSnapshot ?? []).find((entry) => entry.id === candidateId)
-  if (decision.action === 'use_this' && item?.kind === 'local' && item.fit === 'full') {
-    return { kind: 'reuse_local', candidateIds: [candidateId] }
-  }
-  if (!item || item.kind !== 'remote') return undefined
-  return { kind: 'review_candidates', candidateIds: [candidateId] }
+function localCandidateIdentity(item: ResolutionRecord['localCandidates'][number]): string {
+  return [
+    item.kind,
+    item.name,
+    item.profileEvidence?.profile ?? '',
+    item.profileEvidence?.packageName ?? '',
+  ].join('\0')
 }
 
 const MIXED_SNAPSHOT_MAX = 8
@@ -98,7 +92,7 @@ function excludedCandidateIds(workflow?: Pick<WorkflowRecord, 'seenCandidateIds'
 
 function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): Omit<CandidateSnapshotItem, 'index'> {
   return {
-    id: candidateId('local', item.name),
+    id: candidateId('local', localCandidateIdentity(item)),
     kind: 'local',
     name: item.name,
     identity: item.name,
@@ -106,6 +100,10 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
     localKind: item.kind,
     availability: item.availability,
     ...(item.fit ? { fit: item.fit } : {}),
+    ...(item.semanticFit ? { semanticFit: item.semanticFit } : {}),
+    ...(item.surfaceMatch !== undefined ? { surfaceMatch: item.surfaceMatch } : {}),
+    ...(item.reuseEligible !== undefined ? { reuseEligible: item.reuseEligible } : {}),
+    ...(item.evolutionTarget ? { evolutionTarget: item.evolutionTarget } : {}),
     ...(item.profileEvidence ? { installation: {
       source: item.profileEvidence.source,
       profile: item.profileEvidence.profile,
@@ -119,6 +117,10 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
       description: item.description,
       availability: item.availability,
       fit: item.fit,
+      semanticFit: item.semanticFit,
+      surfaceMatch: item.surfaceMatch,
+      reuseEligible: item.reuseEligible,
+      evolutionTarget: item.evolutionTarget,
       profileEvidence: item.profileEvidence,
     }),
   }
@@ -351,31 +353,49 @@ function mintExecutionLease(input: {
 function registerReviewedCandidate(workflow: WorkflowRecord, review: ReviewRecord): void {
   const snapshot = workflow.candidateSnapshot ?? []
   const source = review.sourceSnapshot
-  let candidate = source.kind === 'github'
-    ? snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase())
-    : snapshot.find((item) => workflow.reviewIdsByCandidate?.[item.id] === review.id)
+  let candidate = workflow.pendingReviewedCandidateId
+    ? snapshot.find((item) => item.id === workflow.pendingReviewedCandidateId)
+    : undefined
+  if (!candidate && source.kind === 'github') {
+    candidate = snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase())
+      ?? snapshot.find((item) => item.evolutionTarget?.repository.toLowerCase() === source.repository.toLowerCase()
+        && item.evolutionTarget.commit === source.commit)
+  }
+  if (!candidate) {
+    candidate = snapshot.find((item) => workflow.reviewIdsByCandidate?.[item.id] === review.id)
+  }
 
   if (!candidate && source.kind === 'local') {
-    const identity = `${source.path}:${source.statusHash}`
-    candidate = {
-      id: candidateId('local', identity),
-      index: snapshot.reduce((max, item) => Math.max(max, item.index), 0) + 1,
-      kind: 'local',
-      name: review.manifest.packageName ?? 'managed-plugin',
-      identity,
-      localName: review.manifest.packageName ?? source.path,
-      fit: review.fit,
-      digest: hashObject({
-        reviewId: review.id,
-        sourceSnapshot: source,
-        installSpec: review.installSpec,
-        recommendation: review.recommendation,
-      }),
+    const frozen = snapshot.find((item) => item.evolutionTarget
+      && review.manifest.packageName
+      && item.evolutionTarget.packageName === review.manifest.packageName)
+    if (frozen) candidate = frozen
+    else {
+      const identity = `${source.path}:${source.statusHash}`
+      candidate = {
+        id: candidateId('local', identity),
+        index: snapshot.reduce((max, item) => Math.max(max, item.index), 0) + 1,
+        kind: 'local',
+        name: review.manifest.packageName ?? 'managed-plugin',
+        identity,
+        localName: review.manifest.packageName ?? source.path,
+        fit: review.fit,
+        digest: hashObject({
+          reviewId: review.id,
+          sourceSnapshot: source,
+          installSpec: review.installSpec,
+          recommendation: review.recommendation,
+        }),
+      }
+      snapshot.push(candidate)
+      workflow.candidateSnapshot = snapshot
     }
-    snapshot.push(candidate)
-    workflow.candidateSnapshot = snapshot
   }
   if (!candidate) return
+  if (candidate.evolutionTarget && review.manifest.packageName
+    && candidate.evolutionTarget.packageName !== review.manifest.packageName) {
+    throw new EvolutionError('invalid_input', 'Reviewed package name does not match the frozen installed package')
+  }
 
   workflow.reviewIdsByCandidate = {
     ...(workflow.reviewIdsByCandidate ?? {}),
@@ -428,6 +448,7 @@ function snapshotDigestFor(
   if (!resolution) throw new EvolutionError('invalid_input', 'Selection interrupt requires a resolution snapshot')
   return hashObject({
     kind,
+    intent: workflow.intent,
     candidateSnapshot: workflow.candidateSnapshot,
     remoteDiscoveryComplete: resolution.remoteDiscoveryComplete,
     remoteCandidateSource: resolution.remoteCandidateSource,
@@ -462,7 +483,7 @@ export class WorkflowEngine {
     private readonly host: WorkflowHost,
   ) {}
 
-  async start(requirement: string, exec: ToolRunContext): Promise<WorkflowView> {
+  async start(requirement: string, exec: ToolRunContext, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<WorkflowView> {
     const normalized = normalizeRequirement(requirement)
     if (!normalized || normalized.length > 2_000) {
       throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
@@ -473,7 +494,7 @@ export class WorkflowEngine {
     }
     const cwd = sessionCwd(exec.agent)
     await this.invalidateStalePolicyWorkflows(sessionId, normalized, exec)
-    const existing = await this.findReusableWorkflow(sessionId, cwd, normalized)
+    const existing = await this.findReusableWorkflow(sessionId, cwd, normalized, intent)
     if (existing) {
       return await this.withLock(existing.id, async () => {
         const latest = await this.store.getWorkflow(existing.id)
@@ -508,7 +529,7 @@ export class WorkflowEngine {
       })
     }
 
-    return await this.startFresh(requirement, normalized, sessionId, cwd, exec)
+    return await this.startFresh(requirement, normalized, sessionId, cwd, exec, intent)
   }
 
   private async startFresh(
@@ -517,6 +538,7 @@ export class WorkflowEngine {
     sessionId: string,
     cwd: string,
     exec: ToolRunContext,
+    intent: RequestIntent = DEFAULT_REQUEST_INTENT,
     recoveredFromWorkflowId?: string,
     workflowId = newWorkflowId(requirement),
   ): Promise<WorkflowView> {
@@ -536,6 +558,7 @@ export class WorkflowEngine {
       cursor: 'resolve_local',
       generation: 1,
       consumedInterruptIds: [],
+      intent,
       ...(recoveredFromWorkflowId ? { recoveredFromWorkflowId } : {}),
     }
     this.creationGuard.invalidateExecutionLease(exec.agent)
@@ -544,7 +567,7 @@ export class WorkflowEngine {
   }
 
   async recover(input: WorkflowRecoveryInput, exec: ToolRunContext): Promise<WorkflowView> {
-    let restart: { requirement: string; normalized: string; sessionId: string; cwd: string; oldWorkflowId: string; workflowId: string } | undefined
+    let restart: { requirement: string; normalized: string; sessionId: string; cwd: string; intent: RequestIntent; oldWorkflowId: string; workflowId: string } | undefined
     const lockedView = await this.withLock(input.workflowId, async () => {
       const workflow = await this.store.getWorkflow(input.workflowId)
       this.assertOwner(workflow, exec)
@@ -563,6 +586,7 @@ export class WorkflowEngine {
       restart.sessionId,
       restart.cwd,
       exec,
+      restart.intent,
       restart.oldWorkflowId,
       restart.workflowId,
     )
@@ -589,6 +613,7 @@ export class WorkflowEngine {
       normalized: string
       sessionId: string
       cwd: string
+      intent: RequestIntent
       oldWorkflowId: string
       workflowId: string
     }) => void,
@@ -643,6 +668,7 @@ export class WorkflowEngine {
       normalized: string
       sessionId: string
       cwd: string
+      intent: RequestIntent
       oldWorkflowId: string
       workflowId: string
     }) => void,
@@ -724,6 +750,7 @@ export class WorkflowEngine {
       normalized: string
       sessionId: string
       cwd: string
+      intent: RequestIntent
       oldWorkflowId: string
       workflowId: string
     }) => void,
@@ -753,6 +780,7 @@ export class WorkflowEngine {
       normalized,
       sessionId,
       cwd,
+      intent: workflow.intent ?? DEFAULT_REQUEST_INTENT,
       oldWorkflowId: workflow.id,
       workflowId: restartedAsWorkflowId,
     })
@@ -1116,18 +1144,6 @@ export class WorkflowEngine {
       if (input.navigation && input.decision) {
         return await this.invalidResumeView(workflow, resolution, exec, input, 'Provide either navigation or decision, not both')
       }
-      const coercedNavigation = !input.navigation
-        ? selectionNavigationFromMisplacedDecision(workflow, input.decision)
-        : undefined
-      if (coercedNavigation) {
-        try {
-          return await this.resumeNavigation(workflow, resolution, coercedNavigation, input.interruptId, exec)
-        } catch (error) {
-          const hint = retryableResumeHint(error)
-          if (hint) return await this.invalidResumeView(workflow, resolution, exec, input, hint)
-          throw error
-        }
-      }
       if (input.navigation) {
         try {
           return await this.resumeNavigation(workflow, resolution, input.navigation, input.interruptId, exec)
@@ -1306,13 +1322,26 @@ export class WorkflowEngine {
       }
       repositories = pending.map((item) => item.repository!)
       pendingReviewIds = pending.map((item) => item.id)
+    } else if (navigation.kind === 'review_existing') {
+      if (requestedIds.length !== 1) {
+        throw new EvolutionError('invalid_input', 'review_existing requires exactly one candidate_id')
+      }
+      const candidate = snapshot.find((item) => item.id === requestedIds[0])
+      const target = candidate?.evolutionTarget
+      if (!candidate || candidate.kind !== 'local' || !target) {
+        throw new EvolutionError('invalid_input', 'review_existing requires an installed candidate with Host-derived source provenance')
+      }
+      repositories = [target.repository]
+      pendingReviewIds = [candidate.id]
+      latest.pendingReviewedCandidateId = candidate.id
+      latest.pendingRef = target.commit
     } else if (navigation.kind === 'reuse_local') {
       if (requestedIds.length !== 1) {
         throw new EvolutionError('invalid_input', 'reuse_local requires exactly one candidate_id')
       }
       const candidate = snapshot.find((item) => item.id === requestedIds[0])
-      if (!candidate || candidate.kind !== 'local' || candidate.fit !== 'full') {
-        throw new EvolutionError('invalid_input', 'reuse_local requires a full local candidate from this snapshot')
+      if (!candidate || candidate.kind !== 'local' || !(candidate.reuseEligible ?? candidate.fit === 'full')) {
+        throw new EvolutionError('invalid_input', 'reuse_local requires a reusable local candidate from this snapshot')
       }
       reuseCandidate = candidate
     }
@@ -1340,12 +1369,12 @@ export class WorkflowEngine {
     delete latest.lastDiagnosis
     delete latest.invalidResumeAttempt
 
-    if (navigation.kind === 'review_candidates') {
+    if (navigation.kind === 'review_candidates' || navigation.kind === 'review_existing') {
       this.creationGuard.invalidateExecutionLease(exec.agent)
       latest.selectionReceipt = receipt
       latest.actionCommitment = mintActionCommitment({
         receipt,
-        action: 'review_candidates',
+        action: navigation.kind,
         endpoint: { kind: 'none' },
       })
       delete latest.executionLease
@@ -1356,7 +1385,7 @@ export class WorkflowEngine {
       }
       latest.reviewQueue = [...latest.reviewPlan.candidateIds]
       latest.pendingRepositories = repositories
-      latest.cursor = 'review_github'
+      latest.cursor = navigation.kind === 'review_existing' ? 'review_existing' : 'review_github'
     } else if (navigation.kind === 'search_more') {
       this.creationGuard.invalidateExecutionLease(exec.agent)
       const currentIds = snapshot.map((item) => item.id)
@@ -1545,14 +1574,19 @@ export class WorkflowEngine {
     sessionId: string,
     cwd: string,
     requirementNormalized: string,
+    intent: RequestIntent,
   ): Promise<WorkflowRecord | undefined> {
+    const wanted = intentIdentity(intent)
     const workflows = await this.store.listWorkflows()
     const matches = workflows
       .filter((item) => isUnfinished(item.status)
         && item.ownerSessionId === sessionId
         && item.cwd === cwd
         && item.requirementNormalized === requirementNormalized
-        && item.policyVersion === POLICY_VERSION)
+        && item.policyVersion === POLICY_VERSION
+        && (item.intent
+          ? intentIdentity(item.intent) === wanted
+          : item.status === 'running'))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     return matches[0]
   }

@@ -42,6 +42,38 @@ describe('third-party review', () => {
     expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
     expect(record.runtimeSurface?.llmRegistered).toBe(true)
     expect(record.runtimeSurface?.credentialsRegistered).toBe(true)
+    expect(record.manifest.activatedFibers).toEqual([{ id: 'llm-xai-oauth', name: 'dsh-xai' }])
+  })
+
+  it('freezes carrier insert Fibers instead of the npm package name', () => {
+    const carrierPatch = [
+      '- insert:',
+      '    - id: zhihu-search-mcp',
+      '      name: \'@deepseek-ai/dsh-mcp-client\'',
+      '      config:',
+      '        command: uvx',
+    ].join('\n')
+    const record = evaluatePluginContent({
+      resolutionId: 'resolution_0123456789abcdef',
+      runtimeVersion: '0.1.0-rc.6',
+      requirement: 'zhihu-search plugin',
+      sourceSnapshot: { kind: 'github', repository: 'klarkxy/zhihu-search', requestedRef: 'HEAD', commit: 'a'.repeat(40), defaultBranch: 'main' },
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({
+          name: 'dsh-plugin-zhihu-search',
+          license: 'MIT',
+          dsh: { bundle: { patch: './dsh-plugin/cordis.patch.yml' } },
+        })) },
+        { path: 'dsh-plugin/cordis.patch.yml', content: Buffer.from(carrierPatch) },
+      ],
+    })
+    expect(record.manifest.packageName).toBe('dsh-plugin-zhihu-search')
+    expect(record.manifest.bundlePatch).toBe('dsh-plugin/cordis.patch.yml')
+    expect(record.manifest.activatedFibers).toEqual([{
+      id: 'zhihu-search-mcp',
+      name: '@deepseek-ai/dsh-mcp-client',
+    }])
+    expect(record.runtimeSurface?.verificationLayer).toBe('bundle_activation')
   })
 
   it('requires conversation, export, and long-image facets instead of accepting screenshot OCR', () => {

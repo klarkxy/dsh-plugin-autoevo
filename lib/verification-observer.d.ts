@@ -11,6 +11,7 @@ interface Config {
   packageName?: string;
   fixtureDigest?: string;
   fixturesJson?: string;
+  activatedFibersJson?: string;
 }
 declare const Config: Schema<Config>;
 declare const name = "dsh-plugin-autoevo-verification-observer";

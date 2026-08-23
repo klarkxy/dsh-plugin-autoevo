@@ -164,6 +164,28 @@ describe('SourceManager defaults and provenance', () => {
     expect(stored.headCommit).toBe(commit)
   })
 
+  it('claims a clean completed source for a later workflow and rejects a dirty tree', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-claim-'))
+    temporary.push(root)
+    const commit = 'c'.repeat(40)
+    const firstId = `workflow_${'d'.repeat(24)}`
+    const secondId = `workflow_${'e'.repeat(24)}`
+    const state = { head: commit, branch: `autoevo/${firstId}`, dirty: '' }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const receipt = await manager.materializeReviewedGithub({
+      review: review(commit),
+      workflowId: firstId,
+    })
+    await manager.completeWorkflow(receipt.sourceId, firstId)
+    const inspected = await manager.inspectCompletedSource(receipt.sourceId)
+    expect(inspected?.activeWorkflowId).toBeNull()
+    const claimed = await manager.claimCompletedSourceForWorkflow(receipt.sourceId, secondId)
+    expect(claimed.activeWorkflowId).toBe(secondId)
+    await manager.completeWorkflow(receipt.sourceId, secondId)
+    state.dirty = ' M package.json\n'
+    await expect(manager.inspectCompletedSource(receipt.sourceId)).resolves.toBeUndefined()
+  })
+
   it('rejects a dirty tree before continuing', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-dirty-'))
     temporary.push(root)

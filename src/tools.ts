@@ -2,6 +2,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolCallKind, type ToolCallView, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { FORGED_RESUME_HOST_KEYS } from './contracts.js'
 import { EvolutionError } from './errors.js'
+import { parseRequestIntent } from './resolver/intent.js'
 import { copyForArgs } from './i18n.js'
 import type { CapabilityEvolutionService } from './service.js'
 import { compactAgentView } from './workflow/agent-view.js'
@@ -52,11 +53,14 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   if (navKind === 'review_candidates') {
     return genericPendingCard(args, 'Reviewing selected plugin candidates', '正在审查选中的插件候选', 'read')
   }
+  if (navKind === 'review_existing') {
+    return genericPendingCard(args, 'Reviewing the installed plugin\'s known source; this is not a modification', '正在审查已安装插件的已知来源，这不是修改', 'read')
+  }
   if (navKind === 'search_more') {
     return genericPendingCard(args, 'Searching for more plugin candidates', '正在搜索更多插件候选', 'search')
   }
   if (navKind === 'reuse_local') {
-    return genericPendingCard(args, 'Checking already-installed local capabilities', '正在检查已安装的本地能力', 'read')
+    return genericPendingCard(args, 'Using the existing local capability unchanged', '正在原样使用已有本地能力', 'read')
   }
   return genericPendingCard(args, 'Continuing the capability workflow', '正在继续能力工作流', 'other')
 }
@@ -88,14 +92,36 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
   return [
     defineTool({
       name: 'capability_workflow',
-      description: 'Start autonomous capability discovery with the user\'s original requirement. Returns Host-verified facts and a bounded candidate pool. Refine or present the pool using the dedicated tools; this call does not itself authorize review or mutation.',
+      description: 'Start autonomous capability discovery with the user\'s original requirement and a structured intent. Intent classifies read-only discovery only and grants no mutation. Returns Host-verified facts and a bounded candidate pool. Refine or present the pool using the dedicated tools; this call does not itself authorize review or mutation.',
       parameters: {
         requirement: { type: 'string', required: true, description: 'Concrete capability required by the current user task.' },
+        intent: {
+          type: 'object',
+          required: true,
+          additionalProperties: false,
+          description: 'Read-only classification of this request. Grants no mutation. evolve_existing reviews/modifies a named installed plugin; reuse_existing uses an existing capability unchanged; discover_or_reuse searches with local reuse allowed.',
+          properties: {
+            operation: {
+              type: 'string',
+              enum: ['discover_or_reuse', 'reuse_existing', 'evolve_existing'],
+              required: true,
+            },
+            required_surface: {
+              type: 'string',
+              enum: ['any', 'native_dsh_plugin'],
+              required: true,
+            },
+            target_name: {
+              type: 'string',
+              description: 'Exact local capability or package name when evolving or reusing a specific installed target.',
+            },
+          },
+        },
       },
       output: jsonOutput,
       presentCall: (args) => presentCapabilityToolCall('capability_workflow', args),
       async execute(args, exec) {
-        return compactAgentView(await service.start(args.requirement, exec) as WorkflowView) as unknown as JsonValue
+        return compactAgentView(await service.start(args.requirement, exec, parseRequestIntent(args.intent)) as WorkflowView) as unknown as JsonValue
       },
     }),
     defineTool({
@@ -144,7 +170,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           properties: {
             kind: {
               type: 'string',
-              enum: ['review_candidates', 'search_more', 'reuse_local', 'stop', 'finish_managed_work'],
+              enum: ['review_candidates', 'review_existing', 'search_more', 'reuse_local', 'stop', 'finish_managed_work'],
               required: true,
             },
             candidate_ids: { type: 'array', items: { type: 'string' } },

@@ -118,6 +118,7 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
   if (node === 'discover_remote') return executeDiscoverRemote(ctx)
   if (node === 'ensure_market') return executeEnsureMarket(ctx)
   if (node === 'review_github') return executeReviewGithub(ctx)
+  if (node === 'review_existing') return executeReviewExisting(ctx)
   if (node === 'review_local') return executeReviewLocal(ctx)
   if (node === 'install_verify') return executeInstallVerify(ctx)
   if (node === 'prepare_modify') return executePrepareModify(ctx)
@@ -173,7 +174,7 @@ async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecut
 }
 
 async function executeResolveLocal(ctx: GraphContext): Promise<NodeExecutionResult> {
-  const resolution = await ctx.host.bootstrapResolution(ctx.workflow.requirement, ctx.exec)
+  const resolution = await ctx.host.bootstrapResolution(ctx.workflow.requirement, ctx.exec, ctx.workflow.intent)
   ctx.workflow.resolutionId = resolution.id
   ctx.workflow.cwd = resolution.cwd
   const shouldDiscover = ctx.workflow.forceRemoteDiscovery || resolution.decision !== 'use_local'
@@ -200,8 +201,8 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
   if (resolution.remoteCandidateSource === 'marketplace-setup') {
     return { kind: 'next', node: 'ensure_market', resolution }
   }
-  const hasFullLocal = resolution.localCandidates.some((item) => item.fit === 'full')
-  if (nextUnseenRemote(resolution, ctx.workflow) || hasFullLocal || !resolution.remoteDiscoveryComplete) {
+  const hasSatisfyingLocal = resolution.localCandidates.some((item) => item.fit === 'full' && item.surfaceMatch !== false)
+  if (nextUnseenRemote(resolution, ctx.workflow) || hasSatisfyingLocal || !resolution.remoteDiscoveryComplete) {
     return { kind: 'next', node: 'await_discovery', resolution }
   }
   return {
@@ -216,8 +217,8 @@ async function executeEnsureMarket(ctx: GraphContext): Promise<NodeExecutionResu
   const { resolution, market } = await ctx.host.ensureMarket(current, ctx.exec)
   if (market.status === 'loaded') return { kind: 'next', node: 'discover_remote', resolution }
   if (market.status === 'empty') {
-    const hasFullLocal = resolution.localCandidates.some((item) => item.fit === 'full')
-    if (nextUnseenRemote(resolution, ctx.workflow) || hasFullLocal || !resolution.remoteDiscoveryComplete) {
+    const hasSatisfyingLocal = resolution.localCandidates.some((item) => item.fit === 'full' && item.surfaceMatch !== false)
+    if (nextUnseenRemote(resolution, ctx.workflow) || hasSatisfyingLocal || !resolution.remoteDiscoveryComplete) {
       return { kind: 'next', node: 'await_discovery', resolution }
     }
     return { kind: 'next', node: 'await_confirmation', resolution }
@@ -269,6 +270,22 @@ async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResu
     ctx.exec,
     ctx.workflow,
   )
+  return { kind: 'next', node: 'await_confirmation', resolution, review }
+}
+
+async function executeReviewExisting(ctx: GraphContext): Promise<NodeExecutionResult> {
+  const current = await requireResolution(ctx)
+  const snapshot = ctx.workflow.candidateSnapshot ?? []
+  const candidate = snapshot.find((item) => item.id === ctx.workflow.pendingReviewedCandidateId)
+    ?? snapshot.find((item) => item.evolutionTarget && ctx.workflow.pendingRepositories?.includes(item.evolutionTarget.repository))
+  const target = candidate?.evolutionTarget
+  if (!target) {
+    throw new EvolutionError('invalid_input', 'review_existing requires a frozen installed evolution target')
+  }
+  if (!ctx.host.reviewExisting) {
+    throw new EvolutionError('invalid_input', 'This workflow host does not support installed-source review')
+  }
+  const { resolution, review } = await ctx.host.reviewExisting(current, target, ctx.exec, ctx.workflow)
   return { kind: 'next', node: 'await_confirmation', resolution, review }
 }
 

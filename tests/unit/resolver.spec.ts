@@ -269,6 +269,33 @@ describe('local matching', () => {
     expect(result.shouldDiscoverRemote).toBe(false)
   })
 
+  it('does not let a same-name Zhihu skill suppress native plugin discovery', async () => {
+    const ctx = {
+      tools: { schemas: () => [] },
+      systemPrompt: { assemble: async () => ({ tools: [] }) },
+      skills: { list: async () => [{
+        name: 'zhihu-search',
+        description: 'Use zhihu-search proactively for Chinese web research',
+        whenToUse: 'When the user asks to search Zhihu',
+        invocation: { modelInvocable: true },
+      }] },
+    } as unknown as Context
+    const result = await resolveLocalCapabilities(
+      ctx,
+      '安装官方 zhihu-search DeepSeek Harness 插件',
+      { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+      { intent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' } },
+    )
+    expect(result.candidates).toEqual([expect.objectContaining({
+      kind: 'skill',
+      name: 'zhihu-search',
+      surfaceMatch: false,
+      reuseEligible: false,
+    })])
+    expect(result.candidates[0]?.fit).not.toBe('full')
+    expect(result.shouldDiscoverRemote).toBe(true)
+  })
+
   it('distinguishes scoped tools, tool-search-reachable tools, and model-invocable skills', async () => {
     const schemas = [
       { name: 'tool_search', description: 'Search tools' },

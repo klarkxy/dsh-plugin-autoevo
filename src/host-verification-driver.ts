@@ -11,12 +11,18 @@ import {
 } from '@deepseek-ai/dsh-tools'
 import {
   classifyRuntimeSurface,
+  type ActivatedFiber,
   type ReviewRecord,
   type RuntimeSurfaceFacts,
   type VerificationEvidence,
   type VerificationLayerKind,
   type VerificationStatus,
 } from './contracts.js'
+import {
+  matchActivatedEntries,
+  parseActivatedFibersJson,
+  type ActivationEntry,
+} from './lifecycle/bundle-activation.js'
 import { hashObject } from './state/hashes.js'
 
 const HOST_OVERLAY_ID_PREFIX = 'autoevo-host-verification-'
@@ -74,6 +80,7 @@ export interface HostDriverConfig {
   packageName: string
   fixtureDigest: string
   fixturesJson?: string
+  activatedFibersJson?: string
   requestExit?: (code: number) => void
 }
 
@@ -382,6 +389,7 @@ export function hostVerificationOverlay(input: {
   fixtureDigest: string
   fixtures: readonly HostExecutableFixture[]
   observerUrl: string
+  activatedFibers?: readonly ActivatedFiber[]
 }): unknown[] {
   const fixtures: Record<string, Record<string, unknown>> = {}
   for (const item of input.fixtures) fixtures[item.tool] = item.arguments
@@ -403,6 +411,7 @@ export function hostVerificationOverlay(input: {
         packageName: input.packageName,
         fixtureDigest: input.fixtureDigest,
         fixturesJson: JSON.stringify(fixtures),
+        activatedFibersJson: JSON.stringify(input.activatedFibers ?? []),
       },
       }],
     },
@@ -430,8 +439,7 @@ function parseFixturesJson(value: string | undefined): Record<string, Record<str
   }
 }
 
-interface LoaderEntryLike {
-  options?: { name?: string }
+interface LoaderEntryLike extends ActivationEntry {
   disabled?: boolean
   fiber?: { await(): Promise<unknown>; state: number }
 }
@@ -444,19 +452,21 @@ function contextLoader(ctx: Context): LoaderLike | undefined {
   return (ctx as Context & { loader?: LoaderLike }).loader
 }
 
-function packageEntries(ctx: Context, packageName: string): LoaderEntryLike[] {
+function packageEntries(
+  ctx: Context,
+  packageName: string,
+  targets: readonly ActivatedFiber[],
+): LoaderEntryLike[] {
   const loader = contextLoader(ctx)
   if (!loader || typeof loader.entries !== 'function') return []
-  const matched: LoaderEntryLike[] = []
-  for (const entry of loader.entries()) {
-    const name = entry.options?.name
-    if (typeof name !== 'string') continue
-    if (name === packageName || name.endsWith(`/${packageName}`)) matched.push(entry)
-  }
-  return matched
+  return matchActivatedEntries([...loader.entries()], { packageName, targets })
 }
 
-async function waitForLoader(ctx: Context, packageName: string): Promise<{ stable: boolean; sourceMatched: boolean; reason: string }> {
+async function waitForLoader(
+  ctx: Context,
+  packageName: string,
+  targets: readonly ActivatedFiber[],
+): Promise<{ stable: boolean; sourceMatched: boolean; reason: string }> {
   const loader = contextLoader(ctx)
   if (!loader) return { stable: false, sourceMatched: false, reason: 'Host child has no Loader service.' }
   const own = (ctx as Context & { fiber?: { entry?: unknown } }).fiber?.entry
@@ -464,7 +474,7 @@ async function waitForLoader(ctx: Context, packageName: string): Promise<{ stabl
     if (entry === own || entry.disabled) continue
     if (entry.fiber) await entry.fiber.await()
   }
-  const matched = packageEntries(ctx, packageName)
+  const matched = packageEntries(ctx, packageName, targets)
   if (matched.length === 0) {
     return { stable: false, sourceMatched: false, reason: 'Reviewed package Fiber was not present after Loader settle.' }
   }
@@ -541,7 +551,11 @@ export async function runHostVerification(ctx: Context, config: HostDriverConfig
     }
   }
 
-  const loader = await waitForLoader(ctx, config.packageName)
+  const loader = await waitForLoader(
+    ctx,
+    config.packageName,
+    parseActivatedFibersJson(config.activatedFibersJson),
+  )
   if (!loader.stable || !loader.sourceMatched) {
     return {
       layer: config.layer,

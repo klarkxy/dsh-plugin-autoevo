@@ -550,6 +550,7 @@ describe('Policy V8 legacy invalidation', () => {
 
   it('presents use_this and search_more as primary confirmation actions', () => {
     expect(WORKFLOW_OPTIONS.use_this.placement).toBe('primary')
+    expect(WORKFLOW_OPTIONS.review_existing.placement).toBe('primary')
     expect(WORKFLOW_OPTIONS.search_more.placement).toBe('primary')
     expect(WORKFLOW_OPTIONS.modify_this.placement).toBe('advanced')
     expect(WORKFLOW_OPTIONS.create_new.placement).toBe('advanced')

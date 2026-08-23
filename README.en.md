@@ -70,7 +70,7 @@ Before uninstalling AutoEvo, remove Capability Evolution in DSH's Agent preset U
 - After `awaiting_user_test`, invite the user to try the capability in the target client or profile. Do not use a fixed script, and do not re-ask during later casual chat.
 - The same review / source / layer / fixture cannot be installed or verified again; modify is capped at two attempts. When the user explicitly asks to clean up and start over, completed `installed` / `restart_required` / `activated` / `awaiting_user_test` use post-install cleanup/restart. Failed `recovery_required` keeps the sealed interrupt protocol. `taskResultMatchedExpectation` is diagnostic only and does not gate success.
 - `partial` candidates get a minimal patch, upstream tests, a local re-review to `full`, then an immutable tgz.
-- Dissatisfaction with an installed community plugin goes through the same gates: the installation receipt's `reviewId` points at the upstream repository and exact commit; after the user selects that origin, review → improve-this → local re-review → pinned tgz reinstall, then remove the old installation by its receipt. Plugins created under `create_authorized` or static local plugins are upgraded as ordinary repair work.
+- Dissatisfaction with an installed community plugin starts at Gate 1 as an installed-source review: Host derives the upstream from an exact `github:owner/repo#sha` profile dependency (or an owned installation-receipt chain). After the user chooses to review that known source: review → improve-this → local re-review → pinned tgz replacement. Using an existing capability unchanged is a separate terminal path and is never described as review or modification. A same-name skill cannot claim to be a native DSH plugin or suppress plugin discovery. Plugins created under `create_authorized` or static local plugins are upgraded as ordinary repair work.
 - After the current task is done, generic improvements can be suggested as a contribution. The installation receipt's `contributionAdvice` records eligibility; fork, push, and PR still use `git` / `gh` after another explicit approval.
 
 ## Try it
@@ -85,10 +85,10 @@ It should call `capability_workflow`, autonomously refine the real discovery poo
 
 | Tool | Role | Surface |
 |---|---|---|
-| `capability_workflow` | Preserve the original requirement and return a bounded Host-verified discovery pool, evidence, and budgets | read-only / approval when installing marketplace |
+| `capability_workflow` | Preserve the original requirement and a structured intent (discover/reuse/evolve-installed), then return a bounded Host-verified discovery pool, evidence, and budgets | read-only / approval when installing marketplace |
 | `capability_workflow_refine` | Add bounded query hints or strict GitHub repository identities to the open discovery pool | read-only |
 | `capability_workflow_present` | Seal 1–5 pool candidates into the final shortlist and open Gate 1 | read-only |
-| `capability_workflow_resume` | Use `navigation` for read-only selection/review; use an LLM-interpreted structured `decision` for final confirmation, bounded by the Host to the authentic turn and current interrupt action/candidate | read-only for review; approval for install |
+| `capability_workflow_resume` | Use `navigation` for read-only selection, installed-source review, or unchanged reuse; use an LLM-interpreted structured `decision` for final confirmation, bounded by the Host to the authentic turn and current interrupt action/candidate | read-only for review; approval for install |
 | `capability_workflow_diagnose` | Read bounded redacted discovery, review, child, install, verification, and cleanup facts after failure | read-only |
 | `capability_workflow_recover` | Two distinct paths: sealed failure recovery requires the current `interrupt_id`; completed-install cleanup/restart is driven by a new top-level explicit user request and omits `interrupt_id` | authentic confirmation / one-time cleanup approval |
 | `plugin_remove` | Remove exactly one installation by receipt | approval |

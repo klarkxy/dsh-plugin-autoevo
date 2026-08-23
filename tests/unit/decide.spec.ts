@@ -263,4 +263,67 @@ describe('install authorization receipts', () => {
       }],
     })).toThrow(/has not chosen/i)
   })
+
+  it('binds persistent replacement to the frozen installed target instead of a first-time install', () => {
+    const commit = '5'.repeat(40)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current: InterruptPayload = {
+      kind: 'await_confirmation',
+      interruptId: `interrupt_${'a'.repeat(24)}`,
+      ownerSessionId: 'session-decide',
+      bootId: 'boot_decide',
+      validAfterTurnId: `turn_${'0'.repeat(24)}`,
+      snapshotDigest: 'b'.repeat(64),
+      options: [{ ...WORKFLOW_OPTIONS.use_this, candidateIds: [candidateId] }, WORKFLOW_OPTIONS.stop],
+      facts: {
+        installProfiles: ['web'],
+        candidateSnapshot: [{
+          id: candidateId,
+          index: 1,
+          kind: 'local',
+          name: 'dsh-xai',
+          identity: 'dsh-xai',
+          digest: 'e'.repeat(64),
+          evolutionTarget: {
+            kind: 'github_exact',
+            repository: 'MirDie/dsh-xai',
+            commit,
+            packageName: 'dsh-xai',
+            profile: 'web',
+            dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+            specDigest: 'f'.repeat(64),
+          },
+        }],
+      },
+    }
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '替换现装插件' }] })
+    const resume = resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      requirement: 'dsh-xai',
+    })
+    expect(resume.install).toMatchObject({
+      targetProfile: 'web',
+      retention: 'persistent',
+      replacement: {
+        profile: 'web',
+        packageName: 'dsh-xai',
+        oldDependencySpec: `github:MirDie/dsh-xai#${commit}`,
+      },
+    })
+    const again = {
+      ...current,
+      interruptId: `interrupt_${'b'.repeat(24)}`,
+    }
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '临时装' }] })
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: again,
+      decision: { action: 'use_this', candidateId, retention: 'temporary' },
+      requirement: 'dsh-xai',
+    })).toThrow(/persistent retention/i)
+  })
 })

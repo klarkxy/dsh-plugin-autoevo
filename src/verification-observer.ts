@@ -17,6 +17,7 @@ export interface Config {
   packageName?: string
   fixtureDigest?: string
   fixturesJson?: string
+  activatedFibersJson?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -29,6 +30,7 @@ export const Config: Schema<Config> = Schema.object({
   packageName: Schema.string().default(''),
   fixtureDigest: Schema.string().default(''),
   fixturesJson: Schema.string().default(''),
+  activatedFibersJson: Schema.string().default(''),
 })
 
 export const name = 'dsh-plugin-autoevo-verification-observer'
@@ -75,6 +77,7 @@ export function apply(ctx: Context, config: Config): void {
       packageName: config.packageName ?? '',
       fixtureDigest: config.fixtureDigest ?? '',
       ...(config.fixturesJson ? { fixturesJson: config.fixturesJson } : {}),
+      ...(config.activatedFibersJson ? { activatedFibersJson: config.activatedFibersJson } : {}),
     }
     applyHostVerification(ctx, driverConfig)
     return

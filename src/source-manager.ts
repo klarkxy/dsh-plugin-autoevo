@@ -621,6 +621,52 @@ export class SourceManager {
     return next
   }
 
+  async inspectCompletedSource(sourceId: string, signal?: AbortSignal): Promise<SourceReceipt | undefined> {
+    const receipt = await this.readReceipt(sourceId)
+    if (!receipt || receipt.activeWorkflowId) return undefined
+    const lockFile = this.lockPath(sourceId)
+    try {
+      const lock = JSON.parse(await readFile(lockFile, 'utf8')) as SourceLock
+      if (isLockHolderAlive(lock.pid)) return undefined
+    } catch (error) {
+      if (!isNotFound(error)) throw error
+    }
+    const root = await this.assertPathContainment(sourceId)
+    const status = await this.git(root, ['status', '--porcelain'], signal)
+    const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    const gitSecurityHash = await this.gitConfigHash(sourceId)
+    if (status || head !== receipt.headCommit || branch !== receipt.branch || gitSecurityHash !== receipt.gitConfigHash) {
+      return undefined
+    }
+    return receipt
+  }
+
+  async claimCompletedSourceForWorkflow(
+    sourceId: string,
+    workflowId: string,
+    signal?: AbortSignal,
+  ): Promise<SourceReceipt> {
+    const inspected = await this.inspectCompletedSource(sourceId, signal)
+    if (!inspected) {
+      throw new EvolutionError('invalid_input', 'Completed managed source is missing, locked, dirty, or drifted')
+    }
+    await this.acquireLock(sourceId, workflowId, signal)
+    const next: SourceReceipt = { ...inspected, activeWorkflowId: workflowId }
+    await this.writeReceipt(next)
+    const root = await this.assertPathContainment(sourceId)
+    const headCommit = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    await writeFile(this.lockPath(sourceId), `${JSON.stringify({
+      workflowId,
+      createdAt: new Date().toISOString(),
+      pid: process.pid,
+      headCommit,
+      branch,
+    } satisfies SourceLock, null, 2)}\n`, 'utf8')
+    return next
+  }
+
   /** Re-enter an already-owned managed source without resetting its lineage. */
   async resumeWorkflowSource(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<SourceReceipt> {
     const receipt = await this.readReceipt(sourceId)

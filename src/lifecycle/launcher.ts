@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { parse } from 'yaml'
 import type { RuntimeConfig } from '../config.js'
-import type { ReviewRecord, VerificationEvidence, VerificationLayerKind, VerificationStatus } from '../contracts.js'
+import type {
+  ActivatedFiber,
+  ReviewRecord,
+  VerificationEvidence,
+  VerificationLayerKind,
+  VerificationStatus,
+} from '../contracts.js'
 import {
   declaredVerificationFixturesFromPackage,
   hostLayerSuccess,
@@ -15,6 +22,7 @@ import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import type { CommandResult, CommandRunner } from '../process/runner.js'
 import { sha256 } from '../state/hashes.js'
+import { activationTargetsFromPatch } from './bundle-activation.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
 
 interface SessionFile {
@@ -302,6 +310,26 @@ export class DshLauncher {
     }
   }
 
+  async profileDependencySpec(
+    dshHome: string,
+    profile: string,
+    packageName: string,
+  ): Promise<string | undefined> {
+    const safePackageName = assertSafePackageName(packageName)
+    try {
+      const body = await readFile(path.join(dshHome, 'profiles', profile, 'package.json'), 'utf8')
+      const manifest: unknown = JSON.parse(body)
+      if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return undefined
+      const dependencies = (manifest as { dependencies?: unknown }).dependencies
+      if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) return undefined
+      const spec = (dependencies as Record<string, unknown>)[safePackageName]
+      return typeof spec === 'string' ? spec : undefined
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+  }
+
   /** Verify that the target profile records the exact reviewed source and loads that bundle. */
   async profileSourceMatches(
     dshHome: string,
@@ -513,6 +541,34 @@ export class DshLauncher {
    * Host-owned mechanical verification. Never forwards credentials, never
    * passes a user task, and never boots an Agent turn or default model route.
    */
+  async readInstalledActivationTargets(
+    dshHome: string,
+    profile: string,
+    packageName: string,
+  ): Promise<ActivatedFiber[]> {
+    const safePackageName = assertSafePackageName(packageName)
+    const packageRoot = path.join(dshHome, 'profiles', profile, 'node_modules', ...safePackageName.split('/'))
+    try {
+      const manifest: unknown = JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8'))
+      const dsh = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+        ? (manifest as { dsh?: unknown }).dsh
+        : undefined
+      const bundle = dsh && typeof dsh === 'object' && !Array.isArray(dsh)
+        ? (dsh as { bundle?: unknown }).bundle
+        : undefined
+      const patchSpec = bundle && typeof bundle === 'object' && !Array.isArray(bundle)
+        ? (bundle as { patch?: unknown }).patch
+        : undefined
+      if (typeof patchSpec !== 'string' || !patchSpec || path.isAbsolute(patchSpec)
+        || patchSpec.split(/[\\/]/u).includes('..')) return []
+      const value: unknown = parse(await readFile(path.resolve(packageRoot, patchSpec), 'utf8'))
+      return activationTargetsFromPatch(value)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+  }
+
   async verifyHost(input: {
     dshHome: string
     profile: string
@@ -522,6 +578,7 @@ export class DshLauncher {
     expectedTools: readonly string[]
     fixtures: readonly HostExecutableFixture[]
     fixtureDigest: string
+    activatedFibers?: readonly ActivatedFiber[]
     signal?: AbortSignal
   }): Promise<VerificationEvidence> {
     const verificationRoot = path.join(this.config.stateDir, 'verifications', randomUUID())
@@ -529,6 +586,14 @@ export class DshLauncher {
     const overlayPath = path.join(verificationRoot, 'host-driver.cordis.yml')
     await mkdir(verificationRoot, { recursive: true })
     const observerUrl = new URL('./verification-observer.js', import.meta.url).href
+    let activatedFibers = [...(input.activatedFibers ?? [])]
+    if (activatedFibers.length === 0) {
+      try {
+        activatedFibers = await this.readInstalledActivationTargets(input.dshHome, input.profile, input.packageName)
+      } catch {
+        activatedFibers = []
+      }
+    }
     const overlay = hostVerificationOverlay({
       receiptPath,
       expectedTools: input.expectedTools,
@@ -537,6 +602,7 @@ export class DshLauncher {
       fixtureDigest: input.fixtureDigest,
       fixtures: input.fixtures,
       observerUrl,
+      activatedFibers,
     })
     await writeFile(overlayPath, `${JSON.stringify(overlay, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
     await writeFile(receiptPath, `${JSON.stringify({ kind: 'host/launch', version: 1, attempted: true, layer: input.layer })}\n`, {

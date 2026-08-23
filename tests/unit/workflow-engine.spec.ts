@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
@@ -16,7 +16,7 @@ afterEach(async () => {
   await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
 })
 
-function exec(sessionId = 'session-1'): ToolRunContext {
+function exec(sessionId = 'session-1', cwd = process.cwd()): ToolRunContext {
   return {
     callId: 'call-1',
     rootCallId: 'call-1',
@@ -24,7 +24,7 @@ function exec(sessionId = 'session-1'): ToolRunContext {
     signal: new AbortController().signal,
     agent: {
       id: sessionId,
-      session: { header: { id: sessionId, cwd: process.cwd(), version: 0, createdAt: 0 } },
+      session: { header: { id: sessionId, cwd, version: 0, createdAt: 0 } },
     },
   } as unknown as ToolRunContext
 }
@@ -346,7 +346,7 @@ describe('workflow engine autonomous discovery', () => {
     const reused = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
-      decision: { action: 'use_this', candidateId: candidate.id },
+      navigation: { kind: 'reuse_local', candidateIds: [candidate.id] },
     }, turn)
 
     expect(reused.workflow).toMatchObject({ status: 'completed', cursor: 'reuse_local' })
@@ -782,9 +782,390 @@ describe('workflow engine autonomous discovery', () => {
     await store.put('workflows', persisted)
     const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
 
-    const resumed = await engine.start('calculator', exec())
+    const started = await engine.start('calculator', exec())
 
-    expect(resumed.workflow).toMatchObject({ id: persisted.id, schemaVersion: 1, cursor: 'await_selection' })
-    expect(resumed.workflow.interrupt?.interruptId).toBe(persisted.interrupt!.interruptId)
+    expect(started.workflow.id).not.toBe(persisted.id)
+    expect((await store.getWorkflow(persisted.id)).interrupt?.interruptId).toBe(persisted.interrupt!.interruptId)
+  })
+
+  it('does not reuse an unfinished workflow across different start intents', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-intent-reuse-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const record = resolution()
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const turn = exec('session-1', 'C:/workspace')
+    const first = await engine.start('calculator', turn, {
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'dsh-xai',
+    })
+    const second = await engine.start('calculator', turn, {
+      operation: 'discover_or_reuse',
+      requiredSurface: 'any',
+    })
+    expect(second.workflow.id).not.toBe(first.workflow.id)
+    const same = await engine.start('calculator', turn, {
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'dsh-xai',
+    })
+    expect(same.workflow.id).toBe(first.workflow.id)
+  })
+
+  it('offers review_existing for an installed GitHub SHA without treating Gate-1 use_this as review', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-review-existing-'))
+    temporary.push(root)
+    const commit = '5'.repeat(40)
+    const record = resolution('dsh-xai')
+    record.localCandidates[0] = {
+      kind: 'plugin',
+      name: 'dsh-xai',
+      description: 'xAI Grok OAuth',
+      availability: 'installed_in_profile',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      surfaceMatch: true,
+      reuseEligible: true,
+      evolutionTarget: {
+        kind: 'github_exact',
+        repository: 'MirDie/dsh-xai',
+        commit,
+        packageName: 'dsh-xai',
+        profile: 'web',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        specDigest: 'd'.repeat(64),
+      },
+      profileEvidence: {
+        source: 'host_profile_manifest',
+        profile: 'web',
+        packageName: 'dsh-xai',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        configuredBundle: true,
+      },
+    }
+    const store = new StateStore(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, host(store, record))
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
+    const optionIds = selection.workflow.interrupt?.options.map((item) => item.id) ?? []
+    expect(optionIds).toEqual(expect.arrayContaining(['review_existing', 'reuse_local', 'search_more', 'stop']))
+    expect(optionIds).not.toContain('modify_this')
+    const candidateId = selection.workflow.candidateSnapshot![0]!.id
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '装这个' }] })
+    const rejected = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId },
+    }, turn)
+    expect(rejected.status).toBe('invalid_resume')
+    expect(rejected.workflow.cursor).toBe('await_selection')
+    expect(rejected.workflow.interrupt?.interruptId).toBe(selection.workflow.interrupt!.interruptId)
+  })
+
+  it('reviews an installed exact SHA into confirmation with modify_this and without search_more', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-installed-review-'))
+    temporary.push(root)
+    const commit = '5'.repeat(40)
+    const record = resolution('dsh-xai')
+    record.localCandidates[0] = {
+      kind: 'plugin',
+      name: 'dsh-xai',
+      description: 'xAI Grok OAuth',
+      availability: 'installed_in_profile',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      surfaceMatch: true,
+      reuseEligible: true,
+      evolutionTarget: {
+        kind: 'github_exact',
+        repository: 'MirDie/dsh-xai',
+        commit,
+        packageName: 'dsh-xai',
+        profile: 'web',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        specDigest: 'd'.repeat(64),
+      },
+      profileEvidence: {
+        source: 'host_profile_manifest',
+        profile: 'web',
+        packageName: 'dsh-xai',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        configuredBundle: true,
+      },
+    }
+    const store = new StateStore(root)
+    const review: ReviewRecord = {
+      schemaVersion: 1,
+      id: `review_${'a'.repeat(64)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-22T00:00:00.000Z',
+      resolutionId: record.id,
+      requirement: 'dsh-xai',
+      sourceSnapshot: {
+        kind: 'github',
+        repository: 'MirDie/dsh-xai',
+        requestedRef: commit,
+        commit,
+        defaultBranch: 'main',
+      },
+      inspectedFiles: [],
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-xai',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+      },
+      fit: 'full',
+      confidence: 0.9,
+      securityRisk: 'low',
+      maintained: true,
+      license: 'MIT',
+      compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
+      missingCapabilities: [],
+      findings: [],
+      recommendation: 'modify',
+      installSpec: `github:MirDie/dsh-xai#${commit}`,
+    }
+    const workflowHost = host(store, record)
+    workflowHost.listInstallProfiles = async () => ['web']
+    workflowHost.reviewExisting = async (resolution, target) => {
+      expect(target.commit).toBe(commit)
+      await store.put('reviews', review)
+      const next = {
+        ...resolution,
+        selectedRepositories: [target.repository],
+        authorization: {
+          state: 'confirmation_required' as const,
+          resolutionId: resolution.id,
+          reason: 'reviewed installed source',
+          reviewId: review.id,
+        },
+      }
+      await store.put('resolutions', next)
+      return { resolution: next, review }
+    }
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, workflowHost)
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
+    const candidateId = selection.workflow.candidateSnapshot![0]!.id
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审这个已装来源' }] })
+    const reviewed = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'review_existing', candidateIds: [candidateId] },
+    }, turn)
+    expect(reviewed.workflow.cursor).toBe('await_confirmation')
+    expect(reviewed.workflow.reviewIdsByCandidate?.[candidateId]).toBe(review.id)
+    const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
+    expect(optionIds).toContain('modify_this')
+    expect(optionIds).not.toContain('search_more')
+    expect(optionIds).not.toContain('review_candidates')
+    expect(reviewed.workflow.interrupt?.options.find((item) => item.id === 'modify_this')?.candidateIds).toEqual([candidateId])
+  })
+
+  it('keeps the installed candidate through modify and sends replacement on use_this', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-installed-replace-'))
+    temporary.push(root)
+    const commit = '5'.repeat(40)
+    const record = resolution('dsh-xai')
+    record.localCandidates[0] = {
+      kind: 'plugin',
+      name: 'dsh-xai',
+      description: 'xAI Grok OAuth',
+      availability: 'installed_in_profile',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      surfaceMatch: true,
+      reuseEligible: true,
+      evolutionTarget: {
+        kind: 'github_exact',
+        repository: 'MirDie/dsh-xai',
+        commit,
+        packageName: 'dsh-xai',
+        profile: 'web',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        specDigest: 'd'.repeat(64),
+      },
+      profileEvidence: {
+        source: 'host_profile_manifest',
+        profile: 'web',
+        packageName: 'dsh-xai',
+        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        configuredBundle: true,
+      },
+    }
+    const store = new StateStore(root)
+    const githubReview: ReviewRecord = {
+      schemaVersion: 1,
+      id: `review_${'a'.repeat(64)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-22T00:00:00.000Z',
+      resolutionId: record.id,
+      requirement: 'dsh-xai',
+      sourceSnapshot: {
+        kind: 'github',
+        repository: 'MirDie/dsh-xai',
+        requestedRef: commit,
+        commit,
+        defaultBranch: 'main',
+      },
+      inspectedFiles: [],
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-xai',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+      },
+      fit: 'full',
+      confidence: 0.9,
+      securityRisk: 'low',
+      maintained: true,
+      license: 'MIT',
+      compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
+      missingCapabilities: [],
+      findings: [],
+      recommendation: 'modify',
+      installSpec: `github:MirDie/dsh-xai#${commit}`,
+    }
+    const localReview: ReviewRecord = {
+      ...githubReview,
+      id: `review_${'b'.repeat(64)}`,
+      sourceSnapshot: {
+        kind: 'local',
+        path: path.join(root, 'src'),
+        baseReviewId: githubReview.id,
+        baseCommit: commit,
+        statusHash: 'c'.repeat(64),
+      },
+      installSpec: `file:${path.join(root, 'dsh-xai.tgz')}`,
+      recommendation: 'use',
+    }
+    let latest: ReviewRecord = githubReview
+    const installs: Array<{ retention: string; replacement?: unknown }> = []
+    const workflowHost = host(store, record)
+    workflowHost.listInstallProfiles = async () => ['web']
+    workflowHost.latestReview = async () => latest
+    workflowHost.reviewExisting = async (resolution, target) => {
+      expect(target.repository).toBe('MirDie/dsh-xai')
+      await store.put('reviews', githubReview)
+      const next = {
+        ...resolution,
+        selectedRepositories: [target.repository],
+        authorization: {
+          state: 'confirmation_required' as const,
+          resolutionId: resolution.id,
+          reason: 'reviewed installed source',
+          reviewId: githubReview.id,
+        },
+      }
+      await store.put('resolutions', next)
+      return { resolution: next, review: githubReview }
+    }
+    workflowHost.prepareModify = async (resolution, review, _exec, workflow) => {
+      expect(review.id).toBe(githubReview.id)
+      workflow.pendingPath = path.join(root, 'src')
+      workflow.managedSourceId = 'mirdie_dsh-xai'
+      return { resolution, path: workflow.pendingPath }
+    }
+    workflowHost.finishManagedWork = async (resolution, _exec, workflow) => {
+      latest = localReview
+      await store.put('reviews', localReview)
+      workflow.lastReviewId = localReview.id
+      workflow.lineageTipReviewId = localReview.id
+      return { resolution, ...(workflow.pendingPath ? { path: workflow.pendingPath } : {}), review: localReview }
+    }
+    workflowHost.installReviewed = async (_review, input) => {
+      installs.push({ retention: input.retention, replacement: input.replacement })
+      const installation: InstallationRecord = {
+        schemaVersion: 1,
+        id: `installation_${'e'.repeat(24)}`,
+        createdAt: new Date().toISOString(),
+        reviewId: localReview.id,
+        targetProfile: 'web',
+        retention: 'persistent',
+        dshHome: root,
+        packageName: 'dsh-xai',
+        installSpec: localReview.installSpec ?? '',
+        installState: 'installed',
+        installOutcome: 'activated',
+        installed: true,
+        loaded: false,
+        verified: false,
+        restartRequired: true,
+        removed: false,
+        replacement: {
+          state: 'new_present',
+          oldSpecDigest: 'd'.repeat(64),
+          newInstallSpec: localReview.installSpec ?? '',
+          preparedAt: new Date().toISOString(),
+        },
+        verification: {
+          attempted: true,
+          expectedTools: [],
+          calledTools: [],
+          resultTools: [],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: false,
+          layer: 'bundle_activation',
+          status: 'passed',
+          sourceMatched: true,
+          reason: 'replaced',
+        },
+      }
+      await store.put('installations', installation)
+      return installation
+    }
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, workflowHost)
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
+    const candidateId = selection.workflow.candidateSnapshot![0]!.id
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审已装来源' }] })
+    const reviewed = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'review_existing', candidateIds: [candidateId] },
+    }, turn)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '在这个上改' }] })
+    const modifying = await engine.resume({
+      workflowId: reviewed.workflow.id,
+      interruptId: reviewed.workflow.interrupt!.interruptId,
+      decision: { action: 'modify_this', candidateId },
+    }, turn)
+    expect(modifying.workflow.cursor).toBe('await_modify_work')
+    const finished = await engine.resume({
+      workflowId: modifying.workflow.id,
+      navigation: { kind: 'finish_managed_work' },
+    }, turn)
+    expect(finished.workflow.cursor).toBe('await_confirmation')
+    expect(finished.workflow.reviewIdsByCandidate?.[candidateId]).toBe(localReview.id)
+    expect(finished.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining(['use_this', 'modify_this']))
+    expect(finished.workflow.interrupt?.options.map((item) => item.id)).not.toContain('search_more')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '装回去' }] })
+    const installed = await engine.resume({
+      workflowId: finished.workflow.id,
+      interruptId: finished.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+    }, turn)
+    expect(installs).toEqual([expect.objectContaining({
+      retention: 'persistent',
+      replacement: expect.objectContaining({
+        profile: 'web',
+        packageName: 'dsh-xai',
+        oldDependencySpec: `github:MirDie/dsh-xai#${commit}`,
+      }),
+    })])
+    expect(installed.workflow.cursor).toBe('restart_required')
   })
 })

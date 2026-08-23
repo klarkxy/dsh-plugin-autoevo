@@ -60,6 +60,57 @@ describe('current-profile Loader hot reload', () => {
     expect(group.data).toEqual(original)
   })
 
+  it('hot-loads a carrier patch that inserts another package Fiber', async () => {
+    const dshHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-hot-load-carrier-'))
+    temporary.push(dshHome)
+    const profile = 'web'
+    const profileRoot = path.join(dshHome, 'profiles', profile)
+    const packageRoot = path.join(profileRoot, 'node_modules', 'dsh-plugin-zhihu-search')
+    await mkdir(packageRoot, { recursive: true })
+    await writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'dsh-plugin-zhihu-search',
+      dsh: { bundle: { patch: './dsh-plugin/cordis.patch.yml' } },
+    }), 'utf8')
+    await mkdir(path.join(packageRoot, 'dsh-plugin'), { recursive: true })
+    await writeFile(path.join(packageRoot, 'dsh-plugin', 'cordis.patch.yml'), [
+      '- insert:',
+      '    - id: zhihu-search-mcp',
+      '      name: \'@deepseek-ai/dsh-mcp-client\'',
+      '      config: {}',
+    ].join('\n'), 'utf8')
+
+    const original = [{ id: 'autoevo', name: 'dsh-plugin-autoevo', config: {} }]
+    const group = {
+      data: structuredClone(original),
+      update: vi.fn(async (entries: typeof original) => { group.data = structuredClone(entries) }),
+      tree: {
+        resolve: (id: string) => {
+          if (id !== 'zhihu-search-mcp') throw new Error(`unexpected id ${id}`)
+          return { fiber: { await: async () => undefined } }
+        },
+      },
+    }
+    const ctx = {
+      baseUrl: pathToFileURL(profileRoot),
+      fiber: { entry: { id: 'autoevo', parent: group } },
+      tools: { get: () => undefined },
+    } as unknown as Context
+
+    const result = await hotLoadInstalledBundle({
+      ctx,
+      dshHome,
+      profile,
+      packageName: 'dsh-plugin-zhihu-search',
+      expectedTools: [],
+    })
+
+    expect(result.evidence).toMatchObject({ attempted: true, loaded: true, method: 'loader' })
+    expect(group.data).toContainEqual(expect.objectContaining({
+      id: 'zhihu-search-mcp',
+      name: '@deepseek-ai/dsh-mcp-client',
+    }))
+  })
+
   it('does not ask the current process to hot-load a different profile', async () => {
     const dshHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-hot-load-profile-'))
     temporary.push(dshHome)

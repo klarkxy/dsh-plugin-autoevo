@@ -32,12 +32,59 @@ export type AuthorizationAction =
   | 'modify_this'
 export type NavigationKind =
   | 'review_candidates'
+  | 'review_existing'
   | 'search_more'
   | 'reuse_local'
   | 'stop'
   | 'finish_managed_work'
 export type ReviewMode = 'fixed' | 'adaptive'
 export type WorkflowOptionId = AuthorizationAction | NavigationKind
+export type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing'
+export type RequiredSurface = 'any' | 'native_dsh_plugin'
+
+export interface RequestIntent {
+  operation: RequestOperation
+  requiredSurface: RequiredSurface
+  targetName?: string
+}
+
+export const DEFAULT_REQUEST_INTENT: RequestIntent = {
+  operation: 'discover_or_reuse',
+  requiredSurface: 'any',
+}
+
+export type EvolutionTargetKind = 'github_exact' | 'owned_chain'
+
+export interface EvolutionTarget {
+  kind: EvolutionTargetKind
+  repository: string
+  commit: string
+  packageName: string
+  profile: string
+  dependencySpec: string
+  specDigest: string
+  installationId?: string
+  reviewId?: string
+  sourceId?: string
+}
+
+export type ReplacementJournalState = 'prepared' | 'old_present' | 'new_present' | 'absent' | 'unknown'
+
+export interface ReplacementTarget {
+  profile: string
+  packageName: string
+  oldSpecDigest: string
+  oldDependencySpec: string
+  predecessorInstallationId?: string
+}
+
+export interface ReplacementJournal {
+  state: ReplacementJournalState
+  oldSpecDigest: string
+  newInstallSpec: string
+  preparedAt: string
+  reconciledAt?: string
+}
 
 export interface NavigationInput {
   kind: NavigationKind
@@ -80,8 +127,16 @@ export interface LocalCapabilityCandidate {
   confidence: number
   /** Retrieval is broad; only `full` may suppress remote discovery. */
   fit?: 'full' | 'partial' | 'none'
+  /** Anchor/name match before intent and surface adjustments. */
+  semanticFit?: 'full' | 'partial' | 'none'
+  /** Whether this candidate kind satisfies the request's required delivery surface. */
+  surfaceMatch?: boolean
+  /** Safe to use unchanged. Distinct from request-satisfaction `fit`. */
+  reuseEligible?: boolean
   matchedFacets?: string[]
   missingFacets?: string[]
+  /** Host-owned installed-source provenance for evolve-existing. */
+  evolutionTarget?: EvolutionTarget
   /** Profile-manifest evidence proves install/configuration only, never runtime state. */
   profileEvidence?: {
     source: 'host_profile_manifest'
@@ -125,6 +180,8 @@ export interface ResolutionRecord {
   decisions?: DecisionReceipt[]
   queries: string[]
   reasons: string[]
+  /** Structured start intent. Absent on intentless Policy V8 records. */
+  intent?: RequestIntent
   /** Instruction for the Agent: present in chat, then call capability_workflow_resume. */
   nextStep?: string
 }
@@ -142,11 +199,18 @@ export interface ReviewFinding {
   evidenceHash?: string
 }
 
+export interface ActivatedFiber {
+  id?: string
+  name: string
+}
+
 export interface ManifestFacts {
   kind: 'bundle' | 'skill' | 'legacy' | 'unknown'
   packageName?: string
   packageVersion?: string
   bundlePatch?: string
+  /** Loader insert rows this bundle activates. Carrier patches name another package. */
+  activatedFibers?: ActivatedFiber[]
   license?: string
   scripts: string[]
   dependencies: string[]
@@ -504,6 +568,9 @@ export interface InstallationRecord {
     eligible: boolean
     reason: string
   }
+  predecessorInstallationId?: string
+  supersededByInstallationId?: string
+  replacement?: ReplacementJournal
 }
 
 export interface InstallInput {
@@ -515,6 +582,8 @@ export interface InstallInput {
   verificationExpectedText?: string
   /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
   expectedArtifactSha256?: string
+  /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
+  replacement?: ReplacementTarget
 }
 
 export interface RemoveInput {
