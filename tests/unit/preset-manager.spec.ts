@@ -28,21 +28,26 @@ async function writeTemplate(root: string, files: Record<string, string>): Promi
   const templateDir = path.join(root, 'template')
   await mkdir(templateDir, { recursive: true })
   for (const [name, body] of Object.entries(files)) {
-    await writeFile(path.join(templateDir, name), body, 'utf8')
+    const target = path.join(templateDir, name)
+    await mkdir(path.dirname(target), { recursive: true })
+    await writeFile(target, body, 'utf8')
   }
   return templateDir
 }
 
+const officialSkillStub = '---\nname: official-creator-skill\n---\n# stub\n'
+
 const baseTemplate = {
   'preset.yml': 'name: 能力进化\ndescription: 用于按需创造新能力：具备创造模式的全部能力，并提供社区插件复用、审查安装和受控的动态 Cordis 插件创建。\n',
   'agent.cordis.yml': '- id: tool-cordis\n  name: "@deepseek-ai/dsh-tool-cordis"\n',
+  'skills/cordis-plugin-development/SKILL.md': officialSkillStub,
+  'skills/editing-cordis-compositions/SKILL.md': officialSkillStub,
 }
 
-function manifestFor(files: Record<keyof typeof baseTemplate, string>, templateVersion = EVOLUTION_PRESET_TEMPLATE_VERSION) {
-  return buildManifest({
-    'preset.yml': sha256(Buffer.from(files['preset.yml'])),
-    'agent.cordis.yml': sha256(Buffer.from(files['agent.cordis.yml'])),
-  }, templateVersion)
+function manifestFor(files: Record<string, string>, templateVersion = EVOLUTION_PRESET_TEMPLATE_VERSION) {
+  const hashes: Record<string, string> = {}
+  for (const [name, body] of Object.entries(files)) hashes[name] = sha256(Buffer.from(body))
+  return buildManifest(hashes, templateVersion)
 }
 
 afterEach(async () => {
@@ -138,6 +143,7 @@ describe('materializeEvolutionPreset', () => {
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
     const seed = await writeTemplate(root, {
+      ...baseTemplate,
       'preset.yml': 'name: prior-v4\n',
       'agent.cordis.yml': '- id: prior\n',
     })
@@ -165,13 +171,16 @@ describe('materializeEvolutionPreset', () => {
     const dshHome = path.join(root, 'dsh')
     const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
     const priorFiles = {
+      ...baseTemplate,
       'preset.yml': 'name: prior\ndescription: crlf\n',
       'agent.cordis.yml': '- id: prior\n  name: prior\n',
     }
     const crlfTemplate = path.join(root, 'crlf-template')
     await mkdir(crlfTemplate, { recursive: true })
     for (const [name, body] of Object.entries(priorFiles)) {
-      await writeFile(path.join(crlfTemplate, name), body.replace(/\n/gu, '\r\n'), 'utf8')
+      const target = path.join(crlfTemplate, name)
+      await mkdir(path.dirname(target), { recursive: true })
+      await writeFile(target, body.replace(/\n/gu, '\r\n'), 'utf8')
     }
     await materializeEvolutionPreset({
       dshHome,
@@ -419,10 +428,9 @@ describe('materializeEvolutionPreset', () => {
     const templateDir = await writeTemplate(root, baseTemplate)
     await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
     const target = resolveEvolutionPresetPaths(dshHome).targetDir
-    const hashes = {
-      'preset.yml': sha256(Buffer.from(baseTemplate['preset.yml'])),
-      'agent.cordis.yml': sha256(Buffer.from(baseTemplate['agent.cordis.yml'])),
-    }
+    const hashes = Object.fromEntries(
+      Object.entries(baseTemplate).map(([name, body]) => [name, sha256(Buffer.from(body))]),
+    )
     const manifest = buildManifest(hashes)
     await expect(verifyPristine(target, manifest)).resolves.toEqual({ ok: true })
   })

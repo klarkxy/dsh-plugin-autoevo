@@ -203,12 +203,41 @@ async function readTemplateFiles(
   const files: Record<string, Buffer> = {}
   const hashes: Record<string, string> = {}
   for (const relative of EVOLUTION_PRESET_MANAGED_CONTENT_FILES) {
-    const absolute = assertContained(resolvedTemplate, path.join(resolvedTemplate, relative), `template ${relative}`)
+    const absolute = assertContained(resolvedTemplate, path.join(resolvedTemplate, ...relative.split('/')), `template ${relative}`)
     const bytes = normalizeManagedText(await readFile(absolute))
     files[relative] = bytes
     hashes[relative] = sha256(bytes)
   }
   return { files, hashes }
+}
+
+function toPosixRelative(root: string, absolute: string): string {
+  return path.relative(root, absolute).split(path.sep).join('/')
+}
+
+async function listTreeFilesNoFollow(root: string): Promise<string[]> {
+  const files: string[] = []
+  const walk = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true })
+    for (const entry of entries) {
+      const child = path.join(directory, entry.name)
+      const info = await lstat(child)
+      const relative = toPosixRelative(root, child)
+      if (info.isSymbolicLink()) {
+        throw new Error(`linked entry is not managed content: ${relative}`)
+      }
+      if (info.isDirectory()) {
+        await walk(child)
+        continue
+      }
+      if (!info.isFile()) {
+        throw new Error(`unexpected non-file entry: ${relative}`)
+      }
+      files.push(relative)
+    }
+  }
+  await walk(root)
+  return files.sort((a, b) => a.localeCompare(b))
 }
 
 /** Verify target is pristine against the installed manifest (content + no extras). */
@@ -226,27 +255,19 @@ export async function verifyPristine(
   ])
   let children: string[]
   try {
-    children = await listExactChildren(resolvedTarget)
+    children = await listTreeFilesNoFollow(resolvedTarget)
   } catch (error) {
-    return { ok: false, reason: `cannot list target: ${error instanceof Error ? error.message : String(error)}` }
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 
   for (const name of children) {
     if (!expectedNames.has(name)) {
       return { ok: false, reason: `extra file present: ${name}` }
     }
-    const childPath = path.join(resolvedTarget, name)
-    const info = await lstat(childPath)
-    if (info.isSymbolicLink()) {
-      return { ok: false, reason: `linked entry is not managed content: ${name}` }
-    }
-    if (!info.isFile()) {
-      return { ok: false, reason: `unexpected non-file entry: ${name}` }
-    }
   }
 
   for (const relative of Object.keys(manifest.files)) {
-    const absolute = path.join(resolvedTarget, relative)
+    const absolute = path.join(resolvedTarget, ...relative.split('/'))
     if (!(await pathExists(absolute))) {
       return { ok: false, reason: `missing managed file: ${relative}` }
     }
@@ -271,7 +292,8 @@ async function writeStagedPreset(
 ): Promise<void> {
   await mkdir(stagingDir, { recursive: true })
   for (const [relative, bytes] of Object.entries(contentFiles)) {
-    const target = assertContained(stagingDir, path.join(stagingDir, relative), `stage ${relative}`)
+    const target = assertContained(stagingDir, path.join(stagingDir, ...relative.split('/')), `stage ${relative}`)
+    await mkdir(path.dirname(target), { recursive: true })
     await writeFile(target, bytes)
   }
   const manifestPath = assertContained(
@@ -282,7 +304,7 @@ async function writeStagedPreset(
   await writeFile(manifestPath, serializeManifest(manifest), 'utf8')
 }
 
-/** Bounded cleanup for the flat, exact managed preset tree; never follows links. */
+/** Bounded cleanup for the exact managed preset tree; never follows links. */
 async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Promise<void> {
   const resolvedTree = assertContained(containmentRoot, treeRoot, 'cleanup tree')
   if (!(await pathExists(resolvedTree))) return
@@ -299,17 +321,36 @@ async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Prom
     ...EVOLUTION_PRESET_MANAGED_CONTENT_FILES,
     EVOLUTION_PRESET_MANIFEST_FILENAME,
   ])
-  const entries = await readdir(resolvedTree, { withFileTypes: true })
-  for (const entry of entries) {
-    if (!allowedNames.has(entry.name)) {
-      throw new Error(`AutoEvo refused cleanup of unexpected preset entry: ${entry.name}`)
+  const files: string[] = []
+  const directories: string[] = []
+  const walk = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true })
+    for (const entry of entries) {
+      const child = assertContained(resolvedTree, path.join(directory, entry.name), 'cleanup entry')
+      const childInfo = await lstat(child)
+      const relative = toPosixRelative(resolvedTree, child)
+      if (childInfo.isSymbolicLink()) {
+        if (!allowedNames.has(relative) && !allowedNames.has(entry.name)) {
+          throw new Error(`AutoEvo refused cleanup of unexpected preset entry: ${relative}`)
+        }
+        await unlink(child)
+        continue
+      }
+      if (childInfo.isDirectory()) {
+        directories.push(child)
+        await walk(child)
+        continue
+      }
+      if (!allowedNames.has(relative)) {
+        throw new Error(`AutoEvo refused cleanup of unexpected preset entry: ${relative}`)
+      }
+      files.push(child)
     }
-    const child = assertContained(resolvedTree, path.join(resolvedTree, entry.name), 'cleanup entry')
-    const childInfo = await lstat(child)
-    if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) {
-      throw new Error(`AutoEvo refused cleanup of nested preset directory: ${entry.name}`)
-    }
-    await unlink(child)
+  }
+  await walk(resolvedTree)
+  for (const file of files) await unlink(file)
+  for (const directory of directories.sort((left, right) => right.length - left.length)) {
+    await rmdir(directory)
   }
   await rmdir(resolvedTree)
 }

@@ -314,7 +314,7 @@ describe('conversational confirmation gates', () => {
       name: 'cordis_define',
       arguments: { plugin: { kind: 'new' } },
       agent: turn.agent,
-    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
   })
 
   it('does not mint create authorization from start itself', async () => {
@@ -504,7 +504,7 @@ describe('conversational confirmation gates', () => {
       name: 'cordis_define',
       arguments: { plugin: { kind: 'new' } },
       agent: turn.agent,
-    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
   })
 
   it('exposes use_this for a high-risk review with an exact approved verdict and defaults retention to temporary', async () => {

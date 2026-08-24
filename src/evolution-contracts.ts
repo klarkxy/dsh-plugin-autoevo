@@ -5,7 +5,7 @@
 
 export const EVOLUTION_PRESET_ID = 'evolution' as const
 export const EVOLUTION_PRESET_DISPLAY_NAME = '能力进化' as const
-export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：由官方创造模式构造，由 AutoEvo 治理复用、审查、安装与升级；改进过的插件可在明确批准后贡献回上游。' as const
+export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：具备官方创造模式的全部能力，并由 AutoEvo 治理复用、审查、安装与升级；改进过的插件可在明确批准后贡献回上游。' as const
 
 /** Scoped Cordis service key published only behind a preset isolate realm. */
 export const EVOLUTION_MODE_SERVICE_KEY = 'autoevoEvolutionMode' as const
@@ -20,7 +20,7 @@ export const EVOLUTION_MODE_PROTOCOL_VERSION = 1 as const
 export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as const
 
 /** Template version for the bundled `presets/evolution` tree. */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '13' as const
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '14' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -32,6 +32,8 @@ export const EVOLUTION_MODE_PACKAGE_EXPORT = 'dsh-plugin-autoevo/evolution-mode'
 export const EVOLUTION_PRESET_MANAGED_CONTENT_FILES = [
   'preset.yml',
   'agent.cordis.yml',
+  'skills/cordis-plugin-development/SKILL.md',
+  'skills/editing-cordis-compositions/SKILL.md',
 ] as const
 
 export type EvolutionPresetManagedContentFile =
@@ -48,20 +50,21 @@ export interface EvolutionPresetManifest {
 /**
  * The one template this unreleased line owns.
  *
- * There are no legacy users to migrate. The on-disk manifest remains an
- * integrity record rather than an authority token: anything other than this
- * exact current template is preserved instead of being overwritten.
+ * V13 is the last non-superset template. A pristine V13 install may upgrade
+ * to the current Creator-superset template. Anything else is preserved.
  */
-export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
-  Object.freeze({
-    owner: EVOLUTION_MODE_OWNER,
-    schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
-    templateVersion: EVOLUTION_PRESET_TEMPLATE_VERSION,
-    files: Object.freeze({
-      'agent.cordis.yml': '521d2133694c5642e3e78fcd5ddfa7f2d7af6eab80244fdd2c22030dd586d55c',
-      'preset.yml': 'd51f8ab85feeb76c73de0cb091735b7ddbdad4d2b3d8adfc878dd35b6e79bbbd',
-    }),
+export const EVOLUTION_PRESET_V13_MANIFEST: EvolutionPresetManifest = Object.freeze({
+  owner: EVOLUTION_MODE_OWNER,
+  schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+  templateVersion: '13',
+  files: Object.freeze({
+    'agent.cordis.yml': '521d2133694c5642e3e78fcd5ddfa7f2d7af6eab80244fdd2c22030dd586d55c',
+    'preset.yml': 'd51f8ab85feeb76c73de0cb091735b7ddbdad4d2b3d8adfc878dd35b6e79bbbd',
   }),
+})
+
+export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
+  EVOLUTION_PRESET_V13_MANIFEST,
 ])
 
 export interface EvolutionModeMarker {
@@ -111,17 +114,16 @@ export function isEvolutionPresetManifest(value: unknown): value is EvolutionPre
   if (typeof record.templateVersion !== 'string' || record.templateVersion.length === 0) return false
   if (record.files === null || typeof record.files !== 'object' || Array.isArray(record.files)) return false
   const files = record.files as Record<string, unknown>
-  const expectedFiles = [...EVOLUTION_PRESET_MANAGED_CONTENT_FILES].sort((a, b) => a.localeCompare(b))
-  const actualFiles = Object.keys(files).sort((a, b) => a.localeCompare(b))
-  if (actualFiles.length !== expectedFiles.length) return false
-  if (actualFiles.some((key, index) => key !== expectedFiles[index])) return false
+  const actualFiles = Object.keys(files)
+  if (actualFiles.length === 0) return false
   for (const [key, digest] of Object.entries(files)) {
     if (typeof key !== 'string' || key.length === 0) return false
+    if (key.startsWith('/') || key.includes('\\') || key.split('/').some((part) => part === '' || part === '.' || part === '..')) return false
     if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) return false
   }
   return true
 }
 
-/** Stable denial when cordis_define(kind:new) is attempted outside genuine evolution mode. */
+/** Stable denial when AutoEvo-governed construction is attempted outside genuine evolution mode. */
 export const OUTSIDE_EVOLUTION_MODE_DENIAL =
-  'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Dynamic new Cordis definitions are not permitted on the parent session; create-new continues only in a managed git source child session after an explicit user decision.'
+  'AutoEvo denied this AutoEvo-governed construction action: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Temporary live Cordis plugins remain available in official Creator; Host-managed create/modify continues only in Capability Evolution after an explicit user decision.'

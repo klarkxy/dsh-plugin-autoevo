@@ -50,6 +50,8 @@ describe('evolution-mode entry', () => {
     expect(register).not.toHaveBeenCalled()
 
     expect(section).not.toHaveBeenCalled()
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('official Creator plus AutoEvo governance')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Temporary live Cordis plugins')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain("user's original requirement")
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('structured intent')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Never describe unchanged local reuse as review or modification')

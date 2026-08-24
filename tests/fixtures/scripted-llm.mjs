@@ -107,13 +107,12 @@ class ScriptedAdapter extends LlmAdapter {
     }
 
     if (pairs.length === 1) {
-      const denial = pairs[0]
-      const denialText = typeof denial.result === 'string' ? denial.result : JSON.stringify(denial.result)
-      if (!denial.isError
-        || !denialText.includes('AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset')
-        || denialText.includes('UNKNOWN_TOOL')
-        || denialText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')) {
-        return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${denialText}` }
+      const definition = pairs[0]
+      const definitionText = typeof definition.result === 'string' ? definition.result : JSON.stringify(definition.result)
+      if (definition.isError
+        || !definitionText.includes('E2E_CORDIS_DEFINE_PROBE_EXECUTED')
+        || definitionText.includes('UNKNOWN_TOOL')) {
+        return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${definitionText}` }
       }
       return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
     }
@@ -127,7 +126,7 @@ class ScriptedAdapter extends LlmAdapter {
       }
     }
     return card?.state === 'waiting_candidate_selection'
-      ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK guard-denied-before-resolve ${JSON.stringify(pairs[0].result)} card=${JSON.stringify(card)}` }
+      ? { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_OK live-define-allowed-then-discover ${JSON.stringify(pairs[0].result)} card=${JSON.stringify(card)}` }
       : { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR expected sealed Gate 1 ${JSON.stringify(card)}` }
   }
 

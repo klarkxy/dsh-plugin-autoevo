@@ -190,12 +190,6 @@ export class ExecutionGuard {
 
   private parentDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
     if (AUTOEVO_TOOLS.has(name)) return undefined
-    if (matchesSet(name, DELEGATION_TOOLS)) {
-      return 'AutoEvo parent session denies subagent, workflow, and ralph delegation; keep work visible in this session.'
-    }
-    if (isNewCordisDefinition(exec)) {
-      return 'AutoEvo parent session denies cordis_define(kind:new); create-new continues as in-session work on a Host-managed git source.'
-    }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
       return 'AutoEvo parent session denies direct plugin install/remove tools; use capability_workflow_resume / plugin_remove.'
     }

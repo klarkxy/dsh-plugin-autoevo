@@ -70,33 +70,38 @@ const creatorSkillSuccess: ToolExecutionResult = {
 } as unknown as ToolExecutionResult
 
 describe('new Cordis Plugin creation guard', () => {
-  it('denies new definitions outside evolution mode even with a stale create authorization', async () => {
+  it('allows official Creator live definitions outside evolution mode', async () => {
     const guard = outsideModeGuard()
     resolveAs(guard, authorization('create_authorized'))
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     const exec = execution('call-outside')
-    await expect(guard.preExecute(exec, next)).resolves.toEqual({
-      kind: 'deny',
-      reason: OUTSIDE_EVOLUTION_MODE_DENIAL,
-    })
-    expect(next).not.toHaveBeenCalled()
-    expect(guard.guard(exec)).toBe(OUTSIDE_EVOLUTION_MODE_DENIAL)
+    await expect(guard.preExecute(exec, next)).resolves.toEqual({ kind: 'allow' })
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(guard.guard(exec)).toBeUndefined()
     expect(_testing.outsideEvolutionModeReason()).toBe(OUTSIDE_EVOLUTION_MODE_DENIAL)
   })
 
-  it('denies an unresolved new definition in evolution mode with actionable feedback', async () => {
+  it('allows an unresolved live definition in evolution mode', async () => {
     const guard = inModeGuard()
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    await expect(guard.preExecute(execution('call-1'), next)).resolves.toEqual({
-      kind: 'deny',
-      reason: expect.stringContaining('call capability_workflow'),
-    })
-    expect(next).not.toHaveBeenCalled()
-    expect(guard.guard(execution('call-final'))).toContain('call capability_workflow')
+    await expect(guard.preExecute(execution('call-1'), next)).resolves.toEqual({ kind: 'allow' })
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(guard.guard(execution('call-final'))).toBeUndefined()
   })
 
-  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'modify_review', 'use_review', 'market_required', 'stopped', 'create_authorized'] as const)(
-    'keeps new definitions blocked in evolution mode for %s',
+  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'use_review', 'market_required', 'stopped'] as const)(
+    'keeps live Creator definitions available in evolution mode for %s',
+    async (state) => {
+      const guard = inModeGuard()
+      resolveAs(guard, authorization(state))
+      const decision = await guard.preExecute(execution(`call-${state}`), async () => ({ kind: 'allow' }))
+      expect(decision).toEqual({ kind: 'allow' })
+      expect(guard.guard(execution(`call-${state}-guard`))).toBeUndefined()
+    },
+  )
+
+  it.each(['modify_review', 'create_authorized'] as const)(
+    'blocks live definitions during Host-managed construction for %s',
     async (state) => {
       const guard = inModeGuard()
       resolveAs(guard, authorization(state))
@@ -160,8 +165,8 @@ describe('new Cordis Plugin creation guard', () => {
       agent: otherAgent,
     } as unknown as ToolExecution
     const decision = await guard.preExecute(foreign, async () => ({ kind: 'allow' }))
-    expect(decision).toEqual({ kind: 'deny', reason: OUTSIDE_EVOLUTION_MODE_DENIAL })
-    expect(guard.guard(foreign)).toBe(OUTSIDE_EVOLUTION_MODE_DENIAL)
+    expect(decision).toEqual({ kind: 'allow' })
+    expect(guard.guard(foreign)).toBeUndefined()
   })
 
   it('does not gate existing Plugin repair or unrelated tools', async () => {
@@ -179,7 +184,7 @@ describe('new Cordis Plugin creation guard', () => {
     resolveAs(guard, authorization('create_authorized'))
     guard.beginResolution(agent)
     const decision = await guard.preExecute(execution('call-revoked'), async () => ({ kind: 'allow' }))
-    expect(decision.kind).toBe('deny')
+    expect(decision).toEqual({ kind: 'allow' })
   })
 
   it('ignores a stale resolution completion after a newer resolution starts', async () => {
@@ -190,7 +195,7 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.applyResolutionAuthorization(agent, current, currentGeneration)).toBe(true)
     expect(guard.applyResolutionAuthorization(agent, authorization('create_authorized'), staleGeneration)).toBe(false)
     expect(guard.authorization(agent)).toEqual(current)
-    expect((await guard.preExecute(execution('call-stale'), async () => ({ kind: 'allow' }))).kind).toBe('deny')
+    expect(await guard.preExecute(execution('call-stale'), async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
   })
 
   it('only lets reviews update the active in-memory resolution for the same Agent', () => {

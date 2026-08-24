@@ -1,5 +1,7 @@
 # 安全模型
 
+[使用指南](user-guide.md) · [开发者指南](developer-guide.md) · [架构说明](architecture.md) · [返回 README](../README.md)
+
 ## 1. 信任边界
 
 可信输入是插件自身固定策略、DSH services、用户在当前任务中的明确批准，以及插件自己写入并重新读取的 receipt。
@@ -30,15 +32,15 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 ## 2.1 父会话边界与托管源创建
 
-AutoEvo 父会话在 `tools/pre-execute` 上拒绝 `cordis_define(kind:new)` 和直接的 DSH plugin install/remove；能力进化 preset 本身不继承创造模式。真正的能力进化模式仍由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。
+AutoEvo 父会话保留官方创造模式的活进程插件实验、runtime inspect、preset 创作与委托工具，只在 `tools/pre-execute` 上拒绝直接的 DSH plugin install/remove。真正的能力进化模式仍由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。
 
-`create_new` / `modify_this` / 定向纠错在当前能力进化会话中继续，cwd 绑定托管 git 源。Host 不再创建子 Agent，也不把官方 `cordis` preset 挂到隐藏会话；绝不回退 `code`。源码副作用前预检父会话施工目录。父会话不得 `cordis_define(kind:new)`、不得派 subagent/workflow/ralph；施工阶段只允许托管源内文件读写、shell 测试、todo、可选官方创造技能和三个 `cordis_inspect_*`，并拒绝 Cordis mutation、嵌套委托、装卸、Git 写入、依赖变更与发布部署。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
+`create_new` / `modify_this` / 定向纠错在当前能力进化会话中继续，cwd 绑定托管 git 源。Host 不再创建子 Agent；绝不回退 `code`。源码副作用前预检父会话施工目录。施工阶段只允许托管源内文件读写、shell 测试、todo、官方创造技能和三个 `cordis_inspect_*`，并拒绝 Cordis mutation、嵌套委托、装卸、Git 写入、依赖变更与发布部署。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
 
-父回合取消后，Host 通过 owned `AgentHandle.dispose()` 停止并 drain 子 Agent，不依赖创建阶段 signal。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock。取消、超时与真实 executable 缺失分别报告。
+父回合取消后没有子 Agent 需要 dispose。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock。取消、超时与真实 executable 缺失分别报告。
 
 能力发现用用户原话进入 `capability_workflow`。模型在 Host 限定的两轮补查、五个补充查询和二十候选预算内自主收敛，并且只能用 `capability_workflow_present` 密封发现池中的 1–5 个候选；空池不能生成候选。Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定。选择阶段误提交的 `use_this` 会安全归一化为只读审查，不会产生副作用授权。相同无效参数在同一回合重复时断路，且不消费 interrupt、commitment 或 lease。DSH approval 仍不能代替用户决定。
 
-模型展示只包含版本化语义状态、定长事实、预算、硬约束、候选作用域动作和可用工具。市场描述与仓库内容始终标记为不可信数据。诊断工具仅在关联失败或搜索不完整后可用，每个失败事件最多两次调用、八个探针；它不启动子进程、不重试、不清理，并屏蔽凭据、完整路径、URL、原始 stderr 和子会话正文。审查与安装仍要求当前 Policy V8 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合、防重放与 `allowed-once`。同一 review / source / layer / fixture 不得重复安装或验证；modify 最多两次。completed 安装的清理重开与 sealed `recovery_required` 是两条互不混同的路径。
+模型展示只包含版本化语义状态、定长事实、预算、硬约束、候选作用域动作和可用工具。市场描述与仓库内容始终标记为不可信数据。诊断工具仅在关联失败或搜索不完整后可用，每个失败事件最多两次调用、八个探针；它不启动子进程、不重试、不清理，并屏蔽凭据、完整路径、URL、原始 stderr 和施工会话正文。审查与安装仍要求当前 Policy V8 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合、防重放与 `allowed-once`。同一 review / source / layer / fixture 不得重复安装或验证；modify 最多两次。completed 安装的清理重开与 sealed `recovery_required` 是两条互不混同的路径。
 
 这意味着语义正确性明确依赖当前 LLM：弱模型可能把真实用户意图解释成另一个同样合法的 action 或候选。Host 保证授权完整性和作用域约束，不保证模型的语言理解正确；因此能力进化模式不得搭配低智力、上下文保持差或结构化工具调用不可靠的模型。
 

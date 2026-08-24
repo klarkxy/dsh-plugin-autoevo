@@ -8,108 +8,76 @@
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。Agent 需要新能力时，先检查本地已有工具和技能，再搜索、审查、部署社区插件；候选只差一点，就地改进后再用。对动态 Cordis 插件入口，AutoEvo 会在工具执行层强制执行这一顺序。
+`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。能力进化 preset 是官方创造模式的超集：创造模式已有的运行时检查、活进程插件实验、preset 创作和委托工具都在。Agent 需要可复用的新能力时，AutoEvo 先检查本地工具和技能，再发现、审查并安装社区插件；候选只差一点时，可以在 Host 托管源码上完成修改、重审和安装。
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
 `Reuse before build. Improve before replace.`
 
+## 文档
+
+| 读者 / 主题 | 入口 |
+| --- | --- |
+| 使用者：安装、首次使用、两道确认门、状态与恢复 | [使用指南](docs/user-guide.md) |
+| 开发者：本地环境、架构入口、测试、调试与贡献 | [开发者指南](docs/developer-guide.md) |
+| Policy、数据布局和运行时接缝 | [架构说明](docs/architecture.md) |
+| 信任边界、安装门槛和验证证据 | [安全模型](docs/security.md) |
+| 可重复用户路径及其证据等级 | [真实样例目录](docs/real-world-samples.md) |
+
+详细文档遵循单一权威原则：操作步骤以使用指南为准，开发流程以开发者指南为准，内部状态与安全不变量分别以架构和安全文档为准。
+
 ## 安装
 
-```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.3
-```
-
-安装后 AutoEvo 会先尝试把 bundle 热加载进当前 DSH 进程；只有 Loader 无法完成热加载（例如还包含浏览器端资源）时才要求重启。
-
-升级时把 tag 换成新版本，再执行同一条安装命令，例如 `#v0.5.2` 换成 `#v0.5.3`。
-
-DSH 的 `plugin` 命令把依赖操作转交给 pnpm。semver、Git tag 和 exact commit 都能钉住版本；AutoEvo 安装后会显式尝试 Loader 热加载，失败时才要求重启。
-
-本仓库开发安装：
+安装到正在使用的 DSH profile；下面以 `web` 为例：
 
 ```powershell
-pnpm install
-pnpm build
-New-Item -ItemType Directory -Force C:\tmp\autoevo-pack
-npm pack --pack-destination C:\tmp\autoevo-pack --ignore-scripts
-dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-autoevo-0.5.3.tgz"
+dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
 ```
 
-开发包同样使用不可变 `file:...tgz`。这也避开了 DSH rc.6 在 Windows 上转交含空格 `link:` 路径时的参数拆分问题。第三方候选也会打成 owned `file:...tgz`。
+安装或升级 AutoEvo 后，重启对应的 DSH profile，让它加载新 bundle。AutoEvo 运行后为其它能力执行安装时，才会通过结果中的 `restartRequired: true` 告诉你是否需要再次重启目标 profile。
 
-## 能力进化模式
+当前可安装发布版为 `v0.5.1`；仓库中的 `0.5.3` 是尚未发布的下一版本。Node.js 要求 `>=22.19.0 || >=24.0.0`；当前开发与验收基于 DSH `0.1.0-rc.6`、Cordis `4.0.1`。
 
-安装后，AutoEvo 默认会全新安装用户 Agent preset **能力进化**（id `evolution`，模板版本 V13）。官方创造模式仍可供用户手动切换，AutoEvo 负责治理：能力进化不继承创造模式。社区插件复用、审查安装、已有能力升级由 AutoEvo 治理；create / modify / correction 在当前能力进化会话对托管源施工，Host 不再拉起子 Agent，也不回退到 `code`。改进过的插件可在明确批准后贡献回上游。当前没有旧 preset 迁移路径：发布包只认当前 V13 的精确托管内容，其他现有或手改 preset 一律保留，不会覆盖。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装，**不会**删除已有 preset。工作流、审查、安装回执继续保存在 `<dshHome>/autoevo/`，兼容既有 Host 账本；托管 git 源默认进入当前会话工作区 `.autoevo/sources/`。装进 DSH profile 的插件不依赖工作区源文件。当前运行时是 Policy V8。completed 的安装可在用户新的顶层消息明确要求清理并重来后，按工作流精确清理再开全新发现；故障 `recovery_required` 仍走 sealed interrupt，两条路径不得混同。
+## 快速体验
 
-> [!WARNING]
-> **不要使用智力或工具调用能力过低的 LLM 运行能力进化。** 最终安装、修改、新建和停止决定由当前 LLM 理解用户自然语言后提交为结构化 `decision`；Host 负责校验真实新用户回合、当前 interrupt 绑定的 action/candidate、review、session、boot 与防重放边界，但不会再用关键词替模型重做语义理解。弱模型可能在合法选项之间选错动作或候选。请使用具备可靠指令遵循、上下文保持和结构化工具调用能力的模型。
+1. 在 DSH 新建会话，选择用户 preset **能力进化**（id `evolution`）。
+2. 用自然语言说明需要的能力，例如：
 
-它出现在 DSH 的用户 preset 列表里（界面标记为自定义），不是内置系统模式。首次安装或升级后先尝试热加载，只有当前进程无法完整接入时才需要重启。AutoEvo 只升级自己管理且未被改过的版本；用户改过的文件、或同名的外来目录一律保留。
+   > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-新建动态 Cordis 插件时，在空白/新会话中把 Agent 切到 **能力进化**。官方创造模式仍用于既有插件修复和静态开发；AutoEvo 治理发现、审查、授权、安装，以及当前会话内的托管源施工，不会在全局替换 `cordis-plugin-development`。
+3. AutoEvo 给出 1–5 个候选后，用新的正常聊天消息选择要审查的候选。
+4. 审查完成后，再用一条新的消息决定原样使用、安装、修改、继续搜索、从零创建或停止。
 
-卸载 AutoEvo 前，先在 DSH 的 Agent preset 管理界面移除 **能力进化**，再移除插件依赖并重启。仅把 `evolutionPreset` 设为 `false` 不会删除现有目录。
+这两次用户回复是两道独立确认门。DSH 的一次性 approval 只批准具体副作用，不能替代候选选择或最终决定。自然语言即可，不需要背内部 action 名称。
 
-## 工作方式
+## 怎样理解结果
 
-- 父会话执行发现、审查、授权、安装治理，以及用户确认后的修改/新建施工。执行层拒绝 `cordis_define(kind:new)`、直接装卸和 subagent/workflow/ralph。create / modify / correction 在当前能力进化会话里对 Host 托管 git 源施工，用户能看见改文件和测试；Host 不再 `agents.create` 子 Agent，也不把官方创造模式挂进隐藏会话。官方 `cordis` 创造模式文件不变，用户仍可手动切换。构造前先做无源码副作用的父会话施工目录预检。Windows 上 sandbox 是完整性导向的部分隔离，不宣称机密性或网络隔离。
-- Workflow 只管理事实、预算、持久状态和副作用授权。`capability_workflow` 返回最多 20 个 Host 验证候选；Agent 可在最多两轮、五个补充查询词内调用 `capability_workflow_refine` 换词或提交严格的 GitHub 仓库标识，再用 `capability_workflow_present` 自主密封 1–5 个最终候选。密封前没有用户选择 interrupt，也不会预选推荐项。
-- Agent 自主排序、比较、推荐和自然表达，并负责把“按你推荐”“两个都”“另一个”“看看3”等回答映射到密封候选 ID。只有新鲜真实用户回合选中的候选才进入只读审查；审查完成后才签发第二道决定门。
-- 审完后只展示真实合法动作。简单 UI 主操作为 `use_this` / `search_more`；`modify_this` / `create_new` / `stop` 在 advanced/recovery。用户明确选择安装、修改、新建或停止时，Agent 直接依靠 LLM 的语义理解提交结构化 `decision`：`action`、安装/修改所需的当前候选 `candidate_id`，以及安装时可选的 `retention`。Host 只验证该解释是否落在当前 interrupt 和快照边界内，铸造 commitment/lease，并把它绑定到新鲜真实用户回合；不再用正则表达式二次解析用户措辞。DSH approval 不能代替该决定。MechanicalFacts 只用于展示和路由；需要语义判断时由 Host 拉起独立 reviewer。
-- 安全 finding 是静态审查事实，不是用途判断。同类 source/build 命中会合并展示来源；Agent 不得从 `process_execution` 自行推断“恶意”“OAuth 必需”“启动回调服务”或其它未验证语义。任何 block finding 仍保持 `high` 并禁止直接安装。
-- `create_authorized` / `modify_this` 在当前会话继续（cwd 绑定托管源）；父会话不得 `cordis_define(kind:new)`，也不得派子 Agent。施工阶段只允许托管源内文件读写、shell 测试、todo、可选的官方创造技能，以及 `cordis_inspect_list` / `query` / `self`。Agent 可见的 Creator 事实只有 verified / unavailable。
-- 用户停止父任务时，没有子 Agent 可 dispose。已产生的受控编辑用独立 cleanup 生命周期 checkpoint；workflow 进入 `recovery_required`，锁被释放，取消不会伪装成“git 不存在”。
-- 安装结果为 `pending | verified | activated | awaiting_user_test | failed_absent | recovery_required`。`verified`、`activated`、`awaiting_user_test` 都是非失败完成态：workflow completed，不阻塞正常聊天。只有 Host `tool_roundtrip` passed 才是功能已验证；`activated` 只表示 bundle 已加载；`awaiting_user_test` 需要用户到目标客户端/profile 手动测试，后二者不得冒充已验证。`plugin_remove` 只卸载，不删除托管源仓库。
-- 搜索、审查、托管修改、安装或验证失败后，Agent 可调用只读 `capability_workflow_diagnose` 获取脱敏定长事实；每个失败事件最多两次诊断、合计八个探针。诊断不会重试、修改、安装或清理。重复失败后给出人类决策或诊断出口，不得原样循环。
-- 先检查当前 Agent 可见的 tools、model-invocable skills，以及已有 `tool_search` 桥能到达的工具。
-- 本地能力不足时，优先调用当前 Agent scope 内已有的 [`find_dsh_plugin`](https://github.com/awesome-dsh-plugin/dsh-find-plugin)。若市场未安装，AutoEvo 在一次性批准后用脚本安装 `dsh-find-plugin` 并尽量热加载到当前进程；热加载失败才需要重启。不要审查市场插件，也不要直接用 `gh` 搜索。市场已装但没有相关候选时，视为没有可复用插件。
-- 审查精确 commit 上的 manifest、README 和必要源码，只输出路径、派生事实、风险代码与内容 hash。
-- 安装条件：`full + use`，风险 `low` 或 `medium`，实际 DSH 版本兼容，且 review 携带匹配的不可变 install specification。
-- 安装和移除都需要 DSH 一次性批准 `allowed-once`。
-- 机械验证完全由 Host 驱动：不把验证任务交给普通模型，不让模型自行判断 success，也不把独立 semantic verifier 当作可信完成门槛。旧 semantic 组件可兼容存在，但发布包行为以 Host 三层结果为准。
-- 三层必须严格区分：`tool_roundtrip` passed → `verified`；`bundle_activation` passed → `activated`；`manual_runtime` persistent → `awaiting_user_test`。第三方工具包默认没有 Host attestation，因此通常进入 `manual_runtime` / persistent；包清单 `safe`/`risk` 或候选自报不得升级为 `tool_roundtrip`。`manual_runtime` 的 temporary 会在安装与批准副作用前被拒绝。
-- 进入 `awaiting_user_test` 后，自然提示用户到目标客户端/profile 手动测试；不要机械式固定话术，也不要在之后的闲聊里反复追问。
-- 同一 review / source / layer / fixture 不能重复安装或验证；modify 最多两次。用户明确要求清理并重来时，completed 的 `installed` / `restart_required` / `activated` / `awaiting_user_test` 走完成态 cleanup/restart；故障 `recovery_required` 走 sealed interrupt。`taskResultMatchedExpectation` 只是诊断字段，不作为成功门槛。
-- `partial` 候选在托管 git 源上做最小修改并跑上游测试，再本地重审为 `full`，最后打成固定 tgz 安装。
-- 对已装社区插件不满时，升级从 Gate 1 的已安装来源审查开始：Host 从 profile 精确 `github:owner/repo#sha`（或已有安装回执链）派生上游，用户选审查已知来源后按审查 → 在这个上改 → 本地重审 → 固定 tgz 替换执行。原样使用已有能力是另一条终态，不会变成审查或修改。同名 skill 不能冒充原生 DSH 插件或挡住插件发现。从零创建走托管源脚手架，不恢复 `create_authorized` grant。
-- 当前任务完成后再建议向上游贡献。安装回执的 `contributionAdvice` 记录是否具备建议资格；fork、push 与 PR 仍由现有 `git` / `gh` 在用户再次批准后执行。
+| 结果 | 含义 | 下一步 |
+| --- | --- | --- |
+| `verified` | Host 完成了预期工具往返，功能已验证 | 可以直接使用 |
+| `activated` | bundle 已加载，但没有工具往返证据 | 在目标 profile 中实际试用 |
+| `awaiting_user_test` | 该能力必须在真实客户端或 profile 中人工测试 | 按提示试用一次 |
+| `restartRequired: true` | 安装已形成非失败结果，但当前进程没有完整热加载 | 重启对应 profile 后再试 |
+| `failed_absent` | 安装失败，且 Host 证明目标不存在 | 查看诊断，再决定是否重试 |
+| `recovery_required` | 安装状态或清理状态不能安全判定 | 先走恢复，不要盲目重装 |
 
-## 试用
+`installed` 或 `loaded` 不等于功能已验证；只有 `verified` 才能这样表述。完整状态和恢复步骤见[使用指南](docs/user-guide.md#5-结果状态与下一步)。
 
-安装完成后（若结果明确要求重启则先重启），对当前 Agent 说：
+## 安全边界
 
-> 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
+- 发现、审查和诊断默认只读；安装、移除、修改和新建需要真实用户决定，副作用还需要 DSH 一次性批准。
+- 修改和创建发生在当前能力进化会话可见的 Host 托管 Git 源中，不会启动隐藏子 Agent，也不会回退到 `code`。
+- Windows sandbox 是完整性导向的部分隔离，不是凭据、网络或恶意代码的机密性沙箱；安装的第三方代码最终仍以当前用户权限运行。
+- 弱模型可能把自然语言理解成另一个合法动作或候选。能力进化应搭配可靠的指令遵循、上下文保持和结构化工具调用能力。
 
-它应先调用 `capability_workflow` 获取真实发现池，自主补查或收敛后调用 `capability_workflow_present` 给出 1–5 个自然短名单。你选一个后 Host 才审查，再停一次让你决定是否安装。同回合 resume 是 no-op，不是错误。用自然语言明确选择即可；例如“装这个”表示安装，“看看第二个”表示改看另一个候选——这些只是例子，不是固定口令。最终安装、修改或新建由 LLM 理解该明确选择后转换成结构化 `decision`，Host 再把它约束到当前真实用户回合。如果当前 scope 还没有 `find_dsh_plugin`，批准后由 AutoEvo 用脚本安装并尽量热加载；热加载失败才需要重启。
-
-## Agent 工具
-
-| 工具 | 作用 | 环境 |
-|---|---|---|
-| `capability_workflow` | 保留用户原始需求和结构化 intent（发现/复用/进化已装），检查本地与市场能力，返回 Host 验证的有界发现池、证据和预算 | 只读 / 装市场时需批准 |
-| `capability_workflow_refine` | 在发现阶段提交补充查询词或严格 GitHub 仓库标识；Host 校验、去重并合并候选 | 只读 |
-| `capability_workflow_present` | 从发现池密封 1–5 个最终短名单候选并开启第一道用户门 | 只读 |
-| `capability_workflow_resume` | 只读搜索/审查已装来源/复用时传 `navigation`；最终确认时由 LLM 传结构化 `decision`，Host 校验真实回合与当前 interrupt 的 action/candidate 边界 | 导航只读；安装/修改/新建需真实确认 |
-| `capability_workflow_diagnose` | 失败后读取有预算的脱敏搜索、审查、安装、验证、子会话和清理事实 | 只读 |
-| `capability_workflow_recover` | 两条互不混同的路径：sealed 故障恢复必须带当前 `interrupt_id`；completed 安装的清理重开由新的顶层用户明确要求驱动，且省略 `interrupt_id` | 需真实确认 / 一次性批准清理 |
-| `plugin_remove` | 按 installation receipt 精确卸载；不删除托管源仓库 | 需批准 |
-
-AutoEvo 新增这些高层工具，并在父会话只拦截 `cordis_define(kind:new)` 与直接装卸。官方创造模式负责构造，AutoEvo 负责治理；遗留 `autoevo-plugin-creator` 技能保留但不使用。
-
-## 基线
-
-维护线 `0.5.3`。已验证：DSH `0.1.0-rc.6`、Cordis `4.0.1`、Node.js `>=22.19.0 \|\| >=24`。审查回执记录实际 `dsh --version`；无法确认版本时不会授权安装。
+## 开发
 
 ```powershell
-node --version
-pnpm --version
-gh auth status
-pnpm check         # 日常门：静态检查、单测、Loader、local/adversarial E2E
-pnpm check:release # 日常门 + 市场/full/partial live E2E + pack dry-run；发布前必须通过
+pnpm install --frozen-lockfile
+pnpm check
 ```
 
-设计见 [架构说明](docs/architecture.md)，安全门槛见 [安全模型](docs/security.md)。
+源码、生成的 `lib/`、测试矩阵和发布前检查见[开发者指南](docs/developer-guide.md)。
 
 ## 许可
 

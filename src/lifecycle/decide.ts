@@ -95,8 +95,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'create_authorized') {
     return zh
-      ? '用户允许新建。创建只会在托管 git 源与 workspace-write 子会话中进行；不要直接 cordis_define。'
-      : 'The user allowed create-new. Creation continues only in a managed git source and workspace-write child session; do not call cordis_define directly.'
+      ? '用户允许新建。创建只在当前会话的托管 git 源中进行；不要用 cordis_define 代替这份施工。'
+      : 'The user allowed create-new. Creation continues in this session on the Host-managed git source; do not use cordis_define instead of that construction.'
   }
   if (authorization.state === 'use_review') {
     return zh
@@ -105,8 +105,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'modify_review') {
     return zh
-      ? '用户选择在这次审查上做最小修改。修改在托管源与子会话中进行；不要提交本地路径。'
-      : 'The user chose to improve this review. Modification continues in a managed source child session; do not supply a local path.'
+      ? '用户选择在这次审查上做最小修改。修改在当前会话的托管源中进行；不要提交本地路径。'
+      : 'The user chose to improve this review. Modification continues in this session on the Host-managed source; do not supply a local path.'
   }
   if (authorization.state === 'reuse_local') {
     return zh

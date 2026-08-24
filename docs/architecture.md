@@ -1,5 +1,7 @@
 # 架构说明
 
+[使用指南](user-guide.md) · [开发者指南](developer-guide.md) · [安全模型](security.md) · [返回 README](../README.md)
+
 ## 1. 位置
 
 AutoEvo 是 DSH Agent 工作流里的 `Capability Reuse Layer`。它把本地解析、远端发现、审查凭据、批准安装、真实验证和精确清理串成闭环。包管理、GitHub 协作和代码修改继续走 DSH、pnpm、`git`、`gh` 与现有 Coding Agent。
@@ -30,10 +32,10 @@ capability_workflow
                        ▼
                  Host authentic-turn and workflow-boundary validation
                        │
-                  full/use ─────┴───── modify/create (managed git source child)
+                  full/use ─────┴───── modify/create (managed git source)
                        │                       │
                        ▼                       ▼
-                 install_verify          workspace-write child + local re-review
+                 install_verify          current-session work + local re-review
                        │                       │
                  approval once          normalized tgz + explicit confirmation
                        │                       │
@@ -53,24 +55,24 @@ capability_workflow
                            plugin_remove
 ```
 
-能力进化 preset 不继承创造模式，也不把官方 `cordis` preset 挂到隐藏子会话。父会话负责发现、审查、授权、安装、恢复治理，以及用户确认后的修改/新建施工；`create_new` / `modify_this` / 定向纠错在当前会话对 `<workspace>/.autoevo/sources/` 中的托管 git 源进行，Host 账本继续保存在 `<dshHome>/autoevo/`，绝不回退到 `code`，也绝不 `agents.create`。Creator Foundation 在克隆、初始化或写入托管源码前预检父会话施工目录。Windows 上为完整性导向的部分隔离。
+能力进化 preset 是官方创造模式的超集：标准编码面、运行时检查、活进程插件实验、preset 创作 skill 与委托工具都在。父会话额外负责发现、审查、授权、安装、恢复治理；`create_new` / `modify_this` / 定向纠错在当前会话对 `<workspace>/.autoevo/sources/` 中的托管 git 源进行，Host 账本继续保存在 `<dshHome>/autoevo/`，绝不回退到 `code`，也绝不 `agents.create`。只有进入托管施工后，才收紧为源内文件读写、只读 git、shell 测试、官方 Creator skill 与 `cordis_inspect_*`。Creator Foundation 在克隆、初始化或写入托管源码前预检父会话施工目录。Windows 上为完整性导向的部分隔离。
 
 父回合取消后，没有子 Agent 可 dispose。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V13）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V13 为 no-op；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。当前没有旧 preset 迁移路径，发布包只信任这一份 V13 manifest。配置为 `false` 时跳过安装，且永不自动删除。
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V14）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V14 为 no-op；未改过的 V13 可升级到 V14；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装，且永不自动删除。
 
 ## 3. DSH 接缝
 
-入口 [src/index.ts](../src/index.ts) 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V8 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
+入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V8 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
 
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
-- `agents` / `agentPresets`：由 Host 建立并验证官方 `cordis` 子会话所有权、system trust、实际 composition 和 scoped catalog；
-- `sandbox` / `sandboxPolicy` / `fs`：对子会话的真实 `workspace-write` 文件与 shell 边界做启动探测。
+- `agentPresets`：可选地确认当前会话确实使用能力进化 preset，并在施工前验证父会话施工目录；不会创建子 Agent；
+- 当前会话的文件、shell 与工具调用仍受 DSH scope 和 AutoEvo `ExecutionGuard` 共同约束。
 
-`tools` 同时承载最终执行门禁。父会话只拒绝 `cordis_define(kind=new)` 和直接装卸。受管 Creator 子会话只允许仓库文件读写、shell 测试、todo、两个官方 Creator skill 与三个 `cordis_inspect_*` 只读工具；其它能力 fail closed。提示词不是授权边界。
+`tools` 同时承载最终执行门禁。父会话保留创造模式的 inspect / define / run / mount 与委托工具，只拒绝直接装卸。进入托管施工阶段后，只允许托管仓库文件读写、shell 测试、todo、两个官方 Creator skill 与三个 `cordis_inspect_*` 只读工具，其它能力 fail closed。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -103,9 +105,9 @@ Host 持久状态默认继续位于 `<dshHome>/autoevo/`，托管源码默认位
 
 社区质量筛选与上报不在主线；完整实现留在 `community-quality` 分支。
 
-V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要；可选的有界 Creator 执行记录保持旧 JSON 兼容。内部 receipt 记录 composition 摘要、所需目录摘要和子会话身份，但 Agent 只看到 `verified` / `unavailable`。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
+V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要；可选的有界 Creator 执行记录保持旧 JSON 兼容。内部 receipt 记录 composition 摘要、所需目录摘要和施工会话身份；为兼容旧 JSON，`childSessionId` 字段当前存放父会话身份。Agent 只看到 `verified` / `unavailable`。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
 
-`AgentWorkflowViewV2` 是唯一模型展示协议：公开语义状态、事实与证据、剩余预算、硬约束、候选作用域动作和可用工具，不公开内部图节点或规定回答句式。Policy V8 的 resolution、review、receipt、commitment 和 lease 不跨 policy 复用；不兼容的持久状态一律 fail closed。相同无效调用指纹在同一用户回合第二次后断路，但不消费 interrupt 或授权。失败后的 `capability_workflow_diagnose` 只读取关联记录，按失败事件限制为两次调用、八个探针，并脱敏路径、URL、原始 stderr 与子会话正文。
+`AgentWorkflowViewV2` 是唯一模型展示协议：公开语义状态、事实与证据、剩余预算、硬约束、候选作用域动作和可用工具，不公开内部图节点或规定回答句式。Policy V8 的 resolution、review、receipt、commitment 和 lease 不跨 policy 复用；不兼容的持久状态一律 fail closed。相同无效调用指纹在同一用户回合第二次后断路，但不消费 interrupt 或授权。失败后的 `capability_workflow_diagnose` 只读取关联记录，按失败事件限制为两次调用、八个探针，并脱敏路径、URL、原始 stderr 与施工会话正文。
 
 Policy V3 起，最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不再用关键词或正则重做语义理解。`use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`，Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供 repository、path、review id 或 install spec。Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
 
@@ -133,7 +135,7 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 
 ## 6. 部分适配
 
-GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再启动 cwd 精确绑定该仓库的 `workspace-write` 子会话。子会话只改源码和运行本地检查；Host 校验 branch/HEAD、Git config/hooks 摘要与工作树后，禁用 hooks 和签名创建本地 commit，再做 local review 与固定 tgz。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。symlink、特殊文件或触及文件/字节上限的快照记为 `skip`。
+GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 和受限 cwd 交给当前能力进化会话。当前会话只在托管源内改源码和运行本地检查；`finish_managed_work` 后，Host 校验 branch/HEAD、Git config/hooks 摘要与工作树，禁用 hooks 和签名创建本地 commit，再做 local review 与固定 tgz。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。symlink、特殊文件或触及文件/字节上限的快照记为 `skip`。
 
 本地快照成为 `full` 且用户 `use_this` 之后才能安装。批准后，安装器把已审查字节复制到 owned snapshot，比较完整路径/hash/size，再用 `npm pack --ignore-scripts` 生成 tgz，复核 snapshot 后交给 DSH 的是 owned `file:...tgz`。temporary artifact 随 trial 清理；persistent artifact 随 receipt 驱动的 remove 清理。同一需求的第二刀补丁必须留在这条 resolution：`base_review_id` 可以是上一刀本地 review，HEAD 可以是 lineage root 的后代提交。安装授权看该 resolution 最新一条匹配的 `use_this` 回执，不依赖当前进程里另一次 resolve。
 
@@ -143,18 +145,20 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，H
 
 ## 7. 实现入口
 
-- [src/resolver/local.ts](../src/resolver/local.ts)：本地工具、技能和 tool-search 桥。
-- [src/creation-guard.ts](../src/creation-guard.ts)：Host 用户回合、session/boot/interrupt 绑定与 Cordis 新建拒绝。
-- [src/creator-foundation.ts](../src/creator-foundation.ts)：官方 Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
-- [src/managed-child.ts](../src/managed-child.ts)：历史 Host-owned 子会话实现；运行时不再创建子 Agent。
-- [src/source-manager.ts](../src/source-manager.ts)：普通 Git 源、排他锁、hookless commit 与来源回执。
-- [src/discovery/remote.ts](../src/discovery/remote.ts)：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
-- [src/github/discovery.ts](../src/github/discovery.ts)：严格 `owner/repository` 标识校验。
-- [src/review/review.ts](../src/review/review.ts)：exact snapshot、manifest/fit/security 派生事实。
-- [src/workflow/engine.ts](../src/workflow/engine.ts)：固定图工作流引擎、interrupt/resume、checkpoint。
-- [src/lifecycle/install.ts](../src/lifecycle/install.ts)：批准、重验证、状态机和失败清理。
-- [src/lifecycle/snapshot.ts](../src/lifecycle/snapshot.ts)：完整本地文件绑定、owned snapshot 与固定 tgz。
-- [src/lifecycle/launcher.ts](../src/lifecycle/launcher.ts)：DSH CLI、隔离安装进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
-- [src/host-verification-driver.ts](../src/host-verification-driver.ts)：按 frozen runtime-surface 选择验证层；plugin 自报不得铸造 `tool_roundtrip`；`manual_runtime` 不拉起验证子进程。
-- [src/verification-observer.ts](../src/verification-observer.ts)：记录 Host 工具名/callId 往返与完成轮 hash；不记录模型正文，也不作为语义成功门槛。
-- [src/lifecycle/remove.ts](../src/lifecycle/remove.ts)：receipt 驱动的精确移除。
+本节只列运行时与 Policy 入口。本地搭建、测试矩阵、调试顺序和发布前检查见[开发者指南](developer-guide.md)。
+
+- `src/resolver/local.ts`：本地工具、技能和 tool-search 桥。
+- `src/creation-guard.ts`：Host 用户回合、session/boot/interrupt 绑定与 Cordis 新建拒绝。
+- `src/creator-foundation.ts`：官方 Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
+- `src/managed-child.ts`：历史 Host-owned 子会话兼容接口；运行时不再创建子 Agent。
+- `src/source-manager.ts`：普通 Git 源、排他锁、hookless commit 与来源回执。
+- `src/discovery/remote.ts`：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
+- `src/github/discovery.ts`：严格 `owner/repository` 标识校验。
+- `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
+- `src/workflow/engine.ts`：固定图工作流引擎、interrupt/resume、checkpoint。
+- `src/lifecycle/install.ts`：批准、重验证、状态机和失败清理。
+- `src/lifecycle/snapshot.ts`：完整本地文件绑定、owned snapshot 与固定 tgz。
+- `src/lifecycle/launcher.ts`：DSH CLI、隔离安装进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
+- `src/host-verification-driver.ts`：按 frozen runtime-surface 选择验证层；plugin 自报不得铸造 `tool_roundtrip`；`manual_runtime` 不拉起验证子进程。
+- `src/verification-observer.ts`：记录 Host 工具名/callId 往返与完成轮 hash；不记录模型正文，也不作为语义成功门槛。
+- `src/lifecycle/remove.ts`：receipt 驱动的精确移除。

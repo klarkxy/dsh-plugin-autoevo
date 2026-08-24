@@ -62,6 +62,21 @@ function surface(overrides = {}) {
   }
 }
 
+async function assertPackedDocumentationLinks(packedRoot, relativePaths) {
+  for (const relativePath of relativePaths) {
+    const absolutePath = path.join(packedRoot, relativePath)
+    const markdown = await readFile(absolutePath, 'utf8')
+    const links = [...markdown.matchAll(/\[[^\]]*\]\((?!https?:|mailto:|#)([^)#]+)(?:#[^)]+)?\)/gu)]
+    for (const match of links) {
+      const target = match[1]?.trim()
+      if (!target) continue
+      const resolved = path.resolve(path.dirname(absolutePath), target)
+      const exists = await access(resolved).then(() => true).catch(() => false)
+      assert.ok(exists, `packed documentation link is missing: ${relativePath} -> ${target}`)
+    }
+  }
+}
+
 async function assertPackedPolicyV8(packedRoot) {
   const packedIndex = await readFile(path.join(packedRoot, 'lib', 'index.js'), 'utf8')
   const packedEvolution = [
@@ -129,21 +144,47 @@ async function assertPackedPolicyV8(packedRoot) {
   assert.match(packedJs, /plugin self-declared safety cannot mint tool_roundtrip/u)
 
   const readme = await readFile(path.join(packedRoot, 'README.md'), 'utf8')
-  assert.match(readme, /Policy V8/u)
-  assert.match(readme, /tool_roundtrip/u)
+  assert.match(readme, /能力进化/u)
   assert.match(readme, /awaiting_user_test/u)
-  assert.match(readme, /capability_workflow_recover/u)
-  assert.match(readme, /temporary 会在安装与批准副作用前被拒绝/u)
-  assert.doesNotMatch(readme, /开一条新的 V7 发现/u)
-  assert.doesNotMatch(readme, /以及独立 semantic verifier/u)
+  assert.match(readme, /restartRequired: true/u)
+  assert.match(readme, /docs\/user-guide\.md/u)
+
+  const userGuide = await readFile(path.join(packedRoot, 'docs', 'user-guide.md'), 'utf8')
+  assert.match(userGuide, /tool_roundtrip/u)
+  assert.match(userGuide, /临时安装只适用于 Host 能自动验证的层/u)
+  assert.match(userGuide, /restartRequired: true/u)
+
+  const developerGuide = await readFile(path.join(packedRoot, 'docs', 'developer-guide.md'), 'utf8')
+  assert.match(developerGuide, /Policy V8/u)
+  assert.match(developerGuide, /pnpm check:release/u)
+
+  await access(path.join(packedRoot, 'README.en.md'))
+  await access(path.join(packedRoot, 'docs', 'user-guide.en.md'))
+  await access(path.join(packedRoot, 'docs', 'developer-guide.en.md'))
+  await access(path.join(packedRoot, 'docs', 'architecture.md'))
+  await access(path.join(packedRoot, 'docs', 'security.md'))
+  await access(path.join(packedRoot, 'docs', 'real-world-samples.md'))
+  await access(path.join(packedRoot, 'docs', 'assets', 'kanban.png'))
+  await assertPackedDocumentationLinks(packedRoot, [
+    'README.md',
+    'README.en.md',
+    'docs/user-guide.md',
+    'docs/user-guide.en.md',
+    'docs/developer-guide.md',
+    'docs/developer-guide.en.md',
+    'docs/architecture.md',
+    'docs/security.md',
+    'docs/real-world-samples.md',
+  ])
 
   const skill = await readFile(path.join(packedRoot, 'skills', 'autoevo-plugin-creator', 'SKILL.md'), 'utf8')
   const state = await readFile(
     path.join(packedRoot, 'skills', 'autoevo-plugin-creator', 'references', 'autoevo-state.md'),
     'utf8',
   )
-  assert.match(skill, /only a Host tool-roundtrip pass is functionally verified/u)
-  assert.match(skill, /Never treat a model judgment or semantic verifier as the success gate/u)
+  assert.match(skill, /Host `tool_roundtrip` passed/u)
+  assert.match(skill, /model judgment, semantic verifier,[^\n]+cannot mint `verified`/u)
+  assert.match(skill, /finish_managed_work/u)
   assert.match(state, /completed `awaiting_user_test`/u)
   assert.match(state, /two legal modes that must not be mixed/u)
   assert.match(state, /Policy V8 discovery/u)

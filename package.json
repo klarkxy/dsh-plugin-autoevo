@@ -44,6 +44,15 @@
     "presets",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
+    "docs/user-guide.md",
+    "docs/user-guide.en.md",
+    "docs/developer-guide.md",
+    "docs/developer-guide.en.md",
+    "docs/architecture.md",
+    "docs/security.md",
+    "docs/real-world-samples.md",
+    "docs/assets/kanban.png",
     "LICENSE"
   ],
   "engines": {

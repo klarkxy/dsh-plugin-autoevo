@@ -30,9 +30,9 @@ async function tempDir(prefix: string): Promise<string> {
   return dir
 }
 
-describe('evolution preset clean-slate V13', () => {
-  it('trusts only the one current V13 template', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('13')
+describe('evolution preset Creator-superset V14', () => {
+  it('trusts pristine V13 as the upgrade prior and ships V14 as current', () => {
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('14')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS).toEqual([{
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,
@@ -44,21 +44,48 @@ describe('evolution preset clean-slate V13', () => {
     }])
   })
 
-  it('installs V13 into a blank home and no-ops the exact current template', async () => {
-    const root = await tempDir('autoevo-v12-fresh')
+  it('upgrades a pristine V13 install to the current Creator-superset template', async () => {
+    const root = await tempDir('autoevo-v13-upgrade')
+    const dshHome = path.join(root, 'dsh')
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    await mkdir(target, { recursive: true })
+    await writeFile(path.join(target, 'preset.yml'), 'name: v13-body\n', 'utf8')
+    await writeFile(path.join(target, 'agent.cordis.yml'), '- id: v13-body\n', 'utf8')
+    const matching = buildManifest({
+      'preset.yml': sha256('name: v13-body\n'),
+      'agent.cordis.yml': sha256('- id: v13-body\n'),
+    }, '13')
+    await writeFile(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), _testing.serializeManifest(matching), 'utf8')
+
+    const result = await materializeEvolutionPreset({
+      dshHome,
+      enabled: true,
+      templateDir: path.resolve(process.cwd(), 'presets', 'evolution'),
+      trustedPriorManifests: [matching],
+    })
+    expect(result.status).toBe('upgraded')
+    expect(result.templateVersion).toBe('14')
+    expect(await readFile(path.join(target, 'skills', 'cordis-plugin-development', 'SKILL.md'), 'utf8'))
+      .toContain('name: cordis-plugin-development')
+  })
+
+  it('installs the current template into a blank home and no-ops the exact current template', async () => {
+    const root = await tempDir('autoevo-v14-fresh')
     const dshHome = path.join(root, 'dsh')
     const templateDir = path.resolve(process.cwd(), 'presets', 'evolution')
 
     const first = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(first).toMatchObject({ status: 'installed', templateVersion: '13' })
+    expect(first).toMatchObject({ status: 'installed', templateVersion: '14' })
     const second = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(second).toMatchObject({ status: 'noop', templateVersion: '13' })
+    expect(second).toMatchObject({ status: 'noop', templateVersion: '14' })
 
     const manifest = JSON.parse(await readFile(
       path.join(first.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME),
       'utf8',
     ))
-    expect(manifest).toEqual(EVOLUTION_PRESET_KNOWN_MANIFESTS[0])
+    expect(manifest.templateVersion).toBe('14')
+    expect(manifest.files['preset.yml']).toMatch(/^[a-f0-9]{64}$/u)
+    expect(manifest.files['skills/cordis-plugin-development/SKILL.md']).toMatch(/^[a-f0-9]{64}$/u)
   })
 
   it('preserves edited content, unknown manifests, and foreign owners', async () => {
@@ -127,6 +154,6 @@ describe('evolution preset clean-slate V13', () => {
     const manifestA = JSON.parse(await readFile(path.join(a.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     const manifestB = JSON.parse(await readFile(path.join(b.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     expect(manifestA).toEqual(manifestB)
-    expect(manifestA.templateVersion).toBe('13')
+    expect(manifestA.templateVersion).toBe('14')
   })
 })

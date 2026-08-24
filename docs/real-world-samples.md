@@ -1,10 +1,12 @@
 # AutoEvo 真实样例目录
 
+[使用指南](user-guide.md) · [开发者指南](developer-guide.md) · [返回 README](../README.md)
+
 这个目录把可重复的用户路径、前置夹具、成功证据和清理责任放在一起。它不是“功能已经上线”的清单：`real-live-passed` 只表示一次有可核验 DSH 会话证据的路径；`implemented` 表示仓库自动化覆盖；`planned` 仍需要真实环境验收。
 
 执行时先复制对应的中文用户回合，不要把它们拼成一条自动批准指令。发现、选择、审查和最终 `use_this` / `modify_this` / `create_new` 决定仍须来自新的顶层用户回合。
 
-机器可读目录在 [`tests/fixtures/real-world-samples.json`](../tests/fixtures/real-world-samples.json)，由 [`tests/unit/real-world-samples.spec.ts`](../tests/unit/real-world-samples.spec.ts) 校验。
+机器可读目录位于仓库路径 `tests/fixtures/real-world-samples.json`，由 `tests/unit/real-world-samples.spec.ts` 校验。发布包不携带测试源码。
 
 ## 最小推荐集
 

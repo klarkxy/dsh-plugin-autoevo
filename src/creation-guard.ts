@@ -139,9 +139,9 @@ function denialReason(authorization?: ResolutionAuthorization): string {
     return `${prefix}: wait for marketplace setup and its hot-load attempt. Restart DSH only when the returned state explicitly says hot-load failed. Do not create a plugin. ${authorization.reason}`
   }
   if (authorization.state === 'create_authorized') {
-    return `${prefix}: create-new continues as in-session work on a Host-managed git source; cordis_define(kind:new) is not permitted.`
+    return `${prefix}: create-new continues as in-session work on a Host-managed git source; use repository files instead of cordis_define(kind:new).`
   }
-  return `${prefix}: dynamic Cordis creation is not permitted on the parent AutoEvo session.`
+  return `${prefix}: Host-managed construction is using the managed git source; live cordis_define(kind:new) is not the construction path.`
 }
 
 function outsideEvolutionModeReason(): string {
@@ -578,11 +578,9 @@ export class CreationGuard {
     const protocol = this.protocolDenial(exec)
     if (protocol) return Promise.resolve({ kind: 'deny', reason: protocol })
     if (!exec.agent || !isNewCordisDefinition(exec)) return next()
-    if (!this.inEvolutionMode(exec.agent)) {
-      return Promise.resolve({ kind: 'deny', reason: outsideEvolutionModeReason() })
-    }
-    const state = this.states.get(exec.agent)
-    return Promise.resolve({ kind: 'deny', reason: denialReason(state?.authorization) })
+    const managed = this.managedConstructionDenial(exec.agent)
+    if (managed) return Promise.resolve({ kind: 'deny', reason: managed })
+    return next()
   }
 
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
@@ -590,13 +588,20 @@ export class CreationGuard {
     const protocol = this.protocolDenial(exec)
     if (protocol) return protocol
     if (!exec.agent || !isNewCordisDefinition(exec)) return undefined
-    if (!this.inEvolutionMode(exec.agent)) return outsideEvolutionModeReason()
-    const state = this.states.get(exec.agent)
-    return denialReason(state?.authorization)
+    return this.managedConstructionDenial(exec.agent)
   }
 
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
-    // Parent session never grants cordis_define(kind:new); nothing to consume.
+    // Live cordis_define(kind:new) is a Creator experiment; Host-managed construction does not consume it.
+  }
+
+  private managedConstructionDenial(agent: Agent): string | undefined {
+    if (!this.inEvolutionMode(agent)) return undefined
+    const state = this.states.get(agent)
+    if (state?.constructionRoot) return denialReason(state.authorization)
+    const auth = state?.authorization?.state
+    if (auth === 'create_authorized' || auth === 'modify_review') return denialReason(state?.authorization)
+    return undefined
   }
 
   authorization(agent: Agent): ResolutionAuthorization | undefined {

@@ -47,15 +47,15 @@ describe('parent execution boundaries', () => {
       exec('ask_user_question'),
       exec('cordis_inspect_self'),
       exec('cordis_define', { plugin: { kind: 'existing' } }),
+      exec('cordis_define', { plugin: { kind: 'new' } }),
       exec('cordis_run'),
+      exec('subagent'),
+      exec('workflow'),
+      exec('ralph'),
       exec('calculator'),
     ]) {
       await expect(parent.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
-    expect(parent.guard(exec('subagent'))).toMatch(/denies subagent/i)
-    expect(parent.guard(exec('workflow'))).toMatch(/denies subagent/i)
-    expect(parent.guard(exec('ralph'))).toMatch(/denies subagent/i)
-    expect(parent.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/kind:new/i)
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin remove dsh-xai' }))).toMatch(/plugin install\/remove/i)

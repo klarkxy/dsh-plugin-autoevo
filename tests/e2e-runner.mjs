@@ -182,18 +182,17 @@ async function runScenario() {
   assert.match(result.stdout, new RegExp(expectedMarker, 'u'))
 
   if (scenario === 'adversarial-define') {
-    // Headless sessions are outside Capability Evolution mode, so new defines are
-    // denied with the mode-specific message even before capability_workflow runs.
-    assert.match(result.stdout, /AutoEvo denied new Cordis plugin creation: start or switch a blank\/new session to the Capability Evolution \(evolution\) agent preset/u)
-    assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL|E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
+    // Headless sessions are outside Capability Evolution mode. Live Creator
+    // definitions stay available; AutoEvo still owns persistent discovery.
+    assert.match(result.stdout, /E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
+    assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL/u)
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
     assert.match(result.stdout, /"policy_version":"8"/u)
     assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
     return {
       scenario,
       marker: expectedMarker,
-      guard: 'denied cordis_define(kind:new) outside Capability Evolution mode',
-      denial: 'AutoEvo denied new Cordis plugin creation: start or switch a blank/new session to the Capability Evolution (evolution) agent preset',
+      guard: 'allowed live cordis_define(kind:new) outside Capability Evolution mode',
       workflow: 'autonomous discovery sealed at Gate 1',
       policyVersion: '8',
     }
