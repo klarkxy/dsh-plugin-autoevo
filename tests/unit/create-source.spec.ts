@@ -1,9 +1,8 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import os from 'node:os'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
-import { trackTempDirs } from '../helpers/temp-dirs.js'
+import { tempRoot, trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { CommandRunner } from '../../src/process/runner.js'
 import { SourceManager, sourceIdForCreate } from '../../src/source-manager.js'
@@ -60,8 +59,7 @@ function scriptedGit(): { runner: CommandRunner; markDirty(): void } {
 
 describe('managed Git creation sources', () => {
   it('writes a trusted scaffold commit and Host-only sidecar provenance', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-create-scaffold-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-create-scaffold-', temporary)
     const git = scriptedGit()
     const manager = new SourceManager(config(root), git.runner)
     const workspace = path.join(root, 'project')
@@ -88,8 +86,7 @@ describe('managed Git creation sources', () => {
   })
 
   it('requires a child worktree change, creates a second unsigned Host commit, and records artifact sha256', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-create-final-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-create-final-', temporary)
     const git = scriptedGit()
     const manager = new SourceManager(config(root), git.runner)
     const workspace = path.join(root, 'project')

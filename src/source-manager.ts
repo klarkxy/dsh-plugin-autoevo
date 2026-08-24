@@ -247,11 +247,11 @@ export class SourceManager {
   }
 
   async receiptForManagedPath(candidate: string): Promise<SourceReceipt | undefined> {
-    const resolved = path.resolve(candidate)
+    const resolved = await canonicalPath(candidate)
     const sourceId = path.basename(resolved)
-    if (!this.isManagedSourceDir(resolved, sourceId)) return undefined
+    if (!(await this.isCanonicalManagedSourceDir(resolved, sourceId))) return undefined
     const receipt = await this.readReceipt(sourceId)
-    if (!receipt || path.resolve(receipt.path) !== resolved) return undefined
+    if (!receipt || await canonicalPath(receipt.path) !== resolved) return undefined
     return receipt
   }
 
@@ -272,7 +272,8 @@ export class SourceManager {
       || receipt.repository?.toLowerCase() !== input.repository.toLowerCase()
       || receipt.baseCommit.toLowerCase() !== input.baseCommit.toLowerCase()) return undefined
     const inCurrentWorkspace = await this.pathUnderSourceRoot(receipt.path, input.workspaceCwd)
-    const inLegacyRoot = path.resolve(receipt.path) === path.resolve(this.legacySourceRoot, receipt.sourceId)
+    const inLegacyRoot = await canonicalPath(receipt.path)
+      === await canonicalPath(path.join(this.legacySourceRoot, receipt.sourceId))
     if (!inCurrentWorkspace && !inLegacyRoot) return undefined
     const completed = await this.inspectCompletedSource(receipt.sourceId, input.signal)
     if (!completed

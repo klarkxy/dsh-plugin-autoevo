@@ -1,10 +1,9 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import os from 'node:os'
+import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { testReview } from '../helpers/records.js'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
-import { trackTempDirs } from '../helpers/temp-dirs.js'
+import { tempRoot, trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import type { CommandRunner } from '../../src/process/runner.js'
@@ -106,8 +105,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('defaults omitted sourceDir to <workspace>/.autoevo/sources', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-default-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-default-', temporary)
     const workspace = path.join(root, 'project')
     const manager = new SourceManager(config(root, false), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
     expect(() => manager.sourceRoot).toThrow(/session workspace/i)
@@ -116,8 +114,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('materializes into the session workspace and keeps Host control under stateDir', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-workspace-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-workspace-', temporary)
     const workspace = path.join(root, 'project')
     const commit = 'c'.repeat(40)
     const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
@@ -132,8 +129,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('keeps receipts and locks under dshHome while sources stay in the session workspace', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-unified-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-unified-', temporary)
     const workspace = path.join(root, 'project')
     const commit = 'c'.repeat(40)
     const manager = new SourceManager(config(root, false, false), scriptedGit({ head: commit, branch: 'main' }))
@@ -171,8 +167,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('relocates materialization into the current workspace when a receipt points elsewhere', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-reloc-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-reloc-', temporary)
     const workspace = path.join(root, 'project')
     const commit = 'c'.repeat(40)
     const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
@@ -203,8 +198,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('materializes exact reviewed commit provenance onto autoevo/<workflow-id>', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-prov-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-prov-', temporary)
     const commit = 'c'.repeat(40)
     const git = scriptedGit({ head: commit, branch: 'main' })
     const manager = new SourceManager(config(root), git)
@@ -227,8 +221,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('claims a clean completed source for a later workflow and rejects a dirty tree', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-claim-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-claim-', temporary)
     const commit = 'c'.repeat(40)
     const firstId = `workflow_${'d'.repeat(24)}`
     const secondId = `workflow_${'e'.repeat(24)}`
@@ -249,8 +242,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('adopts an inactive legacy receipt only after clean repository revalidation', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-legacy-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-legacy-', temporary)
     const commit = 'c'.repeat(40)
     const sourceId = sourceIdForRepository('acme/calculator')
     const cfg = config(root)
@@ -278,8 +270,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('does not adopt a legacy receipt owned by an active workflow', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-legacy-active-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-legacy-active-', temporary)
     const sourceId = sourceIdForRepository('acme/calculator')
     const cfg = config(root)
     const manager = new SourceManager(cfg, scriptedGit({ head: 'c'.repeat(40), branch: 'autoevo/legacy' }))
@@ -301,8 +292,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('rejects a dirty tree before continuing', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-dirty-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-dirty-', temporary)
     const git = scriptedGit({ head: 'c'.repeat(40), branch: 'main', dirty: ' M package.json\n' })
     const manager = new SourceManager(config(root), git)
     await expect(manager.materializeReviewedGithub({
@@ -312,8 +302,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('rejects concurrent locks and recovers a stale lock after revalidation', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-lock-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-lock-', temporary)
     const commit = 'c'.repeat(40)
     const git = scriptedGit({ head: commit, branch: `autoevo/workflow_${'f'.repeat(24)}` })
     const manager = new SourceManager(config(root), git)
@@ -343,8 +332,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('defends against path escape and symlink roots', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-escape-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-escape-', temporary)
     const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
     expect(() => manager.sourcePath(`..${path.sep}escape`)).toThrow(/safe single path segment/i)
     expect(() => manager.sourcePath('.')).toThrow(/safe single path segment/i)
@@ -358,8 +346,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('keeps control metadata outside the child repo and finalizes reviewed provenance', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-finalize-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-finalize-', temporary)
     const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
     const manager = new SourceManager(config(root), scriptedGit(state))
     const workflowId = `workflow_${'d'.repeat(24)}`
@@ -386,8 +373,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('checkpoints interrupted child edits and resumes the same workflow cleanly', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-resume-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-resume-', temporary)
     const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
       head: 'c'.repeat(40), branch: 'main', dirty: '',
     }
@@ -413,8 +399,7 @@ describe('SourceManager defaults and provenance', () => {
 
   it('rejects untracked dependency stores before Host git add', async () => {
     expect(sourceTesting.forbiddenUntrackedPath('?? .pnpm-store/v10/files/cache\n')).toBe('.pnpm-store/v10/files/cache')
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-cache-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-cache-', temporary)
     const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
       head: 'c'.repeat(40), branch: 'main', dirty: '',
     }
@@ -432,8 +417,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('rejects child tampering with repository Git configuration before Host commit', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-git-config-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-git-config-', temporary)
     const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
     const manager = new SourceManager(config(root), scriptedGit(state))
     const workflowId = `workflow_${'e'.repeat(24)}`
@@ -449,8 +433,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('rejects child-created Git hooks before any Host commit can execute them', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-git-hooks-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-git-hooks-', temporary)
     const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
     const manager = new SourceManager(config(root), scriptedGit(state))
     const workflowId = `workflow_${'e'.repeat(24)}`
@@ -469,8 +452,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('keeps managed sources after uninstall-style artifact cleanup', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-survive-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-survive-', temporary)
     const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
     const receipt = await manager.materializeReviewedGithub({
       review: review(),
@@ -486,8 +468,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('accepts a symlink-aliased stateDir for the disabled-hooks containment check', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-state-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-alias-state-', temporary)
     const realState = path.join(root, 'real-state')
     await mkdir(realState, { recursive: true })
     const aliasState = path.join(root, 'alias-state')
@@ -505,8 +486,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('still rejects a disabled-hooks directory that genuinely escapes stateDir', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-hooks-escape-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-hooks-escape-', temporary)
     const state = path.join(root, 'state')
     await mkdir(state, { recursive: true })
     const outside = path.join(root, 'outside')
@@ -523,8 +503,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('accepts a symlink-aliased sourceDir for managed source containment and receipt equality', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-source-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-alias-source-', temporary)
     const realSources = path.join(root, 'real-sources')
     await mkdir(realSources, { recursive: true })
     const aliasSources = path.join(root, 'alias-sources')
@@ -549,8 +528,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('still rejects symlink source roots under a symlink-aliased sourceDir', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-escape-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-alias-escape-', temporary)
     const realSources = path.join(root, 'real-sources')
     await mkdir(realSources, { recursive: true })
     const aliasSources = path.join(root, 'alias-sources')
@@ -563,8 +541,7 @@ describe('SourceManager defaults and provenance', () => {
   })
 
   it('relocates into a symlink-aliased workspace when a receipt points elsewhere', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-reloc-'))
-    temporary.push(root)
+    const root = await tempRoot('autoevo-source-alias-reloc-', temporary)
     const realWorkspace = path.join(root, 'real-workspace')
     await mkdir(realWorkspace, { recursive: true })
     const aliasWorkspace = path.join(root, 'alias-workspace')
