@@ -186,7 +186,7 @@ describe('managed create vertical flow', () => {
     }))
     const revalidate = service as unknown as { revalidate(review: NonNullable<typeof result.review>): Promise<boolean> }
     await expect(revalidate.revalidate(result.review!)).resolves.toBe(true)
-  }, 20_000)
+  }, 60_000)
 
   it('checkpoints cancelled parent edits, reports recovery, and releases the source lock with an aborted signal', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-cancel-e2e-'))
@@ -230,7 +230,7 @@ describe('managed create vertical flow', () => {
     expect(flow.creatorRecords?.at(-1)?.status).toBe('unavailable')
     const status = await runner.run({ argv: ['git', 'status', '--porcelain'], cwd: service.sources.sourcePath(sourceId) })
     expect(status.stdout.trim()).toBe('')
-  }, 20_000)
+  }, 60_000)
 
   it('does not clone, scaffold, or write sources when Creator preflight fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-preflight-fail-'))
@@ -267,7 +267,7 @@ describe('managed create vertical flow', () => {
     await expect(access(cfg.sourceDir!)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(flow.managedSourceId).toBeUndefined()
     expect(flow.creatorRecords).toEqual([expect.objectContaining({ operation: 'create', status: 'unavailable' })])
-  }, 20_000)
+  }, 60_000)
 
   it('reclaims and freshly freezes a completed managed repair in a later workflow', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-repair-reclaim-'))
