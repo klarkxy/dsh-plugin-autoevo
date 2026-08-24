@@ -97,7 +97,7 @@ You can stop at either gate. Stop is never treated as install/create authority, 
 | `failed_absent` | Install failed and the Host proved both dependency and visible target absent | Diagnose before retrying |
 | `recovery_required` | Install, replacement, or cleanup state cannot be determined safely | Recover; do not reinstall or delete blindly |
 
-An isolated `headless` preflight proves that reviewed bytes settle in an isolated Loader. It does not prove destination loading or a real-client tool round trip.
+An isolated minimal-DSH preflight proves that reviewed bytes settle in a throwaway `dsh-base` Loader. It does not prove destination loading or a real-client tool round trip. That sandbox does not use or modify the official `headless` profile.
 
 For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile. A model saying “looks successful” is not a Host `verified` receipt.
 

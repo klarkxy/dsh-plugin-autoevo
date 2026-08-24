@@ -206,7 +206,7 @@ Host verification / recovery / receipt
 2. 物化 owned snapshot/tgz，并再次比较路径、size、hash；
 3. 取得 DSH `allowed-once` approval；
 4. 写 provisional installation receipt；
-5. 对 persistent 安装执行 exact reviewed bundle 的隔离 headless 预检；
+5. 对 persistent 安装执行 exact reviewed bundle 的隔离最小 DSH（`autoevo-verify` / 仅 `dsh-base`）预检；
 6. 修改 profile，并对账 exact dependency 与可见 package target；
 7. 执行 Host 验证与目标进程热加载；
 8. 写最终 receipt，或进入 `failed_absent` / `recovery_required`。
@@ -219,7 +219,7 @@ Host verification / recovery / receipt
 | `bundle_activation` | `activated` | 审查 bundle 的 Loader/Fiber 已收口 |
 | persistent `manual_runtime` | `awaiting_user_test` | 已安装，等待真实客户端测试 |
 
-`loaded` 只表示目标进程 bundle 已加载；headless preflight 单独记录，不能证明 live profile。semantic verifier 与 `taskResultMatchedExpectation` 都不能把结果升级为 `verified`。
+`loaded` 只表示目标进程 bundle 已加载；隔离最小 DSH 预检单独记录，不能证明 live profile。semantic verifier 与 `taskResultMatchedExpectation` 都不能把结果升级为 `verified`。
 
 ## 10. 测试矩阵
 

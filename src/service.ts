@@ -46,7 +46,7 @@ import {
 } from './lifecycle/decide.js'
 import { sessionCwd } from './host-identity.js'
 import { prefersChinese } from './i18n.js'
-import { PluginInstaller } from './lifecycle/install.js'
+import { ISOLATED_VERIFICATION_PROFILE, PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
@@ -676,7 +676,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       },
       undefined,
       undefined,
-      'headless',
+      ISOLATED_VERIFICATION_PROFILE,
       () => this.currentProfileOwner(),
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)

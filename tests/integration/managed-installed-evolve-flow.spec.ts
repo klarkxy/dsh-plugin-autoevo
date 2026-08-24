@@ -182,7 +182,7 @@ describe('installed evolve replacement on an isolated profile', () => {
         evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
       }),
       undefined,
-      'headless',
+      'autoevo-verify',
     )
     const exec = {
       callId: 'call-1',

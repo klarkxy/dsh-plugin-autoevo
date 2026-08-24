@@ -1175,6 +1175,7 @@ declare class CreationGuard {
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined;
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
+  private managedConstructionDenial;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
   private resignLeaseIfUnchanged;
 }

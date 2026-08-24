@@ -62,7 +62,7 @@ Never call `cordis_define(kind: "new")`, directly install/remove a package, use 
 - `restartRequired: true`: a non-failure capability install exists, but the target process needs a restart to load it fully.
 - `recovery_required`: state cannot be reconciled safely; do not reinstall or clean up blindly.
 
-An isolated headless preflight, model judgment, semantic verifier, `installed`, or `loaded` alone cannot mint `verified`.
+An isolated minimal-DSH preflight, model judgment, semantic verifier, `installed`, or `loaded` alone cannot mint `verified`.
 
 ## 5. Diagnose, recover, and clean up
 

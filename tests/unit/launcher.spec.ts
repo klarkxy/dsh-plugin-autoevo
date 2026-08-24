@@ -83,7 +83,7 @@ describe('Host-owned launcher verification', () => {
             disabled?: boolean
             insert?: Array<{ config: { receiptPath: string; layer?: string } }>
           }>
-          expect(overlay).toEqual(expect.arrayContaining([
+          expect(overlay).not.toEqual(expect.arrayContaining([
             { id: 'headless-startup', disabled: true },
             { id: 'headless-runner', disabled: true },
           ]))

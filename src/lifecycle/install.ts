@@ -58,6 +58,13 @@ export type ProfileHotLoader = (input: {
   agent?: ToolRunContext['agent']
 }) => Promise<HotReloadAttempt>
 
+/**
+ * Isolated persistent-install preflight profile. The name is not a shipped
+ * DSH template, so `dsh plugin` initializes only `@deepseek-ai/dsh-base`.
+ * The sandbox lives under the trial DSH home, never `~/.dsh/profiles/headless`.
+ */
+export const ISOLATED_VERIFICATION_PROFILE = 'autoevo-verify' as const
+
 function validateProfile(profile: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(profile)) {
     throw new EvolutionError('invalid_input', 'targetProfile must be a simple DSH profile name')
@@ -189,7 +196,7 @@ function installApprovalReason(input: {
   const actionPlan = copy(
     input.requirement,
     input.preflight
-      ? `Preflight the exact reviewed ${input.packageName} in an isolated headless profile, then install it into live profile ${input.targetProfile}`
+      ? `Preflight the exact reviewed ${input.packageName} in an isolated minimal DSH profile, then install it into live profile ${input.targetProfile}`
       : input.retention === 'temporary'
         ? `Install the exact reviewed ${input.packageName} into isolated temporary profile ${input.targetProfile}`
         : `Install the exact reviewed ${input.packageName} into profile ${input.targetProfile}`,

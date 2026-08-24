@@ -96,6 +96,7 @@ Host 持久状态默认继续位于 `<dshHome>/autoevo/`，托管源码默认位
 ├─ reviews/<id>.json
 ├─ installations/<id>.json
 ├─ trials/<installation-id>/dsh-home/
+│  └─ preflight-dsh-home/profiles/autoevo-verify/  # 一次性最小 DSH，仅 dsh-base + 候选包
 └─ verifications/<uuid>/
    ├─ observer.cordis.yml
    └─ tool-roundtrip.jsonl

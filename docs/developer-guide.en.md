@@ -156,7 +156,7 @@ Cancellation uses an independent bounded cleanup lifetime, checkpoints bounded e
 
 Review receipts bind policy, requirement, exact source, inspected hashes, manifest facts, actual DSH runtime, and compatibility. Installation re-reviews materials before mutation.
 
-Persistent install materializes and rechecks an owned snapshot/tgz, obtains one-time approval, writes a provisional receipt, preflights the exact reviewed bundle in isolated headless Loader state, mutates and reconciles the target profile, performs Host verification and hot-load, then writes a final or recovery receipt.
+Persistent install materializes and rechecks an owned snapshot/tgz, obtains one-time approval, writes a provisional receipt, preflights the exact reviewed bundle in an isolated minimal DSH (`autoevo-verify`, `dsh-base` only) Loader, mutates and reconciles the target profile, performs Host verification and hot-load, then writes a final or recovery receipt.
 
 | Layer | Outcome | Valid claim |
 | --- | --- | --- |

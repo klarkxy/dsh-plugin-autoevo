@@ -120,7 +120,7 @@ AutoEvo 不会为这一步启动隐藏子 Agent。历史失败或已移除来源
 | `failed_absent` | 安装命令失败，且 profile 与可见 package target 都不存在 | 先诊断原因，再决定是否重试 |
 | `recovery_required` | 安装、替换或清理的真实状态不能安全确定 | 走恢复流程，不要盲目重装或手删 |
 
-隔离 `headless` 预检只证明已审查字节能在隔离 Loader 中收口。它不等于目标 profile 已加载，也不等于真实客户端工具调用成功。
+隔离最小 DSH 预检只证明已审查字节能在一次性 `dsh-base` 沙箱的 Loader 中收口。它不等于目标 profile 已加载，也不等于真实客户端工具调用成功。该沙箱不使用、也不改写官方 `headless` profile。
 
 ### 人工功能验证
 

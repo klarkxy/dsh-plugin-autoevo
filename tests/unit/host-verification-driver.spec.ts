@@ -465,7 +465,7 @@ describe('Host verification driver', () => {
       observerUrl: 'file:///observer.js',
     })
     const text = JSON.stringify(overlay)
-    expect(overlay).toEqual(expect.arrayContaining([
+    expect(overlay).not.toEqual(expect.arrayContaining([
       { id: 'headless-startup', disabled: true },
       { id: 'headless-runner', disabled: true },
     ]))

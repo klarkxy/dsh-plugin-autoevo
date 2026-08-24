@@ -344,7 +344,7 @@ describe('fail-closed install outcomes', () => {
     })
   })
 
-  it('preflights the exact source in isolated headless before installing into the live profile', async () => {
+  it('preflights the exact source in isolated minimal DSH before installing into the live profile', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -370,7 +370,7 @@ describe('fail-closed install outcomes', () => {
       undefined,
       async () => ({ evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' } }),
       unusedVerifier(),
-      'headless',
+      'autoevo-verify',
     )
     const result = await installer.install({
       reviewId: review().id,
@@ -379,7 +379,7 @@ describe('fail-closed install outcomes', () => {
     }, execution())
 
     expect(install).toHaveBeenCalledTimes(2)
-    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
     expect(install.mock.calls[1]?.[0]).toBe(config(root).dshHome)
     expect(install.mock.calls[1]?.[1]).toBe('web')
     expect(install.mock.calls[0]?.[2]).toBe(install.mock.calls[1]?.[2])
@@ -389,11 +389,11 @@ describe('fail-closed install outcomes', () => {
       installOutcome: 'verified',
       loaded: false,
       restartRequired: true,
-      preflight: { profile: 'headless', passed: true, sourceMatched: true },
+      preflight: { profile: 'autoevo-verify', passed: true, sourceMatched: true },
     })
   })
 
-  it('does not mutate the destination when isolated headless preflight fails', async () => {
+  it('does not mutate the destination when isolated minimal DSH preflight fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-fail-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -410,11 +410,11 @@ describe('fail-closed install outcomes', () => {
       verifyHost: async () => hostFailedEvidence,
     } as unknown as DshLauncher
     const result = await new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
     ).install({ reviewId: review().id, targetProfile: 'web', retention: 'persistent' }, execution())
 
     expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
     expect(result).toMatchObject({
       installPhase: 'completed',
       installOutcome: 'failed_absent',
@@ -445,7 +445,7 @@ describe('fail-closed install outcomes', () => {
       verifyHost: async () => hostPassedEvidence,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
     )
 
     await expect(installer.install({
@@ -455,10 +455,10 @@ describe('fail-closed install outcomes', () => {
     }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
     expect(absenceChecks).toBe(2)
     expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
   })
 
-  it('uses headless only for activation preflight when the real result requires a user test', async () => {
+  it('uses isolated minimal DSH only for activation preflight when the real result requires a user test', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-manual-preflight-'))
     temporary.push(root)
     const manual = attestedReview({
@@ -507,7 +507,7 @@ describe('fail-closed install outcomes', () => {
       undefined,
       async () => ({ evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' } }),
       undefined,
-      'headless',
+      'autoevo-verify',
     ).install({ reviewId: manual.id, targetProfile: 'web', retention: 'persistent' }, execution())
 
     expect(install).toHaveBeenCalledTimes(2)
@@ -565,7 +565,7 @@ describe('fail-closed install outcomes', () => {
       },
     } as unknown as DshLauncher
     const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
     )
 
     await expect(installer.install({
@@ -574,7 +574,7 @@ describe('fail-closed install outcomes', () => {
       retention: 'persistent',
     }, execution())).rejects.toThrow(/bytes changed between isolated preflight and destination install/i)
     expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('headless')
+    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
   })
 
   it('refuses to overwrite an existing destination package before approval or preflight', async () => {
@@ -587,7 +587,7 @@ describe('fail-closed install outcomes', () => {
     const install = vi.fn()
     const launcher = { profileTargetAbsent: async () => false, install } as unknown as DshLauncher
     const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
     )
 
     await expect(installer.install({
@@ -660,7 +660,7 @@ describe('fail-closed install outcomes', () => {
         evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
       }),
       undefined,
-      'headless',
+      'autoevo-verify',
     )
     const result = await installer.install({
       reviewId: current.id,
@@ -692,7 +692,7 @@ describe('fail-closed install outcomes', () => {
       profileDependencySpec: async () => 'github:acme/calculator#main',
     } as unknown as DshLauncher
     const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'headless',
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
     )
     await expect(installer.install({
       reviewId: attestedReview().id,
@@ -726,7 +726,7 @@ describe('fail-closed install outcomes', () => {
       undefined,
       undefined,
       undefined,
-      'headless',
+      'autoevo-verify',
       async () => 'headless',
     )
 
@@ -1523,7 +1523,7 @@ describe('install authorization uses verdict and hard boundaries', () => {
           evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
         }),
         undefined,
-        'headless',
+        'autoevo-verify',
       )
       const result = await installer.install({
         reviewId: local.id,
