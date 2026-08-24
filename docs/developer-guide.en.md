@@ -8,7 +8,7 @@ This guide is for maintainers who change AutoEvo Host seams, workflow behavior, 
 
 - Node.js `>=22.19.0 || >=24.0.0`; CI uses Node 24.
 - pnpm; CI currently uses `10.29.2`.
-- Git; live marketplace/GitHub work also requires GitHub CLI.
+- Git; live GitHub discovery and review also require GitHub CLI.
 - Windows/PowerShell is the primary exercised environment. Core execution uses argv runners and must not depend on interactive shell state.
 
 ```powershell
@@ -51,7 +51,7 @@ src/
 ├─ contracts.ts                # Policy V8 contracts and receipts
 ├─ workflow/                   # Graph engine, lifecycle mapping, Agent view
 ├─ resolver/                   # Intent, local/installed source, lineage, profile ownership
-├─ discovery/                  # find_dsh_plugin dispatch and normalization
+├─ discovery/                  # scoped GitHub discovery and normalization
 ├─ review/                     # Exact snapshot and mechanical review facts
 ├─ lifecycle/                  # install, snapshot, launcher, remove, recovery
 ├─ source-manager.ts           # Managed Git source, lock, commit, source receipt
@@ -101,7 +101,7 @@ Gate 1 accepts only candidates sealed by `capability_workflow_present`. Gate 2 m
 
 ## 6. Resolver and lineage
 
-Resolution is local-first: Agent-visible tools, skills, bridges, then `find_dsh_plugin`. Finder text is untrusted; only strict GitHub identities and bounded summaries enter the pool.
+Resolution is local-first: Agent-visible tools, skills, bridges, then Host-owned `topic:dsh-plugin` GitHub search. Remote summaries are untrusted; only strict GitHub identities and bounded summaries enter the pool.
 
 Live profile ownership—not inventory—is authoritative for installed sources. Replacement is limited to `github_exact` and receipt-owned `owned_chain`. Historical `failed_install` / `reviewed_snapshot` entries that are absent or removed become a first install after full revalidation and re-freeze; never relax live-spec drift protection to force replacement.
 

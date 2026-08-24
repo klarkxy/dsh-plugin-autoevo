@@ -53,12 +53,12 @@ function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: st
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
 }
 
-function marketplaceCtx(baseUrl: string): Context {
+function hostCtx(baseUrl: string): Context {
   return {
     baseUrl,
     tools: {
       schemas: () => [],
-      get: (name: string) => name === 'find_dsh_plugin' ? {} : undefined,
+      get: () => undefined,
       execute: async () => ({ isError: false, value: { results: [] }, content: [] }),
       register: () => undefined,
     },
@@ -277,9 +277,17 @@ describe('interrupt binding and host-turn decisions', () => {
     await writeFile(path.join(baseUrl, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dependencies: {} }))
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx(baseUrl),
+      hostCtx(baseUrl),
       config(root),
-      { run: async () => ({ exitCode: 0, signal: null, stdout: '0.1.0-rc.6\n', stderr: '' }) },
+      {
+        run: async (request: { argv: readonly string[] }) => {
+          const joined = request.argv.join(' ')
+          if (joined.includes('/search/repositories')) {
+            return { exitCode: 0, signal: null, stdout: JSON.stringify({ items: [] }), stderr: '' }
+          }
+          return { exitCode: 0, signal: null, stdout: '0.1.0-rc.6\n', stderr: '' }
+        },
+      },
       new StateStore(root),
       guard,
     )

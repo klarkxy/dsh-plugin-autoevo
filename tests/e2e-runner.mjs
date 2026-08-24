@@ -159,8 +159,8 @@ async function runScenario() {
     { id: 'autoevo', config: {
       dshHome,
       stateDir,
-      dshCommand: scenario === 'marketplace-flow' ? 'dsh' : process.execPath,
-      dshCommandArgs: scenario === 'marketplace-flow' ? [] : [dshBin],
+      dshCommand: process.execPath,
+      dshCommandArgs: [dshBin],
       commandTimeoutMs: 120_000,
       verificationPatchPaths: [],
     } },
@@ -172,7 +172,7 @@ async function runScenario() {
   const mainPatch = await writePatch('main.cordis.yml', mainPatches)
   const task = scenario === 'resolve-local' || scenario === 'adversarial-define'
     ? 'Resolve a capability that is already local and report the decision.'
-    : 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.'
+    : 'Search GitHub for an existing Grok Build capability.'
   const result = await runDsh(['--profile', 'headless', '--patch', mainPatch, task], 600_000)
   const expectedMarker = scenario === 'resolve-local'
     ? 'E2E_RESOLVE_LOCAL_OK'
@@ -209,14 +209,17 @@ async function runScenario() {
 
   if (scenario === 'marketplace-flow') {
     const profile = JSON.parse(await readFile(path.join(dshHome, 'profiles', 'headless', 'package.json'), 'utf8'))
-    assert.equal(typeof profile.dependencies['dsh-find-plugin'], 'string')
-    assert.ok(profile.dsh.profile.bundles.includes('dsh-find-plugin'))
+    assert.equal(profile.dependencies['dsh-find-plugin'], undefined)
+    const resolutions = await filesBelow(path.join(stateDir, 'resolutions'), '.json')
+    const records = await Promise.all(resolutions.map(async (file) => JSON.parse(await readFile(file, 'utf8'))))
+    assert.ok(records.some((record) => record.remoteCandidateSource === 'github'
+      && Array.isArray(record.remoteCandidates)
+      && record.remoteCandidates.some((item) => /dsh-(?:grok|xai|oauth)/iu.test(item.repository ?? ''))))
     return {
       scenario,
       marker: expectedMarker,
-      marketplaceDependency: profile.dependencies['dsh-find-plugin'],
-      hotLoad: 'same process',
-      search: 'dsh-plugin-grok discovered',
+      search: 'scoped GitHub topic search',
+      finderDependency: false,
     }
   }
 

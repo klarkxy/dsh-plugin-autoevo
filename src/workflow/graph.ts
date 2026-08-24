@@ -198,9 +198,6 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
   const current = await requireResolution(ctx)
   const resolution = await ctx.host.discoverRemote(current, ctx.exec)
   ctx.workflow.forceRemoteDiscovery = false
-  if (resolution.remoteCandidateSource === 'marketplace-setup') {
-    return { kind: 'next', node: 'ensure_market', resolution }
-  }
   const hasSatisfyingLocal = resolution.localCandidates.some((item) => item.fit === 'full' && item.surfaceMatch !== false)
   if (nextUnseenRemote(resolution, ctx.workflow) || hasSatisfyingLocal || !resolution.remoteDiscoveryComplete) {
     return { kind: 'next', node: 'await_discovery', resolution }

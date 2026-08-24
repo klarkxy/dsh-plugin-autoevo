@@ -1,28 +1,12 @@
-import { randomUUID } from 'node:crypto'
-import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
 import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
-import { validateGithubRepository } from '../github/index.js'
+import { searchGithubRepositories, validateGithubRepository } from '../github/index.js'
+import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries, marketplaceSearchQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
 
-export const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
 export const FIND_PLUGIN_REPOSITORY = 'awesome-dsh-plugin/dsh-find-plugin'
-
-
-
-interface FindPluginItem {
-  name?: unknown
-  url?: unknown
-  description?: unknown
-  stars?: unknown
-}
-
-interface FindPluginValue {
-  results?: unknown
-}
 
 export interface RemoteDiscoveryResult {
   candidates: RemotePluginCandidate[]
@@ -35,49 +19,6 @@ export interface RemoteDiscoveryResult {
 function boundedText(value: unknown, maxLength: number): string {
   if (typeof value !== 'string') return ''
   return value.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, maxLength)
-}
-
-function repositoryFromUrl(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.username || url.password || url.search || url.hash) return null
-    const segments = url.pathname.split('/').filter(Boolean)
-    if (segments.length !== 2) return null
-    return validateGithubRepository(`${segments[0]}/${segments[1]}`)
-  } catch {
-    return null
-  }
-}
-
-function normalizeFindPluginCandidates(value: unknown, limit: number): RemotePluginCandidate[] {
-  if (!value || typeof value !== 'object') return []
-  const results = (value as FindPluginValue).results
-  if (!Array.isArray(results)) return []
-  const candidates = new Map<string, RemotePluginCandidate>()
-  for (const raw of results) {
-    if (!raw || typeof raw !== 'object') continue
-    const item = raw as FindPluginItem
-    const repository = repositoryFromUrl(item.url)
-    if (!repository) continue
-    const stars = typeof item.stars === 'number' && Number.isFinite(item.stars)
-      ? Math.max(0, Math.floor(item.stars))
-      : 0
-    const candidate: RemotePluginCandidate = {
-      repository,
-      name: boundedText(item.name, 120) || repository.split('/')[1]!,
-      description: boundedText(item.description, 500),
-      stars,
-      // find_dsh_plugin 0.3.x does not expose pushed/updated metadata.
-      updatedAt: null,
-      topics: ['dsh-plugin'],
-    }
-    const prior = candidates.get(repository.toLowerCase())
-    if (!prior || candidate.stars > prior.stars) candidates.set(repository.toLowerCase(), candidate)
-  }
-  return [...candidates.values()]
-    .sort((left, right) => right.stars - left.stars || left.repository.localeCompare(right.repository))
-    .slice(0, limit)
 }
 
 export function annotateRemoteCandidate(
@@ -98,7 +39,7 @@ export function annotateRemoteCandidate(
     ...(matchedTerms.length > 0 ? { matchedTerms } : {}),
     matchReason: matchedTerms.length > 0
       ? `matched ${matchedTerms.join(', ')}`
-      : 'marketplace summary matched the request',
+      : 'GitHub summary matched the request',
   }
 }
 
@@ -117,108 +58,90 @@ function relevantRemoteCandidates(
     }))
     .filter(({ confidence }) => confidence >= 0.3)
     .sort((left, right) => right.confidence - left.confidence
+      || (right.candidate.updatedAt ?? '').localeCompare(left.candidate.updatedAt ?? '')
       || right.candidate.stars - left.candidate.stars
       || left.candidate.repository.localeCompare(right.candidate.repository))
     .map(({ candidate }) => annotateRemoteCandidate(requirement, candidate))
 }
 
-export function findPluginQuery(requirement: string): string {
-  return (marketplaceSearchQueries(requirement)[0] ?? capabilityQueries(requirement)[0] ?? requirement).slice(0, 256)
-}
-
-async function discoverWithFindPlugin(options: {
-  ctx: Context
-  config: RuntimeConfig
-  requirement: string
-  query: string
-  exec: ToolRunContext
-}): Promise<RemotePluginCandidate[]> {
-  // Finder results are often star-ranked. Pull a bounded wider pool so exact,
-  // low-star matches can outrank popular plugins with only one matching facet.
-  const poolLimit = Math.min(20, Math.max(10, options.config.maxCandidates * 3))
-  const result = await options.ctx.tools.execute({
-    callId: `${options.exec.callId}:autoevo-find:${randomUUID()}` as typeof options.exec.callId,
-    rootCallId: options.exec.rootCallId,
-    name: FIND_PLUGIN_TOOL,
-    arguments: {
-      query: options.query,
-      limit: poolLimit,
-      lang: /[\p{Script=Han}]/u.test(options.requirement) ? 'zh' : 'en',
-    },
-    ...(options.exec.agent ? { agent: options.exec.agent } : {}),
-    parent: options.exec.token,
-    signal: options.exec.signal,
-  })
-  if (result.isError) throw new Error(result.error.message)
-  return normalizeFindPluginCandidates(result.value, poolLimit)
+export function githubSearchPhrases(requirement: string, extra?: readonly string[]): string[] {
+  const planned = extra
+    ? [...new Set(extra
+        .map((query) => boundedText(query, 120))
+        .filter((query) => query.length >= 2))]
+        .slice(0, 5)
+    : marketplaceSearchQueries(requirement)
+  if (planned.length > 0) return planned
+  const fallback = capabilityQueries(requirement)[0] ?? boundedText(requirement, 120)
+  return fallback.length >= 2 ? [fallback] : []
 }
 
 /**
- * Prefer the ecosystem marketplace tool when it is visible in the current
- * Agent registry scope. If that tool is missing, offer to install it instead
- * of searching GitHub directly. An installed finder that returns nothing is
- * treated as "no reusable candidate", not a reason to run raw gh search.
+ * Host-owned GitHub discovery scoped to `topic:dsh-plugin`. Empty results mean
+ * there is no reusable plugin. An unavailable `gh` search is incomplete and
+ * must not grant create permission.
  */
 export async function discoverRemoteCandidates(options: {
-  ctx: Context
+  runner: CommandRunner
   config: RuntimeConfig
+  cwd: string
   requirement: string
-  exec: ToolRunContext
-  /** Optional model-proposed read-only queries. Host normalizes and bounds them. */
   queries?: readonly string[]
+  signal?: AbortSignal
 }): Promise<RemoteDiscoveryResult> {
-  const queries: string[] = []
+  const phrases = githubSearchPhrases(options.requirement, options.queries)
   const reasons: string[] = []
-  const finder = options.ctx.tools.get(FIND_PLUGIN_TOOL, options.exec.agent)
-  if (finder) {
-    const planned = options.queries
-      ? [...new Set(options.queries
-          .map((query) => boundedText(query, 120))
-          .filter((query) => query.length >= 2))]
-          .slice(0, 5)
-      : marketplaceSearchQueries(options.requirement)
-    queries.push(...(planned.length > 0 ? planned : [findPluginQuery(options.requirement)]))
-    const merged = new Map<string, RemotePluginCandidate>()
-    let succeeded = 0
-    let failed = 0
-    for (const query of queries) {
-      try {
-        const batch = await discoverWithFindPlugin({ ...options, query })
-        succeeded += 1
-        reasons.push(`find_dsh_plugin query ${JSON.stringify(query)} returned ${batch.length} summaries.`)
-        for (const candidate of batch) {
-          const key = candidate.repository.toLowerCase()
-          const prior = merged.get(key)
-          if (!prior || candidate.stars > prior.stars) merged.set(key, candidate)
+  if (phrases.length === 0) {
+    reasons.push('No scoped GitHub search phrase could be derived from the requirement.')
+    return { candidates: [], complete: true, queries: [], reasons }
+  }
+
+  const poolLimit = Math.min(20, Math.max(10, options.config.maxCandidates * 3))
+  const merged = new Map<string, RemotePluginCandidate>()
+  let succeeded = 0
+  let failed = 0
+  const queries: string[] = []
+  for (const phrase of phrases) {
+    try {
+      const batch = await searchGithubRepositories({
+        runner: options.runner,
+        config: options.config,
+        cwd: options.cwd,
+        query: phrase,
+        limit: poolLimit,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+      succeeded += 1
+      queries.push(phrase)
+      reasons.push(`GitHub topic search ${JSON.stringify(phrase)} returned ${batch.length} summaries.`)
+      for (const candidate of batch) {
+        if (candidate.repository.toLowerCase() === FIND_PLUGIN_REPOSITORY.toLowerCase()) continue
+        const key = candidate.repository.toLowerCase()
+        const prior = merged.get(key)
+        if (!prior || candidate.stars > prior.stars || (candidate.updatedAt ?? '') > (prior.updatedAt ?? '')) {
+          merged.set(key, candidate)
         }
-      } catch (error) {
-        failed += 1
-        reasons.push(`find_dsh_plugin query ${JSON.stringify(query)} was unavailable: ${boundedText(errorMessage(error), 300)}`)
       }
-    }
-    if (succeeded === 0) {
-      return { candidates: [], complete: false, queries, reasons }
-    }
-    const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
-      .slice(0, options.config.maxCandidates)
-    if (candidates.length === 0) {
-      reasons.push('find_dsh_plugin returned no valid reusable candidates; GitHub fallback was not used.')
-    }
-    const source = candidates.length > 0 ? 'dsh-find-plugin' as const : undefined
-    return {
-      candidates,
-      ...(source ? { source } : {}),
-      complete: failed === 0,
-      queries,
-      reasons,
+    } catch (error) {
+      failed += 1
+      queries.push(phrase)
+      reasons.push(`GitHub topic search ${JSON.stringify(phrase)} was unavailable: ${boundedText(errorMessage(error), 300)}`)
     }
   }
 
-  reasons.push('find_dsh_plugin is not installed in the current Agent scope. AutoEvo will install the DSH plugin marketplace with a one-time approval instead of searching GitHub.')
+  if (succeeded === 0) {
+    return { candidates: [], complete: false, queries, reasons }
+  }
+
+  const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
+    .slice(0, options.config.maxCandidates)
+  if (candidates.length === 0) {
+    reasons.push('Scoped GitHub topic search returned no valid reusable candidates.')
+  }
   return {
-    candidates: [],
-    source: 'marketplace-setup',
-    complete: true,
+    candidates,
+    ...(candidates.length > 0 ? { source: 'github' as const } : {}),
+    complete: failed === 0,
     queries,
     reasons,
   }
@@ -227,8 +150,7 @@ export async function discoverRemoteCandidates(options: {
 export const _testing = {
   annotateRemoteCandidate,
   boundedText,
-  normalizeFindPluginCandidates,
-  relevantFinderCandidates: relevantRemoteCandidates,
+  githubSearchPhrases,
   relevantRemoteCandidates,
-  repositoryFromUrl,
+  validateGithubRepository,
 }

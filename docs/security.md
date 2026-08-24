@@ -8,7 +8,7 @@
 
 GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据分类。系统提示只含本插件固定策略。审查输出是来源路径、派生风险代码、短事实说明、blob/content hash、fit 和兼容性结论。
 
-`find_dsh_plugin` 是可选的第三方发现后端，不是信任根。AutoEvo 只在它对当前 Agent registry scope 可见时经 DSH nested tool pipeline 调用；返回的 note、描述和安装命令都视为不可信数据。只有严格 GitHub 仓库 URL 会被归一化为候选标识，摘要长度受限，并且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点。市场未安装时，不降级到裸 `gh` 搜索，也不把市场仓库送进能力审查。AutoEvo 只对固定包名 `dsh-find-plugin` 申请一次性批准并用 `dsh plugin add --save-exact` 安装。市场已装后的空、畸形或明显无关结果视为没有可复用候选；执行失败则发现未完成，不能发放创建权限。保留下来的候选都不能跳过下述审查与批准门槛。
+远端发现是 Host 自己的 scoped GitHub 搜索，不是第三方市场插件。AutoEvo 通过 argv-only `gh api` 查询 `topic:dsh-plugin`，描述和其它仓库文本都视为不可信数据。只有严格 `owner/repository` 标识会被归一化为候选，摘要长度受限，并且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点。不安装 `dsh-find-plugin`，也不降级到无 topic 的全站搜索。空、畸形或明显无关结果视为没有可复用候选；`gh` 执行失败则发现未完成，不能发放创建权限。模型不得直接调用 `find_dsh_plugin` 或裸 `gh`。保留下来的候选都不能跳过下述审查与批准门槛。
 
 ## 2. 安装门槛
 

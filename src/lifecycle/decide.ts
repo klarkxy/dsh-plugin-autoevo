@@ -80,8 +80,8 @@ export function nextStepForAuthorization(
   const zh = prefersChinese(requirement)
   if (authorization.state === 'market_required') {
     return zh
-      ? '市场插件还在安装或需要重启。批准后等热加载；热加载失败就重启 DSH，再调用 capability_workflow。'
-      : 'The marketplace plugin is still installing or needs a restart. Approve if asked, then wait for hot-load. Restart DSH only if hot-load fails, then call capability_workflow again.'
+      ? '这份旧回执还停在市场安装状态。重新调用 capability_workflow，改走 Host 侧 GitHub topic 搜索。'
+      : 'This older receipt is still parked on marketplace setup. Call capability_workflow again so Host-owned GitHub topic search can run.'
   }
   if (authorization.state === 'selection_required') {
     return zh

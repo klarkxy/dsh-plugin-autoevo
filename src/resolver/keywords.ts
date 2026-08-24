@@ -179,8 +179,8 @@ export function capabilityQueries(requirement: string): string[] {
 const MARKETPLACE_QUERY_LIMIT = 5
 
 /**
- * Phrase queries for find_dsh_plugin. Keep word order from the requirement so
- * GitHub search can rank "grok build"; do not reduce the intent to one token.
+ * Phrase queries for scoped GitHub topic search. Keep word order from the
+ * requirement so GitHub can rank "grok build"; do not reduce the intent to one token.
  *
  * Slot allocation: one representative query per matched concept comes first,
  * then the requirement's own English phrases, then remaining concept queries.

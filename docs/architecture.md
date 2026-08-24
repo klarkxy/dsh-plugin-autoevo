@@ -14,7 +14,7 @@ User task
    ▼
 capability_workflow
    ├─ resolve_local
-   └─ discover_remote / ensure_market
+   └─ discover_remote
                   │
         AgentWorkflowViewV2: discovering
         Host pool ≤20; model refine ≤2 rounds / ≤5 supplemental queries
@@ -76,9 +76,9 @@ capability_workflow
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
-远端发现是一条分层链路。AutoEvo 先用 `ctx.tools.get('find_dsh_plugin', scope)` 判断当前 Agent 是否允许调用专用搜索插件；命中时通过 `ctx.tools.execute` 做 nested dispatch，因此沿用 DSH 的 restriction、guard、policy、取消信号与事件记录。AutoEvo 只从结果中接受严格的 `https://github.com/owner/repository` 和有界摘要，不采用其 `install` 命令或说明文本；finder 摘要的仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。市场工具未安装时，不跑裸 `gh` 搜索，也不把市场当成能力候选再审一遍；AutoEvo 在一次性批准后执行 `dsh plugin add --save-exact dsh-find-plugin`（`market_required`），等待 Cordis 热加载完成后就在当前解析中继续搜索；只有热加载失败才要求重启后重试。市场已装但没有相关命中，视为没有可复用插件；Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。无论候选来自哪一层，只有用户在对话里选中、并由 resume 记入回执的仓库才进入同一套 exact-commit 审查门禁。不要用 `ask_user` 在搜完后立刻弹窗。
+远端发现由 Host 直接调用 `gh api /search/repositories`，每条查询都强制带上 `topic:dsh-plugin`。结果只接受严格 `owner/repository` 标识和有界摘要；仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点，把需求关键词夹在一串其它 Agent/CLI 名称里的热门仓库视为一眼无关。不安装 `dsh-find-plugin`，也不回退到无 topic 的全站 GitHub 搜索。空结果视为没有可复用插件；Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。只有用户在对话里选中、并由 resume 记入回执的仓库才进入同一套 exact-commit 审查门禁。不要用 `ask_user` 在搜完后立刻弹窗。旧回执里的 `market_required` / `marketplace-setup` 只可读，不再新签发。
 
-发现结果先进入无 interrupt 的模型控制检查点。模型只看 Host 验证身份、派生匹配信号、标记为不可信数据的市场摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户要比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
+发现结果先进入无 interrupt 的模型控制检查点。模型只看 Host 验证身份、派生匹配信号、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户要比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
 
 ## 4. 数据与状态
 
@@ -153,8 +153,8 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，H
 - `src/creator-foundation.ts`：官方 Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
 - `src/managed-child.ts`：历史 Host-owned 子会话兼容接口；运行时不再创建子 Agent。
 - `src/source-manager.ts`：普通 Git 源、排他锁、hookless commit 与来源回执。
-- `src/discovery/remote.ts`：`find_dsh_plugin` 发现、候选归一化和来源记录；市场未安装时申请安装，不回退裸 `gh` 搜索。
-- `src/github/discovery.ts`：严格 `owner/repository` 标识校验。
+- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。
+- `src/github/discovery.ts`：严格 `owner/repository` 标识校验，以及 `topic:dsh-plugin` 的 `gh api` 搜索。
 - `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
 - `src/workflow/engine.ts`：固定图工作流引擎、interrupt/resume、checkpoint。
 - `src/lifecycle/install.ts`：批准、重验证、状态机和失败清理。

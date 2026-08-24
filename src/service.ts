@@ -48,7 +48,6 @@ import { sessionCwd } from './host-identity.js'
 import { prefersChinese } from './i18n.js'
 import { ISOLATED_VERIFICATION_PROFILE, PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
-import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
@@ -398,15 +397,8 @@ function waitingAuthorization(
   resolutionId: string,
   decision: ResolutionRecord['decision'],
   remoteDiscoveryComplete: boolean,
-  remoteCandidateSource?: ResolutionRecord['remoteCandidateSource'],
+  _remoteCandidateSource?: ResolutionRecord['remoteCandidateSource'],
 ): ResolutionAuthorization {
-  if (decision === 'inspect_remote' && remoteCandidateSource === 'marketplace-setup') {
-    return {
-      state: 'market_required',
-      resolutionId,
-      reason: 'The DSH plugin marketplace still needs to finish installing. That is search infrastructure, not permission to create a plugin.',
-    }
-  }
   if (!remoteDiscoveryComplete && decision !== 'use_local') {
     return {
       state: 'selection_required',
@@ -786,12 +778,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord> {
     const discovery = await discoverRemoteCandidates({
-      ctx: this.ctx,
+      runner: this.runner,
       config: this.config,
+      cwd: resolution.cwd,
       requirement: resolution.requirement,
-      exec: asToolExec(exec),
+      ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    const decision: ResolutionRecord['decision'] = discovery.source === 'marketplace-setup' || discovery.candidates.length > 0
+    const decision: ResolutionRecord['decision'] = discovery.candidates.length > 0
       ? 'inspect_remote'
       : resolution.decision === 'use_local'
         ? 'use_local'
@@ -825,11 +818,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
   ): Promise<ResolutionRecord> {
     const discovery = input.queries.length > 0
       ? await discoverRemoteCandidates({
-          ctx: this.ctx,
+          runner: this.runner,
           config: this.config,
+          cwd: resolution.cwd,
           requirement: resolution.requirement,
           queries: input.queries,
-          exec: asToolExec(exec),
+          ...(exec.signal ? { signal: exec.signal } : {}),
         })
       : { candidates: [], complete: false, queries: [], reasons: [] }
     let accumulated = { ...resolution, remoteCandidates: [...resolution.remoteCandidates] }
@@ -877,59 +871,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
     resolution: ResolutionRecord
     market: MarketplaceStepResult
   }> {
-    const profile = await this.currentProfileOwner()
-    const setup = await installMarketplace({
-      ctx: this.ctx,
-      config: this.config,
-      launcher: this.launcher,
-      profile,
-      cwd: resolution.cwd,
-      exec: asToolExec(exec),
-      requirement: resolution.requirement,
-    })
-    const reasons = [...resolution.reasons, setup.reason]
-    if (setup.status === 'loaded') {
-      const { remoteCandidateSource: _ignored, ...withoutSource } = resolution
-      void _ignored
-      const next = withNextStep({
-        ...withoutSource,
-        reasons,
-        remoteDiscoveryComplete: false,
-        authorization: waitingAuthorization(resolution.id, 'inspect_remote', false),
-      })
-      await this.store.put('resolutions', next)
-      return { resolution: next, market: { status: 'loaded', reason: setup.reason } }
+    const rediscovered = await this.discoverRemote(resolution, exec)
+    return {
+      resolution: rediscovered,
+      market: {
+        status: 'empty',
+        reason: prefersChinese(resolution.requirement)
+          ? '远端发现改走 Host 侧 GitHub topic 搜索，不再安装市场插件。'
+          : 'Remote discovery now uses Host-owned GitHub topic search and no longer installs a marketplace plugin.',
+      },
     }
-    if (setup.status === 'denied' || setup.status === 'failed' || setup.status === 'no_profile') {
-      const authorization: ResolutionAuthorization = {
-        state: 'market_required',
-        resolutionId: resolution.id,
-        reason: setup.reason,
-      }
-      const next = withNextStep({
-        ...resolution,
-        remoteCandidates: [],
-        remoteDiscoveryComplete: false,
-        authorization,
-        reasons,
-      })
-      await this.store.put('resolutions', next)
-      return { resolution: next, market: { status: 'blocked', reason: setup.reason } }
-    }
-    const authorization: ResolutionAuthorization = {
-      state: 'market_required',
-      resolutionId: resolution.id,
-      reason: prefersChinese(resolution.requirement)
-        ? '市场插件已写入 profile，但当前进程热加载失败。请重启 DSH，再调用 capability_workflow。'
-        : 'The marketplace plugin is a profile dependency, but this process could not hot-load it. Restart DSH, then call capability_workflow again.',
-    }
-    const next = withNextStep({
-      ...resolution,
-      authorization,
-      reasons,
-    })
-    await this.store.put('resolutions', next)
-    return { resolution: next, market: { status: 'restart', reason: setup.reason } }
   }
 
   async reviewGithub(
@@ -1652,7 +1603,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     if (resolution.authorization?.state === 'market_required') {
       throw new EvolutionError(
         'invalid_input',
-        'Finish marketplace setup and call capability_workflow again before recording a decision',
+        'This older receipt is still parked on marketplace setup. Call capability_workflow again before recording a decision',
       )
     }
     if (resume.optionId === 'use_this' && (!review || !isDirectlyUsableReview(review, workflow))) {

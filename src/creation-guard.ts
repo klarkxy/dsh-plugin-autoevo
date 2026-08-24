@@ -136,7 +136,7 @@ function denialReason(authorization?: ResolutionAuthorization): string {
   if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
   if (authorization.state === 'stopped') return `${prefix}: the user stopped. ${authorization.reason}`
   if (authorization.state === 'market_required') {
-    return `${prefix}: wait for marketplace setup and its hot-load attempt. Restart DSH only when the returned state explicitly says hot-load failed. Do not create a plugin. ${authorization.reason}`
+    return `${prefix}: this older receipt is still parked on marketplace setup. Call capability_workflow again so Host-owned GitHub topic search can run. Do not create a plugin. ${authorization.reason}`
   }
   if (authorization.state === 'create_authorized') {
     return `${prefix}: create-new continues as in-session work on a Host-managed git source; use repository files instead of cordis_define(kind:new).`

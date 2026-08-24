@@ -13,7 +13,7 @@ This packaged skill is compatibility guidance for the Capability Evolution prese
 
 Call `capability_workflow` with the user's original capability wording. Do not replace the requirement with an implementation proposal.
 
-During `discovering`, use only Host-returned candidates and budgets. Refine when evidence would change the shortlist, then seal 1–5 pool candidate IDs with `capability_workflow_present`. Do not invent a candidate or use a general GitHub search in place of `find_dsh_plugin`.
+During `discovering`, use only Host-returned candidates and budgets. Refine when evidence would change the shortlist, then seal 1–5 pool candidate IDs with `capability_workflow_present`. Do not invent a candidate or call `find_dsh_plugin` / raw `gh` yourself.
 
 Two fresh user messages are separate gates:
 
@@ -35,7 +35,7 @@ Read [the state reference](references/autoevo-state.md) when a workflow result i
 | `use_review` | Let the Host install the selected exact review. Do not build a replacement. |
 | `modify_review` | Wait for the Host-managed source and WorkOrder, then follow the managed-work loop below. |
 | `create_authorized` | Create only in the Host-managed source under the current WorkOrder. |
-| `market_required` | Ask for approval to install `dsh-find-plugin`. Continue after hot-load; restart only if the Host reports restart required. |
+| `market_required` | Older receipt parked on marketplace setup. Call `capability_workflow` again so Host-owned GitHub topic search can run. Do not create a plugin. |
 | `stopped` | Stop without installation or construction. |
 | `recovery_required` | Diagnose or recover only through the current sealed failure path. |
 

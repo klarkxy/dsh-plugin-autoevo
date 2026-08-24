@@ -36,7 +36,7 @@ dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5
 
 > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-AutoEvo 先检查当前 Agent 能看到的本地工具、技能和桥接能力；不足时再使用插件市场发现。若 `dsh-find-plugin` 尚未安装，AutoEvo 会单独请求一次 DSH approval 来安装它。这个 approval 只允许市场工具安装，不等于你选择了任何候选。
+AutoEvo 先检查当前 Agent 能看到的本地工具、技能和桥接能力；不足时再在 GitHub 上搜索带 `dsh-plugin` topic 的仓库。这次搜索不安装市场插件，也不等于你选择了任何候选。
 
 ### 3.2 第一道确认门：选候选去审查
 

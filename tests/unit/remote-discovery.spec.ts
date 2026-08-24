@@ -1,8 +1,7 @@
-import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import { discoverRemoteCandidates, FIND_PLUGIN_TOOL, _testing } from '../../src/discovery/remote.js'
+import { discoverRemoteCandidates, _testing } from '../../src/discovery/remote.js'
+import { scopedGithubQuery } from '../../src/github/index.js'
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh',
@@ -20,178 +19,149 @@ const config: RuntimeConfig = {
   evolutionPreset: true,
 }
 
-const exec = {
-  callId: 'call-resolve',
-  rootCallId: 'call-resolve',
-  token: Symbol('resolve'),
-  signal: new AbortController().signal,
-  agent: { session: { header: { cwd: 'C:/workspace' } } },
-} as unknown as ToolRunContext
+function searchItem(input: {
+  full_name: string
+  name?: string
+  description?: string
+  stars?: number
+  updated_at?: string
+  topics?: string[]
+  archived?: boolean
+  fork?: boolean
+  disabled?: boolean
+}) {
+  return {
+    full_name: input.full_name,
+    name: input.name ?? input.full_name.split('/')[1],
+    description: input.description ?? '',
+    stargazers_count: input.stars ?? 0,
+    updated_at: input.updated_at ?? '2026-08-01T00:00:00Z',
+    topics: input.topics ?? ['dsh-plugin'],
+    archived: input.archived ?? false,
+    fork: input.fork ?? false,
+    disabled: input.disabled ?? false,
+    default_branch: 'main',
+  }
+}
 
+function runnerFor(handler: (query: string) => unknown) {
+  return {
+    run: vi.fn(async (request: { argv: readonly string[] }) => {
+      const queryArg = request.argv.find((part) => part.startsWith('q='))
+      const query = queryArg?.slice(2) ?? ''
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: JSON.stringify(handler(query)),
+        stderr: '',
+      }
+    }),
+  }
+}
 
+describe('scoped GitHub discovery', () => {
+  it('forces every query onto topic:dsh-plugin', () => {
+    expect(scopedGithubQuery('codex')).toBe('codex topic:dsh-plugin')
+    expect(scopedGithubQuery('codex topic:dsh-plugin')).toBe('codex topic:dsh-plugin')
+    expect(scopedGithubQuery('')).toBe('topic:dsh-plugin')
+  })
 
-describe('remote discovery precedence', () => {
-  it('uses a current-scope find_dsh_plugin result without calling gh', async () => {
-    const execute = vi.fn(async (_request: { arguments: { query: string, lang: string } }) => ({
-      isError: false as const,
-      value: {
-        results: [{
-          name: 'scientific-calculator',
-          url: 'https://github.com/acme/scientific-calculator',
+  it('searches GitHub with scoped queries and keeps updated metadata', async () => {
+    const runner = runnerFor((query) => {
+      expect(query).toContain('topic:dsh-plugin')
+      if (query.includes('scientific') || query.includes('科学')) {
+        return { items: [searchItem({
+          full_name: 'acme/scientific-calculator',
           description: 'Scientific notation support',
           stars: 42,
-          install: 'untrusted and intentionally ignored',
-        }],
-        note: 'untrusted and intentionally ignored',
-      },
-      content: [],
-    }))
-    const get = vi.fn(() => ({ name: FIND_PLUGIN_TOOL }))
-    const ctx = { tools: { get, execute } } as unknown as Context
+          updated_at: '2026-07-01T00:00:00Z',
+          topics: ['dsh-plugin', 'calculator'],
+        })] }
+      }
+      return { items: [] }
+    })
 
-    const result = await discoverRemoteCandidates({ ctx, config, requirement: '科学计数法计算器', exec })
+    const result = await discoverRemoteCandidates({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      requirement: '科学计数法计算器',
+    })
 
-    expect(get).toHaveBeenCalledWith(FIND_PLUGIN_TOOL, exec.agent)
-    const queries = execute.mock.calls.map((call) => (call[0] as { arguments: { query: string, lang: string } }).arguments)
-    expect(queries.length).toBeGreaterThan(1)
-    expect(queries.some((item) => item.query === 'scientific notation' || item.query === '科学计数法')).toBe(true)
-    expect(queries.every((item) => item.lang === 'zh')).toBe(true)
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
-      name: FIND_PLUGIN_TOOL,
-      arguments: expect.objectContaining({ limit: 15 }),
-      parent: exec.token,
-      rootCallId: exec.rootCallId,
-    }))
-    expect(result.source).toBe('dsh-find-plugin')
+    expect(runner.run.mock.calls.length).toBeGreaterThan(1)
+    expect(runner.run.mock.calls.every((call) => call[0].argv.includes('/search/repositories'))).toBe(true)
+    expect(result.source).toBe('github')
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([expect.objectContaining({
       repository: 'acme/scientific-calculator',
       stars: 42,
-      updatedAt: null,
+      updatedAt: '2026-07-01T00:00:00Z',
+      topics: expect.arrayContaining(['dsh-plugin', 'calculator']),
     })])
   })
 
-  it('offers the plugin marketplace instead of searching GitHub when find_dsh_plugin is absent', async () => {
-    const ctx = { tools: { get: vi.fn(() => undefined) } } as unknown as Context
-
+  it('does not emit an unscoped dsh fallback query', async () => {
+    const runner = runnerFor(() => ({ items: [] }))
     const result = await discoverRemoteCandidates({
-      ctx,
+      runner,
       config,
+      cwd: 'C:/workspace',
       requirement: '我需要一个能在dsh里调用codex的能力。',
-      exec,
     })
-
+    const queries = runner.run.mock.calls.map((call) => {
+      const arg = call[0].argv.find((part) => part.startsWith('q='))
+      return arg?.slice(2) ?? ''
+    })
+    expect(queries.length).toBeGreaterThan(0)
+    expect(queries.every((query) => query.includes('topic:dsh-plugin'))).toBe(true)
+    expect(queries.some((query) => query === 'codex dsh' || query.endsWith(' dsh'))).toBe(false)
     expect(result.complete).toBe(true)
-    expect(result.source).toBe('marketplace-setup')
     expect(result.candidates).toEqual([])
-    expect(result.reasons.join(' ')).toContain('will install the DSH plugin marketplace')
   })
 
-  it('does not fall back to GitHub when the installed marketplace returns nothing relevant', async () => {
-    const execute = vi.fn(async (_request: { arguments: { query: string } }) => ({
-      isError: false as const,
-      value: { results: [{
-        name: 'open-design',
-        url: 'https://github.com/nexu-io/open-design',
-        description: 'Claude Code / Codex / Cursor / OpenCode design plugin',
-        stars: 99,
-      }] },
-      content: [],
-    }))
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute,
-      },
-    } as unknown as Context
-
+  it('treats an empty scoped search as no reusable candidate', async () => {
     const result = await discoverRemoteCandidates({
-      ctx,
+      runner: runnerFor(() => ({ items: [] })),
       config,
-      requirement: '我需要一个能在dsh里调用codex的能力。',
-      exec,
+      cwd: 'C:/workspace',
+      requirement: 'calculator',
     })
-
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
-    expect(result.reasons.join(' ')).toContain('GitHub fallback was not used')
-    expect(execute.mock.calls.some((call) => (call[0] as { arguments: { query: string } }).arguments.query.includes('codex'))).toBe(true)
+    expect(result.source).toBeUndefined()
   })
 
-  it('treats an empty marketplace result as no reusable candidate', async () => {
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => ({ isError: false as const, value: { results: [] }, content: [] })),
+  it('fails closed when every GitHub query errors', async () => {
+    const result = await discoverRemoteCandidates({
+      runner: {
+        run: async () => {
+          throw new Error('rate limited')
+        },
       },
-    } as unknown as Context
-
-    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
-
-    expect(result.complete).toBe(true)
-    expect(result.candidates).toEqual([])
-  })
-
-  it('fails closed when the installed marketplace errors', async () => {
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => ({ isError: true as const, error: { message: 'rate limited' }, content: [] })),
-      },
-    } as unknown as Context
-
-    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
-
+      config,
+      cwd: 'C:/workspace',
+      requirement: 'calculator',
+    })
     expect(result.complete).toBe(false)
     expect(result.candidates).toEqual([])
   })
 
-  it('rejects malformed finder URLs and ignores install commands', async () => {
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => ({
-          isError: false as const,
-          value: { results: [{ name: 'bad', url: 'https://evil.example/acme/plugin', stars: 999, install: 'rm -rf /' }] },
-          content: [],
-        })),
-      },
-    } as unknown as Context
-
-    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
-
-    expect(result.candidates.some((candidate) => candidate.repository === 'acme/plugin')).toBe(false)
-  })
-
-  it('drops finder summaries that have no requirement anchor', async () => {
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => ({
-          isError: false as const,
-          value: { results: [{
-            name: 'open-design',
-            url: 'https://github.com/acme/open-design',
-            description: 'A general design system repository',
-            stars: 99,
-          }] },
-          content: [],
-        })),
-      },
-    } as unknown as Context
-
+  it('drops archived, forked, disabled, and finder infrastructure hits', async () => {
     const result = await discoverRemoteCandidates({
-      ctx,
+      runner: runnerFor(() => ({ items: [
+        searchItem({ full_name: 'acme/old', description: 'calculator', archived: true }),
+        searchItem({ full_name: 'acme/forked', description: 'calculator', fork: true }),
+        searchItem({ full_name: 'awesome-dsh-plugin/dsh-find-plugin', description: 'calculator' }),
+        searchItem({ full_name: 'acme/calc', description: 'scientific calculator', stars: 3 }),
+      ] })),
       config,
-      requirement: 'frobulate-qzvm Q7V9M2X4 R3K8N5P1',
-      exec,
+      cwd: 'C:/workspace',
+      requirement: 'calculator',
     })
-
-    expect(result.complete).toBe(true)
-    expect(result.candidates).toEqual([])
+    expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calc'])
   })
 
-  it('keeps finder candidates with requirement evidence in topics or package name', () => {
+  it('keeps candidates with requirement evidence in topics or package name', () => {
     const candidate = {
       repository: 'acme/plugin-bundle',
       name: 'plugin-bundle',
@@ -201,7 +171,7 @@ describe('remote discovery precedence', () => {
       topics: ['dsh-plugin', 'frobulate'],
       packageName: 'dsh-plugin-frobulate',
     }
-    expect(_testing.relevantFinderCandidates('frobulate', [candidate])).toEqual([
+    expect(_testing.relevantRemoteCandidates('frobulate', [candidate])).toEqual([
       expect.objectContaining({
         ...candidate,
         matchedTerms: expect.arrayContaining(['frobulate']),
@@ -216,7 +186,7 @@ describe('remote discovery precedence', () => {
       name: 'dsh-conv-export',
       description: 'Export the current DSH conversation as a long PNG image.',
       stars: 2,
-      updatedAt: null,
+      updatedAt: '2026-08-02T00:00:00Z',
       topics: ['dsh-plugin', 'conversation-export'],
     }
     const popularButWrong = {
@@ -224,7 +194,7 @@ describe('remote discovery precedence', () => {
       name: 'dsh-vision-toolkit',
       description: 'Long screenshot OCR and UI restoration toolkit.',
       stars: 680,
-      updatedAt: null,
+      updatedAt: '2026-08-03T00:00:00Z',
       topics: ['screenshot', 'ocr'],
     }
 
@@ -236,87 +206,56 @@ describe('remote discovery precedence', () => {
     ])
   })
 
-  it('runs every marketplace phrase and keeps GitHub hits that match the requirement', async () => {
-    const execute = vi.fn(async (request: { arguments: { query: string } }) => {
-      if (request.arguments.query.includes('grok build')) {
-        return {
-          isError: false as const,
-          value: { results: [{
-            name: 'dsh-plugin-grok',
-            url: 'https://github.com/toolazytoname/dsh-plugin-grok',
-            description: 'Call the local Grok Build CLI from DSH',
-            stars: 4,
-          }] },
-          content: [],
-        }
+  it('runs every phrase and keeps GitHub hits that match the requirement', async () => {
+    const runner = runnerFor((query) => {
+      if (query.includes('grok build')) {
+        return { items: [searchItem({
+          full_name: 'toolazytoname/dsh-plugin-grok',
+          description: 'Call the local Grok Build CLI from DSH',
+          stars: 4,
+        })] }
       }
-      return {
-        isError: false as const,
-        value: { results: [{
-          name: 'EchoBird',
-          url: 'https://github.com/edison7009/EchoBird',
-          description: 'Claude Code, Codex CLI, Grok Build, DeepSeek Harness, Kimi Code',
-          stars: 3041,
-        }] },
-        content: [],
-      }
+      return { items: [searchItem({
+        full_name: 'edison7009/EchoBird',
+        description: 'Claude Code, Codex CLI, Grok Build, DeepSeek Harness, Kimi Code',
+        stars: 3041,
+      })] }
     })
-    const ctx = {
-      tools: { get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })), execute },
-    } as unknown as Context
 
     const result = await discoverRemoteCandidates({
-      ctx,
+      runner,
       config,
+      cwd: 'C:/workspace',
       requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
-      exec,
     })
 
-    expect(execute.mock.calls.length).toBeGreaterThan(1)
-    expect(result.source).toBe('dsh-find-plugin')
+    expect(runner.run.mock.calls.length).toBeGreaterThan(1)
+    expect(result.source).toBe('github')
     expect(result.candidates).toEqual([expect.objectContaining({
       repository: 'toolazytoname/dsh-plugin-grok',
     })])
   })
 
-  it('fails closed when the installed marketplace throws', async () => {
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => { throw new Error('offline') }),
-      },
-    } as unknown as Context
-
-    const result = await discoverRemoteCandidates({ ctx, config, requirement: 'calculator', exec })
-
-    expect(result.candidates).toEqual([])
-    expect(result.complete).toBe(false)
-    expect(result.reasons.join(' ')).toContain('unavailable')
-  })
-
-  it('keeps discovery incomplete when only some marketplace queries succeed', async () => {
+  it('keeps discovery incomplete when only some queries succeed', async () => {
     let calls = 0
-    const ctx = {
-      tools: {
-        get: vi.fn(() => ({ name: FIND_PLUGIN_TOOL })),
-        execute: vi.fn(async () => {
-          calls += 1
-          if (calls === 1) return { isError: false as const, value: { results: [] }, content: [] }
-          throw new Error('transient marketplace failure')
-        }),
-      },
-    } as unknown as Context
-
     const result = await discoverRemoteCandidates({
-      ctx,
+      runner: {
+        run: async () => {
+          calls += 1
+          if (calls === 1) {
+            return { exitCode: 0, signal: null, stdout: JSON.stringify({ items: [] }), stderr: '' }
+          }
+          throw new Error('transient github failure')
+        },
+      },
       config,
+      cwd: 'C:/workspace',
       requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
-      exec,
     })
 
     expect(calls).toBeGreaterThan(1)
     expect(result.candidates).toEqual([])
     expect(result.complete).toBe(false)
-    expect(result.reasons.join(' ')).toContain('transient marketplace failure')
+    expect(result.reasons.join(' ')).toContain('transient github failure')
   })
 })

@@ -34,7 +34,7 @@ Choose **Capability Evolution** in a new or blank DSH session and describe the g
 
 > I need a DSH plugin that can calculate scientific notation. Search for an existing one first.
 
-AutoEvo checks tools, skills, and bridges visible to the current Agent before marketplace discovery. If `dsh-find-plugin` is missing, AutoEvo requests one-time DSH approval to install it. That approval authorizes the finder installation only; it does not select a capability candidate.
+AutoEvo checks tools, skills, and bridges visible to the current Agent before searching GitHub for repositories tagged `dsh-plugin`. That search does not install a marketplace plugin and does not select a capability candidate.
 
 ### 3.2 Gate 1: choose what to review
 

@@ -270,7 +270,7 @@ function resolution(schemaVersion: 1 | 2 = 2): ResolutionRecord {
       { repository: 'acme/one', name: 'one', description: '', stars: 1, updatedAt: null, topics: [] },
       { repository: 'acme/two', name: 'two', description: '', stars: 1, updatedAt: null, topics: [] },
     ],
-    remoteCandidateSource: 'dsh-find-plugin',
+    remoteCandidateSource: 'github',
     remoteDiscoveryComplete: true,
     ...(schemaVersion === 2
       ? { authorization: { state: 'selection_required' as const, resolutionId: id, reason: 'review candidates' } }
@@ -343,7 +343,8 @@ describe('resolution authorization state', () => {
     const id = resolution().id
     expect(_testing.waitingAuthorization(id, 'use_local', true).state).toBe('selection_required')
     expect(_testing.waitingAuthorization(id, 'inspect_remote', true).state).toBe('selection_required')
-    expect(_testing.waitingAuthorization(id, 'inspect_remote', true, 'marketplace-setup').state).toBe('market_required')
+    expect(_testing.waitingAuthorization(id, 'inspect_remote', true, 'marketplace-setup').state).toBe('selection_required')
+    expect(_testing.waitingAuthorization(id, 'inspect_remote', true, 'github').state).toBe('selection_required')
     expect(_testing.waitingAuthorization(id, 'none', true).state).toBe('selection_required')
     expect(_testing.waitingAuthorization(id, 'none', false).state).toBe('selection_required')
   })

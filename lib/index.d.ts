@@ -58,7 +58,7 @@ type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
 type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source';
-type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
+type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';

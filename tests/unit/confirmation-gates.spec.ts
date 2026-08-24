@@ -178,15 +178,15 @@ function localCtx(stateDir: string): Context {
   } as unknown as Context
 }
 
-function marketplaceCtx(results: Array<{ name: string, url: string, description: string, stars?: number }>, stateDir: string): Context {
+function hostCtx(stateDir: string): Context {
   const sandbox = capableSandbox(stateDir)
   const baseUrl = testProfileBase(stateDir)
   return {
     baseUrl,
     tools: {
       schemas: () => [],
-      get: (name: string) => name === 'find_dsh_plugin' ? { name } : undefined,
-      execute: async () => ({ isError: false, value: { results }, content: [] }),
+      get: () => undefined,
+      execute: async () => ({ isError: false, value: { results: [] }, content: [] }),
       register: () => undefined,
     },
     systemPrompt: {
@@ -206,11 +206,48 @@ function testProfileBase(stateDir: string): string {
   return baseUrl
 }
 
+function searchItem(result: { name: string, url: string, description: string, stars?: number }) {
+  return {
+    full_name: result.url.replace('https://github.com/', ''),
+    name: result.name,
+    description: result.description,
+    stargazers_count: result.stars ?? 0,
+    updated_at: '2026-01-01T00:00:00Z',
+    topics: ['dsh-plugin'],
+    default_branch: 'main',
+  }
+}
+
+function discoveryRunner(
+  results: Array<{ name: string, url: string, description: string, stars?: number }>,
+  files: Record<string, string> = {},
+) {
+  const review = Object.keys(files).length > 0
+    ? ghRunner(files)
+    : {
+      async run(request: { argv: readonly string[] }) {
+        const joined = request.argv.join(' ')
+        if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
+        return commandResult()
+      },
+    }
+  return {
+    async run(request: { argv: readonly string[] }) {
+      const joined = request.argv.join(' ')
+      if (joined.includes('/search/repositories')) {
+        return commandResult(JSON.stringify({ items: results.map(searchItem) }))
+      }
+      return review.run(request)
+    },
+  }
+}
+
 function ghRunner(files: Record<string, string>) {
   return {
     async run(request: { argv: readonly string[] }) {
       const joined = request.argv.join(' ')
       if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
+      if (joined.includes('/search/repositories')) return commandResult(JSON.stringify({ items: [] }))
       if (joined.includes('/commits/')) {
         return commandResult(JSON.stringify({ sha: 'a'.repeat(40), commit: { committer: { date: new Date().toISOString() } } }))
       }
@@ -292,9 +329,9 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([], root),
+      hostCtx(root),
       config(root),
-      { run: async () => commandResult('0.1.0-rc.6\n') },
+      discoveryRunner([]),
       new StateStore(root),
       guard,
     )
@@ -322,9 +359,9 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([], root),
+      hostCtx(root),
       config(root),
-      { run: async () => commandResult('0.1.0-rc.6\n') },
+      discoveryRunner([]),
       new StateStore(root),
       guard,
     )
@@ -340,14 +377,14 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([{
+      hostCtx(root),
+      config(root),
+      discoveryRunner([{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], root),
-      config(root),
-      ghRunner(grokBundle),
+      }], grokBundle),
       new StateStore(root),
       guard,
     )
@@ -378,14 +415,14 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([{
+      hostCtx(root),
+      config(root),
+      discoveryRunner([{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], root),
-      config(root),
-      ghRunner(grokBundle),
+      }], grokBundle),
       new StateStore(root),
       guard,
     )
@@ -418,7 +455,9 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([
+      hostCtx(root),
+      config(root),
+      discoveryRunner([
         {
           name: 'dsh-xai',
           url: 'https://github.com/MirDie/dsh-xai',
@@ -437,9 +476,7 @@ describe('conversational confirmation gates', () => {
           description: 'third grok candidate',
           stars: 1,
         },
-      ], root),
-      config(root),
-      ghRunner(grokBundle),
+      ], grokBundle),
       new StateStore(root),
       guard,
     )
@@ -463,14 +500,14 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([{
+      hostCtx(root),
+      config(root),
+      discoveryRunner([{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], root),
-      config(root),
-      ghRunner(grokHighRisk),
+      }], grokHighRisk),
       new StateStore(root),
       guard,
       undefined,
@@ -513,14 +550,14 @@ describe('conversational confirmation gates', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([{
+      hostCtx(root),
+      config(root),
+      discoveryRunner([{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], root),
-      config(root),
-      ghRunner(grokHighRisk),
+      }], grokHighRisk),
       store,
       guard,
       undefined,
@@ -557,9 +594,9 @@ describe('conversational confirmation gates', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([], root),
+      hostCtx(root),
       config(root),
-      withGitSupport({ run: async () => commandResult('0.1.0-rc.6\n') }),
+      withGitSupport(discoveryRunner([])),
       store,
       guard,
     )
@@ -623,14 +660,14 @@ describe('conversational confirmation gates', () => {
     const useGuard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
     const useService = new CapabilityEvolutionService(
-      marketplaceCtx([{
+      hostCtx(root),
+      config(root),
+      discoveryRunner([{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], root),
-      config(root),
-      ghRunner(grokBundle),
+      }], grokBundle),
       store,
       useGuard,
     )
@@ -669,13 +706,13 @@ describe('conversational confirmation gates', () => {
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([
+      hostCtx(root),
+      config(root),
+      discoveryRunner([
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-tui', url: 'https://github.com/acme/dsh-grok-tui', description: 'grok tui', stars: 2 },
         { name: 'dsh-grok-screenshot', url: 'https://github.com/paicat1/dsh-grok-screenshot', description: 'grok screenshot', stars: 1 },
-      ], root),
-      config(root),
-      ghRunner(grokBundle),
+      ], grokBundle),
       store,
       guard,
     )
@@ -716,12 +753,12 @@ describe('conversational confirmation gates', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([
+      hostCtx(root),
+      config(root),
+      discoveryRunner([
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
-      ], root),
-      config(root),
-      ghRunner(grokBundle),
+      ], grokBundle),
       store,
       guard,
     )
@@ -776,13 +813,13 @@ describe('conversational confirmation gates', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true })
     const store = new StateStore(root)
     const service = new CapabilityEvolutionService(
-      marketplaceCtx([
+      hostCtx(root),
+      config(root),
+      discoveryRunner([
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
         { name: 'dsh-grok-third', url: 'https://github.com/acme/dsh-grok-third', description: 'Third Grok integration', stars: 1 },
-      ], root),
-      config(root),
-      ghRunner(grokHighRisk),
+      ], grokHighRisk),
       store,
       guard,
       undefined,

@@ -24,7 +24,7 @@ function resolution(): ResolutionRecord {
       matchReason: 'matched grok, xai',
     }],
     remoteDiscoveryComplete: true,
-    remoteCandidateSource: 'dsh-find-plugin',
+    remoteCandidateSource: 'github',
     authorization: {
       state: 'selection_required',
       resolutionId: 'resolution_autonomy',

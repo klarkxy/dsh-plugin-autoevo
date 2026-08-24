@@ -10,7 +10,7 @@
 
 - Node.js `>=22.19.0 || >=24.0.0`；CI 使用 Node 24。
 - pnpm；CI 当前使用 `10.29.2`。
-- Git；远端审查和 live marketplace E2E 还需要可用的 GitHub CLI。
+- Git；远端审查和 live GitHub discovery E2E 还需要可用的 GitHub CLI。
 - Windows / PowerShell 是主要实测环境，但核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
 初始化并运行日常验收：
@@ -57,7 +57,7 @@ src/
 ├─ contracts.ts                # Policy V8 公共合同、review/install receipts
 ├─ workflow/                   # 图引擎、生命周期映射、Agent 展示协议
 ├─ resolver/                   # 本地/已装来源、intent、lineage 与 profile ownership
-├─ discovery/                  # find_dsh_plugin 发现与归一化
+├─ discovery/                  # scoped GitHub 发现与归一化
 ├─ review/                     # exact snapshot 与机械审查事实
 ├─ lifecycle/                  # install/snapshot/launcher/remove/recovery
 ├─ source-manager.ts           # 托管 Git 源、锁、commit 与 source receipt
@@ -128,7 +128,7 @@ Host verification / recovery / receipt
 
 ## 6. Resolver 与来源 lineage
 
-解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 `find_dsh_plugin`。远端 finder 返回的文本始终是不可信数据；Host 只接受严格 GitHub 仓库标识和有界摘要。
+解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 Host 侧 `topic:dsh-plugin` GitHub 搜索。远端摘要始终是不可信数据；Host 只接受严格 GitHub 仓库标识和有界摘要。
 
 已安装来源必须由 live profile ownership 解析，不能仅凭本地 inventory 推断。replacement 只适用于：
 
