@@ -1,34 +1,22 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import type { CommandRequest, CommandRunner } from '../../src/process/runner.js'
 import { fixtureDigestFor } from '../../src/host-verification-driver.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
-  return {
+  return testRuntimeConfig(root, {
     dshHome: root,
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
     forwardedCredentialEnv: ['OPENAI_API_KEY', 'XAI_API_KEY'],
-    verificationPatchPaths: [],
     evolutionPreset: true,
-  }
+  })
 }
 
 describe('Host-owned launcher verification', () => {

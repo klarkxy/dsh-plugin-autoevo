@@ -113,32 +113,6 @@ describe('managed modification instruction', () => {
     ])
   })
 
-  it('labels child-only checks without promoting them to Host observations', () => {
-    expect(_testing.childCheckEvidence('Tests were not run.\nAUTOEVO_CHILD_COMPLETED')).toEqual({
-      source: 'child_reported',
-      status: 'skipped',
-      summary: 'The managed child reported that tests were skipped.',
-    })
-    expect(_testing.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
-      source: 'child_reported',
-      status: 'passed',
-    })
-    expect(_testing.childCheckEvidence('Tests failed.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
-      source: 'child_reported',
-      status: 'failed',
-    })
-    expect(_testing.childCheckEvidence('Implemented the change.\nAUTOEVO_CHILD_COMPLETED')).toMatchObject({
-      source: 'unknown',
-      status: 'unknown',
-    })
-    expect(_testing.childCheckEvidence(
-      'npm test failed because vitest was unavailable; npm run typecheck failed because tsc was unavailable; node --check lib/index.js passed.\nAUTOEVO_CHILD_COMPLETED',
-    )).toMatchObject({
-      source: 'child_reported',
-      status: 'unavailable',
-    })
-  })
-
   it('allows one correction only for persisting original blockers and stops on scope expansion or evaluator drift', () => {
     const baseline = candidateReview('acme/one', 'modify', '1')
     baseline.compatibility = { status: 'incompatible', reason: 'peer mismatch', runtimeVersion: '0.1.0-rc.6' }

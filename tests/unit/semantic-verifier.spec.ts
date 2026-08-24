@@ -128,33 +128,46 @@ describe('semantic verifier gate', () => {
     expect(verdict.decision).toBe('uncertain')
   })
 
-  it('returns uncertain after timeout or cancel and rejects a late submit', () => {
-    const timed = openGate()
-    const timeoutVerdict = timed.closeTimedOut('verifier-session')
-    expect(timeoutVerdict.decision).toBe('uncertain')
-    expect(timed.request.status).toBe('timed_out')
-    expect(() => timed.submit({
-      verdict: 'verified',
-      evidence: ['late after timeout'],
-      conditions: [],
-    }, 'verifier-session')).toThrow(/no longer accepting submissions/i)
-
-    const cancelled = openGate()
-    expect(cancelled.closeCancelled('verifier-session').decision).toBe('uncertain')
-    expect(cancelled.request.status).toBe('cancelled')
-    expect(() => cancelled.submit({
-      verdict: 'verified',
-      evidence: ['late after cancel'],
-      conditions: [],
-    }, 'verifier-session')).toThrow(/no longer accepting submissions/i)
-
-    const disposed = openGate()
-    disposed.dispose()
-    expect(() => disposed.submit({
-      verdict: 'verified',
-      evidence: ['after dispose'],
-      conditions: [],
-    }, 'verifier-session')).toThrow(/handle was disposed/i)
+  it.each<{
+    scenario: string
+    close: (gate: VerifierSubmissionGate) => { decision: string }
+    status?: string
+    lateSubmitError?: RegExp
+  }>([
+    {
+      scenario: 'timeout',
+      close: (gate) => gate.closeTimedOut('verifier-session'),
+      status: 'timed_out',
+      lateSubmitError: /no longer accepting submissions/i,
+    },
+    {
+      scenario: 'cancel',
+      close: (gate) => gate.closeCancelled('verifier-session'),
+      status: 'cancelled',
+      lateSubmitError: /no longer accepting submissions/i,
+    },
+    {
+      scenario: 'dispose',
+      close: (gate) => {
+        gate.dispose()
+        return { decision: 'disposed' }
+      },
+      lateSubmitError: /handle was disposed/i,
+    },
+  ])('returns uncertain after $scenario and rejects a late submit', ({ close, status, lateSubmitError }) => {
+    const gate = openGate()
+    const verdict = close(gate)
+    if (status !== undefined) {
+      expect(verdict.decision).toBe('uncertain')
+      expect(gate.request.status).toBe(status)
+    }
+    if (lateSubmitError !== undefined) {
+      expect(() => gate.submit({
+        verdict: 'verified',
+        evidence: ['late'],
+        conditions: [],
+      }, 'verifier-session')).toThrow(lateSubmitError)
+    }
   })
 
   it('redacts source paths from the verifier receipt and binds the mechanical digest', () => {

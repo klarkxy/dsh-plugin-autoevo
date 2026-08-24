@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
-import type { WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
+import type { DiscoveryBudget, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
 function resolution(): ResolutionRecord {
   return {
@@ -62,18 +62,52 @@ const candidate = {
   digest: 'a'.repeat(64),
 }
 
+const discoveryBudget: DiscoveryBudget = {
+  refinementRoundsUsed: 0,
+  refinementQueriesUsed: [],
+  explicitRepositories: [],
+  maxRefinementRounds: 2,
+  maxRefinementQueries: 5,
+  maxCandidates: 20,
+}
+
+function installationRecord(overrides: Partial<InstallationRecord> = {}): InstallationRecord {
+  return {
+    schemaVersion: 1,
+    id: `installation_${'a'.repeat(24)}`,
+    createdAt: '2026-08-21T00:00:00.000Z',
+    reviewId: `review_${'e'.repeat(24)}`,
+    targetProfile: 'web',
+    retention: 'persistent',
+    dshHome: 'C:/Users/test/.dsh',
+    packageName: 'dsh-plugin-demo',
+    installSpec: 'file:demo.tgz',
+    installState: 'installed',
+    installOutcome: 'awaiting_user_test',
+    installed: true,
+    loaded: true,
+    verified: false,
+    restartRequired: false,
+    removed: false,
+    verification: {
+      attempted: true,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: false,
+      reason: 'bundle activated',
+    },
+    ...overrides,
+  }
+}
+
 describe('AgentWorkflowViewV2', () => {
   it('exposes an autonomous discovery pool without a user decision interrupt', () => {
     const workflow = baseWorkflow('await_discovery')
     workflow.discoveryPool = [candidate]
-    workflow.discoveryBudget = {
-      refinementRoundsUsed: 0,
-      refinementQueriesUsed: [],
-      explicitRepositories: [],
-      maxRefinementRounds: 2,
-      maxRefinementQueries: 5,
-      maxCandidates: 20,
-    }
+    workflow.discoveryBudget = { ...discoveryBudget }
     const card = compactAgentView({ workflow, resolution: resolution(), lifecycleState: 'searched' })
     expect(card).toMatchObject({
       schema_version: 2,
@@ -106,14 +140,7 @@ describe('AgentWorkflowViewV2', () => {
     const workflow = baseWorkflow('await_discovery')
     workflow.requirement = 'Use a Grok subscription in DSH'
     workflow.discoveryPool = [candidate]
-    workflow.discoveryBudget = {
-      refinementRoundsUsed: 0,
-      refinementQueriesUsed: [],
-      explicitRepositories: [],
-      maxRefinementRounds: 2,
-      maxRefinementQueries: 5,
-      maxCandidates: 20,
-    }
+    workflow.discoveryBudget = { ...discoveryBudget }
     const card = compactAgentView({
       workflow,
       resolution: { ...resolution(), requirement: workflow.requirement },
@@ -150,14 +177,7 @@ describe('AgentWorkflowViewV2', () => {
       digest: 'f'.repeat(64),
     }
     workflow.discoveryPool = [local]
-    workflow.discoveryBudget = {
-      refinementRoundsUsed: 0,
-      refinementQueriesUsed: [],
-      explicitRepositories: [],
-      maxRefinementRounds: 2,
-      maxRefinementQueries: 5,
-      maxCandidates: 20,
-    }
+    workflow.discoveryBudget = { ...discoveryBudget }
     const localResolution = {
       ...resolution(),
       decision: 'use_local' as const,
@@ -508,170 +528,122 @@ describe('AgentWorkflowViewV2', () => {
     expect(parked.correction?.kind).toBe('waiting_for_user_turn')
   })
 
-  it('treats awaiting_user_test as a completed lifecycle rather than recovery', () => {
-    const workflow = baseWorkflow('awaiting_user_test')
-    workflow.status = 'completed'
-    const installation: InstallationRecord = {
-      schemaVersion: 1,
-      id: `installation_${'a'.repeat(24)}`,
-      createdAt: '2026-08-21T00:00:00.000Z',
-      reviewId: `review_${'e'.repeat(24)}`,
-      targetProfile: 'web',
-      retention: 'persistent',
-      dshHome: 'C:/Users/test/.dsh',
-      packageName: 'dsh-plugin-demo',
-      installSpec: 'file:demo.tgz',
-      installState: 'installed',
-      installOutcome: 'awaiting_user_test',
-      installed: true,
-      loaded: true,
-      verified: false,
-      restartRequired: false,
-      removed: false,
-      verification: {
-        attempted: true,
-        expectedTools: [],
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: true,
-        reason: 'bundle activated; user test required',
+  it.each([
+    {
+      title: 'treats awaiting_user_test as a completed lifecycle rather than recovery',
+      cursor: 'awaiting_user_test' as WorkflowRecord['cursor'],
+      lifecycleState: 'awaiting_user_test' as WorkflowView['lifecycleState'],
+      installation: installationRecord({
+        installOutcome: 'awaiting_user_test',
+        verification: {
+          attempted: true,
+          expectedTools: [],
+          calledTools: [],
+          resultTools: [],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: true,
+          reason: 'bundle activated; user test required',
+        },
+      }),
+      notState: 'recovery_required' as string | null,
+      unexpectedLifecycle: null as string | null,
+      expectCorrectionUndefined: true,
+      expectNoResume: true,
+      recoverMeaning: /用户明确要求/ as RegExp | null,
+      installationMatch: {
+        outcome: 'awaiting_user_test',
+        installed: true,
+        verified: false,
+        may_claim_verified: false,
+        user_test_required: true,
+        cleanup_and_restart_on_explicit_request: true,
       },
-    }
+      installationAbsent: [{ activation: 'passed' }],
+    },
+    {
+      title: 'treats activated as loaded but not functionally verified, with optional cleanup',
+      cursor: 'activated' as WorkflowRecord['cursor'],
+      lifecycleState: 'activated' as WorkflowView['lifecycleState'],
+      installation: installationRecord({ installOutcome: 'activated' }),
+      notState: null as string | null,
+      unexpectedLifecycle: 'verified' as string | null,
+      expectCorrectionUndefined: true,
+      expectNoResume: false,
+      recoverMeaning: null as RegExp | null,
+      installationMatch: {
+        outcome: 'activated',
+        installed: true,
+        verified: false,
+        may_claim_verified: false,
+        activation: 'passed',
+        cleanup_and_restart_on_explicit_request: true,
+      },
+      installationAbsent: [{ user_test_required: true }],
+    },
+    {
+      title: 'lets verified claim function verification without impersonating activation or user test',
+      cursor: 'installed' as WorkflowRecord['cursor'],
+      lifecycleState: 'verified' as WorkflowView['lifecycleState'],
+      installation: installationRecord({
+        retention: 'temporary',
+        installOutcome: 'verified',
+        verified: true,
+        verification: {
+          attempted: true,
+          expectedTools: ['calculator'],
+          calledTools: ['calculator'],
+          resultTools: ['calculator'],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: true,
+          reason: 'verified',
+        },
+        contributionAdvice: {
+          eligible: true,
+          reason: 'Potentially eligible to suggest after the user task is complete. Inspect the diff for user-specific data and obtain explicit approval before any fork, push, or upstream PR.',
+        },
+      }),
+      notState: null as string | null,
+      unexpectedLifecycle: null as string | null,
+      expectCorrectionUndefined: false,
+      expectNoResume: false,
+      recoverMeaning: null as RegExp | null,
+      installationMatch: {
+        outcome: 'verified',
+        installed: true,
+        verified: true,
+        may_claim_verified: true,
+        cleanup_and_restart_on_explicit_request: true,
+        contribution: { eligible: true },
+      },
+      installationAbsent: [{ activation: 'passed' }, { user_test_required: true }],
+    },
+  ])('$title', (testCase) => {
+    const workflow = baseWorkflow(testCase.cursor)
+    workflow.status = 'completed'
     const card = compactAgentView({
       workflow,
       resolution: resolution(),
-      installation,
-      lifecycleState: 'awaiting_user_test',
+      installation: testCase.installation,
+      lifecycleState: testCase.lifecycleState,
     })
     expect(card.state).toBe('completed')
-    expect(card.state).not.toBe('recovery_required')
-    expect(card.correction).toBeUndefined()
+    if (testCase.notState) expect(card.state).not.toBe(testCase.notState)
+    if (testCase.expectCorrectionUndefined) expect(card.correction).toBeUndefined()
     expect(card.available_tools).toContain('capability_workflow_recover')
-    expect(card.available_tools).not.toContain('capability_workflow_resume')
-    expect(card.allowed_actions).toEqual([expect.objectContaining({
-      action: 'capability_workflow_recover',
-      user_facing_meaning: expect.stringMatching(/用户明确要求/),
-    })])
-    expect(card.facts.lifecycle).toBe('awaiting_user_test')
-    expect(card.facts.installation).toMatchObject({
-      outcome: 'awaiting_user_test',
-      installed: true,
-      verified: false,
-      may_claim_verified: false,
-      user_test_required: true,
-      cleanup_and_restart_on_explicit_request: true,
-    })
-    expect(card.facts.installation).not.toMatchObject({ activation: 'passed' })
-  })
-
-  it('treats activated as loaded but not functionally verified, with optional cleanup', () => {
-    const workflow = baseWorkflow('activated')
-    workflow.status = 'completed'
-    const installation: InstallationRecord = {
-      schemaVersion: 1,
-      id: `installation_${'a'.repeat(24)}`,
-      createdAt: '2026-08-21T00:00:00.000Z',
-      reviewId: `review_${'e'.repeat(24)}`,
-      targetProfile: 'web',
-      retention: 'persistent',
-      dshHome: 'C:/Users/test/.dsh',
-      packageName: 'dsh-plugin-demo',
-      installSpec: 'file:demo.tgz',
-      installState: 'installed',
-      installOutcome: 'activated',
-      installed: true,
-      loaded: true,
-      verified: false,
-      restartRequired: false,
-      removed: false,
-      verification: {
-        attempted: true,
-        expectedTools: [],
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: false,
-        reason: 'bundle activated',
-      },
+    if (testCase.expectNoResume) expect(card.available_tools).not.toContain('capability_workflow_resume')
+    if (testCase.recoverMeaning) {
+      expect(card.allowed_actions).toEqual([expect.objectContaining({
+        action: 'capability_workflow_recover',
+        user_facing_meaning: expect.stringMatching(testCase.recoverMeaning),
+      })])
     }
-    const card = compactAgentView({
-      workflow,
-      resolution: resolution(),
-      installation,
-      lifecycleState: 'activated',
-    })
-    expect(card.state).toBe('completed')
-    expect(card.facts.lifecycle).toBe('activated')
-    expect(card.facts.lifecycle).not.toBe('verified')
-    expect(card.facts.installation).toMatchObject({
-      outcome: 'activated',
-      installed: true,
-      verified: false,
-      may_claim_verified: false,
-      activation: 'passed',
-      cleanup_and_restart_on_explicit_request: true,
-    })
-    expect(card.facts.installation).not.toMatchObject({ user_test_required: true })
-    expect(card.available_tools).toContain('capability_workflow_recover')
-    expect(card.correction).toBeUndefined()
-  })
-
-  it('lets verified claim function verification without impersonating activation or user test', () => {
-    const workflow = baseWorkflow('installed')
-    workflow.status = 'completed'
-    const installation: InstallationRecord = {
-      schemaVersion: 1,
-      id: `installation_${'a'.repeat(24)}`,
-      createdAt: '2026-08-21T00:00:00.000Z',
-      reviewId: `review_${'e'.repeat(24)}`,
-      targetProfile: 'web',
-      retention: 'temporary',
-      dshHome: 'C:/Users/test/.dsh',
-      packageName: 'dsh-plugin-demo',
-      installSpec: 'file:demo.tgz',
-      installState: 'installed',
-      installOutcome: 'verified',
-      installed: true,
-      loaded: true,
-      verified: true,
-      restartRequired: false,
-      removed: false,
-      verification: {
-        attempted: true,
-        expectedTools: ['calculator'],
-        calledTools: ['calculator'],
-        resultTools: ['calculator'],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: true,
-        reason: 'verified',
-      },
-      contributionAdvice: {
-        eligible: true,
-        reason: 'Potentially eligible to suggest after the user task is complete. Inspect the diff for user-specific data and obtain explicit approval before any fork, push, or upstream PR.',
-      },
+    expect(card.facts.lifecycle).toBe(testCase.lifecycleState)
+    if (testCase.unexpectedLifecycle) expect(card.facts.lifecycle).not.toBe(testCase.unexpectedLifecycle)
+    expect(card.facts.installation).toMatchObject(testCase.installationMatch)
+    for (const absent of testCase.installationAbsent) {
+      expect(card.facts.installation).not.toMatchObject(absent)
     }
-    const card = compactAgentView({
-      workflow,
-      resolution: resolution(),
-      installation,
-      lifecycleState: 'verified',
-    })
-    expect(card.state).toBe('completed')
-    expect(card.facts.lifecycle).toBe('verified')
-    expect(card.facts.installation).toMatchObject({
-      outcome: 'verified',
-      installed: true,
-      verified: true,
-      may_claim_verified: true,
-      cleanup_and_restart_on_explicit_request: true,
-      contribution: { eligible: true },
-    })
-    expect(card.facts.installation).not.toMatchObject({ activation: 'passed' })
-    expect(card.facts.installation).not.toMatchObject({ user_test_required: true })
-    expect(card.available_tools).toContain('capability_workflow_recover')
   })
 })

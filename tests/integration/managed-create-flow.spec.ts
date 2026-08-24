@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type EvolutionTarget, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
@@ -16,8 +18,7 @@ import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
-const temporary: string[] = []
-afterEach(async () => Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true }))))
+const temporary = trackTempDirs()
 
 class NativeRunner implements CommandRunner {
   async run(request: CommandRequest): Promise<CommandResult> {
@@ -101,22 +102,10 @@ class NativeRunner implements CommandRunner {
 }
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
+  return testRuntimeConfig(root, {
     stateDir: path.join(root, 'state'),
     sourceDir: path.join(root, 'state', 'sources'),
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  })
 }
 
 function resolution(root: string): ResolutionRecord {

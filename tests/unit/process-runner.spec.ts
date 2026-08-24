@@ -68,49 +68,78 @@ describe('subprocess environment boundary', () => {
     })
   })
 
-  it('unwraps a global Windows dsh.cmd to its native JavaScript entry', () => {
-    const wrapped = _testing.argvForResolvedExecutable(
-      'C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd',
-      ['plugin', '--profile', 'web', 'add', '--save-exact', 'dsh-find-plugin'],
-      'win32',
-    )
-    expect(wrapped[0]).toBe(process.execPath)
-    expect(wrapped[1]).toBe('C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js')
-    expect(wrapped).toContain('dsh-find-plugin')
-  })
-
-  it('preserves spaces inside arguments without a shell parser', () => {
-    const wrapped = _testing.argvForResolvedExecutable(
-      'C:\\Users\\x\\dsh.cmd',
-      ['plugin', '--profile', 'web', 'add', 'link:D:/0 code/dsh-plugin-autoevo'],
-      'win32',
-    )
-    expect(wrapped.slice(-2)).toEqual(['add', 'link:D:/0 code/dsh-plugin-autoevo'])
-    expect(wrapped[0]).toBe(process.execPath)
-  })
-
-  it('unwraps a pnpm node_modules .bin dsh shim', () => {
-    const wrapped = _testing.argvForResolvedExecutable(
-      'D:\\0 code\\repo\\node_modules\\.bin\\dsh.CMD',
-      ['--version'],
-      'win32',
-    )
-    expect(wrapped.slice(0, 2)).toEqual([
-      process.execPath,
-      'D:\\0 code\\repo\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
-    ])
-  })
-
-  it('fails closed for unsupported Windows command shims', () => {
-    expect(() => _testing.argvForResolvedExecutable('C:\\tools\\unknown.cmd', ['arg'], 'win32'))
-      .toThrow(/unsupported Windows command shim/u)
-  })
-
-  it('leaves native executables unchanged', () => {
-    expect(_testing.argvForResolvedExecutable('C:\\Program Files\\GitHub CLI\\gh.exe', ['api'], 'win32'))
-      .toEqual(['C:\\Program Files\\GitHub CLI\\gh.exe', 'api'])
-    expect(_testing.argvForResolvedExecutable('/usr/bin/dsh', ['plugin'], 'linux'))
-      .toEqual(['/usr/bin/dsh', 'plugin'])
+  it.each<{
+    name: string
+    executable: string
+    args: string[]
+    platform: NodeJS.Platform
+    throws?: RegExp
+    verify?: (wrapped: string[]) => void
+  }>([
+    {
+      name: 'unwraps a global Windows dsh.cmd to its native JavaScript entry',
+      executable: 'C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd',
+      args: ['plugin', '--profile', 'web', 'add', '--save-exact', 'dsh-find-plugin'],
+      platform: 'win32',
+      verify: (wrapped) => {
+        expect(wrapped[0]).toBe(process.execPath)
+        expect(wrapped[1]).toBe('C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js')
+        expect(wrapped).toContain('dsh-find-plugin')
+      },
+    },
+    {
+      name: 'preserves spaces inside arguments without a shell parser',
+      executable: 'C:\\Users\\x\\dsh.cmd',
+      args: ['plugin', '--profile', 'web', 'add', 'link:D:/0 code/dsh-plugin-autoevo'],
+      platform: 'win32',
+      verify: (wrapped) => {
+        expect(wrapped.slice(-2)).toEqual(['add', 'link:D:/0 code/dsh-plugin-autoevo'])
+        expect(wrapped[0]).toBe(process.execPath)
+      },
+    },
+    {
+      name: 'unwraps a pnpm node_modules .bin dsh shim',
+      executable: 'D:\\0 code\\repo\\node_modules\\.bin\\dsh.CMD',
+      args: ['--version'],
+      platform: 'win32',
+      verify: (wrapped) => {
+        expect(wrapped.slice(0, 2)).toEqual([
+          process.execPath,
+          'D:\\0 code\\repo\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+        ])
+      },
+    },
+    {
+      name: 'fails closed for unsupported Windows command shims',
+      executable: 'C:\\tools\\unknown.cmd',
+      args: ['arg'],
+      platform: 'win32',
+      throws: /unsupported Windows command shim/u,
+    },
+    {
+      name: 'leaves native Windows executables unchanged',
+      executable: 'C:\\Program Files\\GitHub CLI\\gh.exe',
+      args: ['api'],
+      platform: 'win32',
+      verify: (wrapped) => {
+        expect(wrapped).toEqual(['C:\\Program Files\\GitHub CLI\\gh.exe', 'api'])
+      },
+    },
+    {
+      name: 'leaves native Linux executables unchanged',
+      executable: '/usr/bin/dsh',
+      args: ['plugin'],
+      platform: 'linux',
+      verify: (wrapped) => {
+        expect(wrapped).toEqual(['/usr/bin/dsh', 'plugin'])
+      },
+    },
+  ])('$name', ({ executable, args, platform, throws: error, verify }) => {
+    if (error !== undefined) {
+      expect(() => _testing.argvForResolvedExecutable(executable, args, platform)).toThrow(error)
+      return
+    }
+    verify!(_testing.argvForResolvedExecutable(executable, args, platform))
   })
 
   it('spawns a resolved dsh.cmd through Node without cmd.exe', async () => {

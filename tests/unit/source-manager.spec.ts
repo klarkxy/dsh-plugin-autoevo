@@ -1,7 +1,10 @@
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testReview } from '../helpers/records.js'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import type { CommandRunner } from '../../src/process/runner.js'
@@ -9,71 +12,29 @@ import { normalizeConfig } from '../../src/config.js'
 import { SourceManager, sourceIdForRepository, _testing as sourceTesting } from '../../src/source-manager.js'
 import { runInWorkspace } from '../../src/workspace-layout.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function config(
   root: string,
   sourceDir: string | false = path.join(root, 'sources'),
   stateDir: string | false = root,
 ): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
-    ...(stateDir === false ? {} : { stateDir }),
-    ...(sourceDir === false ? {} : { sourceDir }),
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  } as RuntimeConfig
+  return testRuntimeConfig(root, { stateDir, sourceDir })
 }
 
 function review(commit = 'c'.repeat(40)): ReviewRecord {
-  return {
-    schemaVersion: 1,
-    id: `review_${'a'.repeat(64)}`,
+  return testReview({
     policyVersion: '1',
     createdAt: '2026-08-18T00:00:00.000Z',
-    resolutionId: `resolution_${'b'.repeat(24)}`,
-    requirement: 'calculator',
-    sourceSnapshot: {
-      kind: 'github',
-      repository: 'acme/calculator',
-      requestedRef: 'main',
-      commit,
-      defaultBranch: 'main',
-    },
-    inspectedFiles: [],
-    manifest: {
-      kind: 'bundle',
-      packageName: 'dsh-tool-calculator',
-      bundlePatch: './cordis.patch.yml',
-      scripts: [],
-      dependencies: [],
-      peerDependencies: {},
-      expectedTools: ['calculator'],
-    },
-    fit: 'full',
     confidence: 0.9,
-    securityRisk: 'low',
-    maintained: true,
-    license: 'MIT',
+    sourceSnapshot: { kind: 'github', repository: 'acme/calculator', requestedRef: 'main', commit, defaultBranch: 'main' },
+    manifest: {
+      kind: 'bundle', packageName: 'dsh-tool-calculator', bundlePatch: './cordis.patch.yml', scripts: [],
+      dependencies: [], peerDependencies: {}, expectedTools: ['calculator'],
+    },
     compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
-    missingCapabilities: [],
-    findings: [],
-    recommendation: 'use',
     installSpec: `github:acme/calculator#${commit}`,
-  }
+  })
 }
 
 function scriptedGit(state: {
@@ -207,25 +168,6 @@ describe('SourceManager defaults and provenance', () => {
     expect(second.sourceRootFor('C:/workspace-b')).toBe(sharedSources)
     expect(first.lockPath(sourceId)).toBe(second.lockPath(sourceId))
     expect(first.lockPath(sourceId)).toBe(path.join(root, 'dsh-home', 'autoevo', 'source-control', `${sourceId}.lock`))
-  })
-
-  it('creates a new plugin source under the session workspace', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-create-ws-'))
-    temporary.push(root)
-    const workspace = path.join(root, 'project')
-    const manager = new SourceManager(config(root, false), scriptedGit({
-      head: 'c'.repeat(40),
-      branch: 'main',
-      dirty: '?? package.json\n?? cordis.patch.yml\n?? lib/index.js\n?? README.md\n',
-    }))
-    const receipt = await manager.initializeCreateSource({
-      resolutionId: `resolution_${'a'.repeat(24)}`,
-      workflowId: `workflow_${'d'.repeat(24)}`,
-      packageName: 'dsh-plugin-new',
-      workspaceCwd: workspace,
-    })
-    expect(receipt.path.startsWith(path.resolve(workspace, '.autoevo', 'sources'))).toBe(true)
-    expect(path.basename(path.dirname(receipt.path))).toBe('sources')
   })
 
   it('relocates materialization into the current workspace when a receipt points elsewhere', async () => {

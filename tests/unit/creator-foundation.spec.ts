@@ -1,9 +1,10 @@
-import { access, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import {
   appendCreatorRecord,
   assertChildCreatorCatalog,
@@ -23,8 +24,7 @@ import { StateStore } from '../../src/state/store.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
-const temporary: string[] = []
-afterEach(async () => Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true }))))
+const temporary = trackTempDirs()
 
 function requiredTools(): string[] {
   return [...requiredCreatorCatalog().tools]

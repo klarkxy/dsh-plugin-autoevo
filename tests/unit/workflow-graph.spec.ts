@@ -3,8 +3,8 @@ import { POLICY_VERSION, type MechanicalFacts, type ResolutionRecord, type Revie
 import { EvolutionError } from '../../src/errors.js'
 import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
-import { executeNode, interruptPayload, transition } from '../../src/workflow/graph.js'
-import type { WorkflowHost, WorkflowRecord } from '../../src/workflow/contracts.js'
+import { executeNode, interruptPayload, type NodeExecutionResult, transition } from '../../src/workflow/graph.js'
+import type { WorkflowExec, WorkflowHost, WorkflowNodeId, WorkflowRecord } from '../../src/workflow/contracts.js'
 
 function resolution(): ResolutionRecord {
   const id = `resolution_${'b'.repeat(24)}`
@@ -135,6 +135,41 @@ function workflow(cursor: WorkflowRecord['cursor']): WorkflowRecord {
   }
 }
 
+async function runNode(
+  node: WorkflowNodeId,
+  options: { host: WorkflowHost; resolution: ResolutionRecord; exec?: WorkflowExec; workflow?: WorkflowRecord },
+): Promise<NodeExecutionResult> {
+  return executeNode(node, {
+    host: options.host,
+    workflow: options.workflow ?? workflow(node),
+    exec: options.exec ?? {},
+    resolution: options.resolution,
+  })
+}
+
+function installVerifyHost(options: {
+  installReviewed: () => Promise<unknown>
+  getInstallation?: (id: string) => Promise<unknown>
+}): WorkflowHost {
+  return {
+    async latestReview() { return review() },
+    installReviewed: options.installReviewed,
+    ...(options.getInstallation ? { getInstallation: options.getInstallation } : {}),
+  } as unknown as WorkflowHost
+}
+
+function prepareModifyHost(options: {
+  prepareModify: () => Promise<unknown>
+  latestReview?: (resolutionId: string, reviewId?: string) => Promise<ReviewRecord>
+  getResolution?: () => Promise<ResolutionRecord>
+}): WorkflowHost {
+  return {
+    latestReview: options.latestReview ?? (async () => review()),
+    prepareModify: options.prepareModify,
+    ...(options.getResolution ? { getResolution: options.getResolution } : {}),
+  } as unknown as WorkflowHost
+}
+
 describe('workflow graph transitions', () => {
   it('keeps create-new blocked when marketplace setup fails before discovery', async () => {
     const current = resolution()
@@ -146,12 +181,7 @@ describe('workflow graph transitions', () => {
         }
       },
     } as unknown as WorkflowHost
-    const result = await executeNode('ensure_market', {
-      host,
-      workflow: workflow('ensure_market'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('ensure_market', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'done', node: 'market_setup_required' })
   })
 
@@ -209,12 +239,7 @@ describe('workflow graph nodes', () => {
         return current
       },
     } as unknown as WorkflowHost
-    const result = await executeNode('discover_remote', {
-      host,
-      workflow: workflow('discover_remote'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('discover_remote', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'next', node: 'await_discovery', resolution: current })
   })
 
@@ -227,12 +252,7 @@ describe('workflow graph nodes', () => {
         return { resolution: { ...current, authorization: { state: 'confirmation_required', resolutionId: current.id, reason: 'reviewed' } }, review: inspected }
       },
     } as unknown as WorkflowHost
-    const result = await executeNode('review_github', {
-      host,
-      workflow: workflow('review_github'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('review_github', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
   })
 
@@ -310,12 +330,7 @@ describe('workflow graph nodes', () => {
         }
       },
     } as unknown as WorkflowHost
-    const result = await executeNode('review_github', {
-      host,
-      workflow: workflow('review_github'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('review_github', { host, resolution: current })
     expect(result).toMatchObject({
       kind: 'next',
       node: 'await_confirmation',
@@ -343,33 +358,20 @@ describe('workflow graph nodes', () => {
         return { resolution: current, review: local }
       },
     } as unknown as WorkflowHost
-    const result = await executeNode('review_local', {
-      host,
-      workflow: workflow('review_local'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('review_local', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: local.id } })
   })
 
   it('returns to confirmation when install fails for a non-input reason', async () => {
     const current = resolution()
     const inspected = review()
-    const host = {
-      async latestReview() {
-        return inspected
-      },
+    const host = installVerifyHost({
       async installReviewed() {
         throw new Error('verify failed')
       },
-    } as unknown as WorkflowHost
-    const record = workflow('install_verify')
-    const result = await executeNode('install_verify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+    const record = workflow('install_verify')
+    const result = await runNode('install_verify', { host, resolution: current, workflow: record })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
     expect(record.lastFailure).toEqual({
       stage: 'install',
@@ -381,12 +383,10 @@ describe('workflow graph nodes', () => {
 
   it('binds a preserved installation receipt and parks at recovery when final receipt persistence fails', async () => {
     const current = resolution()
-    const inspected = review()
     const record = workflow('install_verify')
     const installationId = `installation_${'f'.repeat(24)}`
     const diagnosticHash = '9'.repeat(64)
-    const host = {
-      async latestReview() { return inspected },
+    const host = installVerifyHost({
       async installReviewed() {
         throw new EvolutionError('command_failed', 'final receipt persistence failed', {
           recoveryRequired: true,
@@ -398,14 +398,9 @@ describe('workflow graph nodes', () => {
         expect(id).toBe(installationId)
         return { id, workflowId: record.id }
       },
-    } as unknown as WorkflowHost
-
-    const result = await executeNode('install_verify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+
+    const result = await runNode('install_verify', { host, resolution: current, workflow: record })
 
     expect(result).toMatchObject({
       kind: 'done',
@@ -436,9 +431,7 @@ describe('workflow graph nodes', () => {
     node,
   ) => {
     const current = resolution()
-    const inspected = review()
-    const host = {
-      async latestReview() { return inspected },
+    const host = installVerifyHost({
       async installReviewed() {
         return {
           id: `installation_${'a'.repeat(24)}`,
@@ -448,13 +441,8 @@ describe('workflow graph nodes', () => {
           verification: { reason: installOutcome },
         }
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('install_verify', {
-      host,
-      workflow: workflow('install_verify'),
-      exec: {},
-      resolution: current,
     })
+    const result = await runNode('install_verify', { host, resolution: current })
     expect(result).toMatchObject({ kind, node, installation: { installOutcome } })
     if (installOutcome === 'verified') {
       expect(result.node).not.toBe('activated')
@@ -468,10 +456,8 @@ describe('workflow graph nodes', () => {
 
   it('does not treat malformed activated or awaiting_user_test receipts as verified', async () => {
     const current = resolution()
-    const inspected = review()
     for (const installOutcome of ['activated', 'awaiting_user_test'] as const) {
-      const host = {
-        async latestReview() { return inspected },
+      const host = installVerifyHost({
         async installReviewed() {
           return {
             id: `installation_${'a'.repeat(24)}`,
@@ -481,24 +467,17 @@ describe('workflow graph nodes', () => {
             verification: { reason: installOutcome, status: 'passed' },
           }
         },
-      } as unknown as WorkflowHost
-      const result = await executeNode('install_verify', {
-        host,
-        workflow: workflow('install_verify'),
-        exec: {},
-        resolution: current,
       })
+      const result = await runNode('install_verify', { host, resolution: current })
       expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
     }
   })
 
   it('routes failed, blocked_precondition, and uncertain verification onto explicit failure closure', async () => {
     const current = resolution()
-    const inspected = review()
     for (const status of ['failed', 'blocked_precondition', 'uncertain'] as const) {
       const record = workflow('install_verify')
-      const host = {
-        async latestReview() { return inspected },
+      const host = installVerifyHost({
         async installReviewed() {
           return {
             id: `installation_${'a'.repeat(24)}`,
@@ -508,13 +487,8 @@ describe('workflow graph nodes', () => {
             verification: { reason: status, status, layer: 'tool_roundtrip' },
           }
         },
-      } as unknown as WorkflowHost
-      const result = await executeNode('install_verify', {
-        host,
-        workflow: record,
-        exec: {},
-        resolution: current,
       })
+      const result = await runNode('install_verify', { host, resolution: current, workflow: record })
       expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
       expect(record.lastFailure).toMatchObject({
         stage: 'verification',
@@ -526,7 +500,6 @@ describe('workflow graph nodes', () => {
 
   it('does not re-execute install or verify for the same review, source, layer, and fixture digest', async () => {
     const current = resolution()
-    const inspected = review()
     const record = workflow('install_verify')
     let installs = 0
     const installation = {
@@ -543,29 +516,18 @@ describe('workflow graph nodes', () => {
         fixtureDigest: 'ab'.repeat(32),
       },
     }
-    const host = {
-      async latestReview() { return inspected },
+    const host = installVerifyHost({
       async installReviewed() {
         installs += 1
         return installation
       },
       async getInstallation() { return installation },
-    } as unknown as WorkflowHost
-    const first = await executeNode('install_verify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+    const first = await runNode('install_verify', { host, resolution: current, workflow: record })
     expect(first).toMatchObject({ kind: 'next', node: 'await_confirmation' })
     expect(installs).toBe(1)
     record.lastInstallationId = installation.id
-    const second = await executeNode('install_verify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
-    })
+    const second = await runNode('install_verify', { host, resolution: current, workflow: record })
     expect(installs).toBe(1)
     expect(second).toMatchObject({ kind: 'next', node: 'await_confirmation' })
     expect(record.lastFailure).toMatchObject({
@@ -613,19 +575,13 @@ describe('workflow graph nodes', () => {
       introducedBlockers: [],
     }
     let prepareCalls = 0
-    const host = {
-      async latestReview() { return inspected },
+    const host = prepareModifyHost({
       async prepareModify() {
         prepareCalls += 1
         throw new Error('must not start another child')
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('prepare_modify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+    const result = await runNode('prepare_modify', { host, resolution: current, workflow: record })
     expect(prepareCalls).toBe(0)
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
     expect(record.lastFailure).toMatchObject({
@@ -687,7 +643,7 @@ describe('workflow graph nodes', () => {
     const controller = new AbortController()
     controller.abort()
     const record = workflow('prepare_modify')
-    const host = {
+    const host = prepareModifyHost({
       async latestReview(_resolutionId: string, reviewId?: string) {
         return reviewId === preserved.id ? preserved : inspected
       },
@@ -701,12 +657,12 @@ describe('workflow graph nodes', () => {
           headCommit: 'd'.repeat(40),
         })
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('prepare_modify', {
+    })
+    const result = await runNode('prepare_modify', {
       host,
-      workflow: record,
-      exec: { signal: controller.signal },
       resolution: current,
+      exec: { signal: controller.signal },
+      workflow: record,
     })
     expect(result).toMatchObject({
       kind: 'done',
@@ -728,7 +684,7 @@ describe('workflow graph nodes', () => {
     const preserved = { ...inspected, id: `review_${'f'.repeat(64)}` }
     const preservedResolution = { ...current, reasons: [...current.reasons, 'first modification review persisted'] }
     const record = workflow('prepare_modify')
-    const host = {
+    const host = prepareModifyHost({
       async latestReview(_resolutionId: string, reviewId?: string) {
         return reviewId === preserved.id ? preserved : inspected
       },
@@ -738,13 +694,8 @@ describe('workflow graph nodes', () => {
         record.lineageTipReviewId = preserved.id
         throw new Error('child failed after checkpoint')
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('prepare_modify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+    const result = await runNode('prepare_modify', { host, resolution: current, workflow: record })
     expect(result).toMatchObject({
       kind: 'next',
       node: 'await_confirmation',
@@ -761,28 +712,19 @@ describe('workflow graph nodes', () => {
 
   it('terminates in explicit recovery when failed child edits cannot be checkpointed safely', async () => {
     const current = resolution()
-    const inspected = review()
     const record = workflow('prepare_modify')
-    const host = {
-      async latestReview() { return inspected },
+    const host = prepareModifyHost({
       async prepareModify() {
         throw new EvolutionError('command_failed', 'explicit source recovery is required', { recoveryRequired: true })
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('prepare_modify', {
-      host,
-      workflow: record,
-      exec: {},
-      resolution: current,
     })
+    const result = await runNode('prepare_modify', { host, resolution: current, workflow: record })
     expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
   })
 
   it('requests restart only after a verified install reports incomplete hot-load', async () => {
     const current = resolution()
-    const inspected = review()
-    const host = {
-      async latestReview() { return inspected },
+    const host = installVerifyHost({
       async installReviewed() {
         return {
           id: `installation_${'c'.repeat(24)}`,
@@ -793,24 +735,14 @@ describe('workflow graph nodes', () => {
           verification: { reason: 'verified; client restart needed' },
         }
       },
-    } as unknown as WorkflowHost
-    const result = await executeNode('install_verify', {
-      host,
-      workflow: workflow('install_verify'),
-      exec: {},
-      resolution: current,
     })
+    const result = await runNode('install_verify', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'done', node: 'restart_required' })
   })
 
   it('authorizes create-new without a scratch grant node', async () => {
     const current = resolution()
-    const result = await executeNode('prepare_create', {
-      host: {} as WorkflowHost,
-      workflow: workflow('prepare_create'),
-      exec: {},
-      resolution: current,
-    })
+    const result = await runNode('prepare_create', { host: {} as WorkflowHost, resolution: current })
     expect(result).toMatchObject({ kind: 'done', node: 'create_authorized' })
   })
 

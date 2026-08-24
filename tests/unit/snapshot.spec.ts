@@ -1,7 +1,9 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import { materializeLocalPackage } from '../../src/lifecycle/snapshot.js'
@@ -9,28 +11,10 @@ import type { CommandRunner } from '../../src/process/runner.js'
 import { inspectLocalDirectory } from '../../src/review/review.js'
 import { sha256 } from '../../src/state/hashes.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: true,
-  }
+  return testRuntimeConfig(root, { evolutionPreset: true })
 }
 
 describe('immutable local package materialization', () => {

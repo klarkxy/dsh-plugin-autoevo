@@ -1,16 +1,13 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import { hotLoadInstalledBundle } from '../../src/lifecycle/hot-load.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 describe('current-profile Loader hot reload', () => {
   it('applies the reviewed bundle patch transactionally and exposes rollback', async () => {

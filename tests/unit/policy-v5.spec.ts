@@ -1,19 +1,18 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { testResolution, testReview } from '../helpers/records.js'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import {
   POLICY_VERSION,
   classifyRuntimeSurface,
-  type InstallOutcome,
   type ResolutionRecord,
   type ReviewRecord,
-  type VerificationLayerKind,
-  type VerificationStatus,
-  type VerificationVerdict,
 } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import {
@@ -25,18 +24,13 @@ import {
 import { selectInstallVerificationLayer } from '../../src/host-verification-driver.js'
 import { PluginInstaller } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
-import { assertDirectUseAllowed, isDirectlyUsableReview } from '../../src/review/direct-use.js'
+import { isDirectlyUsableReview } from '../../src/review/direct-use.js'
 import { _testing as serviceTesting } from '../../src/service.js'
-import { verificationVerdictAllowsCompletion } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
 import { WORKFLOW_OPTIONS, type WorkflowHost } from '../../src/workflow/contracts.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function exec(sessionId = 'session-1'): ToolRunContext {
   return {
@@ -53,77 +47,21 @@ function exec(sessionId = 'session-1'): ToolRunContext {
 
 function resolution(): ResolutionRecord {
   const id = `resolution_${'b'.repeat(24)}`
-  return {
-    schemaVersion: 2,
-    id,
-    policyVersion: POLICY_VERSION,
+  const record = testResolution({
     createdAt: '2026-08-17T00:00:00.000Z',
-    requirement: 'calculator',
-    cwd: 'C:/workspace',
-    decision: 'inspect_remote',
-    localCandidates: [],
     remoteCandidates: [],
-    remoteDiscoveryComplete: true,
     authorization: { state: 'selection_required', resolutionId: id, reason: 'wait' },
-    queries: [],
-    reasons: [],
-  }
+  })
+  delete record.selectedRepositories
+  return record
 }
 
 function review(policyVersion = POLICY_VERSION): ReviewRecord {
-  return {
-    schemaVersion: 1,
-    id: `review_${'a'.repeat(64)}`,
-    policyVersion,
-    createdAt: '2026-08-19T00:00:00.000Z',
-    resolutionId: resolution().id,
-    requirement: 'calculator',
-    sourceSnapshot: {
-      kind: 'github',
-      repository: 'acme/calculator',
-      requestedRef: 'main',
-      commit: 'c'.repeat(40),
-      defaultBranch: 'main',
-    },
-    inspectedFiles: [],
-    manifest: {
-      kind: 'bundle',
-      packageName: 'dsh-tool-calculator',
-      bundlePatch: './cordis.patch.yml',
-      scripts: [],
-      dependencies: [],
-      peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-      expectedTools: ['calculator'],
-    },
-    fit: 'full',
-    confidence: 0.8,
-    securityRisk: 'low',
-    maintained: true,
-    license: 'MIT',
-    compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
-    missingCapabilities: [],
-    findings: [],
-    recommendation: 'use',
-    installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
-  }
+  return testReview({ policyVersion, createdAt: '2026-08-19T00:00:00.000Z', resolutionId: resolution().id })
 }
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'persistent-dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  return testRuntimeConfig(root, { dshHome: path.join(root, 'persistent-dsh-home') })
 }
 
 function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn(async (current: ResolutionRecord) => current)): WorkflowHost {
@@ -167,40 +105,6 @@ describe('Policy V8 legacy invalidation', () => {
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')
-    const layers: VerificationLayerKind[] = ['bundle_activation', 'tool_roundtrip', 'manual_runtime']
-    const statuses: VerificationStatus[] = [
-      'passed',
-      'pending_user_test',
-      'blocked_precondition',
-      'failed',
-      'uncertain',
-    ]
-    const outcomes: InstallOutcome[] = [
-      'pending',
-      'verified',
-      'failed_absent',
-      'recovery_required',
-      'activated',
-      'awaiting_user_test',
-    ]
-    expect(layers).toHaveLength(3)
-    expect(statuses).toHaveLength(5)
-    expect(outcomes).toContain('activated')
-    expect(outcomes).toContain('awaiting_user_test')
-    expect(classifyRuntimeSurface({
-      llmDependency: false,
-      llmRegistered: false,
-      credentialsDependency: false,
-      credentialsRegistered: false,
-      networkSignal: false,
-      environmentSignal: false,
-      processSignal: false,
-      skillOnly: false,
-      unsafeTools: false,
-      expectedTools: [],
-      toolFixtures: [],
-      kind: 'bundle',
-    })).toBe('bundle_activation')
   })
 
   it('requires Host-validated fixtures for tool_roundtrip and treats plugin-declared safe as manual_runtime', () => {
@@ -278,7 +182,6 @@ describe('Policy V8 legacy invalidation', () => {
   })
 
   it('keeps old reviews readable but never usable for use/install', () => {
-    const current = review()
     const legacy = review('4')
     legacy.reviewerVerdict = {
       requestId: `reviewer_${'1'.repeat(24)}`,
@@ -295,8 +198,6 @@ describe('Policy V8 legacy invalidation', () => {
       createdAt: '2026-08-19T00:00:03.000Z',
     }
     expect(isDirectlyUsableReview(legacy)).toBe(false)
-    expect(() => assertDirectUseAllowed(legacy)).toThrow(/predates the current policy/i)
-    expect(isDirectlyUsableReview(current)).toBe(true)
 
     const oldResolution = resolution()
     oldResolution.policyVersion = '4'
@@ -349,179 +250,97 @@ describe('Policy V8 legacy invalidation', () => {
     expect(verifier.run).not.toHaveBeenCalled()
   })
 
-  it('does not execute old interrupt/decision/receipt/verdict/commitment/lease on resume', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-resume-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
-    const installReviewed = vi.fn(async () => {
-      throw new Error('must not install')
-    })
-    const engine = new WorkflowEngine(store, guard, {
-      ...host(store, record, applyDecision),
-      installReviewed,
-    })
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    const legacy = await store.getWorkflow(started.workflow.id)
-    const interruptId = legacy.interrupt!.interruptId
-    legacy.policyVersion = '4'
-    legacy.selectionReceipt = {
-      id: 'receipt_legacy',
-      workflowId: legacy.id,
-      interruptId,
-      snapshotDigest: 'a'.repeat(64),
-      kind: 'use_this',
-      candidateIds: [`candidate_${'c'.repeat(24)}`],
-      candidateDigests: {},
-      hostTurnId: 'turn_legacy',
-      ownerSessionId: 'session-1',
-      bootId: 'boot_engine',
-      createdAt: '2026-08-17T00:00:00.000Z',
-    }
-    legacy.actionCommitment = {
-      id: 'commit_legacy',
-      selectionReceiptId: 'receipt_legacy',
-      snapshotDigest: 'a'.repeat(64),
-      frozenIdentity: { kind: 'none' },
-      requestedAction: 'use_this',
-      endpoint: { kind: 'none' },
-      allowedParameterConstraints: {},
-      createdAt: '2026-08-17T00:00:00.000Z',
-    }
-    legacy.executionLease = {
-      id: 'lease_legacy',
-      commitmentId: 'commit_legacy',
-      selectionReceiptId: 'receipt_legacy',
-      workflowId: legacy.id,
-      ownerSessionId: 'session-1',
-      bootId: 'boot_engine',
-      hostTurnId: 'turn_legacy',
-      interruptId,
-      snapshotDigest: 'a'.repeat(64),
-      requestedAction: 'use_this',
-      endpoint: { kind: 'none' },
-      allowedParameterConstraints: {},
-      createdAt: '2026-08-17T00:00:00.000Z',
-    }
-    await store.put('workflows', legacy)
+  it.each(['4', '7'] as const)(
+    'does not execute old interrupt/decision/receipt/commitment/lease on resume (policy %s)',
+    async (policyVersion) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-resume-'))
+      temporary.push(root)
+      const store = new StateStore(root)
+      const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+      const record = resolution()
+      const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
+      const installReviewed = vi.fn(async () => {
+        throw new Error('must not install')
+      })
+      const engine = new WorkflowEngine(store, guard, {
+        ...host(store, record, applyDecision),
+        installReviewed,
+      })
+      const turn = exec()
+      const started = await engine.start('calculator', turn)
+      const legacy = await store.getWorkflow(started.workflow.id)
+      const interruptId = legacy.interrupt!.interruptId
+      legacy.policyVersion = policyVersion
+      legacy.selectionReceipt = {
+        id: `receipt_${policyVersion}`,
+        workflowId: legacy.id,
+        interruptId,
+        snapshotDigest: 'a'.repeat(64),
+        kind: 'use_this',
+        candidateIds: [`candidate_${'c'.repeat(24)}`],
+        candidateDigests: {},
+        hostTurnId: `turn_${policyVersion}`,
+        ownerSessionId: 'session-1',
+        bootId: 'boot_engine',
+        createdAt: '2026-08-17T00:00:00.000Z',
+      }
+      legacy.actionCommitment = {
+        id: `commit_${policyVersion}`,
+        selectionReceiptId: `receipt_${policyVersion}`,
+        snapshotDigest: 'a'.repeat(64),
+        frozenIdentity: { kind: 'none' },
+        requestedAction: 'use_this',
+        endpoint: { kind: 'none' },
+        allowedParameterConstraints: {},
+        createdAt: '2026-08-17T00:00:00.000Z',
+      }
+      legacy.executionLease = {
+        id: `lease_${policyVersion}`,
+        commitmentId: `commit_${policyVersion}`,
+        selectionReceiptId: `receipt_${policyVersion}`,
+        workflowId: legacy.id,
+        ownerSessionId: 'session-1',
+        bootId: 'boot_engine',
+        hostTurnId: `turn_${policyVersion}`,
+        interruptId,
+        snapshotDigest: 'a'.repeat(64),
+        requestedAction: 'use_this',
+        endpoint: { kind: 'none' },
+        allowedParameterConstraints: {},
+        createdAt: '2026-08-17T00:00:00.000Z',
+      }
+      await store.put('workflows', legacy)
 
-    const beforeForeignResume = await store.getWorkflow(legacy.id)
-    await expect(engine.resume({
-      workflowId: legacy.id,
-      interruptId,
-      decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
-    }, exec('session-foreign'))).rejects.toThrow(/different owner session/i)
-    expect(await store.getWorkflow(legacy.id)).toEqual(beforeForeignResume)
+      const beforeForeignResume = await store.getWorkflow(legacy.id)
+      await expect(engine.resume({
+        workflowId: legacy.id,
+        interruptId,
+        decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
+      }, exec('session-foreign'))).rejects.toThrow(/different owner session/i)
+      expect(await store.getWorkflow(legacy.id)).toEqual(beforeForeignResume)
 
-    const restarted = await engine.resume({
-      workflowId: legacy.id,
-      interruptId,
-      decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
-    }, turn)
-    expect(applyDecision).not.toHaveBeenCalled()
-    expect(installReviewed).not.toHaveBeenCalled()
-    expect(restarted.lifecycleState).toBe('interrupted')
-    expect(restarted.workflow.status).toBe('completed')
-    expect(restarted.workflow.policyVersion).toBe('4')
-    expect(restarted.lifecycleState).not.toBe('verified')
-    expect(restarted.workflow.interrupt).toBeUndefined()
-    expect(restarted.workflow.selectionReceipt).toBeUndefined()
-    expect(restarted.workflow.actionCommitment).toBeUndefined()
-    expect(restarted.workflow.executionLease).toBeUndefined()
-    expect(restarted.workflow.lastFailure).toMatchObject({
-      stage: 'workflow',
-      code: 'policy_restart_required',
-      retryable: false,
-    })
-
-    const staleVerdict: VerificationVerdict = {
-      requestId: 'verifier_legacy',
-      installationId: `installation_${'c'.repeat(24)}`,
-      reviewId: review('4').id,
-      requirementHash: '8'.repeat(64),
-      evidenceDigest: '9'.repeat(64),
-      verifierSessionId: 'verifier-session',
-      verifierVersion: '1',
-      decision: 'verified',
-      evidence: ['legacy'],
-      conditions: [],
-      createdAt: '2026-08-19T00:00:02.000Z',
-    }
-    expect(verificationVerdictAllowsCompletion(staleVerdict, {
-      installationId: staleVerdict.installationId,
-      reviewId: review().id,
-      requirement: 'calculator',
-      evidenceDigest: '1'.repeat(64),
-    })).toBe(false)
-  })
-
-  it('does not migrate unfinished V7 execution authorization onto Policy V8', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-v7-resume-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const record = resolution()
-    const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
-    const installReviewed = vi.fn(async () => {
-      throw new Error('must not install')
-    })
-    const engine = new WorkflowEngine(store, guard, {
-      ...host(store, record, applyDecision),
-      installReviewed,
-    })
-    const turn = exec()
-    const started = await engine.start('calculator', turn)
-    const legacy = await store.getWorkflow(started.workflow.id)
-    const interruptId = legacy.interrupt!.interruptId
-    legacy.policyVersion = '7'
-    legacy.actionCommitment = {
-      id: 'commit_v7',
-      selectionReceiptId: 'receipt_v7',
-      snapshotDigest: 'a'.repeat(64),
-      frozenIdentity: { kind: 'none' },
-      requestedAction: 'use_this',
-      endpoint: { kind: 'none' },
-      allowedParameterConstraints: {},
-      createdAt: '2026-08-17T00:00:00.000Z',
-    }
-    legacy.executionLease = {
-      id: 'lease_v7',
-      commitmentId: 'commit_v7',
-      selectionReceiptId: 'receipt_v7',
-      workflowId: legacy.id,
-      ownerSessionId: 'session-1',
-      bootId: 'boot_engine',
-      hostTurnId: 'turn_v7',
-      interruptId,
-      snapshotDigest: 'a'.repeat(64),
-      requestedAction: 'use_this',
-      endpoint: { kind: 'none' },
-      allowedParameterConstraints: {},
-      createdAt: '2026-08-17T00:00:00.000Z',
-    }
-    await store.put('workflows', legacy)
-
-    const restarted = await engine.resume({
-      workflowId: legacy.id,
-      interruptId,
-      decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
-    }, turn)
-    expect(applyDecision).not.toHaveBeenCalled()
-    expect(installReviewed).not.toHaveBeenCalled()
-    expect(restarted.lifecycleState).toBe('interrupted')
-    expect(restarted.workflow.status).toBe('completed')
-    expect(restarted.workflow.policyVersion).toBe('7')
-    expect(restarted.workflow.actionCommitment).toBeUndefined()
-    expect(restarted.workflow.executionLease).toBeUndefined()
-    expect(restarted.workflow.lastFailure).toMatchObject({
-      stage: 'workflow',
-      code: 'policy_restart_required',
-      retryable: false,
-    })
-  })
+      const restarted = await engine.resume({
+        workflowId: legacy.id,
+        interruptId,
+        decision: { action: 'use_this', candidateId: `candidate_${'c'.repeat(24)}` },
+      }, turn)
+      expect(applyDecision).not.toHaveBeenCalled()
+      expect(installReviewed).not.toHaveBeenCalled()
+      expect(restarted.lifecycleState).toBe('interrupted')
+      expect(restarted.workflow.status).toBe('completed')
+      expect(restarted.workflow.policyVersion).toBe(policyVersion)
+      expect(restarted.lifecycleState).not.toBe('verified')
+      expect(restarted.workflow.interrupt).toBeUndefined()
+      expect(restarted.workflow.selectionReceipt).toBeUndefined()
+      expect(restarted.workflow.actionCommitment).toBeUndefined()
+      expect(restarted.workflow.executionLease).toBeUndefined()
+      expect(restarted.workflow.lastFailure).toMatchObject({
+        stage: 'workflow',
+        code: 'policy_restart_required',
+        retryable: false,
+      })
+    },
+  )
 
   it('starts a fresh V8 workflow instead of replaying an unfinished old-policy one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-start-'))

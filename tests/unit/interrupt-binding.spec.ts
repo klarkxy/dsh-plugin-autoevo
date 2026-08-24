@@ -1,9 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
@@ -12,28 +14,10 @@ import { WorkflowEngine } from '../../src/workflow/engine.js'
 import type { WorkflowHost } from '../../src/workflow/contracts.js'
 import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  return testRuntimeConfig(root)
 }
 
 function exec(sessionId = 'session-alpha', cwd = process.cwd()): ToolRunContext {

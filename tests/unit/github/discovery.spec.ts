@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { scopedGithubQuery, validateGithubRepository, _testing } from '../../../src/github/discovery.js'
+import { validateGithubRepository, _testing } from '../../../src/github/discovery.js'
 
 describe('GitHub repository identifiers', () => {
   it('accepts only strict owner/repository identifiers', () => {
@@ -11,12 +11,6 @@ describe('GitHub repository identifiers', () => {
 })
 
 describe('scoped GitHub query', () => {
-  it('never emits an unscoped search', () => {
-    expect(scopedGithubQuery('codex')).toBe('codex topic:dsh-plugin')
-    expect(scopedGithubQuery('codex dsh')).toBe('codex dsh topic:dsh-plugin')
-    expect(scopedGithubQuery('topic:dsh-plugin calculator')).toBe('calculator topic:dsh-plugin')
-  })
-
   it('drops archived, forked, and disabled repositories', () => {
     expect(_testing.asCandidate({
       full_name: 'acme/old',

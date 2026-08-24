@@ -1,9 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION } from '../../src/contracts.js'
 import { PluginInstaller } from '../../src/lifecycle/install.js'
@@ -11,26 +13,13 @@ import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { StateStore } from '../../src/state/store.js'
 
-const temporary: string[] = []
-afterEach(async () => Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true }))))
+const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
+  return testRuntimeConfig(root, {
     stateDir: path.join(root, 'state'),
     sourceDir: path.join(root, 'state', 'sources'),
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  })
 }
 
 describe('installed evolve replacement on an isolated profile', () => {

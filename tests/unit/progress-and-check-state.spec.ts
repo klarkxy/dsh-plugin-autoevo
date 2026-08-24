@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { testResolution } from '../helpers/records.js'
 import { rememberRequirementLanguage, _testing as i18nTesting } from '../../src/i18n.js'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { AUTOEVO_AUTONOMY_CONTRACT } from '../../src/evolution-mode.js'
@@ -73,25 +74,7 @@ function githubReview(): ReviewRecord {
 }
 
 function resolution(): ResolutionRecord {
-  const id = `resolution_${'b'.repeat(24)}`
-  return {
-    schemaVersion: 2,
-    id,
-    policyVersion: POLICY_VERSION,
-    createdAt: '2026-08-21T18:20:00.000Z',
-    requirement: 'calculator',
-    cwd: 'C:/workspace',
-    decision: 'inspect_remote',
-    localCandidates: [],
-    remoteCandidates: [
-      { repository: 'acme/one', name: 'one', description: '', stars: 1, updatedAt: null, topics: [] },
-    ],
-    remoteDiscoveryComplete: true,
-    authorization: { state: 'confirmation_required', resolutionId: id, reason: 'wait' },
-    selectedRepositories: ['acme/one'],
-    queries: [],
-    reasons: [],
-  }
+  return testResolution({ createdAt: '2026-08-21T18:20:00.000Z' })
 }
 
 function workflowFor(review: ReviewRecord, checks: ModificationCheckEvidence): WorkflowRecord {

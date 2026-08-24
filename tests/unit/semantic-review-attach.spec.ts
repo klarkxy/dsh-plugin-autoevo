@@ -1,9 +1,11 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type ReviewerVerdict } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
@@ -19,10 +21,7 @@ import { requirementHashFor } from '../../src/semantic-reviewer.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowExec, WorkflowRecord } from '../../src/workflow/contracts.js'
 
-const temporary: string[] = []
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 const loaderPatch = '- insert:\n    - id: calculator\n      name: calculator\n'
 
@@ -233,21 +232,7 @@ describe('attachSemanticReview', () => {
 })
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  return testRuntimeConfig(root)
 }
 
 function commandResult(stdout = '') {

@@ -1,20 +1,25 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { describe, expect, it, vi } from 'vitest'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
+import {
+  POLICY_VERSION,
+  type CandidateAvailability,
+  type EvolutionTargetKind,
+  type InstallationRecord,
+  type LocalCapabilityCandidate,
+  type ResolutionRecord,
+  type ReviewRecord,
+} from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 import type { WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function exec(sessionId = 'session-1', cwd = process.cwd()): ToolRunContext {
   return {
@@ -119,12 +124,94 @@ async function startAndPresent(
   return { discovery, selection }
 }
 
+async function makeEngine(record: ResolutionRecord, suffix: string): Promise<{
+  root: string
+  store: StateStore
+  guard: CreationGuard
+  workflowHost: WorkflowHost
+  engine: WorkflowEngine
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), `autoevo-engine-${suffix}-`))
+  temporary.push(root)
+  const store = new StateStore(root)
+  const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+  const workflowHost = host(store, record)
+  const engine = new WorkflowEngine(store, guard, workflowHost)
+  return { root, store, guard, workflowHost, engine }
+}
+
+function installedPluginCandidate(
+  name: string,
+  repository: string,
+  commit: string,
+  options: {
+    kind?: EvolutionTargetKind
+    description?: string
+    availability?: CandidateAvailability
+    reuseEligible?: boolean
+    profileEvidence?: boolean
+    specDigest?: string
+  } = {},
+): LocalCapabilityCandidate {
+  const dependencySpec = `github:${repository}#${commit}`
+  return {
+    kind: 'plugin',
+    name,
+    description: options.description ?? name,
+    availability: options.availability ?? 'installed_in_profile',
+    confidence: 0.99,
+    semanticFit: 'full',
+    fit: 'partial',
+    surfaceMatch: true,
+    reuseEligible: options.reuseEligible ?? true,
+    evolutionTarget: {
+      kind: options.kind ?? 'github_exact',
+      repository,
+      commit,
+      packageName: name,
+      profile: 'web',
+      dependencySpec,
+      specDigest: options.specDigest ?? 'd'.repeat(64),
+    },
+    ...(options.profileEvidence ?? true
+      ? {
+        profileEvidence: {
+          source: 'host_profile_manifest' as const,
+          profile: 'web',
+          packageName: name,
+          dependencySpec,
+          configuredBundle: true,
+        },
+      }
+      : {}),
+  }
+}
+
+async function reviewInstalledCandidate(
+  engine: WorkflowEngine,
+  guard: CreationGuard,
+  turn: ToolRunContext,
+  requirement: string,
+  message: string,
+): Promise<{
+  selection: WorkflowView
+  candidateId: string
+  reviewed: Awaited<ReturnType<WorkflowEngine['resume']>>
+}> {
+  const { selection } = await startAndPresent(engine, requirement, turn)
+  const candidateId = selection.workflow.candidateSnapshot![0]!.id
+  guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: message }] })
+  const reviewed = await engine.resume({
+    workflowId: selection.workflow.id,
+    interruptId: selection.workflow.interrupt!.interruptId,
+    navigation: { kind: 'review_existing', candidateIds: [candidateId] },
+  }, turn)
+  return { selection, candidateId, reviewed }
+}
+
 describe('workflow engine autonomous discovery', () => {
   it('starts at a model-controlled discovery checkpoint without an interrupt or candidate snapshot', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-discovery-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, resolution()))
+    const { store, engine } = await makeEngine(resolution(), 'discovery')
 
     const view = await engine.start('run a PowerShell command', exec())
 
@@ -146,8 +233,6 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('binds profile install/configuration evidence into local candidate snapshots', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-profile-evidence-'))
-    temporary.push(root)
     const record = resolution('@dsh-external/dsh-conv-export')
     record.localCandidates[0] = {
       kind: 'plugin',
@@ -164,8 +249,7 @@ describe('workflow engine autonomous discovery', () => {
         configuredBundle: true,
       },
     }
-    const store = new StateStore(root)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const { engine } = await makeEngine(record, 'profile-evidence')
     const view = await engine.start(record.requirement, exec())
     const candidate = view.workflow.discoveryPool![0]!
     expect(candidate.installation).toEqual({
@@ -180,20 +264,13 @@ describe('workflow engine autonomous discovery', () => {
       ...record.localCandidates[0]!,
       profileEvidence: { ...record.localCandidates[0]!.profileEvidence!, configuredBundle: false },
     }] }
-    const secondRoot = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-profile-digest-'))
-    temporary.push(secondRoot)
-    const secondStore = new StateStore(secondRoot)
-    const second = new WorkflowEngine(secondStore, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(secondStore, changed))
+    const { engine: second } = await makeEngine(changed, 'profile-digest')
     const changedView = await second.start(changed.requirement, exec('session-2'))
     expect(changedView.workflow.discoveryPool![0]!.digest).not.toBe(candidate.digest)
   })
 
   it('present seals one to five pool candidates into Gate 1 and blocks same-turn resume', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-present-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const { engine } = await makeEngine(resolution(), 'present')
     const turn = exec()
     const { discovery, selection } = await startAndPresent(engine, 'calculator', turn)
 
@@ -212,10 +289,7 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('rejects invalid presentation sizes, duplicate ids, and candidates outside the discovery pool', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-present-invalid-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, resolution()))
+    const { store, engine } = await makeEngine(resolution(), 'present-invalid')
     const discovery = await engine.start('calculator', exec())
     const id = discovery.workflow.discoveryPool![0]!.id
 
@@ -230,12 +304,9 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('refines only at discovery, records its budget, and fails closed at the round cap', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-refine-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
     record.decision = 'inspect_remote'
-    const base = host(store, record)
+    const { store, workflowHost, engine } = await makeEngine(record, 'refine')
     const refineRemote = vi.fn(async (current: ResolutionRecord, input: { queries: string[]; repositories: string[] }) => {
       const next = {
         ...current,
@@ -245,7 +316,7 @@ describe('workflow engine autonomous discovery', () => {
       await store.put('resolutions', next)
       return next
     })
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), { ...base, refineRemote })
+    workflowHost.refineRemote = refineRemote
     const turn = exec()
     const started = await engine.start('calculator', turn)
     const first = await engine.refine({ workflowId: started.workflow.id, queries: ['calculator plugin'] }, turn)
@@ -263,13 +334,9 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('enforces the five-query discovery budget before calling the Host', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-query-budget-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const record = resolution()
-    const base = host(store, record)
+    const { workflowHost, engine } = await makeEngine(resolution(), 'query-budget')
     const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), { ...base, refineRemote })
+    workflowHost.refineRemote = refineRemote
     const started = await engine.start('calculator', exec())
 
     await engine.refine({ workflowId: started.workflow.id, queries: ['one', 'two', 'three', 'four', 'five'] }, exec())
@@ -278,19 +345,12 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('opens a stop/search gate when refinement is exhausted without a reviewable candidate', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-exhausted-empty-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
     record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
     record.remoteDiscoveryComplete = false
-    const base = host(store, record)
+    const { workflowHost, engine } = await makeEngine(record, 'exhausted-empty')
     const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
-    const engine = new WorkflowEngine(
-      store,
-      new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }),
-      { ...base, refineRemote },
-    )
+    workflowHost.refineRemote = refineRemote
     const turn = exec()
     const started = await engine.start('calculator', turn)
 
@@ -303,17 +363,13 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('returns search_more from Gate 1 to autonomous discovery without retaining the sealed snapshot', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-search-more-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
     record.decision = 'inspect_remote'
     record.remoteCandidates = [
       { repository: 'acme/one', name: 'one', description: '', stars: 2, updatedAt: null, topics: [] },
       { repository: 'acme/two', name: 'two', description: '', stars: 1, updatedAt: null, topics: [] },
     ]
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, record))
+    const { guard, engine } = await makeEngine(record, 'search-more')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn, 2)
     const firstIds = selection.workflow.candidateSnapshot!.map((item) => item.id)
@@ -333,11 +389,7 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('permits local reuse only after Gate 1 and binds the receipt and lease to the sealed candidate', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-reuse-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const { guard, engine } = await makeEngine(resolution(), 'reuse')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
     const candidate = selection.workflow.candidateSnapshot![0]!
@@ -356,11 +408,7 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('keeps Gate 1 candidate scope sealed for navigation and leaves authorization unconsumed', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-scope-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const { store, guard, engine } = await makeEngine(resolution(), 'scope')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用别的' }] })
@@ -377,11 +425,7 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('blocks the duplicate invalid action fingerprint after two same-turn attempts', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-invalid-breaker-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const { guard, engine } = await makeEngine(resolution(), 'invalid-breaker')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '停' }] })
@@ -403,9 +447,6 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('diagnoses incomplete discovery without changing the autonomous checkpoint', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-diagnose-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
     record.remoteDiscoveryComplete = false
     record.reasons = [
@@ -413,7 +454,7 @@ describe('workflow engine autonomous discovery', () => {
       + '\\\\server\\share\\private key.txt; /home/alice/.config/token; '
       + 'api_key=top-secret; see https://example.test/?token=abc',
     ]
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const { engine } = await makeEngine(record, 'diagnose')
     const started = await engine.start('calculator', exec())
 
     const diagnosed = await engine.diagnose({ workflowId: started.workflow.id, probes: ['discovery'] }, exec())
@@ -432,10 +473,8 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('cleans the exact linked installation and starts a new audited workflow after a fresh user recovery request', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-recover-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution('calculator')
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'recover')
     await store.put('resolutions', record)
     const workflowId = `workflow_${'a'.repeat(24)}`
     const installationId = `installation_${'d'.repeat(24)}`
@@ -489,9 +528,8 @@ describe('workflow engine autonomous discovery', () => {
       lastInstallationId: installationId,
     }
     await store.put('workflows', workflow)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
-    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
     const recoveredAfterRestart = await engine.start('calculator', turn)
     expect(recoveredAfterRestart).toMatchObject({
@@ -552,10 +590,8 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('restarts a completed installation from an explicit user request without forging a recovery interrupt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-completed-recover-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution('calculator')
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'completed-recover')
     await store.put('resolutions', record)
     const workflowId = `workflow_${'a'.repeat(24)}`
     const installationId = `installation_${'d'.repeat(24)}`
@@ -612,9 +648,8 @@ describe('workflow engine autonomous discovery', () => {
       completionTurnId: 'turn_install',
     }
     await store.put('workflows', workflow)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
-    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
 
     const sameTurn = await engine.recover({ workflowId: workflow.id }, turn)
@@ -682,10 +717,8 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('rejects completed-install restart when the receipt is not the unreplaced owned success receipt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-completed-receipt-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution('calculator')
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'completed-receipt')
     await store.put('resolutions', record)
     const workflowId = `workflow_${'a'.repeat(24)}`
     const installationId = `installation_${'d'.repeat(24)}`
@@ -735,9 +768,8 @@ describe('workflow engine autonomous discovery', () => {
       lastInstallationId: installationId,
     }
     await store.put('workflows', workflow)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: false }))
-    const engine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation })
+    workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理并重来' }] })
     await expect(engine.recover({ workflowId }, turn)).rejects.toThrow(/not owned by this recovery workflow/i)
@@ -746,10 +778,8 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('keeps a persisted current-policy Gate 1 interrupt readable for the owning session', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-v5-compat-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
+    const { store, engine } = await makeEngine(record, 'v5-compat')
     await store.put('resolutions', record)
     const persisted: WorkflowRecord = {
       schemaVersion: 1,
@@ -780,7 +810,6 @@ describe('workflow engine autonomous discovery', () => {
       },
     }
     await store.put('workflows', persisted)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
 
     const started = await engine.start('calculator', exec())
 
@@ -789,11 +818,8 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('does not reuse an unfinished workflow across different start intents', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-intent-reuse-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const record = resolution()
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const { engine } = await makeEngine(record, 'intent-reuse')
     const turn = exec('session-1', 'C:/workspace')
     const first = await engine.start('calculator', turn, {
       operation: 'evolve_existing',
@@ -814,40 +840,10 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('offers review_existing for an installed GitHub SHA without treating Gate-1 use_this as review', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-review-existing-'))
-    temporary.push(root)
     const commit = '5'.repeat(40)
     const record = resolution('dsh-xai')
-    record.localCandidates[0] = {
-      kind: 'plugin',
-      name: 'dsh-xai',
-      description: 'xAI Grok OAuth',
-      availability: 'installed_in_profile',
-      confidence: 0.99,
-      semanticFit: 'full',
-      fit: 'partial',
-      surfaceMatch: true,
-      reuseEligible: true,
-      evolutionTarget: {
-        kind: 'github_exact',
-        repository: 'MirDie/dsh-xai',
-        commit,
-        packageName: 'dsh-xai',
-        profile: 'web',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        specDigest: 'd'.repeat(64),
-      },
-      profileEvidence: {
-        source: 'host_profile_manifest',
-        profile: 'web',
-        packageName: 'dsh-xai',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        configuredBundle: true,
-      },
-    }
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, host(store, record))
+    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const { guard, engine } = await makeEngine(record, 'review-existing')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
     const optionIds = selection.workflow.interrupt?.options.map((item) => item.id) ?? []
@@ -866,8 +862,6 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('hides search_more at Gate 1 when evolving a failed known source', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-failed-lineage-'))
-    temporary.push(root)
     const commit = 'd'.repeat(40)
     const record = resolution('zhihu-search')
     record.intent = {
@@ -876,28 +870,15 @@ describe('workflow engine autonomous discovery', () => {
       targetName: 'zhihu-search',
       evolveReason: 'repair',
     }
-    record.localCandidates = [{
-      kind: 'plugin',
-      name: 'dsh-plugin-zhihu-search',
+    record.localCandidates = [installedPluginCandidate('dsh-plugin-zhihu-search', 'klarkxy/zhihu-search', commit, {
+      kind: 'failed_install',
       description: 'failed activation',
       availability: 'known_source',
-      confidence: 0.99,
-      semanticFit: 'full',
-      fit: 'partial',
-      surfaceMatch: true,
       reuseEligible: false,
-      evolutionTarget: {
-        kind: 'failed_install',
-        repository: 'klarkxy/zhihu-search',
-        commit,
-        packageName: 'dsh-plugin-zhihu-search',
-        profile: 'web',
-        dependencySpec: `github:klarkxy/zhihu-search#${commit}`,
-        specDigest: 'e'.repeat(64),
-      },
-    }]
-    const store = new StateStore(root)
-    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+      profileEvidence: false,
+      specDigest: 'e'.repeat(64),
+    })]
+    const { engine } = await makeEngine(record, 'failed-lineage')
     const turn = exec()
     const started = await engine.start('zhihu-search', turn, record.intent)
     expect(started.workflow.cursor).toBe('await_discovery')
@@ -910,8 +891,6 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('replays a failed known-source review through install without a live replacement binding', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-failed-install-replay-'))
-    temporary.push(root)
     const commit = 'd'.repeat(40)
     const oldSpec = `github:klarkxy/zhihu-search#${commit}`
     const record = resolution('zhihu-search')
@@ -921,27 +900,15 @@ describe('workflow engine autonomous discovery', () => {
       targetName: 'zhihu-search',
       evolveReason: 'repair',
     }
-    record.localCandidates[0] = {
-      kind: 'plugin',
-      name: 'dsh-plugin-zhihu-search',
+    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-zhihu-search', 'klarkxy/zhihu-search', commit, {
+      kind: 'failed_install',
       description: 'failed activation',
       availability: 'known_source',
-      confidence: 0.99,
-      semanticFit: 'full',
-      fit: 'partial',
-      surfaceMatch: true,
       reuseEligible: false,
-      evolutionTarget: {
-        kind: 'failed_install',
-        repository: 'klarkxy/zhihu-search',
-        commit,
-        packageName: 'dsh-plugin-zhihu-search',
-        profile: 'web',
-        dependencySpec: oldSpec,
-        specDigest: 'e'.repeat(64),
-      },
-    }
-    const store = new StateStore(root)
+      profileEvidence: false,
+      specDigest: 'e'.repeat(64),
+    })
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'failed-install-replay')
     const fixedReview: ReviewRecord = {
       schemaVersion: 1,
       id: `review_${'f'.repeat(64)}`,
@@ -977,7 +944,6 @@ describe('workflow engine autonomous discovery', () => {
       installSpec: `file:${path.join(root, 'dsh-plugin-zhihu-search-fixed.tgz')}`,
     }
     const installs: Array<{ retention: string; replacement?: unknown }> = []
-    const workflowHost = host(store, record)
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.latestReview = async () => fixedReview
     workflowHost.reviewExisting = async (resolution, target) => {
@@ -1035,17 +1001,8 @@ describe('workflow engine autonomous discovery', () => {
       await store.put('installations', installation)
       return installation
     }
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, workflowHost)
     const turn = exec()
-    const { selection } = await startAndPresent(engine, record.requirement, turn)
-    const candidateId = selection.workflow.candidateSnapshot![0]!.id
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审查这份失败来源' }] })
-    const reviewed = await engine.resume({
-      workflowId: selection.workflow.id,
-      interruptId: selection.workflow.interrupt!.interruptId,
-      navigation: { kind: 'review_existing', candidateIds: [candidateId] },
-    }, turn)
+    const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, record.requirement, '审查这份失败来源')
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.workflow.interrupt?.options.find((item) => item.id === 'use_this')?.candidateIds).toEqual([candidateId])
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '安装修好的这份' }] })
@@ -1060,38 +1017,10 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('reviews an installed exact SHA into confirmation with modify_this and without search_more', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-installed-review-'))
-    temporary.push(root)
     const commit = '5'.repeat(40)
     const record = resolution('dsh-xai')
-    record.localCandidates[0] = {
-      kind: 'plugin',
-      name: 'dsh-xai',
-      description: 'xAI Grok OAuth',
-      availability: 'installed_in_profile',
-      confidence: 0.99,
-      semanticFit: 'full',
-      fit: 'partial',
-      surfaceMatch: true,
-      reuseEligible: true,
-      evolutionTarget: {
-        kind: 'github_exact',
-        repository: 'MirDie/dsh-xai',
-        commit,
-        packageName: 'dsh-xai',
-        profile: 'web',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        specDigest: 'd'.repeat(64),
-      },
-      profileEvidence: {
-        source: 'host_profile_manifest',
-        profile: 'web',
-        packageName: 'dsh-xai',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        configuredBundle: true,
-      },
-    }
-    const store = new StateStore(root)
+    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'installed-review')
     const review: ReviewRecord = {
       schemaVersion: 1,
       id: `review_${'a'.repeat(64)}`,
@@ -1126,7 +1055,6 @@ describe('workflow engine autonomous discovery', () => {
       recommendation: 'modify',
       installSpec: `github:MirDie/dsh-xai#${commit}`,
     }
-    const workflowHost = host(store, record)
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.reviewExisting = async (resolution, target) => {
       expect(target.commit).toBe(commit)
@@ -1144,8 +1072,6 @@ describe('workflow engine autonomous discovery', () => {
       await store.put('resolutions', next)
       return { resolution: next, review }
     }
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, workflowHost)
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
     const candidateId = selection.workflow.candidateSnapshot![0]!.id
@@ -1165,38 +1091,10 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('keeps the installed candidate through modify and sends replacement on use_this', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-installed-replace-'))
-    temporary.push(root)
     const commit = '5'.repeat(40)
     const record = resolution('dsh-xai')
-    record.localCandidates[0] = {
-      kind: 'plugin',
-      name: 'dsh-xai',
-      description: 'xAI Grok OAuth',
-      availability: 'installed_in_profile',
-      confidence: 0.99,
-      semanticFit: 'full',
-      fit: 'partial',
-      surfaceMatch: true,
-      reuseEligible: true,
-      evolutionTarget: {
-        kind: 'github_exact',
-        repository: 'MirDie/dsh-xai',
-        commit,
-        packageName: 'dsh-xai',
-        profile: 'web',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        specDigest: 'd'.repeat(64),
-      },
-      profileEvidence: {
-        source: 'host_profile_manifest',
-        profile: 'web',
-        packageName: 'dsh-xai',
-        dependencySpec: `github:MirDie/dsh-xai#${commit}`,
-        configuredBundle: true,
-      },
-    }
-    const store = new StateStore(root)
+    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'installed-replace')
     const githubReview: ReviewRecord = {
       schemaVersion: 1,
       id: `review_${'a'.repeat(64)}`,
@@ -1246,7 +1144,6 @@ describe('workflow engine autonomous discovery', () => {
     }
     let latest: ReviewRecord = githubReview
     const installs: Array<{ retention: string; replacement?: unknown }> = []
-    const workflowHost = host(store, record)
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.latestReview = async () => latest
     workflowHost.reviewExisting = async (resolution, target) => {
@@ -1320,17 +1217,8 @@ describe('workflow engine autonomous discovery', () => {
       await store.put('installations', installation)
       return installation
     }
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
-    const engine = new WorkflowEngine(store, guard, workflowHost)
     const turn = exec()
-    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
-    const candidateId = selection.workflow.candidateSnapshot![0]!.id
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审已装来源' }] })
-    const reviewed = await engine.resume({
-      workflowId: selection.workflow.id,
-      interruptId: selection.workflow.interrupt!.interruptId,
-      navigation: { kind: 'review_existing', candidateIds: [candidateId] },
-    }, turn)
+    const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, 'dsh-xai', '审已装来源')
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '在这个上改' }] })
     const modifying = await engine.resume({
       workflowId: reviewed.workflow.id,

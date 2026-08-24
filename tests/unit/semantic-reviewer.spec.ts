@@ -206,34 +206,51 @@ describe('semantic reviewer submission gate', () => {
     }))).toThrow(/mechanicalFacts/i)
   })
 
-  it('returns uncertain after timeout, cancel, or a late submit', () => {
-    const timed = openGate()
-    const timeoutVerdict = timed.closeTimedOut('reviewer-session')
-    expect(timeoutVerdict.decision).toBe('uncertain')
-    expect(timed.request.status).toBe('timed_out')
-    expect(() => timed.submit({
-      verdict: 'approved',
-      evidence: ['late'],
-      conditions: [],
-      semantic_coverage: ['full'],
-    }, 'reviewer-session')).toThrow(/no longer accepting submissions/i)
-
-    const cancelled = openGate()
-    expect(cancelled.closeCancelled('reviewer-session').decision).toBe('uncertain')
-    expect(cancelled.request.status).toBe('cancelled')
-
-    const missing = openGate()
-    expect(missing.closeMissingSubmit('reviewer-session').decision).toBe('uncertain')
-    expect(missing.request.status).toBe('completed')
-
-    const disposed = openGate()
-    disposed.dispose()
-    expect(() => disposed.submit({
-      verdict: 'approved',
-      evidence: ['after dispose'],
-      conditions: [],
-      semantic_coverage: ['full'],
-    }, 'reviewer-session')).toThrow(/handle was disposed/i)
+  it.each<{
+    scenario: string
+    close: (gate: ReviewerSubmissionGate) => { decision: string }
+    status?: string
+    lateSubmitError?: RegExp
+  }>([
+    {
+      scenario: 'timeout',
+      close: (gate) => gate.closeTimedOut('reviewer-session'),
+      status: 'timed_out',
+      lateSubmitError: /no longer accepting submissions/i,
+    },
+    {
+      scenario: 'cancel',
+      close: (gate) => gate.closeCancelled('reviewer-session'),
+      status: 'cancelled',
+    },
+    {
+      scenario: 'missing submit',
+      close: (gate) => gate.closeMissingSubmit('reviewer-session'),
+      status: 'completed',
+    },
+    {
+      scenario: 'dispose',
+      close: (gate) => {
+        gate.dispose()
+        return { decision: 'disposed' }
+      },
+      lateSubmitError: /handle was disposed/i,
+    },
+  ])('returns uncertain after $scenario and rejects a late submit', ({ close, status, lateSubmitError }) => {
+    const gate = openGate()
+    const verdict = close(gate)
+    if (status !== undefined) {
+      expect(verdict.decision).toBe('uncertain')
+      expect(gate.request.status).toBe(status)
+    }
+    if (lateSubmitError !== undefined) {
+      expect(() => gate.submit({
+        verdict: 'approved',
+        evidence: ['late'],
+        conditions: [],
+        semantic_coverage: ['full'],
+      }, 'reviewer-session')).toThrow(lateSubmitError)
+    }
   })
 })
 

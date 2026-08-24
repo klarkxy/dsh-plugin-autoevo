@@ -1,9 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { testReview } from '../helpers/records.js'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
@@ -21,40 +24,10 @@ import { sha256 } from '../../src/state/hashes.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
-  return {
-    schemaVersion: 1,
-    id: `review_${'a'.repeat(64)}`,
-    policyVersion: POLICY_VERSION,
-    createdAt: '2026-08-15T00:00:00.000Z',
-    resolutionId: `resolution_${'b'.repeat(24)}`,
-    requirement: 'calculator',
-    sourceSnapshot: {
-      kind: 'github', repository: 'acme/calculator', requestedRef: 'main', commit: 'c'.repeat(40), defaultBranch: 'main',
-    },
-    inspectedFiles: [],
-    manifest: {
-      kind: 'bundle', packageName: 'dsh-tool-calculator', bundlePatch: './cordis.patch.yml', scripts: [], dependencies: [],
-      peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' }, expectedTools: ['calculator'],
-    },
-    fit: 'full',
-    confidence: 0.8,
-    securityRisk: 'low',
-    maintained: true,
-    license: 'MIT',
-    compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
-    missingCapabilities: [],
-    findings: [],
-    recommendation: 'use',
-    installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
-    ...overrides,
-  }
+  return testReview(overrides)
 }
 
 function attestedSurface(expectedTools: readonly string[] = ['calculator']): NonNullable<ReviewRecord['runtimeSurface']> {
@@ -86,21 +59,7 @@ function attestedReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
 }
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'persistent-dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  return testRuntimeConfig(root, { dshHome: path.join(root, 'persistent-dsh-home') })
 }
 
 function execution(): ToolRunContext {
@@ -152,6 +111,28 @@ function jsonFixtures(): Record<string, unknown> {
   return { calculator: { arguments: { expression: '1+1' } } }
 }
 
+async function setup(record?: ReviewRecord): Promise<{ root: string; store: StateStore; ctx: Context }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-'))
+  temporary.push(root)
+  const store = new StateStore(root)
+  if (record) await store.put('reviews', record)
+  const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+  return { root, store, ctx }
+}
+
+function launcherWithHost(evidence: VerificationEvidence, sourceMatches = true) {
+  const verifyHost = vi.fn(async () => evidence)
+  const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
+  const launcher = {
+    install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+    profileSourceMatches: async () => sourceMatches,
+    readInstalledVerificationFixtures: async () => jsonFixtures(),
+    verifyHost,
+    verify,
+  } as unknown as DshLauncher
+  return { launcher, verifyHost, verify }
+}
+
 describe('fail-closed install outcomes', () => {
   it('rejects missing and mismatched install specifications without synthesizing a fallback', () => {
     expect(() => installTesting.assertStrictInstallSpec(review({ installSpec: null }))).toThrow(/missing an immutable install specification/i)
@@ -162,11 +143,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('returns failed_absent when the install command fails and the target is confirmed absent', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-absent-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', review())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(review())
     const launcher = {
       install: async () => { throw new Error('dsh exited with code 1') },
       profileTargetAbsent: async () => true,
@@ -187,11 +164,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('returns recovery_required when the install command fails but the target is present', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-present-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', review())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(review())
     const launcher = {
       install: async () => { throw new Error('timeout after manifest update') },
       profileTargetAbsent: async () => false,
@@ -212,11 +185,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('returns recovery_required when reconciliation is unknown after command failure', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-unknown-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', review())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(review())
     const launcher = {
       install: async () => { throw new Error('timeout') },
       profileTargetAbsent: async () => { throw new Error('profile unreadable') },
@@ -237,20 +206,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('returns recovery_required on Host verification failure and does not report installed success', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-mismatch-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const verifyHost = vi.fn(async () => hostFailedEvidence)
-    const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost,
-      verify,
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher, verifyHost, verify } = launcherWithHost(hostFailedEvidence)
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
       reviewId: review().id,
@@ -270,20 +227,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('reports verified success only after Host tool_roundtrip and never calls a semantic verifier', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-ok-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const verifyHost = vi.fn(async () => hostPassedEvidence)
-    const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost,
-      verify,
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher, verifyHost, verify } = launcherWithHost(hostPassedEvidence)
     const verifier = unusedVerifier()
     const run = vi.spyOn(verifier, 'run')
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
@@ -310,18 +255,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('keeps a verified persistent install usable but requests restart when hot-load is unsupported', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-restart-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async () => hostPassedEvidence,
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher } = launcherWithHost(hostPassedEvidence)
     const verifier = unusedVerifier()
     const run = vi.spyOn(verifier, 'run')
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
@@ -345,11 +280,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('preflights the exact source in isolated minimal DSH before installing into the live profile', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
     ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
@@ -394,11 +325,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('does not mutate the destination when isolated minimal DSH preflight fails', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-fail-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
     ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
@@ -425,11 +352,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('rechecks destination absence after preflight and refuses a concurrent install race', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-race-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     let absenceChecks = 0
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
@@ -459,8 +382,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('uses isolated minimal DSH only for activation preflight when the real result requires a user test', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-manual-preflight-'))
-    temporary.push(root)
     const manual = attestedReview({
       runtimeSurface: {
         ...attestedSurface(),
@@ -468,9 +389,7 @@ describe('fail-closed install outcomes', () => {
         verificationLayer: 'manual_runtime',
       },
     })
-    const store = new StateStore(root)
-    await store.put('reviews', manual)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(manual)
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
     ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
@@ -524,8 +443,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('rehashes a managed local artifact after preflight before destination mutation', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-preflight-drift-'))
-    temporary.push(root)
+    const { root, store, ctx } = await setup()
     const local = attestedReview({
       sourceSnapshot: {
         kind: 'local',
@@ -536,9 +454,7 @@ describe('fail-closed install outcomes', () => {
       },
       installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
     })
-    const store = new StateStore(root)
     await store.put('reviews', local)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
     ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
@@ -578,10 +494,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('refuses to overwrite an existing destination package before approval or preflight', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-existing-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
+    const { root, store } = await setup(attestedReview())
     const request = vi.fn(async () => 'allowed-once')
     const ctx = { get: () => ({ request }) } as unknown as Context
     const install = vi.fn()
@@ -600,8 +513,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('persists a same-package replacement when the frozen old spec still matches live profile state', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-replace-'))
-    temporary.push(root)
     const oldSpec = `github:acme/calculator#${'c'.repeat(40)}`
     const newCommit = 'd'.repeat(40)
     const newSpec = `github:acme/calculator#${newCommit}`
@@ -615,8 +526,7 @@ describe('fail-closed install outcomes', () => {
       },
       installSpec: newSpec,
     })
-    const store = new StateStore(root)
-    await store.put('reviews', current)
+    const { root, store, ctx } = await setup(current)
     const predecessorId = `installation_${'b'.repeat(24)}`
     await store.put('installations', {
       schemaVersion: 1,
@@ -646,7 +556,6 @@ describe('fail-closed install outcomes', () => {
         reason: 'predecessor',
       },
     })
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileTargetAbsent: async () => false,
@@ -680,11 +589,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('refuses replacement when the live spec drifted from the frozen installed target', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-replace-drift-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     const install = vi.fn()
     const launcher = {
       install,
@@ -709,10 +614,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('rechecks the live profile owner immediately before any persistent mutation', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-owner-drift-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
+    const { root, store } = await setup(attestedReview())
     const request = vi.fn(async () => 'allowed-once')
     const ctx = { get: () => ({ request }) } as unknown as Context
     const profileTargetAbsent = vi.fn(async () => true)
@@ -740,8 +642,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('does not pass provider, route, or expected-text into verifyHost', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-route-'))
-    temporary.push(root)
     const routed = review({
       manifest: {
         ...review().manifest,
@@ -754,9 +654,7 @@ describe('fail-closed install outcomes', () => {
         verificationLayer: 'manual_runtime',
       },
     })
-    const store = new StateStore(root)
-    await store.put('reviews', routed)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(routed)
     const verifyHost = vi.fn(async () => { throw new Error('route/provider must not spawn Host verification') })
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
@@ -782,8 +680,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('reports activated after Host bundle_activation and never claims verified', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-activated-'))
-    temporary.push(root)
     const none = attestedReview({
       manifest: {
         ...review().manifest,
@@ -792,9 +688,7 @@ describe('fail-closed install outcomes', () => {
       },
       runtimeSurface: attestedSurface([]),
     })
-    const store = new StateStore(root)
-    await store.put('reviews', none)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(none)
     const verifyHost = vi.fn(async (): Promise<VerificationEvidence> => ({
       attempted: true,
       exitCode: 0,
@@ -899,8 +793,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('cannot mint tool_roundtrip from unattested or self-declared fixtures', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-unattested-'))
-    temporary.push(root)
     const unattested = attestedReview({
       runtimeSurface: {
         ...attestedSurface(),
@@ -908,9 +800,7 @@ describe('fail-closed install outcomes', () => {
         verificationLayer: 'manual_runtime',
       },
     })
-    const store = new StateStore(root)
-    await store.put('reviews', unattested)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(unattested)
     const verifyHost = vi.fn(async () => { throw new Error('unattested fixtures must not spawn Host verification') })
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
@@ -957,18 +847,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('reports recovery rather than restart when failed hot-load could not roll back', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-hot-recovery-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async () => hostPassedEvidence,
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher } = launcherWithHost(hostPassedEvidence)
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
       evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
       rollbackFailed: true,
@@ -989,9 +869,6 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('maps rollbackFailed to recovery_required for activated but never hot-loads awaiting_user_test', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-hot-recovery-layers-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const none = attestedReview({
       manifest: {
         ...review().manifest,
@@ -1000,8 +877,7 @@ describe('fail-closed install outcomes', () => {
       },
       runtimeSurface: attestedSurface([]),
     })
-    await store.put('reviews', none)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(none)
     const rollback = vi.fn(async () => ({
       evidence: { attempted: true, loaded: false, method: 'failed' as const, reason: 'activation and rollback failed' },
       rollbackFailed: true,
@@ -1067,11 +943,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('keeps verificationTask and expectedText as human prompts that never enter verifyHost', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-substring-diagnostic-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     const verifyHost = vi.fn(async (input: unknown) => {
       const serialized = JSON.stringify(input)
       expect(serialized).not.toContain('calculate 6 * 7')
@@ -1112,18 +984,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('does not let a semantic verifier override a missing mechanical Host tool result', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-mechanical-override-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const verifyHost = vi.fn(async () => hostFailedEvidence)
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost,
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher, verifyHost } = launcherWithHost(hostFailedEvidence)
     const verifier = unusedVerifier()
     const run = vi.spyOn(verifier, 'run')
     const installer = new PluginInstaller(
@@ -1154,20 +1016,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('requires the target profile to bind the exact reviewed source before verification can succeed', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-source-mismatch-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const verifyHost = vi.fn(async () => hostPassedEvidence)
-    const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => false,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost,
-      verify,
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher, verifyHost, verify } = launcherWithHost(hostPassedEvidence, false)
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
       reviewId: review().id,
@@ -1187,9 +1037,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('rejects a managed local package whose packed bytes changed after confirmation', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-artifact-drift-'))
-    temporary.push(root)
-    const store = new StateStore(root)
+    const { root, store, ctx } = await setup()
     const local = attestedReview({
       sourceSnapshot: {
         kind: 'local',
@@ -1201,7 +1049,6 @@ describe('fail-closed install outcomes', () => {
       installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
     })
     await store.put('reviews', local)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       materializeLocal: async () => ({
         installSpec: `file:${path.join(root, 'actual.tgz').replaceAll('\\', '/')}`,
@@ -1220,11 +1067,7 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('verifies a Host tool round-trip without using expected-text substring or a model verifier', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-no-substring-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(attestedReview())
     const verifyHost = vi.fn(async (input: unknown) => {
       const fields = Object.keys(input as Record<string, unknown>)
       expect(fields).not.toContain('verificationExpectedText')
@@ -1260,25 +1103,16 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('cannot verify when Host tool results are missing, even if a verifier would approve', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-substring-only-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async (): Promise<VerificationEvidence> => ({
-        ...hostPassedEvidence,
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        status: 'failed',
-        exitCode: 1,
-        reason: 'no successful Host tool result',
-      }),
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher } = launcherWithHost({
+      ...hostPassedEvidence,
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      status: 'failed',
+      exitCode: 1,
+      reason: 'no successful Host tool result',
+    })
     const verifier = unusedVerifier()
     const run = vi.spyOn(verifier, 'run')
     const installer = new PluginInstaller(
@@ -1299,17 +1133,8 @@ describe('fail-closed install outcomes', () => {
   })
 
   it('does not consult a bound semantic verifier on the Host mechanical path', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-stale-verifier-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    await store.put('reviews', attestedReview())
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async () => hostPassedEvidence,
-    } as unknown as DshLauncher
+    const { root, store, ctx } = await setup(attestedReview())
+    const { launcher } = launcherWithHost(hostPassedEvidence)
     const stale: SemanticVerifierHost = {
       async run(input) {
         const request = mintVerifierRequest({
@@ -1400,11 +1225,8 @@ const riskyReview = () => attestedReview({
 
 describe('install authorization uses verdict and hard boundaries', () => {
   it('lets a high-risk prompt-regex review with an exact approved verdict pass the install gate once', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-approved-high-'))
-    temporary.push(root)
     const bound = withApprovedVerdict(riskyReview())
-    const store = new StateStore(root)
-    await store.put('reviews', bound)
+    const { root, store } = await setup(bound)
     const reasons: string[] = []
     let authorized = 0
     const ctx = { get: () => ({
@@ -1443,12 +1265,8 @@ describe('install authorization uses verdict and hard boundaries', () => {
   })
 
   it('rejects missing or rejected verdicts even when prompt-regex and high risk are the only findings', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-missing-verdict-'))
-    temporary.push(root)
-    const store = new StateStore(root)
     const missing = riskyReview()
-    await store.put('reviews', missing)
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const { root, store, ctx } = await setup(missing)
     const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, async () => undefined)
     await expect(installer.install({
@@ -1475,8 +1293,7 @@ describe('install authorization uses verdict and hard boundaries', () => {
       verification: VerificationEvidence
       license?: string
     }) {
-      const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-contrib-'))
-      temporary.push(root)
+      const { root, store, ctx } = await setup()
       const tgz = path.join(root, 'plugin.tgz')
       await writeFile(tgz, 'reviewed bytes')
       const local = attestedReview({
@@ -1492,9 +1309,7 @@ describe('install authorization uses verdict and hard boundaries', () => {
         license: options.license ?? 'MIT',
         recommendation: 'use',
       })
-      const store = new StateStore(root)
       await store.put('reviews', local)
-      const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
       const installer = new PluginInstaller(
         ctx,
         config(root),

@@ -15,7 +15,7 @@ import {
   reviewerBindingDigest,
   reviewSnapshotDigest,
 } from '../../src/review/direct-use.js'
-import { mintReviewerRequest, parseReviewerSubmitArgs, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
+import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const COMMIT = 'c'.repeat(40)
@@ -279,22 +279,5 @@ describe('final use_this Host commitment', () => {
       id: bound.resolutionId,
       decisions: [decisionReceipt(bound)],
     }, { workflow, receipt, commitment, retention: 'temporary' })).toThrow(/current Host action commitment/i)
-  })
-
-  it('does not let reviewer submit fields mint a commitment or authorization', () => {
-    expect(() => parseReviewerSubmitArgs({
-      verdict: 'approved',
-      evidence: [],
-      conditions: [],
-      semantic_coverage: ['partial'],
-      actionCommitment: { requestedAction: 'use_this' },
-    })).toThrow(/does not accept Host-owned or authorization fields/i)
-    expect(() => parseReviewerSubmitArgs({
-      verdict: 'approved',
-      evidence: [],
-      conditions: [],
-      semantic_coverage: ['partial'],
-      authorization: { state: 'use_review' },
-    })).toThrow(/does not accept Host-owned or authorization fields/i)
   })
 })

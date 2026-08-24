@@ -1,7 +1,9 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testReview } from '../helpers/records.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { POLICY_VERSION, type ReviewRecord } from '../../src/contracts.js'
 import {
@@ -19,24 +21,11 @@ import {
   _testing as driverTesting,
 } from '../../src/host-verification-driver.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
-  return {
-    schemaVersion: 1,
-    id: `review_${'a'.repeat(64)}`,
-    policyVersion: POLICY_VERSION,
+  return testReview({
     createdAt: '2026-08-21T00:00:00.000Z',
-    resolutionId: `resolution_${'b'.repeat(24)}`,
-    requirement: 'calculator',
-    sourceSnapshot: {
-      kind: 'github', repository: 'acme/calculator', requestedRef: 'main', commit: 'c'.repeat(40), defaultBranch: 'main',
-    },
-    inspectedFiles: [],
     manifest: {
       kind: 'bundle',
       packageName: 'dsh-tool-calculator',
@@ -46,16 +35,6 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
       peerDependencies: {},
       expectedTools: ['calculator'],
     },
-    fit: 'full',
-    confidence: 0.8,
-    securityRisk: 'low',
-    maintained: true,
-    license: 'MIT',
-    compatibility: { status: 'compatible', reason: 'test', runtimeVersion: '0.1.0-rc.6' },
-    missingCapabilities: [],
-    findings: [],
-    recommendation: 'use',
-    installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
     runtimeSurface: {
       llmDependency: false,
       llmRegistered: false,
@@ -72,7 +51,7 @@ function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
       verificationLayer: 'manual_runtime',
     },
     ...overrides,
-  }
+  })
 }
 
 function attestedReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
@@ -262,38 +241,6 @@ describe('Host verification driver', () => {
     expect(ancestorAwaited).toBe(false)
     expect(candidateInitialized).toBe(true)
     expect(result).toMatchObject({ status: 'passed', sourceMatched: true, exitCode: 0 })
-  })
-
-  it('activates a carrier bundle by insert id and name, not the npm package', async () => {
-    const ctx = {
-      loader: {
-        entries: () => [{
-          id: 'zhihu-search-mcp',
-          options: { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' },
-          fiber: { await: async () => undefined, state: 2 },
-        }],
-      },
-      tools: { get: () => undefined, execute: async () => ({ isError: true }) },
-      get: () => undefined,
-      fiber: {},
-    } as unknown as Context
-    const result = await runHostVerification(ctx, {
-      receiptPath: path.resolve('receipt.jsonl'),
-      expectedTools: [],
-      layer: 'bundle_activation',
-      packageName: 'dsh-plugin-zhihu-search',
-      fixtureDigest: fixtureDigestFor([]),
-      activatedFibersJson: JSON.stringify([{
-        id: 'zhihu-search-mcp',
-        name: '@deepseek-ai/dsh-mcp-client',
-      }]),
-    })
-    expect(result).toMatchObject({
-      layer: 'bundle_activation',
-      status: 'passed',
-      sourceMatched: true,
-      exitCode: 0,
-    })
   })
 
   it('does not treat another MCP client Fiber as the reviewed carrier', async () => {

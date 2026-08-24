@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { resolveLocalCapabilities } from '../../src/resolver/local.js'
@@ -11,12 +12,9 @@ import {
   resolveProfilePluginCapabilities,
 } from '../../src/resolver/profile.js'
 
-const temporary: string[] = []
+const temporary = trackTempDirs()
 const PACKAGE = '@dsh-external/dsh-conv-export'
 
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
 
 async function profileHome(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-profile-'))

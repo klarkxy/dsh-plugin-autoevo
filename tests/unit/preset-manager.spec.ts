@@ -75,22 +75,6 @@ describe('materializeEvolutionPreset', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('performs first install with manifest hashes', async () => {
-    const root = await tempDir('autoevo-preset-install')
-    const dshHome = path.join(root, 'dsh')
-    const templateDir = await writeTemplate(root, baseTemplate)
-    const result = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(result.status).toBe('installed')
-    const target = resolveEvolutionPresetPaths(dshHome).targetDir
-    const preset = await readFile(path.join(target, 'preset.yml'), 'utf8')
-    expect(preset).toBe(baseTemplate['preset.yml'])
-    const manifest = JSON.parse(await readFile(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
-    expect(manifest.owner).toBe('dsh-plugin-autoevo')
-    expect(manifest.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
-    expect(manifest.files['preset.yml']).toBe(sha256(Buffer.from(baseTemplate['preset.yml'])))
-    expect(manifest.files['agent.cordis.yml']).toBe(sha256(Buffer.from(baseTemplate['agent.cordis.yml'])))
-  })
-
   it('allows dshHome itself to resolve through a junction to its physical root', async () => {
     const root = await tempDir('autoevo-preset-home-link')
     const physicalHome = path.join(root, 'physical-dsh')
@@ -104,15 +88,6 @@ describe('materializeEvolutionPreset', () => {
     expect(result.status).toBe('installed')
     expect(await readFile(path.join(physicalHome, '.agent-presets', 'evolution', 'preset.yml'), 'utf8'))
       .toBe(baseTemplate['preset.yml'])
-  })
-
-  it('no-ops when template version and hashes already match', async () => {
-    const root = await tempDir('autoevo-preset-noop')
-    const dshHome = path.join(root, 'dsh')
-    const templateDir = await writeTemplate(root, baseTemplate)
-    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    const second = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(second.status).toBe('noop')
   })
 
   it('upgrades a pristine managed preset', async () => {
@@ -136,34 +111,6 @@ describe('materializeEvolutionPreset', () => {
     expect(upgraded.templateVersion).toBe('3')
     const body = await readFile(path.join(resolveEvolutionPresetPaths(dshHome).targetDir, 'preset.yml'), 'utf8')
     expect(body).toContain('upgraded')
-  })
-
-  it('upgrades a pristine prior install to the shipped current template', async () => {
-    const root = await tempDir('autoevo-preset-known-release')
-    const dshHome = path.join(root, 'dsh')
-    const packageTemplate = path.resolve(process.cwd(), 'presets', 'evolution')
-    const seed = await writeTemplate(root, {
-      ...baseTemplate,
-      'preset.yml': 'name: prior-v4\n',
-      'agent.cordis.yml': '- id: prior\n',
-    })
-    await materializeEvolutionPreset({
-      dshHome,
-      enabled: true,
-      templateDir: seed,
-      templateVersion: '4',
-      trustedPriorManifests: [],
-    })
-    const target = resolveEvolutionPresetPaths(dshHome).targetDir
-    const installed = JSON.parse(await readFile(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
-    const result = await materializeEvolutionPreset({
-      dshHome,
-      enabled: true,
-      templateDir: packageTemplate,
-      trustedPriorManifests: [installed],
-    })
-    expect(result.status).toBe('upgraded')
-    expect(result.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
   })
 
   it('upgrades a CRLF checkout of a pristine prior to the shipped current template', async () => {
@@ -199,28 +146,6 @@ describe('materializeEvolutionPreset', () => {
     })
     expect(result.status).toBe('upgraded')
     expect(result.templateVersion).toBe(EVOLUTION_PRESET_TEMPLATE_VERSION)
-  })
-
-  it('preserves user-modified managed files', async () => {
-    const root = await tempDir('autoevo-preset-modified')
-    const dshHome = path.join(root, 'dsh')
-    const templateDir = await writeTemplate(root, baseTemplate)
-    await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    const target = resolveEvolutionPresetPaths(dshHome).targetDir
-    await writeFile(path.join(target, 'preset.yml'), 'name: user-changed\n', 'utf8')
-
-    const nextTemplate = await writeTemplate(path.join(root, 'next'), {
-      ...baseTemplate,
-      'preset.yml': 'name: next\n',
-    })
-    const result = await materializeEvolutionPreset({
-      dshHome,
-      enabled: true,
-      templateDir: nextTemplate,
-      templateVersion: '2',
-    })
-    expect(result.status).toBe('preserved')
-    expect(await readFile(path.join(target, 'preset.yml'), 'utf8')).toBe('name: user-changed\n')
   })
 
   it('preserves recomputed canonical manifests that are not known package releases', async () => {

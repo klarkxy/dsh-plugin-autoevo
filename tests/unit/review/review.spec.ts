@@ -781,114 +781,101 @@ describe('Policy V8 runtime surface classification', () => {
     expect(namespaced.runtimeSurface?.verificationLayer).toBe('manual_runtime')
   })
 
-  it('freezes an ordinary no-tool bundle as bundle_activation', () => {
-    const record = evaluatePluginContent({
-      ...base,
+  it.each([
+    {
+      title: 'an ordinary no-tool bundle',
+      manifest: {
+        name: '@acme/calculator',
+        license: 'MIT',
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+      },
+      files: [],
+      expected: {
+        expectedTools: [],
+        llmDependency: false,
+        environmentSignal: false,
+        verificationLayer: 'bundle_activation',
+      },
+    },
+    {
+      title: 'llmDependency',
+      manifest: {
+        name: '@acme/llm-helper',
+        license: 'MIT',
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+        dependencies: { '@deepseek-ai/dsh-llm': '1.0.0' },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+      },
+      files: [],
+      expected: {
+        llmDependency: true,
+        llmRegistered: false,
+        verificationLayer: 'manual_runtime',
+      },
+    },
+    {
+      title: 'network signal',
+      manifest: {
+        name: '@acme/calculator',
+        license: 'MIT',
+        dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+      },
       files: [
-        {
-          path: 'package.json',
-          content: Buffer.from(JSON.stringify({
-            name: '@acme/calculator',
-            license: 'MIT',
-            dsh: { bundle: { patch: './cordis.patch.yml' } },
-            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-          })),
-        },
-        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
-      ],
-    })
-    expect(record.runtimeSurface?.expectedTools).toEqual([])
-    expect(record.runtimeSurface?.llmDependency).toBe(false)
-    expect(record.runtimeSurface?.environmentSignal).toBe(false)
-    expect(record.runtimeSurface?.verificationLayer).toBe('bundle_activation')
-  })
-
-  it('freezes llmDependency as manual_runtime', () => {
-    const record = evaluatePluginContent({
-      ...base,
-      files: [
-        {
-          path: 'package.json',
-          content: Buffer.from(JSON.stringify({
-            name: '@acme/llm-helper',
-            license: 'MIT',
-            dsh: { bundle: { patch: './cordis.patch.yml' } },
-            dependencies: { '@deepseek-ai/dsh-llm': '1.0.0' },
-            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-          })),
-        },
-        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
-      ],
-    })
-    expect(record.runtimeSurface?.llmDependency).toBe(true)
-    expect(record.runtimeSurface?.llmRegistered).toBe(false)
-    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
-  })
-
-  it('freezes network and process signals and classifies them as manual_runtime', () => {
-    const network = evaluatePluginContent({
-      ...base,
-      files: [
-        {
-          path: 'package.json',
-          content: Buffer.from(JSON.stringify({
-            name: '@acme/calculator',
-            license: 'MIT',
-            dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
-            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-          })),
-        },
-        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
         { path: 'src/index.ts', content: Buffer.from('export const n = 1; fetch("https://example.test")') },
       ],
-    })
-    expect(network.runtimeSurface).toMatchObject({
-      networkSignal: true,
-      verificationLayer: 'manual_runtime',
-    })
-
-    const process = evaluatePluginContent({
-      ...base,
+      expected: {
+        networkSignal: true,
+        verificationLayer: 'manual_runtime',
+      },
+    },
+    {
+      title: 'process signal',
+      manifest: {
+        name: '@acme/calculator',
+        license: 'MIT',
+        dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+      },
       files: [
-        {
-          path: 'package.json',
-          content: Buffer.from(JSON.stringify({
-            name: '@acme/calculator',
-            license: 'MIT',
-            dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculator'] } },
-            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-          })),
-        },
-        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
         { path: 'src/run.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('echo')") },
       ],
-    })
-    expect(process.runtimeSurface).toMatchObject({
-      processSignal: true,
-      verificationLayer: 'manual_runtime',
-    })
-  })
-
-  it('freezes environment signals as manual_runtime', () => {
+      expected: {
+        processSignal: true,
+        verificationLayer: 'manual_runtime',
+      },
+    },
+    {
+      title: 'environment signal',
+      manifest: {
+        name: '@acme/calculator',
+        license: 'MIT',
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+        peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+      },
+      files: [
+        { path: 'src/index.ts', content: Buffer.from('export const home = process.env.HOME') },
+      ],
+      expected: {
+        environmentSignal: true,
+        expectedTools: [],
+        verificationLayer: 'manual_runtime',
+      },
+    },
+  ])('freezes $title as $expected.verificationLayer', ({ manifest, files, expected }) => {
     const record = evaluatePluginContent({
       ...base,
       files: [
         {
           path: 'package.json',
-          content: Buffer.from(JSON.stringify({
-            name: '@acme/calculator',
-            license: 'MIT',
-            dsh: { bundle: { patch: './cordis.patch.yml' } },
-            peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
-          })),
+          content: Buffer.from(JSON.stringify(manifest)),
         },
         { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
-        { path: 'src/index.ts', content: Buffer.from('export const home = process.env.HOME') },
+        ...files,
       ],
     })
-    expect(record.runtimeSurface?.environmentSignal).toBe(true)
-    expect(record.runtimeSurface?.expectedTools).toEqual([])
-    expect(record.runtimeSurface?.verificationLayer).toBe('manual_runtime')
+    expect(record.runtimeSurface).toMatchObject(expected)
   })
 
   it('classifies skill-only plugins as manual_runtime', () => {

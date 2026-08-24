@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../../src/contracts.js'
 import { TERMINAL_NODES, type WorkflowRecord } from '../../src/workflow/contracts.js'
-import { lifecycleStateFor } from '../../src/workflow/lifecycle.js'
+import { lifecycleStateFor, type LifecycleMappingInput, type WorkflowLifecycleState } from '../../src/workflow/lifecycle.js'
 
 function workflow(overrides: Partial<WorkflowRecord> = {}): WorkflowRecord {
   return {
@@ -97,97 +97,179 @@ function installation(verified: boolean): InstallationRecord {
 }
 
 describe('public workflow lifecycle mapping', () => {
-  it('maps the main discovery-to-verify path without claiming verified early', () => {
-    expect(lifecycleStateFor(workflow({ cursor: 'discover_remote' }))).toBe('searched')
-    expect(lifecycleStateFor(workflow({ status: 'interrupted', cursor: 'await_selection' }))).toBe('selected')
-    expect(lifecycleStateFor(workflow({ cursor: 'review_github' }))).toBe('reviewing')
-    expect(lifecycleStateFor(
-      workflow({ status: 'interrupted', cursor: 'await_confirmation' }),
-      { reviews: [review(verdict('approved'))] },
-    )).toBe('approved')
-    expect(lifecycleStateFor(
-      workflow({ status: 'interrupted', cursor: 'await_confirmation' }),
-      { reviews: [review(verdict('rejected'))] },
-    )).toBe('rejected')
-    expect(lifecycleStateFor(
-      workflow({ status: 'interrupted', cursor: 'await_confirmation' }),
-      { reviews: [review(verdict('uncertain'))] },
-    )).toBe('uncertain')
-    expect(lifecycleStateFor(
-      workflow({ status: 'interrupted', cursor: 'await_confirmation' }),
-      { reviews: [review()] },
-    )).toBe('skipped')
-    expect(lifecycleStateFor(workflow({ status: 'interrupted', cursor: 'await_confirmation' }))).toBe('awaiting_confirmation')
-    expect(lifecycleStateFor(workflow({
-      cursor: 'await_confirmation',
-      actionCommitment: { id: 'c1' } as NonNullable<WorkflowRecord['actionCommitment']>,
-    }))).toBe('committed')
-    expect(lifecycleStateFor(workflow({
-      cursor: 'await_confirmation',
-      executionLease: { id: 'l1' } as NonNullable<WorkflowRecord['executionLease']>,
-    }))).toBe('leased')
-    expect(lifecycleStateFor(workflow({ cursor: 'install_verify' }))).toBe('executing')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      { installation: installation(true) },
-    )).toBe('verified')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      { installation: installation(false) },
-    )).toBe('recovery_required')
-  })
-
-  it('keeps distinct recovery and terminal states', () => {
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'recovery_required' }))).toBe('recovery_required')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'restart_required' }))).toBe('restart_required')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'market_restart_required' }))).toBe('market_restart_required')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'market_setup_required' }))).toBe('market_setup_required')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'modify_authorized' }))).toBe('modify_authorized')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'create_authorized' }))).toBe('create_authorized')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'stopped' }))).toBe('stopped')
-    expect(lifecycleStateFor(workflow({ status: 'interrupted', cursor: 'await_modify_work' }))).toBe('interrupted')
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'reuse_local' }))).toBe('reuse_local')
-    expect(lifecycleStateFor(workflow({
-      policyVersion: '4',
-      status: 'interrupted',
-      cursor: 'await_confirmation',
-    }))).toBe('interrupted')
-  })
-
-  it('maps awaiting_user_test as a normal completed lifecycle, not verified or recovery', () => {
-    expect(TERMINAL_NODES.has('awaiting_user_test')).toBe(true)
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'awaiting_user_test' }))).toBe('awaiting_user_test')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'awaiting_user_test' }),
-      { installation: installation(true) },
-    )).toBe('awaiting_user_test')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      {
+  it.each<{
+    name: string
+    overrides: Partial<WorkflowRecord>
+    extras?: LifecycleMappingInput
+    expected: WorkflowLifecycleState
+    terminal?: Parameters<typeof TERMINAL_NODES.has>[0]
+  }>([
+    {
+      name: 'maps discover_remote to searched without claiming verified early',
+      overrides: { cursor: 'discover_remote' },
+      expected: 'searched',
+    },
+    {
+      name: 'maps interrupted await_selection to selected',
+      overrides: { status: 'interrupted', cursor: 'await_selection' },
+      expected: 'selected',
+    },
+    {
+      name: 'maps review_github to reviewing',
+      overrides: { cursor: 'review_github' },
+      expected: 'reviewing',
+    },
+    {
+      name: 'maps an approved reviewer verdict to approved',
+      overrides: { status: 'interrupted', cursor: 'await_confirmation' },
+      extras: { reviews: [review(verdict('approved'))] },
+      expected: 'approved',
+    },
+    {
+      name: 'maps a rejected reviewer verdict to rejected',
+      overrides: { status: 'interrupted', cursor: 'await_confirmation' },
+      extras: { reviews: [review(verdict('rejected'))] },
+      expected: 'rejected',
+    },
+    {
+      name: 'maps an uncertain reviewer verdict to uncertain',
+      overrides: { status: 'interrupted', cursor: 'await_confirmation' },
+      extras: { reviews: [review(verdict('uncertain'))] },
+      expected: 'uncertain',
+    },
+    {
+      name: 'maps a review without a verdict to skipped',
+      overrides: { status: 'interrupted', cursor: 'await_confirmation' },
+      extras: { reviews: [review()] },
+      expected: 'skipped',
+    },
+    {
+      name: 'maps await_confirmation without reviews to awaiting_confirmation',
+      overrides: { status: 'interrupted', cursor: 'await_confirmation' },
+      expected: 'awaiting_confirmation',
+    },
+    {
+      name: 'maps an action commitment to committed',
+      overrides: {
+        cursor: 'await_confirmation',
+        actionCommitment: { id: 'c1' } as NonNullable<WorkflowRecord['actionCommitment']>,
+      },
+      expected: 'committed',
+    },
+    {
+      name: 'maps an execution lease to leased',
+      overrides: {
+        cursor: 'await_confirmation',
+        executionLease: { id: 'l1' } as NonNullable<WorkflowRecord['executionLease']>,
+      },
+      expected: 'leased',
+    },
+    {
+      name: 'maps install_verify to executing',
+      overrides: { cursor: 'install_verify' },
+      expected: 'executing',
+    },
+    {
+      name: 'maps a verified installation to verified',
+      overrides: { status: 'completed', cursor: 'installed' },
+      extras: { installation: installation(true) },
+      expected: 'verified',
+    },
+    {
+      name: 'maps a failed installation to recovery_required',
+      overrides: { status: 'completed', cursor: 'installed' },
+      extras: { installation: installation(false) },
+      expected: 'recovery_required',
+    },
+    {
+      name: 'keeps recovery_required distinct',
+      overrides: { status: 'completed', cursor: 'recovery_required' },
+      expected: 'recovery_required',
+    },
+    {
+      name: 'keeps restart_required distinct',
+      overrides: { status: 'completed', cursor: 'restart_required' },
+      expected: 'restart_required',
+    },
+    {
+      name: 'keeps market_restart_required distinct',
+      overrides: { status: 'completed', cursor: 'market_restart_required' },
+      expected: 'market_restart_required',
+    },
+    {
+      name: 'keeps market_setup_required distinct',
+      overrides: { status: 'completed', cursor: 'market_setup_required' },
+      expected: 'market_setup_required',
+    },
+    {
+      name: 'keeps modify_authorized distinct',
+      overrides: { status: 'completed', cursor: 'modify_authorized' },
+      expected: 'modify_authorized',
+    },
+    {
+      name: 'keeps create_authorized distinct',
+      overrides: { status: 'completed', cursor: 'create_authorized' },
+      expected: 'create_authorized',
+    },
+    {
+      name: 'keeps stopped distinct',
+      overrides: { status: 'completed', cursor: 'stopped' },
+      expected: 'stopped',
+    },
+    {
+      name: 'maps interrupted await_modify_work to interrupted',
+      overrides: { status: 'interrupted', cursor: 'await_modify_work' },
+      expected: 'interrupted',
+    },
+    {
+      name: 'keeps reuse_local distinct',
+      overrides: { status: 'completed', cursor: 'reuse_local' },
+      expected: 'reuse_local',
+    },
+    {
+      name: 'maps a stale policy version to interrupted',
+      overrides: { policyVersion: '4', status: 'interrupted', cursor: 'await_confirmation' },
+      expected: 'interrupted',
+    },
+    {
+      name: 'maps awaiting_user_test as a normal completed lifecycle, not verified or recovery',
+      overrides: { status: 'completed', cursor: 'awaiting_user_test' },
+      expected: 'awaiting_user_test',
+      terminal: 'awaiting_user_test',
+    },
+    {
+      name: 'keeps awaiting_user_test even with a verified installation',
+      overrides: { status: 'completed', cursor: 'awaiting_user_test' },
+      extras: { installation: installation(true) },
+      expected: 'awaiting_user_test',
+    },
+    {
+      name: 'maps an awaiting_user_test install outcome to awaiting_user_test',
+      overrides: { status: 'completed', cursor: 'installed' },
+      extras: {
         installation: {
           ...installation(false),
           installOutcome: 'awaiting_user_test',
           verified: false,
         },
       },
-    )).toBe('awaiting_user_test')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      { installation: installation(true) },
-    )).toBe('verified')
-    expect(lifecycleStateFor(workflow({
-      policyVersion: '7',
-      status: 'completed',
-      cursor: 'awaiting_user_test',
-    }))).toBe('interrupted')
-  })
-
-  it('maps activated as a completed lifecycle that is not verified or recovery', () => {
-    expect(TERMINAL_NODES.has('activated')).toBe(true)
-    expect(lifecycleStateFor(workflow({ status: 'completed', cursor: 'activated' }))).toBe('activated')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      {
+      expected: 'awaiting_user_test',
+    },
+    {
+      name: 'maps a stale policy version on awaiting_user_test to interrupted',
+      overrides: { policyVersion: '7', status: 'completed', cursor: 'awaiting_user_test' },
+      expected: 'interrupted',
+    },
+    {
+      name: 'maps activated as a completed lifecycle that is not verified or recovery',
+      overrides: { status: 'completed', cursor: 'activated' },
+      expected: 'activated',
+      terminal: 'activated',
+    },
+    {
+      name: 'maps an activated install outcome to activated',
+      overrides: { status: 'completed', cursor: 'installed' },
+      extras: {
         installation: {
           ...installation(false),
           installOutcome: 'activated',
@@ -196,18 +278,18 @@ describe('public workflow lifecycle mapping', () => {
           verified: false,
         },
       },
-    )).toBe('activated')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'activated' }),
-      { installation: installation(true) },
-    )).toBe('activated')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'installed' }),
-      { installation: installation(true) },
-    )).toBe('verified')
-    expect(lifecycleStateFor(
-      workflow({ status: 'completed', cursor: 'restart_required' }),
-      {
+      expected: 'activated',
+    },
+    {
+      name: 'keeps activated even with a verified installation',
+      overrides: { status: 'completed', cursor: 'activated' },
+      extras: { installation: installation(true) },
+      expected: 'activated',
+    },
+    {
+      name: 'keeps restart_required when the install outcome is activated',
+      overrides: { status: 'completed', cursor: 'restart_required' },
+      extras: {
         installation: {
           ...installation(false),
           installOutcome: 'activated',
@@ -215,6 +297,10 @@ describe('public workflow lifecycle mapping', () => {
           verified: false,
         },
       },
-    )).toBe('restart_required')
+      expected: 'restart_required',
+    },
+  ])('$name', ({ overrides, extras, expected, terminal }) => {
+    if (terminal !== undefined) expect(TERMINAL_NODES.has(terminal)).toBe(true)
+    expect(lifecycleStateFor(workflow(overrides), extras)).toBe(expected)
   })
 })

@@ -1,10 +1,12 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { AuthorizationDecisionInput, ReviewerVerdictDecision } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
@@ -14,28 +16,10 @@ import { CapabilityEvolutionService } from '../../src/service.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION, type SemanticReviewerHost } from '../../src/semantic-reviewer.js'
 import { StateStore } from '../../src/state/store.js'
 
-const temporary: string[] = []
-
-afterEach(async () => {
-  await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
-})
+const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
-  return {
-    dshHome: path.join(root, 'dsh-home'),
-    stateDir: root,
-    ghCommand: 'gh',
-    gitCommand: 'git',
-    dshCommand: 'dsh',
-    dshCommandArgs: [],
-    maxCandidates: 5,
-    maxFiles: 80,
-    maxRepositoryBytes: 1_048_576,
-    commandTimeoutMs: 30_000,
-    forwardedCredentialEnv: [],
-    verificationPatchPaths: [],
-    evolutionPreset: false,
-  }
+  return testRuntimeConfig(root)
 }
 
 function exec(sessionId = 'session-gates'): ToolRunContext {
@@ -323,21 +307,38 @@ function reviewerHost(decision: ReviewerVerdictDecision): SemanticReviewerHost {
   }
 }
 
+type RunnerResults = Parameters<typeof discoveryRunner>[0]
+
+function makeService(
+  root: string,
+  runnerResults: RunnerResults | { results: RunnerResults, files: Record<string, string> },
+  reviewer?: SemanticReviewerHost,
+) {
+  const guard = new CreationGuard({ isEvolutionMode: () => true })
+  const store = new StateStore(root)
+  const spec = Array.isArray(runnerResults) ? { results: runnerResults, files: {} } : runnerResults
+  const service = new CapabilityEvolutionService(
+    hostCtx(root),
+    config(root),
+    discoveryRunner(spec.results, spec.files),
+    store,
+    guard,
+    undefined,
+    reviewer,
+  )
+  return { service, guard, store }
+}
+
 describe('conversational confirmation gates', () => {
-  it('does not mint create authorization after empty completed discovery without create-new', async () => {
+  it('does not mint create authorization from start itself or after empty completed discovery without create-new', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-empty-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([]),
-      new StateStore(root),
-      guard,
-    )
+    const { service, guard } = makeService(root, [])
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.authorization?.state).toBe('selection_required')
+    expect(started.resolution?.authorization?.state).not.toBe('create_authorized')
+    expect(started.resolution?.selectedRepositories ?? []).toEqual([])
     expect(started.workflow.cursor).toBe('await_confirmation')
     expect(started.workflow.interrupt?.kind).toBe('await_confirmation')
     expect(started.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining([
@@ -354,40 +355,18 @@ describe('conversational confirmation gates', () => {
     } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
   })
 
-  it('does not mint create authorization from start itself', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-resolve-'))
-    temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([]),
-      new StateStore(root),
-      guard,
-    )
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', exec())
-    expect(started.resolution?.authorization?.state).toBe('selection_required')
-    expect(started.resolution?.authorization?.state).not.toBe('create_authorized')
-    expect(started.resolution?.selectedRepositories ?? []).toEqual([])
-    expect(started.workflow.cursor).toBe('await_confirmation')
-  })
-
   it('keeps discovery autonomous, then seals an agent-presented shortlist before user selection', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-unselected-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([{
+    const { service, guard } = makeService(root, {
+      results: [{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], grokBundle),
-      new StateStore(root),
-      guard,
-    )
+      }],
+      files: grokBundle,
+    })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
@@ -413,19 +392,15 @@ describe('conversational confirmation gates', () => {
   it('rejects a Gate-1 use_this decision without consuming the interrupt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-direct-install-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([{
+    const { service, guard } = makeService(root, {
+      results: [{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], grokBundle),
-      new StateStore(root),
-      guard,
-    )
+      }],
+      files: grokBundle,
+    })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
@@ -453,11 +428,8 @@ describe('conversational confirmation gates', () => {
   it('seals the third discovery candidate for a natural-language third-choice review', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-look-at-3-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([
+    const { service, guard } = makeService(root, {
+      results: [
         {
           name: 'dsh-xai',
           url: 'https://github.com/MirDie/dsh-xai',
@@ -476,10 +448,9 @@ describe('conversational confirmation gates', () => {
           description: 'third grok candidate',
           stars: 1,
         },
-      ], grokBundle),
-      new StateStore(root),
-      guard,
-    )
+      ],
+      files: grokBundle,
+    })
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.workflow.cursor).toBe('await_discovery')
@@ -495,24 +466,22 @@ describe('conversational confirmation gates', () => {
       .toBe(thirdCandidate.repository)
   })
 
-  it('presents full+high at confirmation instead of auto-create, and stop stays stopped', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-high-'))
+  it.each([
+    { verdict: 'uncertain' as ReviewerVerdictDecision },
+    { verdict: 'approved' as ReviewerVerdictDecision },
+  ])('gates a high-risk review at confirmation instead of auto-create ($verdict verdict)', async ({ verdict }) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), `autoevo-gate-high-${verdict}-`))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([{
+    const { service, guard } = makeService(root, {
+      results: [{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], grokHighRisk),
-      new StateStore(root),
-      guard,
-      undefined,
-      reviewerHost('uncertain'),
-    )
+      }],
+      files: grokHighRisk,
+    }, reviewerHost(verdict))
+    service.listInstallProfiles = async () => ['web']
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.workflow.cursor).toBe('await_discovery')
@@ -520,58 +489,33 @@ describe('conversational confirmation gates', () => {
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
-    expect(reviewed.review?.fit).toBe('full')
     expect(reviewed.review?.securityRisk).toBe('high')
-    expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        code: 'dynamic_evaluation',
-        severity: 'block',
-        evidenceKind: 'static_review',
-        observed: true,
-      }),
-    ]))
-    expect(reviewed.workflow.interrupt?.facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
-    expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
     expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).not.toContain('use_this')
-    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('modify_this')
-    const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
-    expect(stopped.resolution?.authorization?.state).toBe('stopped')
-    await expect(guard.preExecute({
-      callId: 'define-high',
-      name: 'cordis_define',
-      arguments: { plugin: { kind: 'new' } },
-      agent: turn.agent,
-    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
-  })
 
-  it('exposes use_this for a high-risk review with an exact approved verdict and defaults retention to temporary', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-approved-high-'))
-    temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const store = new StateStore(root)
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([{
-        name: 'dsh-xai',
-        url: 'https://github.com/MirDie/dsh-xai',
-        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
-        stars: 2,
-      }], grokHighRisk),
-      store,
-      guard,
-      undefined,
-      reviewerHost('approved'),
-    )
-    service.listInstallProfiles = async () => ['web']
-    const turn = exec('session-approved-high')
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
-    expect(started.workflow.cursor).toBe('await_discovery')
-    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
-    const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
-    const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
-    expect(reviewed.workflow.cursor).toBe('await_confirmation')
-    expect(reviewed.review?.securityRisk).toBe('high')
+    if (verdict === 'uncertain') {
+      expect(reviewed.review?.fit).toBe('full')
+      expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'dynamic_evaluation',
+          severity: 'block',
+          evidenceKind: 'static_review',
+          observed: true,
+        }),
+      ]))
+      expect(reviewed.workflow.interrupt?.facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
+      expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
+      expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('modify_this')
+      const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
+      expect(stopped.resolution?.authorization?.state).toBe('stopped')
+      await expect(guard.preExecute({
+        callId: 'define-high',
+        name: 'cordis_define',
+        arguments: { plugin: { kind: 'new' } },
+        agent: turn.agent,
+      } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
+      return
+    }
+
     expect(reviewed.review?.reviewerVerdict?.decision).toBeUndefined()
     expect(reviewed.workflow.executionLease).toBeUndefined()
     const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
@@ -657,20 +601,15 @@ describe('conversational confirmation gates', () => {
       endpoint: { kind: 'exact_tool', name: 'pwsh' },
     })
 
-    const useGuard = new CreationGuard({ isEvolutionMode: () => true })
-    const store = new StateStore(root)
-    const useService = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([{
+    const { service: useService, guard: useGuard, store } = makeService(root, {
+      results: [{
         name: 'dsh-xai',
         url: 'https://github.com/MirDie/dsh-xai',
         description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
         stars: 2,
-      }], grokBundle),
-      store,
-      useGuard,
-    )
+      }],
+      files: grokBundle,
+    })
     useService.listInstallProfiles = async () => ['web']
     const useTurn = exec('session-use')
     const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', useTurn)
@@ -703,19 +642,14 @@ describe('conversational confirmation gates', () => {
   it('rejects a forged resume that does not match the latest host user turn', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-auth-'))
     temporary.push(root)
-    const store = new StateStore(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([
+    const { service, guard, store } = makeService(root, {
+      results: [
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-tui', url: 'https://github.com/acme/dsh-grok-tui', description: 'grok tui', stars: 2 },
         { name: 'dsh-grok-screenshot', url: 'https://github.com/paicat1/dsh-grok-screenshot', description: 'grok screenshot', stars: 1 },
-      ], grokBundle),
-      store,
-      guard,
-    )
+      ],
+      files: grokBundle,
+    })
     const turn = exec()
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.resolution?.remoteCandidates.map((item) => item.repository)).toEqual([
@@ -750,18 +684,13 @@ describe('conversational confirmation gates', () => {
   it('reviews multiple snapshot candidates in one navigation and mints a SelectionReceipt without a DecisionReceipt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-batch-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const store = new StateStore(root)
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([
+    const { service, guard, store } = makeService(root, {
+      results: [
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
-      ], grokBundle),
-      store,
-      guard,
-    )
+      ],
+      files: grokBundle,
+    })
     service.listInstallProfiles = async () => ['web']
     const turn = exec('session-batch')
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
@@ -810,21 +739,14 @@ describe('conversational confirmation gates', () => {
   it('supports compare-another navigation from confirmation while preserving prior reviews', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-adaptive-'))
     temporary.push(root)
-    const guard = new CreationGuard({ isEvolutionMode: () => true })
-    const store = new StateStore(root)
-    const service = new CapabilityEvolutionService(
-      hostCtx(root),
-      config(root),
-      discoveryRunner([
+    const { service, guard, store } = makeService(root, {
+      results: [
         { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
         { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
         { name: 'dsh-grok-third', url: 'https://github.com/acme/dsh-grok-third', description: 'Third Grok integration', stars: 1 },
-      ], grokHighRisk),
-      store,
-      guard,
-      undefined,
-      reviewerHost('uncertain'),
-    )
+      ],
+      files: grokHighRisk,
+    }, reviewerHost('uncertain'))
     const turn = exec('session-adaptive')
     const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
     expect(started.workflow.cursor).toBe('await_discovery')
