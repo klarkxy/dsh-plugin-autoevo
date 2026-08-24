@@ -73,7 +73,7 @@ export class PluginRemover {
 
   /**
    * Uninstalls exactly one installation receipt.
-   * Never deletes a managed source repository under stateDir/sources.
+   * Never deletes a managed source repository under the workspace sources dir.
    */
   async remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
     const record = await this.store.getInstallation(input.installationId)

@@ -42,8 +42,8 @@ describe('bundle activation identity', () => {
 
   it('matches a carrier Fiber by insert id and name', () => {
     const entries = [
-      { id: 'other-mcp', options: { id: 'other-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
-      { id: 'zhihu-search-mcp', options: { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
+      { id: 'include:other-mcp', options: { id: 'other-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
+      { id: 'include:zhihu-search-mcp', options: { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
     ]
     const targets = activationTargetsFromPatch(zhihuPatch)
     expect(matchActivatedEntries(entries, {

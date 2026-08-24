@@ -207,8 +207,8 @@ try {
     env: dshEnv,
     timeoutMs: 300_000,
   })
-  assert.match(result.stdout, /AUTOEVO_PACKAGED_V12_SESSION_OK/u)
-  const evidenceLine = result.stdout.split(/\r?\n/u).find((line) => line.includes('AUTOEVO_PACKAGED_V12_SESSION_OK'))
+  assert.match(result.stdout, /AUTOEVO_PACKAGED_V13_SESSION_OK/u)
+  const evidenceLine = result.stdout.split(/\r?\n/u).find((line) => line.includes('AUTOEVO_PACKAGED_V13_SESSION_OK'))
   assert.ok(evidenceLine)
   const evidence = JSON.parse(evidenceLine)
   assert.equal(evidence.preset, 'evolution')
@@ -228,7 +228,7 @@ try {
   assert.equal(evidence.recoverInterruptOptional, true)
 
   const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
-  assert.equal(manifest.templateVersion, '12')
+  assert.equal(manifest.templateVersion, '13')
   process.stdout.write(`${JSON.stringify({
     status: 'passed',
     installedFrom: path.basename(tarball),

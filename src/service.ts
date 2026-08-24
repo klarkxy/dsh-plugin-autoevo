@@ -44,6 +44,7 @@ import {
   nextStepForAuthorization,
   reviewIdentity,
 } from './lifecycle/decide.js'
+import { sessionCwd } from './host-identity.js'
 import { prefersChinese } from './i18n.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
@@ -51,6 +52,14 @@ import { installMarketplace } from './lifecycle/marketplace.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
+import { applyIntentToCandidate } from './resolver/intent.js'
+import {
+  isFailedSameSpecification,
+  lineageCandidateFromRecords,
+  managedSnapshotRootReview,
+  mergeLineageCandidate,
+  shouldSkipRemoteDiscovery,
+} from './resolver/lineage.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
@@ -76,6 +85,7 @@ import type { SemanticVerifierHost } from './semantic-verifier.js'
 import { SourceManager, sourceIdForCreate, sourceIdForRepository, type SourceReceipt } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
+import { resolveStateRoot, runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
 import type {
   MarketplaceStepResult,
@@ -319,8 +329,13 @@ function modificationWorkOrder(
   cwd: string,
   blockers = modificationBlockers(review),
   focusedCorrection = false,
+  lineageKind?: import('./contracts.js').EvolutionTargetKind,
 ): CreatorWorkOrder {
   const userInstruction = authenticatedModificationInstruction(resolution, review)
+  const repairFiber = lineageKind === 'failed_install'
+    || resolution.intent?.evolveReason === 'repair'
+    || /fiber was not present after loader settle/iu.test(resolution.reasons.join('\n'))
+    || /loader|wrapping fiber|包装/iu.test(resolution.requirement)
   return createCreatorWorkOrder({
     operation: focusedCorrection ? 'correct' : 'modify',
     requirement: resolution.requirement,
@@ -333,6 +348,9 @@ function modificationWorkOrder(
         : 'Host re-review must no longer report the baseline blockers',
       'Host re-review must not introduce a new blocking target',
       'Preserve package identity and choose the implementation path without expanding scope',
+      ...(repairFiber
+        ? ['Host re-review and later install must produce a Loader-visible wrapping Fiber; do not reinstall the failed specification unchanged']
+        : []),
       ...(userInstruction ? [`Apply the authenticated user modification instruction: ${userInstruction}`] : []),
     ],
   })
@@ -665,36 +683,40 @@ export class CapabilityEvolutionService implements WorkflowHost {
     this.engine = new WorkflowEngine(store, creationGuard, this)
   }
 
+  private withWorkspace<T>(exec: { agent?: ToolRunContext['agent'] }, fn: () => T): T {
+    return runInWorkspace(sessionCwd(exec.agent), fn)
+  }
+
   start(requirement: string, exec: ToolRunContext, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<WorkflowView> {
-    return this.engine.start(requirement, exec, intent)
+    return this.withWorkspace(exec, () => this.engine.start(requirement, exec, intent))
   }
 
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.resume(input, exec)
+    return this.withWorkspace(exec, () => this.engine.resume(input, exec))
   }
 
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.refine(input, exec)
+    return this.withWorkspace(exec, () => this.engine.refine(input, exec))
   }
 
   present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.present(input, exec)
+    return this.withWorkspace(exec, () => this.engine.present(input, exec))
   }
 
   diagnose(input: WorkflowDiagnoseInput, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.diagnose(input, exec)
+    return this.withWorkspace(exec, () => this.engine.diagnose(input, exec))
   }
 
   recover(input: WorkflowRecoveryInput, exec: ToolRunContext): Promise<WorkflowView> {
-    return this.engine.recover(input, exec)
+    return this.withWorkspace(exec, () => this.engine.recover(input, exec))
   }
 
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
-    return this.remover.remove(input, exec)
+    return this.withWorkspace(exec, () => this.remover.remove(input, exec))
   }
 
   cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult> {
-    return this.remover.remove({ installationId }, asToolExec(exec))
+    return this.withWorkspace(exec, () => this.remover.remove({ installationId }, asToolExec(exec)))
   }
 
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<ResolutionRecord> {
@@ -705,9 +727,40 @@ export class CapabilityEvolutionService implements WorkflowHost {
       intent,
       ...(activeProfile ? { activeProfile } : {}),
     })
-    const decision: ResolutionRecord['decision'] = local.shouldDiscoverRemote ? 'none' : 'use_local'
+    const [reviews, installations] = await Promise.all([
+      this.store.listAllReviews(),
+      this.store.listInstallations(),
+    ])
+    const reviewById = new Map(reviews.map((item) => [item.id, item]))
+    const managedReviewIds: string[] = []
+    for (const review of reviews) {
+      if (review.sourceSnapshot.kind !== 'local' || !review.installSpec) continue
+      const root = managedSnapshotRootReview(review, reviewById)
+      if (!root || root.sourceSnapshot.kind !== 'github') continue
+      const completed = await this.sources.validateCompletedSnapshot({
+        path: review.sourceSnapshot.path,
+        reviewId: review.id,
+        repository: root.sourceSnapshot.repository,
+        baseCommit: root.sourceSnapshot.commit,
+        workspaceCwd: local.cwd,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      }).catch(() => undefined)
+      if (completed) managedReviewIds.push(review.id)
+    }
+    const lineage = lineageCandidateFromRecords({
+      requirement,
+      intent,
+      reviews,
+      installations,
+      managedReviewIds,
+      ...(activeProfile ? { profile: activeProfile } : {}),
+    })
+    const candidates = mergeLineageCandidate(local.candidates, lineage)
+      .map((item) => applyIntentToCandidate(item, intent))
+    const skipRemote = shouldSkipRemoteDiscovery(candidates, intent)
+    const decision: ResolutionRecord['decision'] = skipRemote ? 'use_local' : 'none'
     const id = newResolutionId(requirement)
-    const authorization = waitingAuthorization(id, decision, !local.shouldDiscoverRemote)
+    const authorization = waitingAuthorization(id, decision, skipRemote)
     const record: ResolutionRecord = {
       schemaVersion: 2,
       id,
@@ -716,12 +769,14 @@ export class CapabilityEvolutionService implements WorkflowHost {
       requirement,
       cwd: local.cwd,
       decision,
-      localCandidates: local.candidates,
+      localCandidates: candidates,
       remoteCandidates: [],
-      remoteDiscoveryComplete: !local.shouldDiscoverRemote,
+      remoteDiscoveryComplete: skipRemote,
       authorization,
       queries: [],
-      reasons: [...local.reasons],
+      reasons: skipRemote && lineage
+        ? [...local.reasons, 'Host found a previously reviewed exact GitHub source; remote search was skipped.']
+        : [...local.reasons],
       intent,
     }
     const waiting = withNextStep(record)
@@ -925,15 +980,89 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const expected = workflow?.candidateSnapshot
       ?.find((item) => item.id === workflow.pendingReviewedCandidateId)
       ?.evolutionTarget
-    if (!expected
-      || expected.repository.toLowerCase() !== target.repository.toLowerCase()
-      || expected.commit !== target.commit
-      || expected.specDigest !== target.specDigest
-      || expected.packageName !== target.packageName
-      || expected.profile !== target.profile) {
+    if (!expected || hashObject(expected) !== hashObject(target)) {
       throw new EvolutionError('invalid_input', 'Installed-source review must use the frozen Host evolution target')
     }
     validateGithubRepository(target.repository)
+    if (target.kind === 'reviewed_snapshot' || target.kind === 'failed_install') {
+      const priorReview = target.reviewId
+        ? await this.store.getReview(target.reviewId).catch(() => undefined)
+        : undefined
+      if (priorReview?.sourceSnapshot.kind === 'local') {
+        if (!workflow) {
+          throw new EvolutionError('invalid_input', 'Managed snapshot review requires an active workflow')
+        }
+        const allReviews = await this.store.listAllReviews()
+        const root = managedSnapshotRootReview(priorReview, new Map(allReviews.map((item) => [item.id, item])))
+        const sourceId = target.sourceId
+        if (!root || root.sourceSnapshot.kind !== 'github') {
+          throw new EvolutionError('review_rejected', 'Managed repair snapshot has an invalid historical GitHub lineage')
+        }
+        const receipt = await this.sources.validateCompletedSnapshot({
+          path: priorReview.sourceSnapshot.path,
+          reviewId: priorReview.id,
+          repository: target.repository,
+          baseCommit: target.commit,
+          workspaceCwd: resolution.cwd,
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+        if (root.sourceSnapshot.repository.toLowerCase() !== target.repository.toLowerCase()
+          || root.sourceSnapshot.commit.toLowerCase() !== target.commit.toLowerCase()
+          || priorReview.sourceSnapshot.baseCommit.toLowerCase() !== target.commit.toLowerCase()
+          || priorReview.installSpec !== target.dependencySpec
+          || priorReview.manifest.packageName !== target.packageName
+          || !sourceId
+          || receipt?.sourceId !== sourceId
+          || !receipt) {
+          throw new EvolutionError('review_rejected', 'Managed repair snapshot failed frozen lineage and provenance validation')
+        }
+        const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
+        const selectedResolution = { ...resolution, selectedRepositories: selected }
+        const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+        const upstreamEvidence = await reviewGithubPluginWithFiles({
+          runner: this.runner,
+          // This immutable upstream snapshot is a lineage anchor only. The
+          // managed repair itself is reviewed in full immediately below.
+          config: {
+            ...this.config,
+            maxFiles: Math.min(this.config.maxFiles, 8),
+            maxRepositoryBytes: Math.min(this.config.maxRepositoryBytes, 262_144),
+          },
+          cwd: resolution.cwd,
+          repository: target.repository,
+          ref: target.commit,
+          resolutionId: resolution.id,
+          requirement: resolution.requirement,
+          ...(runtimeVersion ? { runtimeVersion } : {}),
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+        if (upstreamEvidence.record.sourceSnapshot.kind !== 'github'
+          || upstreamEvidence.record.sourceSnapshot.commit.toLowerCase() !== target.commit.toLowerCase()
+          || (upstreamEvidence.record.manifest.packageName
+            && upstreamEvidence.record.manifest.packageName !== target.packageName)) {
+          throw new EvolutionError('review_rejected', 'Fresh upstream review does not match the frozen managed repair root')
+        }
+        const upstreamReview = await this.persistReviewed(upstreamEvidence.record, upstreamEvidence.files, exec, workflow)
+        await this.sources.claimCompletedSourceForWorkflow(sourceId, workflow.id, exec.signal)
+        workflow.managedSourceId = sourceId
+        workflow.updatedAt = new Date().toISOString()
+        await this.store.put('workflows', workflow)
+        try {
+          return await this.reviewAndFreezeManagedSource({
+            resolution: selectedResolution,
+            sourceId,
+            path: receipt.path,
+            baseReviewId: upstreamReview.id,
+            lineageRootCommit: target.commit,
+            workflowId: workflow.id,
+            exec,
+          })
+        } catch (error) {
+          await this.sources.completeWorkflow(sourceId, workflow.id, exec.signal).catch(() => undefined)
+          throw error
+        }
+      }
+    }
     const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
     const evidence = await reviewGithubPluginWithFiles({
       runner: this.runner,
@@ -1128,9 +1257,11 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
   ): Promise<CreatorFoundationPreflight> {
     try {
+      const parent = this.requireParentAgent(exec)
       return await this.creatorFoundation.preflight({
         ...(exec.signal ? { signal: exec.signal } : {}),
-        parentCtx: this.requireParentAgent(exec).ctx,
+        parentCtx: parent.ctx,
+        parentScope: parent,
       })
     } catch (error) {
       this.rememberCreator(workflow, operation, 'unavailable')
@@ -1195,7 +1326,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const local = await reviewLocalPlugin({
       runner: this.runner,
       config: this.config,
-      workspaceRoot: this.sources.sourceRoot,
+      // The receipt has already bound this exact managed path. Its parent is
+      // the narrowest valid review root and preserves legacy stateDir sources.
+      workspaceRoot: path.dirname(input.path),
       path: input.path,
       baseReviewId: input.baseReviewId,
       lineageRootCommit: input.lineageRootCommit,
@@ -1203,16 +1336,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
       requirement: input.resolution.requirement,
       ...(runtimeVersion ? { runtimeVersion } : {}),
     })
-    const artifactRoot = path.join(this.config.stateDir, 'review-artifacts', `${local.record.id}-${randomUUID()}`)
+    const artifactRoot = path.join(resolveStateRoot(this.config, input.resolution.cwd), 'review-artifacts', `${local.record.id}-${randomUUID()}`)
     const materialized = await this.launcher.materializeLocal(local.record, artifactRoot, input.exec.signal)
     const review: ReviewRecord = { ...local.record, installSpec: materialized.installSpec }
+    await this.store.put('reviews', review)
     await this.sources.recordReviewedArtifact({
       sourceId: input.sourceId,
       workflowId: input.workflowId,
       reviewId: review.id,
       artifactHash: materialized.artifactSha256,
     })
-    await this.store.put('reviews', review)
     const waiting = withNextStep(this.waitingConfirmation(input.resolution, review))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
@@ -1235,18 +1368,29 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
     let receipt: SourceReceipt
     if (sourceKey) {
-      receipt = await this.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
+      const completed = await this.sources.inspectCompletedSource(sourceKey, exec.signal)
+      if (completed) {
+        if (completed.reviewId !== review.id) {
+          throw new EvolutionError('invalid_input', 'Completed managed source is not the current reviewed tip')
+        }
+        receipt = await this.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
+      } else {
+        receipt = await this.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
+      }
     } else if (review.sourceSnapshot.kind === 'github') {
       sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
       const completed = await this.sources.inspectCompletedSource(sourceKey, exec.signal)
-      if (completed
+      const reuseHere = Boolean(completed
         && completed.repository?.toLowerCase() === review.sourceSnapshot.repository.toLowerCase()
-        && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()) {
+        && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()
+        && this.sources.pathUnderSourceRoot(completed.path, resolution.cwd))
+      if (reuseHere && completed) {
         receipt = await this.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
       } else {
         receipt = await this.sources.materializeReviewedGithub({
           review,
           workflowId: workflow.id,
+          workspaceCwd: resolution.cwd,
           ...(exec.signal ? { signal: exec.signal } : {}),
         })
       }
@@ -1255,7 +1399,14 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
     workflow.managedSourceId = sourceKey
     const parent = this.requireParentAgent(exec)
-    const workOrder = modificationWorkOrder(resolution, review, receipt.path)
+    const workOrder = modificationWorkOrder(
+      resolution,
+      review,
+      receipt.path,
+      undefined,
+      false,
+      workflow.candidateSnapshot?.find((item) => item.evolutionTarget)?.evolutionTarget?.kind,
+    )
     await this.store.put('reviews', review)
     workflow.pendingPath = receipt.path
     workflow.pendingWorkOrder = workOrder
@@ -1275,6 +1426,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const receipt = await this.sources.initializeCreateSource({
       resolutionId: resolution.id,
       workflowId: workflow.id,
+      workspaceCwd: resolution.cwd,
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     workflow.managedSourceId = sourceKey
@@ -1285,7 +1437,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       const scaffold = await reviewLocalPlugin({
         runner: this.runner,
         config: this.config,
-        workspaceRoot: this.sources.sourceRoot,
+        workspaceRoot: this.sources.sourceRootFor(resolution.cwd),
         path: receipt.path,
         baseReviewId: scaffoldBaseId,
         lineageRootCommit: receipt.baseCommit,
@@ -1508,6 +1660,14 @@ export class CapabilityEvolutionService implements WorkflowHost {
         reviewId: review?.id,
       })
     }
+    const failedTarget = workflow?.candidateSnapshot?.find((item) => item.id === resume.candidateId)?.evolutionTarget
+      ?? workflow?.candidateSnapshot?.find((item) => item.evolutionTarget)?.evolutionTarget
+    if (resume.optionId === 'use_this' && isFailedSameSpecification(failedTarget, review?.installSpec)) {
+      throw new EvolutionError(
+        'invalid_input',
+        'Host will not reinstall the failed specification; improve the reviewed source first',
+      )
+    }
     if (resume.optionId === 'modify_this' && (!review || review.fit === 'none' || review.license === null)) {
       throw new EvolutionError('review_rejected', 'The selected review is not eligible for managed modification', {
         reviewId: review?.id,
@@ -1700,7 +1860,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
           current = (await reviewLocalPlugin({
             runner: this.runner,
             config: this.config,
-            workspaceRoot: managed ? this.sources.sourceRoot : resolution.cwd,
+            workspaceRoot: managed ? path.dirname(review.sourceSnapshot.path) : resolution.cwd,
             path: review.sourceSnapshot.path,
             baseReviewId: review.sourceSnapshot.baseReviewId,
             lineageRootCommit,

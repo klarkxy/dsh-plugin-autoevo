@@ -53,11 +53,11 @@ capability_workflow
                            plugin_remove
 ```
 
-能力进化 preset 不继承创造模式，也不把官方 `cordis` preset 挂到隐藏子会话。父会话负责发现、审查、授权、安装、恢复治理，以及用户确认后的修改/新建施工；`create_new` / `modify_this` / 定向纠错在当前会话对托管 git 源进行（`sourceDir` 默认 `<stateDir>/sources`），绝不回退到 `code`，也绝不 `agents.create`。Creator Foundation 在克隆、初始化或写入托管源码前预检父会话施工目录。Windows 上为完整性导向的部分隔离。
+能力进化 preset 不继承创造模式，也不把官方 `cordis` preset 挂到隐藏子会话。父会话负责发现、审查、授权、安装、恢复治理，以及用户确认后的修改/新建施工；`create_new` / `modify_this` / 定向纠错在当前会话对 `<workspace>/.autoevo/sources/` 中的托管 git 源进行，Host 账本继续保存在 `<dshHome>/autoevo/`，绝不回退到 `code`，也绝不 `agents.create`。Creator Foundation 在克隆、初始化或写入托管源码前预检父会话施工目录。Windows 上为完整性导向的部分隔离。
 
 父回合取消后，没有子 Agent 可 dispose。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V12）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V12 为 no-op；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。当前没有旧用户迁移路径，发布包只信任这一份 V12 manifest。配置为 `false` 时跳过安装，且永不自动删除。
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V13）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V13 为 no-op；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。当前没有旧 preset 迁移路径，发布包只信任这一份 V13 manifest。配置为 `false` 时跳过安装，且永不自动删除。
 
 ## 3. DSH 接缝
 
@@ -80,10 +80,15 @@ capability_workflow
 
 ## 4. 数据与状态
 
-持久状态在配置的 `stateDir`：
+Host 持久状态默认继续位于 `<dshHome>/autoevo/`，托管源码默认位于当前会话工作区 `.autoevo/sources/`（分别可用 `stateDir` / `sourceDir` 覆盖）：
 
 ```text
-stateDir/
+<workspace>/.autoevo/
+├─ .gitignore
+└─ sources/<id>/
+
+<dshHome>/autoevo/
+├─ source-control/<id>.json
 ├─ workflows/<id>.json
 ├─ resolutions/<id>.json
 ├─ reviews/<id>.json

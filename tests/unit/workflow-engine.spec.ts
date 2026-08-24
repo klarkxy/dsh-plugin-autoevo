@@ -865,6 +865,200 @@ describe('workflow engine autonomous discovery', () => {
     expect(rejected.workflow.interrupt?.interruptId).toBe(selection.workflow.interrupt!.interruptId)
   })
 
+  it('hides search_more at Gate 1 when evolving a failed known source', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-failed-lineage-'))
+    temporary.push(root)
+    const commit = 'd'.repeat(40)
+    const record = resolution('zhihu-search')
+    record.intent = {
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'zhihu-search',
+      evolveReason: 'repair',
+    }
+    record.localCandidates = [{
+      kind: 'plugin',
+      name: 'dsh-plugin-zhihu-search',
+      description: 'failed activation',
+      availability: 'known_source',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      surfaceMatch: true,
+      reuseEligible: false,
+      evolutionTarget: {
+        kind: 'failed_install',
+        repository: 'klarkxy/zhihu-search',
+        commit,
+        packageName: 'dsh-plugin-zhihu-search',
+        profile: 'web',
+        dependencySpec: `github:klarkxy/zhihu-search#${commit}`,
+        specDigest: 'e'.repeat(64),
+      },
+    }]
+    const store = new StateStore(root)
+    const engine = new WorkflowEngine(store, new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' }), host(store, record))
+    const turn = exec()
+    const started = await engine.start('zhihu-search', turn, record.intent)
+    expect(started.workflow.cursor).toBe('await_discovery')
+    const candidateIds = started.workflow.discoveryPool!.map((item) => item.id)
+    const selection = await engine.present({ workflowId: started.workflow.id, candidateIds }, turn)
+    const optionIds = selection.workflow.interrupt?.options.map((item) => item.id) ?? []
+    expect(optionIds).toEqual(['review_existing', 'stop'])
+    expect(optionIds).not.toContain('search_more')
+    expect(optionIds).not.toContain('reuse_local')
+  })
+
+  it('replays a failed known-source review through install without a live replacement binding', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-failed-install-replay-'))
+    temporary.push(root)
+    const commit = 'd'.repeat(40)
+    const oldSpec = `github:klarkxy/zhihu-search#${commit}`
+    const record = resolution('zhihu-search')
+    record.intent = {
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'zhihu-search',
+      evolveReason: 'repair',
+    }
+    record.localCandidates[0] = {
+      kind: 'plugin',
+      name: 'dsh-plugin-zhihu-search',
+      description: 'failed activation',
+      availability: 'known_source',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      surfaceMatch: true,
+      reuseEligible: false,
+      evolutionTarget: {
+        kind: 'failed_install',
+        repository: 'klarkxy/zhihu-search',
+        commit,
+        packageName: 'dsh-plugin-zhihu-search',
+        profile: 'web',
+        dependencySpec: oldSpec,
+        specDigest: 'e'.repeat(64),
+      },
+    }
+    const store = new StateStore(root)
+    const fixedReview: ReviewRecord = {
+      schemaVersion: 1,
+      id: `review_${'f'.repeat(64)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-23T10:58:59.000Z',
+      resolutionId: record.id,
+      requirement: record.requirement,
+      sourceSnapshot: {
+        kind: 'local',
+        path: path.join(root, 'managed-source'),
+        baseReviewId: `review_${'a'.repeat(64)}`,
+        baseCommit: commit,
+        statusHash: '7'.repeat(64),
+      },
+      inspectedFiles: [],
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-plugin-zhihu-search',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+      },
+      fit: 'full',
+      confidence: 0.9,
+      securityRisk: 'low',
+      maintained: true,
+      license: 'MIT',
+      compatibility: { status: 'compatible', reason: 'fixed wrapper', runtimeVersion: '0.1.1-rc.1' },
+      missingCapabilities: [],
+      findings: [],
+      recommendation: 'use',
+      installSpec: `file:${path.join(root, 'dsh-plugin-zhihu-search-fixed.tgz')}`,
+    }
+    const installs: Array<{ retention: string; replacement?: unknown }> = []
+    const workflowHost = host(store, record)
+    workflowHost.listInstallProfiles = async () => ['web']
+    workflowHost.latestReview = async () => fixedReview
+    workflowHost.reviewExisting = async (resolution, target) => {
+      expect(target).toMatchObject({
+        kind: 'failed_install',
+        dependencySpec: oldSpec,
+      })
+      await store.put('reviews', fixedReview)
+      const next = {
+        ...resolution,
+        selectedRepositories: [target.repository],
+        authorization: {
+          state: 'confirmation_required' as const,
+          resolutionId: resolution.id,
+          reason: 'reviewed repaired source',
+          reviewId: fixedReview.id,
+        },
+      }
+      await store.put('resolutions', next)
+      return { resolution: next, review: fixedReview }
+    }
+    workflowHost.installReviewed = async (_review, input) => {
+      installs.push({ retention: input.retention, replacement: input.replacement })
+      const installation: InstallationRecord = {
+        schemaVersion: 1,
+        id: `installation_${'9'.repeat(24)}`,
+        createdAt: '2026-08-23T11:00:00.000Z',
+        reviewId: fixedReview.id,
+        targetProfile: input.targetProfile,
+        retention: input.retention,
+        dshHome: root,
+        packageName: 'dsh-plugin-zhihu-search',
+        installSpec: fixedReview.installSpec ?? '',
+        installState: 'installed',
+        installOutcome: 'activated',
+        installed: true,
+        loaded: false,
+        verified: false,
+        restartRequired: true,
+        removed: false,
+        verification: {
+          attempted: true,
+          expectedTools: [],
+          calledTools: [],
+          resultTools: [],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: false,
+          layer: 'bundle_activation',
+          status: 'passed',
+          sourceMatched: true,
+          reason: 'first persistent install activated',
+        },
+      }
+      await store.put('installations', installation)
+      return installation
+    }
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
+    const engine = new WorkflowEngine(store, guard, workflowHost)
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, record.requirement, turn)
+    const candidateId = selection.workflow.candidateSnapshot![0]!.id
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审查这份失败来源' }] })
+    const reviewed = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'review_existing', candidateIds: [candidateId] },
+    }, turn)
+    expect(reviewed.workflow.cursor).toBe('await_confirmation')
+    expect(reviewed.workflow.interrupt?.options.find((item) => item.id === 'use_this')?.candidateIds).toEqual([candidateId])
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '安装修好的这份' }] })
+    const installed = await engine.resume({
+      workflowId: reviewed.workflow.id,
+      interruptId: reviewed.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+    }, turn)
+    expect(installed.workflow.lastFailure).toBeUndefined()
+    expect(installs).toEqual([{ retention: 'persistent', replacement: undefined }])
+    expect(installed.workflow.cursor).toBe('restart_required')
+  })
+
   it('reviews an installed exact SHA into confirmation with modify_this and without search_more', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-engine-installed-review-'))
     temporary.push(root)

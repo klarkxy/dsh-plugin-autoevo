@@ -66,7 +66,7 @@ describe('managed modify closure', () => {
     temporary.push(root)
     const runner = new NativeRunner()
     const cfg = config(root)
-    const store = new StateStore(cfg.stateDir)
+    const store = new StateStore(cfg.stateDir!)
     const preflight = testingCreatorPreflight()
     const service = new CapabilityEvolutionService(
       { get: () => undefined } as unknown as Context,

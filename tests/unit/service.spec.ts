@@ -80,6 +80,23 @@ describe('managed modification instruction', () => {
     expect(JSON.stringify(order)).not.toContain('edit package.json')
   })
 
+  it('adds a Loader Fiber acceptance target for failed-install repair', () => {
+    const record = resolution()
+    record.intent = { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', evolveReason: 'repair' }
+    record.requirement = '补上能被 Loader 认到的包装 Fiber'
+    const selected = candidateReview('klarkxy/zhihu-search', 'use', '1')
+    const order = _testing.modificationWorkOrder(
+      record,
+      selected,
+      'C:/managed/plugin',
+      undefined,
+      false,
+      'failed_install',
+    )
+    expect(order.acceptanceTargets.join(' ')).toMatch(/Loader-visible wrapping Fiber/i)
+    expect(order.acceptanceTargets.join(' ')).toMatch(/do not reinstall the failed specification/i)
+  })
+
   it('compares stable baseline blockers and separates resolved, unresolved, and introduced targets', () => {
     const baseline = candidateReview('acme/one', 'modify', '1')
     baseline.compatibility = { status: 'incompatible', reason: 'peer mismatch', runtimeVersion: '0.1.0-rc.6' }

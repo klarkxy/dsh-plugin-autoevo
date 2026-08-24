@@ -54,7 +54,7 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
     return genericPendingCard(args, 'Reviewing selected plugin candidates', '正在审查选中的插件候选', 'read')
   }
   if (navKind === 'review_existing') {
-    return genericPendingCard(args, 'Reviewing the installed plugin\'s known source; this is not a modification', '正在审查已安装插件的已知来源，这不是修改', 'read')
+    return genericPendingCard(args, 'Reviewing the plugin\'s known source; this is not a modification', '正在审查这份插件的已知来源，这不是修改', 'read')
   }
   if (navKind === 'search_more') {
     return genericPendingCard(args, 'Searching for more plugin candidates', '正在搜索更多插件候选', 'search')
@@ -99,7 +99,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           type: 'object',
           required: true,
           additionalProperties: false,
-          description: 'Read-only classification of this request. Grants no mutation. evolve_existing reviews/modifies a named installed plugin; reuse_existing uses an existing capability unchanged; discover_or_reuse searches with local reuse allowed.',
+          description: 'Read-only classification of this request. Grants no mutation. evolve_existing reviews/modifies a named installed or previously reviewed plugin and must be used for repair, upgrade, or improve-known-source; reuse_existing uses an existing capability unchanged; discover_or_reuse searches with local reuse allowed. Do not use discover_or_reuse to repair a failed install or improve a source already reviewed in this Host.',
           properties: {
             operation: {
               type: 'string',
@@ -114,6 +114,11 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
             target_name: {
               type: 'string',
               description: 'Exact local capability or package name when evolving or reusing a specific installed target.',
+            },
+            evolve_reason: {
+              type: 'string',
+              enum: ['repair', 'upgrade', 'improve_known_source'],
+              description: 'Optional Host-facing reason under evolve_existing. repair is a failed activation/install; upgrade is a live installed plugin; improve_known_source is an already-reviewed GitHub snapshot.',
             },
           },
         },

@@ -21,7 +21,7 @@ export type AuthorizationState =
   | 'use_review'
   | 'modify_review'
   | 'create_authorized'
-export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile'
+export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source'
 export type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup'
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 export type DecisionPhase = 'gate1' | 'gate2'
@@ -41,11 +41,13 @@ export type ReviewMode = 'fixed' | 'adaptive'
 export type WorkflowOptionId = AuthorizationAction | NavigationKind
 export type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing'
 export type RequiredSurface = 'any' | 'native_dsh_plugin'
+export type EvolveReason = 'repair' | 'upgrade' | 'improve_known_source'
 
 export interface RequestIntent {
   operation: RequestOperation
   requiredSurface: RequiredSurface
   targetName?: string
+  evolveReason?: EvolveReason
 }
 
 export const DEFAULT_REQUEST_INTENT: RequestIntent = {
@@ -53,7 +55,7 @@ export const DEFAULT_REQUEST_INTENT: RequestIntent = {
   requiredSurface: 'any',
 }
 
-export type EvolutionTargetKind = 'github_exact' | 'owned_chain'
+export type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot'
 
 export interface EvolutionTarget {
   kind: EvolutionTargetKind

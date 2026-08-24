@@ -1,5 +1,6 @@
 import {
   DEFAULT_REQUEST_INTENT,
+  type EvolveReason,
   type LocalCapabilityCandidate,
   type RequestIntent,
   type RequestOperation,
@@ -10,13 +11,23 @@ import { evolutionTargetFromProfile } from './installed-origin.js'
 
 const OPERATIONS = new Set<RequestOperation>(['discover_or_reuse', 'reuse_existing', 'evolve_existing'])
 const SURFACES = new Set<RequiredSurface>(['any', 'native_dsh_plugin'])
-const INTENT_KEYS = new Set(['operation', 'required_surface', 'requiredSurface', 'target_name', 'targetName'])
+const REASONS = new Set<EvolveReason>(['repair', 'upgrade', 'improve_known_source'])
+const INTENT_KEYS = new Set([
+  'operation',
+  'required_surface',
+  'requiredSurface',
+  'target_name',
+  'targetName',
+  'evolve_reason',
+  'evolveReason',
+])
 
 export function intentIdentity(intent: RequestIntent): string {
   return [
     intent.operation,
     intent.requiredSurface,
     intent.targetName?.toLowerCase() ?? '',
+    intent.evolveReason ?? '',
   ].join('\0')
 }
 
@@ -33,6 +44,7 @@ export function parseRequestIntent(value: unknown): RequestIntent {
   const operation = record.operation
   const requiredSurface = record.required_surface ?? record.requiredSurface
   const targetName = record.target_name ?? record.targetName
+  const evolveReason = record.evolve_reason ?? record.evolveReason
   if (typeof operation !== 'string' || !OPERATIONS.has(operation as RequestOperation)) {
     throw new EvolutionError('invalid_input', 'intent.operation must be discover_or_reuse, reuse_existing, or evolve_existing')
   }
@@ -44,10 +56,19 @@ export function parseRequestIntent(value: unknown): RequestIntent {
       throw new EvolutionError('invalid_input', 'intent.target_name must be 1 to 214 characters')
     }
   }
+  if (evolveReason !== undefined) {
+    if (typeof evolveReason !== 'string' || !REASONS.has(evolveReason as EvolveReason)) {
+      throw new EvolutionError('invalid_input', 'intent.evolve_reason must be repair, upgrade, or improve_known_source')
+    }
+    if (operation !== 'evolve_existing') {
+      throw new EvolutionError('invalid_input', 'intent.evolve_reason is only valid with evolve_existing')
+    }
+  }
   return {
     operation: operation as RequestOperation,
     requiredSurface: requiredSurface as RequiredSurface,
     ...(typeof targetName === 'string' ? { targetName: targetName.trim() } : {}),
+    ...(typeof evolveReason === 'string' ? { evolveReason: evolveReason as EvolveReason } : {}),
   }
 }
 
@@ -59,11 +80,17 @@ export function surfaceSatisfiesIntent(
   return candidate.kind === 'plugin'
 }
 
-function isNamedTarget(candidate: Pick<LocalCapabilityCandidate, 'name' | 'profileEvidence'>, intent: RequestIntent): boolean {
+function isNamedTarget(candidate: Pick<LocalCapabilityCandidate, 'name' | 'profileEvidence' | 'evolutionTarget'>, intent: RequestIntent): boolean {
   if (!intent.targetName) return true
   const wanted = intent.targetName.toLowerCase()
+  const repo = candidate.evolutionTarget?.repository.toLowerCase()
+  const repoName = repo?.split('/')[1]
   return candidate.name.toLowerCase() === wanted
     || candidate.profileEvidence?.packageName.toLowerCase() === wanted
+    || candidate.evolutionTarget?.packageName.toLowerCase() === wanted
+    || repo === wanted
+    || repoName === wanted
+    || candidate.name.replace(/^dsh-plugin-/u, '').toLowerCase() === wanted
 }
 
 export function applyIntentToCandidate(
@@ -78,7 +105,11 @@ export function applyIntentToCandidate(
   else if (intent.operation === 'evolve_existing' && candidate.availability === 'installed_in_profile' && requestFit === 'full') {
     requestFit = 'partial'
   }
-  const reuseEligible = surfaceMatch && named && semanticFit === 'full'
+  const knownSource = candidate.availability === 'known_source'
+    || candidate.evolutionTarget?.kind === 'failed_install'
+    || candidate.evolutionTarget?.kind === 'reviewed_snapshot'
+  if (knownSource && requestFit !== 'none') requestFit = 'partial'
+  const reuseEligible = !knownSource && surfaceMatch && named && semanticFit === 'full'
   const evolutionTarget = candidate.profileEvidence && named && intent.operation !== 'reuse_existing'
     ? evolutionTargetFromProfile({
         packageName: candidate.profileEvidence.packageName,

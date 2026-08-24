@@ -45,7 +45,11 @@ try {
   assert.deepEqual(registered, expected)
   const startSchema = schemas.find((tool) => tool.name === 'capability_workflow')
   assert.ok(startSchema)
-  assert.equal(startSchema.parameters.properties.intent.required, true)
+  assert.deepEqual(startSchema.parameters.required, ['requirement', 'intent'])
+  assert.deepEqual(
+    startSchema.parameters.properties.intent.required,
+    ['operation', 'required_surface'],
+  )
   assert.deepEqual(
     startSchema.parameters.properties.intent.properties.operation.enum,
     ['discover_or_reuse', 'reuse_existing', 'evolve_existing'],

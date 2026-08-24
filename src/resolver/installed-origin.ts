@@ -1,4 +1,4 @@
-import type { EvolutionTarget, InstallationRecord } from '../contracts.js'
+import type { EvolutionTarget, EvolutionTargetKind, InstallationRecord } from '../contracts.js'
 import { hashObject } from '../state/hashes.js'
 
 const OWNER = '[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}'
@@ -16,6 +16,30 @@ export function parseExactGithubDependency(spec: string): { repository: string; 
   return { repository: `${match[1]}/${match[2]}`, commit: match[3]! }
 }
 
+export function evolutionTargetFromExactGithub(input: {
+  kind: EvolutionTargetKind
+  packageName: string
+  profile: string
+  dependencySpec: string
+  installation?: Pick<InstallationRecord, 'id' | 'reviewId' | 'removed' | 'supersededByInstallationId'>
+  reviewId?: string
+}): EvolutionTarget | undefined {
+  const parsed = parseExactGithubDependency(input.dependencySpec)
+  if (!parsed) return undefined
+  const reviewId = input.reviewId ?? input.installation?.reviewId
+  return {
+    kind: input.kind,
+    repository: parsed.repository,
+    commit: parsed.commit,
+    packageName: input.packageName,
+    profile: input.profile,
+    dependencySpec: input.dependencySpec,
+    specDigest: dependencySpecDigest(input.dependencySpec),
+    ...(input.installation?.id ? { installationId: input.installation.id } : {}),
+    ...(reviewId ? { reviewId } : {}),
+  }
+}
+
 export function evolutionTargetFromProfile(input: {
   packageName: string
   profile: string
@@ -27,19 +51,13 @@ export function evolutionTargetFromProfile(input: {
   const owned = input.installation
     && !input.installation.removed
     && !input.installation.supersededByInstallationId
-  return {
+  return evolutionTargetFromExactGithub({
     kind: owned ? 'owned_chain' : 'github_exact',
-    repository: parsed.repository,
-    commit: parsed.commit,
     packageName: input.packageName,
     profile: input.profile,
     dependencySpec: input.dependencySpec,
-    specDigest: dependencySpecDigest(input.dependencySpec),
-    ...(owned && input.installation ? {
-      installationId: input.installation.id,
-      reviewId: input.installation.reviewId,
-    } : {}),
-  }
+    ...(input.installation ? { installation: input.installation } : {}),
+  })
 }
 
 export const _testing = { EXACT_GITHUB }

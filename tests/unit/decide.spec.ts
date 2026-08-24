@@ -326,4 +326,54 @@ describe('install authorization receipts', () => {
       requirement: 'dsh-xai',
     })).toThrow(/persistent retention/i)
   })
+
+  it('installs a reviewed or failed known source as a first persistent install, not a live-spec replacement', () => {
+    const commit = 'd'.repeat(40)
+    const spec = `github:klarkxy/zhihu-search#${commit}`
+    for (const kind of ['reviewed_snapshot', 'failed_install'] as const) {
+      const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+      const current: InterruptPayload = {
+        kind: 'await_confirmation',
+        interruptId: `interrupt_${(kind === 'failed_install' ? 'd' : 'c').repeat(24)}`,
+        ownerSessionId: 'session-decide',
+        bootId: 'boot_decide',
+        validAfterTurnId: `turn_${'0'.repeat(24)}`,
+        snapshotDigest: 'b'.repeat(64),
+        options: [{ ...WORKFLOW_OPTIONS.use_this, candidateIds: [candidateId] }, WORKFLOW_OPTIONS.stop],
+        facts: {
+          installProfiles: ['web'],
+          candidateSnapshot: [{
+            id: candidateId,
+            index: 1,
+            kind: 'local',
+            name: 'dsh-plugin-zhihu-search',
+            identity: 'dsh-plugin-zhihu-search',
+            digest: 'e'.repeat(64),
+            evolutionTarget: {
+              kind,
+              repository: 'klarkxy/zhihu-search',
+              commit,
+              packageName: 'dsh-plugin-zhihu-search',
+              profile: 'web',
+              dependencySpec: spec,
+              specDigest: 'f'.repeat(64),
+            },
+          }],
+        },
+      }
+      guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个长期保留' }] })
+      const resume = resolveDecisionFromModel({
+        guard,
+        agent,
+        interrupt: current,
+        decision: { action: 'use_this', candidateId, retention: 'persistent' },
+        requirement: 'zhihu-search',
+      })
+      expect(resume.install).toMatchObject({
+        targetProfile: 'web',
+        retention: 'persistent',
+      })
+      expect(resume.install?.replacement).toBeUndefined()
+    }
+  })
 })

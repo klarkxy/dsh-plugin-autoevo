@@ -87,7 +87,12 @@ export interface CreatorFoundationPreflight {
 }
 
 export interface CreatorFoundation {
-  preflight(input?: { signal?: AbortSignal; parentCtx?: unknown }): Promise<CreatorFoundationPreflight>
+  /**
+   * `parentCtx` is the parent Agent context used to resolve live services.
+   * `parentScope` is the parent Agent itself — DSH tools/skills registries
+   * view by Agent, not by `agent.ctx`.
+   */
+  preflight(input?: { signal?: AbortSignal; parentCtx?: unknown; parentScope?: unknown }): Promise<CreatorFoundationPreflight>
 }
 
 interface AgentPresetRosterItem {
@@ -387,7 +392,7 @@ export function assertRequiredCreatorCatalog(
     if (!catalogHas(actualTools, [inspect])) missing.push(inspect)
   }
   if (missing.length > 0) {
-    throw creatorUnavailable('Capability Evolution parent catalog is missing required construction tools', {
+    throw creatorUnavailable(`Capability Evolution parent catalog is missing required construction tools (${missing.join(', ')})`, {
       missing,
     })
   }
@@ -446,9 +451,10 @@ export async function assertChildCreatorCatalog(
 
 export async function preflightCreatorFoundation(
   ctx: Context,
-  input: { signal?: AbortSignal; parentCtx?: unknown } = {},
+  input: { signal?: AbortSignal; parentCtx?: unknown; parentScope?: unknown } = {},
 ): Promise<CreatorFoundationPreflight> {
   const catalogCtx = input.parentCtx ?? ctx
+  const catalogScope = input.parentScope ?? catalogCtx
   const agentPresets = serviceFrom(catalogCtx, 'agentPresets') as AgentPresetsLike | undefined
     ?? serviceFrom(ctx, 'agentPresets') as AgentPresetsLike | undefined
   const composed = agentPresets?.composedPreset?.(catalogCtx)
@@ -469,7 +475,7 @@ export async function preflightCreatorFoundation(
     })
   }
 
-  const catalog = await collectCreatorCatalog(catalogCtx, catalogCtx, input.signal)
+  const catalog = await collectCreatorCatalog(catalogCtx, catalogScope, input.signal)
   assertRequiredCreatorCatalog(catalog)
   const digest = requiredToolCatalogDigest(requiredCreatorCatalog())
 

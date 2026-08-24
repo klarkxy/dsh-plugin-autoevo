@@ -37,6 +37,7 @@ function foundationCtx(options: {
   standingError?: Error
   tools?: string[]
   globalTools?: string[]
+  toolsScope?: unknown
   skills?: string[]
   readError?: Error
   missingRuntime?: string
@@ -48,6 +49,11 @@ function foundationCtx(options: {
   const roster = options.roster === null
     ? undefined
     : options.roster ?? [{ id: EVOLUTION_PRESET_ID }]
+  const scopedNames = (scope?: unknown): Set<string> => {
+    if (scope === undefined) return globalTools
+    if (options.toolsScope !== undefined && scope !== options.toolsScope) return new Set()
+    return tools
+  }
   return {
     get(name: string) {
       if (options.missingRuntime === name) return undefined
@@ -73,8 +79,8 @@ function foundationCtx(options: {
       }
       if (name === 'tools') {
         return {
-          schemas: (scope?: unknown) => [...(scope === undefined ? globalTools : tools)].map((item) => ({ name: item })),
-          get: (item: string, scope?: unknown) => (scope === undefined ? globalTools : tools).has(item) ? { name: item } : undefined,
+          schemas: (scope?: unknown) => [...scopedNames(scope)].map((item) => ({ name: item })),
+          get: (item: string, scope?: unknown) => scopedNames(scope).has(item) ? { name: item } : undefined,
         }
       }
       if (name === 'skills') {
@@ -134,6 +140,15 @@ describe('Creator foundation preflight', () => {
       tools: requiredTools().filter((name) => name !== 'cordis_inspect_query'),
       globalTools: requiredTools(),
     }))).rejects.toThrow(/missing required construction tools/i)
+  })
+
+  it('reads the parent Agent as the DSH tools scope, not agent.ctx', async () => {
+    const parent = { id: 'parent-session' }
+    const ctx = foundationCtx({ toolsScope: parent })
+    await expect(preflightCreatorFoundation(ctx, { parentCtx: ctx }))
+      .rejects.toThrow(/missing required construction tools/i)
+    const preflight = await preflightCreatorFoundation(ctx, { parentCtx: ctx, parentScope: parent })
+    expect(preflight.catalog.tools).toEqual(expect.arrayContaining(requiredTools()))
   })
 
   it('rejects missing parent tool or skill services before source work', async () => {

@@ -95,6 +95,7 @@ const HARD_CONSTRAINTS = [
   'Call capability_workflow_recover in two legal modes only: sealed failure recovery with the current interrupt_id, or a new top-level user request to clean up a completed installation with interrupt_id omitted. Never pass an installation id. If this tool result is waiting or a completed presentation, do not call it again in the same turn.',
   'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
   'Authorized modify or create continues in this session on the Host-managed source path. Do not spawn sub-agents. After editing, call capability_workflow_resume with finish construction navigation and no new user decision.',
+  'After a completed local install, only Host installation.contribution.eligible may prompt asking whether to contribute upstream. Ask in natural language; do not fork, push, or run GitHub CLI until a separate explicit approval. Never invent eligibility.',
 ]
 
 function safeDependencySpec(value: string): string {
@@ -272,8 +273,8 @@ function userFacingMeaning(action: string, requirement: string, completedCleanup
       zh: '继续寻找其他候选',
     },
     review_existing: {
-      en: 'Read-only review of this installed plugin\'s known source; no modification yet',
-      zh: '只读审查这份已安装插件的已知来源；还不是修改',
+      en: 'Read-only review of this plugin\'s known source; no modification yet',
+      zh: '只读审查这份插件的已知来源；还不是修改',
     },
     reuse_local: {
       en: 'Use an existing local capability unchanged; no review, modification, or installation',
@@ -465,6 +466,12 @@ function completionInstallationFacts(view: WorkflowView): Record<string, unknown
     ...(cleanupEligible ? {
       cleanup_and_restart_on_explicit_request: true,
       cleanup_and_restart_available: !view.alreadyWaiting,
+    } : {}),
+    ...(installation.contributionAdvice ? {
+      contribution: {
+        eligible: installation.contributionAdvice.eligible === true,
+        reason: boundedText(installation.contributionAdvice.reason, 400),
+      },
     } : {}),
   }
 }

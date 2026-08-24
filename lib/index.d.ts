@@ -13,8 +13,9 @@ import { SandboxProvider } from "@deepseek-ai/dsh-sandbox";
 //#region src/config.d.ts
 interface Config$1 {
   dshHome?: string;
+  /** Host receipts and artifacts. Empty uses `<dshHome>/autoevo`. */
   stateDir?: string;
-  /** Managed plugin source repositories. Defaults to `<stateDir>/sources`. */
+  /** Managed plugin source repositories. Empty uses `<workspace>/.autoevo/sources`. */
   sourceDir?: string;
   ghCommand?: string;
   gitCommand?: string;
@@ -31,8 +32,9 @@ interface Config$1 {
 }
 interface RuntimeConfig {
   dshHome: string;
-  stateDir: string;
-  /** Optional; omitted callers resolve to `<stateDir>/sources` at the SourceManager boundary. */
+  /** Optional override. Normalized config uses `<dshHome>/autoevo`. */
+  stateDir?: string;
+  /** Optional override. Omitted callers use `<workspace>/.autoevo/sources`. */
   sourceDir?: string;
   ghCommand: string;
   gitCommand: string;
@@ -55,7 +57,7 @@ declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
-type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile';
+type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source';
 type RemoteCandidateSource = 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
@@ -65,12 +67,14 @@ type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
 type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing';
 type RequiredSurface = 'any' | 'native_dsh_plugin';
+type EvolveReason = 'repair' | 'upgrade' | 'improve_known_source';
 interface RequestIntent {
   operation: RequestOperation;
   requiredSurface: RequiredSurface;
   targetName?: string;
+  evolveReason?: EvolveReason;
 }
-type EvolutionTargetKind = 'github_exact' | 'owned_chain';
+type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot';
 interface EvolutionTarget {
   kind: EvolutionTargetKind;
   repository: string;
@@ -716,9 +720,15 @@ interface CreatorFoundationPreflight {
   catalog: CreatorCatalog;
 }
 interface CreatorFoundation {
+  /**
+   * `parentCtx` is the parent Agent context used to resolve live services.
+   * `parentScope` is the parent Agent itself — DSH tools/skills registries
+   * view by Agent, not by `agent.ctx`.
+   */
   preflight(input?: {
     signal?: AbortSignal;
     parentCtx?: unknown;
+    parentScope?: unknown;
   }): Promise<CreatorFoundationPreflight>;
 }
 //#endregion
@@ -776,7 +786,7 @@ interface CandidateSnapshotItem {
   repository?: string;
   localName?: string;
   localKind?: 'tool' | 'skill' | 'plugin';
-  availability?: 'available' | 'available_via_tool_search' | 'installed_in_profile';
+  availability?: CandidateAvailability;
   fit?: 'full' | 'partial' | 'none';
   semanticFit?: 'full' | 'partial' | 'none';
   surfaceMatch?: boolean;
@@ -1301,8 +1311,9 @@ declare class DshSemanticVerifierHost implements SemanticVerifierHost {
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
 type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord;
 declare class StateStore {
-  readonly root: string;
-  constructor(root: string);
+  private readonly resolveRoot;
+  constructor(root: string | (() => string));
+  get root(): string;
   trialRoot(installationId: string): string;
   put(kind: RecordKind, record: StoredRecord): Promise<void>;
   getResolution(id: string): Promise<ResolutionRecord>;
@@ -1311,7 +1322,9 @@ declare class StateStore {
   getWorkflow(id: string): Promise<WorkflowRecord>;
   listWorkflows(): Promise<WorkflowRecord[]>;
   listInstallations(): Promise<InstallationRecord[]>;
+  listAllReviews(): Promise<ReviewRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
+  private readReviews;
   private get;
 }
 //#endregion
@@ -1704,7 +1717,7 @@ declare class PluginRemover {
   constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher);
   /**
    * Uninstalls exactly one installation receipt.
-   * Never deletes a managed source repository under stateDir/sources.
+   * Never deletes a managed source repository under the workspace sources dir.
    */
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
 }
@@ -1814,22 +1827,46 @@ declare class SourceManager {
   private readonly config;
   private readonly runner;
   constructor(config: RuntimeConfig, runner: CommandRunner);
-  /** Resolve managed sources root; omitted config.sourceDir defaults to `<stateDir>/sources`. */
+  private get controlRoot();
+  private get legacySourceRoot();
+  private legacyReceiptPath;
+  private legacyLockPath;
+  /** Explicit `sourceDir` override, or `<workspace>/.autoevo/sources`; Host control remains under stateDir. */
+  sourceRootFor(workspaceCwd?: string): string;
+  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir tests. */
   get sourceRoot(): string;
-  sourcePath(sourceId: string): string;
+  sourcePath(sourceId: string, workspaceCwd?: string): string;
+  /** True when `candidate` is inside the managed sources root for this session. */
+  pathUnderSourceRoot(candidate: string, workspaceCwd?: string): boolean;
+  /**
+   * Resume/finalize follow a Host receipt. Materialize/initialize pass
+   * `workspaceCwd` so a new or relocated tree lands in the session workspace.
+   */
+  private resolveWorkingPath;
   receiptPath(sourceId: string): string;
   lockPath(sourceId: string): string;
+  private isManagedSourceDir;
+  private ensureWorkspaceLayout;
   readReceipt(sourceId: string): Promise<SourceReceipt | undefined>;
   receiptForManagedPath(candidate: string): Promise<SourceReceipt | undefined>;
+  /** Read-only proof that a historical local review still has an intact completed Host source. */
+  validateCompletedSnapshot(input: {
+    path: string;
+    reviewId: string;
+    repository: string;
+    baseCommit: string;
+    workspaceCwd?: string;
+    signal?: AbortSignal;
+  }): Promise<SourceReceipt | undefined>;
   writeReceipt(receipt: SourceReceipt): Promise<void>;
   private git;
   private gitConfigHash;
   private disabledHooksPath;
-  acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
+  acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
   releaseLock(sourceId: string, workflowId: string): Promise<void>;
   completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
-  assertCleanTree(sourceId: string, signal?: AbortSignal): Promise<void>;
-  assertPathContainment(sourceId: string): Promise<string>;
+  assertCleanTree(sourceId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
+  assertPathContainment(sourceId: string, workspaceCwd?: string): Promise<string>;
   /** Trusted minimal DSH bundle scaffold written before any child edit session. */
   static trustedScaffoldFiles(packageName: string): Record<string, string>;
   /**
@@ -1840,6 +1877,7 @@ declare class SourceManager {
     resolutionId: string;
     workflowId: string;
     packageName?: string;
+    workspaceCwd?: string;
     signal?: AbortSignal;
   }): Promise<SourceReceipt>;
   /**
@@ -1849,11 +1887,13 @@ declare class SourceManager {
   materializeReviewedGithub(input: {
     review: ReviewRecord;
     workflowId: string;
+    workspaceCwd?: string;
     signal?: AbortSignal;
   }): Promise<SourceReceipt>;
   createHooklessCommit(input: {
     sourceId: string;
     message: string;
+    workspaceCwd?: string;
     signal?: AbortSignal;
   }): Promise<string>;
   finalizeChildCommit(input: {
@@ -1896,6 +1936,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly engine;
   private readonly creatorFoundation;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
+  private withWorkspace;
   start(requirement: string, exec: ToolRunContext, intent?: RequestIntent): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;

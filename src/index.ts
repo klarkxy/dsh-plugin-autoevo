@@ -20,6 +20,7 @@ import { DshCommandRunner } from './process/runner.js'
 import { CapabilityEvolutionService } from './service.js'
 import { StateStore } from './state/store.js'
 import { createTools } from './tools.js'
+import { resolveStateRoot } from './workspace-layout.js'
 
 export { CreationGuard } from './creation-guard.js'
 export { ExecutionGuard } from './execution-guard.js'
@@ -140,7 +141,7 @@ export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)
   const log = ctx.logger('autoevo')
   installCordisInspectCompatibilityWhenAvailable(ctx)
-  const store = new StateStore(config.stateDir)
+  const store = new StateStore(() => resolveStateRoot(config))
   const runner = new DshCommandRunner(ctx.subprocess, config)
   const creationGuard = new CreationGuard({
     isEvolutionMode: createIsEvolutionMode(ctx),

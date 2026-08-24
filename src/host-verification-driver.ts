@@ -442,6 +442,8 @@ function parseFixturesJson(value: string | undefined): Record<string, Record<str
 interface LoaderEntryLike extends ActivationEntry {
   disabled?: boolean
   fiber?: { await(): Promise<unknown>; state: number }
+  parent?: { tree?: LoaderLike }
+  _initTask?: Promise<void>
 }
 
 interface LoaderLike {
@@ -459,7 +461,15 @@ function packageEntries(
 ): LoaderEntryLike[] {
   const loader = contextLoader(ctx)
   if (!loader || typeof loader.entries !== 'function') return []
-  return matchActivatedEntries([...loader.entries()], { packageName, targets })
+  const own = (ctx as Context & { fiber?: { entry?: LoaderEntryLike } }).fiber?.entry
+  const localTree = own?.parent?.tree
+  // While an inserted observer is activating, the root include Fiber is still
+  // pending and its subtree may not yet be visible from root loader.entries().
+  // The observer's containing tree already owns all sibling candidate rows.
+  const entries = localTree && typeof localTree.entries === 'function'
+    ? [...localTree.entries()]
+    : [...loader.entries()]
+  return matchActivatedEntries(entries, { packageName, targets })
 }
 
 async function waitForLoader(
@@ -469,16 +479,19 @@ async function waitForLoader(
 ): Promise<{ stable: boolean; sourceMatched: boolean; reason: string }> {
   const loader = contextLoader(ctx)
   if (!loader) return { stable: false, sourceMatched: false, reason: 'Host child has no Loader service.' }
-  const own = (ctx as Context & { fiber?: { entry?: unknown } }).fiber?.entry
-  for (const entry of loader.entries()) {
-    if (entry === own || entry.disabled) continue
-    if (entry.fiber) await entry.fiber.await()
-  }
   const matched = packageEntries(ctx, packageName, targets)
   if (matched.length === 0) {
     return { stable: false, sourceMatched: false, reason: 'Reviewed package Fiber was not present after Loader settle.' }
   }
+  // The verification observer is inserted below Loader's root `include`
+  // entry. Awaiting every root entry would therefore await the observer's own
+  // ancestor, while that ancestor is waiting for this observer to activate.
+  // Only the frozen candidate targets in the containing tree are relevant.
   for (const entry of matched) {
+    // Sibling entries are created concurrently. A target can be present in
+    // the tree before its Fiber is assigned; await that target's own Loader
+    // initialization task, never the containing include entry.
+    if (!entry.fiber && entry._initTask) await entry._initTask
     if (!entry.fiber) return { stable: false, sourceMatched: false, reason: 'Reviewed package entry has no Fiber.' }
     await entry.fiber.await()
     if (entry.fiber.state !== 2) {

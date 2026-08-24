@@ -80,15 +80,22 @@ describe('managed Git creation sources', () => {
     temporary.push(root)
     const git = scriptedGit()
     const manager = new SourceManager(config(root), git.runner)
+    const workspace = path.join(root, 'project')
     const resolutionId = `resolution_${'c'.repeat(24)}`
     const workflowId = `workflow_${'d'.repeat(24)}`
-    const receipt = await manager.initializeCreateSource({ resolutionId, workflowId, packageName: 'dsh-plugin-demo' })
+    const receipt = await manager.initializeCreateSource({
+      resolutionId,
+      workflowId,
+      packageName: 'dsh-plugin-demo',
+      workspaceCwd: workspace,
+    })
     expect(receipt).toMatchObject({
       sourceId: sourceIdForCreate(resolutionId),
       repository: null,
       branch: `autoevo/${workflowId}`,
       activeWorkflowId: workflowId,
     })
+    expect(receipt.path.startsWith(path.resolve(workspace, '.autoevo', 'sources'))).toBe(true)
     expect(receipt.baseCommit).toBe(receipt.headCommit)
     expect(path.dirname(manager.receiptPath(receipt.sourceId))).not.toBe(receipt.path)
     const pkg = await readFile(path.join(receipt.path, 'package.json'), 'utf8')
@@ -101,9 +108,14 @@ describe('managed Git creation sources', () => {
     temporary.push(root)
     const git = scriptedGit()
     const manager = new SourceManager(config(root), git.runner)
+    const workspace = path.join(root, 'project')
     const resolutionId = `resolution_${'e'.repeat(24)}`
     const workflowId = `workflow_${'f'.repeat(24)}`
-    const receipt = await manager.initializeCreateSource({ resolutionId, workflowId })
+    const receipt = await manager.initializeCreateSource({
+      resolutionId,
+      workflowId,
+      workspaceCwd: workspace,
+    })
     await expect(manager.finalizeChildCommit({
       sourceId: receipt.sourceId,
       workflowId,

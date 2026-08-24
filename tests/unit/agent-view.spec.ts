@@ -649,6 +649,10 @@ describe('AgentWorkflowViewV2', () => {
         taskResultObserved: true,
         reason: 'verified',
       },
+      contributionAdvice: {
+        eligible: true,
+        reason: 'Potentially eligible to suggest after the user task is complete. Inspect the diff for user-specific data and obtain explicit approval before any fork, push, or upstream PR.',
+      },
     }
     const card = compactAgentView({
       workflow,
@@ -664,6 +668,7 @@ describe('AgentWorkflowViewV2', () => {
       verified: true,
       may_claim_verified: true,
       cleanup_and_restart_on_explicit_request: true,
+      contribution: { eligible: true },
     })
     expect(card.facts.installation).not.toMatchObject({ activation: 'passed' })
     expect(card.facts.installation).not.toMatchObject({ user_test_required: true })

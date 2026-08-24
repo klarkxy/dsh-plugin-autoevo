@@ -17,6 +17,13 @@ import type { ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
 import type { CommandRunner } from './process/runner.js'
 import { hashObject, sha256 } from './state/hashes.js'
+import {
+  currentWorkspaceCwd,
+  ensureAutoEvoGitignore,
+  resolveSourceRoot,
+  resolveStateRoot,
+  WORKSPACE_SOURCE_DIR,
+} from './workspace-layout.js'
 
 export interface SourceReceipt {
   sourceId: string
@@ -104,22 +111,45 @@ export function sourceIdForCreate(resolutionId: string): string {
   return `create_${resolutionId.slice(-16)}`
 }
 
+export { WORKSPACE_SOURCE_DIR }
+
 export class SourceManager {
   constructor(
     private readonly config: RuntimeConfig,
     private readonly runner: CommandRunner,
   ) {}
 
-  /** Resolve managed sources root; omitted config.sourceDir defaults to `<stateDir>/sources`. */
-  get sourceRoot(): string {
-    return path.resolve(this.config.sourceDir || path.join(this.config.stateDir, 'sources'))
+  private get controlRoot(): string {
+    return path.join(resolveStateRoot(this.config), 'source-control')
   }
 
-  sourcePath(sourceId: string): string {
+  private get legacySourceRoot(): string {
+    return path.resolve(this.config.sourceDir || path.join(resolveStateRoot(this.config), 'sources'))
+  }
+
+  private legacyReceiptPath(sourceId: string): string {
+    return path.join(this.legacySourceRoot, '.autoevo-control', `${sourceId}.json`)
+  }
+
+  private legacyLockPath(sourceId: string): string {
+    return path.join(this.legacySourceRoot, '.autoevo-control', `${sourceId}.lock`)
+  }
+
+  /** Explicit `sourceDir` override, or `<workspace>/.autoevo/sources`; Host control remains under stateDir. */
+  sourceRootFor(workspaceCwd?: string): string {
+    return resolveSourceRoot(this.config, workspaceCwd || currentWorkspaceCwd())
+  }
+
+  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir tests. */
+  get sourceRoot(): string {
+    return this.sourceRootFor()
+  }
+
+  sourcePath(sourceId: string, workspaceCwd?: string): string {
     if (!/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/u.test(sourceId) || sourceId === '.' || sourceId === '..') {
       throw new EvolutionError('unsafe_path', 'Managed source id is not a safe single path segment', { sourceId })
     }
-    const root = this.sourceRoot
+    const root = this.sourceRootFor(workspaceCwd)
     const target = path.join(root, sourceId)
     if (!isPathInside(root, target)) {
       throw new EvolutionError('unsafe_path', 'Managed source path escaped sourceDir', { sourceId })
@@ -127,19 +157,76 @@ export class SourceManager {
     return target
   }
 
+  /** True when `candidate` is inside the managed sources root for this session. */
+  pathUnderSourceRoot(candidate: string, workspaceCwd?: string): boolean {
+    return isPathInside(this.sourceRootFor(workspaceCwd), candidate)
+  }
+
+  /**
+   * Resume/finalize follow a Host receipt. Materialize/initialize pass
+   * `workspaceCwd` so a new or relocated tree lands in the session workspace.
+   */
+  private resolveWorkingPath(sourceId: string, workspaceCwd?: string, receipt?: SourceReceipt): string {
+    if (workspaceCwd || this.config.sourceDir) {
+      return this.sourcePath(sourceId, workspaceCwd)
+    }
+    if (receipt) return path.resolve(receipt.path)
+    return this.sourcePath(sourceId, workspaceCwd)
+  }
+
   receiptPath(sourceId: string): string {
-    void this.sourcePath(sourceId)
-    return path.join(this.sourceRoot, '.autoevo-control', `${sourceId}.json`)
+    if (!/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/u.test(sourceId) || sourceId === '.' || sourceId === '..') {
+      throw new EvolutionError('unsafe_path', 'Managed source id is not a safe single path segment', { sourceId })
+    }
+    return path.join(this.controlRoot, `${sourceId}.json`)
   }
 
   lockPath(sourceId: string): string {
-    void this.sourcePath(sourceId)
-    return path.join(this.sourceRoot, '.autoevo-control', `${sourceId}.lock`)
+    if (!/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/u.test(sourceId) || sourceId === '.' || sourceId === '..') {
+      throw new EvolutionError('unsafe_path', 'Managed source id is not a safe single path segment', { sourceId })
+    }
+    return path.join(this.controlRoot, `${sourceId}.lock`)
+  }
+
+  private isManagedSourceDir(resolved: string, sourceId: string): boolean {
+    const parent = path.dirname(resolved)
+    if (path.basename(resolved) !== sourceId) return false
+    if (this.config.sourceDir) return path.resolve(parent) === path.resolve(this.config.sourceDir)
+    if (path.basename(parent) === 'sources' && path.basename(path.dirname(parent)) === '.autoevo') return true
+    if (this.config.stateDir) {
+      return path.resolve(parent) === path.resolve(this.config.stateDir, 'sources')
+    }
+    return false
+  }
+
+  private async ensureWorkspaceLayout(workspaceCwd?: string): Promise<string> {
+    const root = this.sourceRootFor(workspaceCwd)
+    await mkdir(root, { recursive: true })
+    if (path.basename(path.dirname(root)) === '.autoevo') {
+      await ensureAutoEvoGitignore(path.dirname(root))
+    }
+    return root
   }
 
   async readReceipt(sourceId: string): Promise<SourceReceipt | undefined> {
     try {
       return JSON.parse(await readFile(this.receiptPath(sourceId), 'utf8')) as SourceReceipt
+    } catch (error) {
+      if (!isNotFound(error)) throw error
+    }
+    try {
+      const receipt = JSON.parse(await readFile(this.legacyReceiptPath(sourceId), 'utf8')) as SourceReceipt
+      if (receipt.sourceId !== sourceId
+        || receipt.activeWorkflowId !== null
+        || path.resolve(receipt.path) !== path.resolve(this.legacySourceRoot, sourceId)
+        || !this.isManagedSourceDir(path.resolve(receipt.path), sourceId)) return undefined
+      try {
+        const lock = JSON.parse(await readFile(this.legacyLockPath(sourceId), 'utf8')) as SourceLock
+        if (isLockHolderAlive(lock.pid)) return undefined
+      } catch (error) {
+        if (!isNotFound(error)) return undefined
+      }
+      return receipt
     } catch (error) {
       if (isNotFound(error)) return undefined
       throw error
@@ -148,11 +235,38 @@ export class SourceManager {
 
   async receiptForManagedPath(candidate: string): Promise<SourceReceipt | undefined> {
     const resolved = path.resolve(candidate)
-    if (!isPathInside(this.sourceRoot, resolved) || path.dirname(resolved) !== path.resolve(this.sourceRoot)) return undefined
     const sourceId = path.basename(resolved)
+    if (!this.isManagedSourceDir(resolved, sourceId)) return undefined
     const receipt = await this.readReceipt(sourceId)
     if (!receipt || path.resolve(receipt.path) !== resolved) return undefined
     return receipt
+  }
+
+  /** Read-only proof that a historical local review still has an intact completed Host source. */
+  async validateCompletedSnapshot(input: {
+    path: string
+    reviewId: string
+    repository: string
+    baseCommit: string
+    workspaceCwd?: string
+    signal?: AbortSignal
+  }): Promise<SourceReceipt | undefined> {
+    const receipt = await this.receiptForManagedPath(input.path)
+    if (!receipt
+      || receipt.reviewId !== input.reviewId
+      || !receipt.artifactHash
+      || receipt.activeWorkflowId !== null
+      || receipt.repository?.toLowerCase() !== input.repository.toLowerCase()
+      || receipt.baseCommit.toLowerCase() !== input.baseCommit.toLowerCase()) return undefined
+    const inCurrentWorkspace = this.pathUnderSourceRoot(receipt.path, input.workspaceCwd)
+    const inLegacyRoot = path.resolve(receipt.path) === path.resolve(this.legacySourceRoot, receipt.sourceId)
+    if (!inCurrentWorkspace && !inLegacyRoot) return undefined
+    const completed = await this.inspectCompletedSource(receipt.sourceId, input.signal)
+    if (!completed
+      || completed.reviewId !== receipt.reviewId
+      || completed.artifactHash !== receipt.artifactHash
+      || path.resolve(completed.path) !== path.resolve(receipt.path)) return undefined
+    return completed
   }
 
   async writeReceipt(receipt: SourceReceipt): Promise<void> {
@@ -188,8 +302,8 @@ export class SourceManager {
     return result.stdout.trim()
   }
 
-  private async gitConfigHash(sourceId: string): Promise<string> {
-    const root = await this.assertPathContainment(sourceId)
+  private async gitConfigHash(sourceId: string, workspaceCwd?: string): Promise<string> {
+    const root = await this.assertPathContainment(sourceId, workspaceCwd)
     const gitDir = path.join(root, '.git')
     const gitInfo = await lstat(gitDir)
     if (!gitInfo.isDirectory() || gitInfo.isSymbolicLink()) {
@@ -221,8 +335,7 @@ export class SourceManager {
   }
 
   private async disabledHooksPath(): Promise<string> {
-    const controlRoot = path.join(this.sourceRoot, '.autoevo-control')
-    const hooksDir = path.join(controlRoot, 'empty-hooks')
+    const hooksDir = path.join(this.controlRoot, 'empty-hooks')
     await mkdir(hooksDir, { recursive: true })
     const info = await lstat(hooksDir)
     if (!info.isDirectory() || info.isSymbolicLink()) {
@@ -233,16 +346,17 @@ export class SourceManager {
       throw new EvolutionError('unsafe_path', 'Host disabled-hooks directory is not empty')
     }
     const resolved = await realpath(hooksDir)
-    if (!isPathInside(this.sourceRoot, resolved)) {
-      throw new EvolutionError('unsafe_path', 'Host disabled-hooks directory escaped sourceDir')
+    if (!isPathInside(resolveStateRoot(this.config), resolved)) {
+      throw new EvolutionError('unsafe_path', 'Host disabled-hooks directory escaped AutoEvo stateDir')
     }
     return resolved
   }
 
-  async acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void> {
-    const root = this.sourcePath(sourceId)
+  async acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void> {
+    const currentReceipt = await this.readReceipt(sourceId)
+    const root = this.resolveWorkingPath(sourceId, workspaceCwd, currentReceipt)
     await mkdir(root, { recursive: true })
-    await this.assertPathContainment(sourceId)
+    await this.assertPathContainment(sourceId, workspaceCwd)
     const lockFile = this.lockPath(sourceId)
     await mkdir(path.dirname(lockFile), { recursive: true })
     try {
@@ -270,16 +384,16 @@ export class SourceManager {
     const status = await this.git(root, ['status', '--porcelain'], signal).catch(() => null)
     const head = await this.git(root, ['rev-parse', 'HEAD'], signal).catch(() => null)
     const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal).catch(() => null)
-    const receipt = await this.readReceipt(sourceId).catch(() => undefined)
-    const gitSecurityHash = await this.gitConfigHash(sourceId).catch(() => null)
-    const matches = Boolean(receipt
-      && receipt.activeWorkflowId === existing.workflowId
+    const lockedReceipt = await this.readReceipt(sourceId).catch(() => undefined)
+    const gitSecurityHash = await this.gitConfigHash(sourceId, workspaceCwd).catch(() => null)
+    const matches = Boolean(lockedReceipt
+      && lockedReceipt.activeWorkflowId === existing.workflowId
       && existing.headCommit && existing.branch
       && head === existing.headCommit
       && branch === existing.branch
-      && receipt.headCommit === head
-      && receipt.branch === branch
-      && gitSecurityHash === receipt.gitConfigHash
+      && lockedReceipt.headCommit === head
+      && lockedReceipt.branch === branch
+      && gitSecurityHash === lockedReceipt.gitConfigHash
       && status === '')
     if (!matches) {
       throw new EvolutionError('invalid_input', 'Managed source has a stale lock that failed revalidation', {
@@ -288,7 +402,7 @@ export class SourceManager {
       })
     }
     await rm(lockFile, { force: true })
-    await this.acquireLock(sourceId, workflowId, signal)
+    await this.acquireLock(sourceId, workflowId, signal, workspaceCwd)
   }
 
   async releaseLock(sourceId: string, workflowId: string): Promise<void> {
@@ -317,8 +431,8 @@ export class SourceManager {
     await this.releaseLock(sourceId, workflowId)
   }
 
-  async assertCleanTree(sourceId: string, signal?: AbortSignal): Promise<void> {
-    const root = this.sourcePath(sourceId)
+  async assertCleanTree(sourceId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void> {
+    const root = await this.assertPathContainment(sourceId, workspaceCwd)
     const status = await this.git(root, ['status', '--porcelain'], signal)
     if (status) {
       throw new EvolutionError('invalid_input', 'Managed source working tree is dirty; refusing to continue', {
@@ -327,16 +441,24 @@ export class SourceManager {
     }
   }
 
-  async assertPathContainment(sourceId: string): Promise<string> {
-    const root = this.sourcePath(sourceId)
+  async assertPathContainment(sourceId: string, workspaceCwd?: string): Promise<string> {
+    const receipt = await this.readReceipt(sourceId)
+    const root = this.resolveWorkingPath(sourceId, workspaceCwd, receipt)
     await access(root, constants.F_OK)
     const info = await lstat(root)
     if (info.isSymbolicLink()) {
       throw new EvolutionError('unsafe_path', 'Managed source root must not be a symlink', { sourceId })
     }
     const resolved = await realpath(root)
-    if (!isPathInside(this.sourceRoot, resolved)) {
+    if (!this.isManagedSourceDir(resolved, sourceId)) {
       throw new EvolutionError('unsafe_path', 'Managed source realpath escaped sourceDir', { sourceId, resolved })
+    }
+    if (receipt && path.resolve(receipt.path) !== resolved) {
+      const relocating = Boolean(workspaceCwd || this.config.sourceDir)
+        && path.resolve(this.sourcePath(sourceId, workspaceCwd)) === resolved
+      if (!relocating) {
+        throw new EvolutionError('unsafe_path', 'Managed source realpath does not match the Host receipt', { sourceId, resolved })
+      }
     }
     return resolved
   }
@@ -370,13 +492,14 @@ export class SourceManager {
     resolutionId: string
     workflowId: string
     packageName?: string
+    workspaceCwd?: string
     signal?: AbortSignal
   }): Promise<SourceReceipt> {
     const sourceId = sourceIdForCreate(input.resolutionId)
-    await this.acquireLock(sourceId, input.workflowId, input.signal)
+    await this.ensureWorkspaceLayout(input.workspaceCwd)
+    await this.acquireLock(sourceId, input.workflowId, input.signal, input.workspaceCwd)
     try {
-      const root = this.sourcePath(sourceId)
-      await mkdir(this.sourceRoot, { recursive: true })
+      const root = this.sourcePath(sourceId, input.workspaceCwd)
       if (await access(path.join(root, '.git'), constants.F_OK).then(() => true).catch(() => false)) {
         throw new EvolutionError('invalid_input', 'Managed create source already exists; refusing to overwrite', {
           sourceId,
@@ -398,9 +521,10 @@ export class SourceManager {
       const headCommit = await this.createHooklessCommit({
         sourceId,
         message: 'chore: trusted AutoEvo plugin scaffold',
+        ...(input.workspaceCwd ? { workspaceCwd: input.workspaceCwd } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
       })
-      const resolved = await this.assertPathContainment(sourceId)
+      const resolved = await this.assertPathContainment(sourceId, input.workspaceCwd)
       const receipt: SourceReceipt = {
         sourceId,
         repository: null,
@@ -411,7 +535,7 @@ export class SourceManager {
         reviewId: `scaffold_${hashObject({ sourceId, headCommit }).slice(0, 24)}`,
         artifactHash: null,
         activeWorkflowId: input.workflowId,
-        gitConfigHash: await this.gitConfigHash(sourceId),
+        gitConfigHash: await this.gitConfigHash(sourceId, input.workspaceCwd),
       }
       await this.writeReceipt(receipt)
       await writeFile(this.lockPath(sourceId), `${JSON.stringify({
@@ -435,6 +559,7 @@ export class SourceManager {
   async materializeReviewedGithub(input: {
     review: ReviewRecord
     workflowId: string
+    workspaceCwd?: string
     signal?: AbortSignal
   }): Promise<SourceReceipt> {
     if (input.review.sourceSnapshot.kind !== 'github') {
@@ -443,10 +568,10 @@ export class SourceManager {
     const repository = input.review.sourceSnapshot.repository
     const commit = input.review.sourceSnapshot.commit
     const sourceId = sourceIdForRepository(repository)
-    await this.acquireLock(sourceId, input.workflowId, input.signal)
+    await this.ensureWorkspaceLayout(input.workspaceCwd)
+    await this.acquireLock(sourceId, input.workflowId, input.signal, input.workspaceCwd)
     try {
-      const root = this.sourcePath(sourceId)
-      await mkdir(this.sourceRoot, { recursive: true })
+      const root = this.sourcePath(sourceId, input.workspaceCwd)
       const exists = await access(path.join(root, '.git'), constants.F_OK).then(() => true).catch(() => false)
       if (!exists) {
         await mkdir(root, { recursive: true })
@@ -456,7 +581,7 @@ export class SourceManager {
       await this.git(root, ['fetch', '--depth=1', 'origin', commit], input.signal)
       const branch = `autoevo/${input.workflowId}`
       await this.git(root, ['checkout', '-B', branch, commit], input.signal)
-      await this.assertCleanTree(sourceId, input.signal)
+      await this.assertCleanTree(sourceId, input.signal, input.workspaceCwd)
       const headCommit = await this.git(root, ['rev-parse', 'HEAD'], input.signal)
       if (headCommit.toLowerCase() !== commit.toLowerCase()) {
         throw new EvolutionError('review_rejected', 'Managed source HEAD does not match the reviewed commit', {
@@ -464,7 +589,7 @@ export class SourceManager {
           actual: headCommit,
         })
       }
-      const resolved = await this.assertPathContainment(sourceId)
+      const resolved = await this.assertPathContainment(sourceId, input.workspaceCwd)
       const receipt: SourceReceipt = {
         sourceId,
         repository,
@@ -475,7 +600,7 @@ export class SourceManager {
         reviewId: input.review.id,
         artifactHash: null,
         activeWorkflowId: input.workflowId,
-        gitConfigHash: await this.gitConfigHash(sourceId),
+        gitConfigHash: await this.gitConfigHash(sourceId, input.workspaceCwd),
       }
       await this.writeReceipt(receipt)
       await writeFile(this.lockPath(sourceId), `${JSON.stringify({
@@ -495,10 +620,13 @@ export class SourceManager {
   async createHooklessCommit(input: {
     sourceId: string
     message: string
+    workspaceCwd?: string
     signal?: AbortSignal
   }): Promise<string> {
-    const root = this.sourcePath(input.sourceId)
-    await this.assertPathContainment(input.sourceId)
+    const receipt = await this.readReceipt(input.sourceId)
+    const root = receipt
+      ? await this.assertPathContainment(input.sourceId)
+      : this.sourcePath(input.sourceId, input.workspaceCwd)
     const pending = await this.git(root, ['status', '--porcelain'], input.signal)
     if (!pending) {
       throw new EvolutionError('invalid_input', 'Managed child returned without changing the source repository')
@@ -541,7 +669,7 @@ export class SourceManager {
         })
       }
     })
-    await this.assertCleanTree(input.sourceId, input.signal)
+    await this.assertCleanTree(input.sourceId, input.signal, input.workspaceCwd)
     return this.git(root, ['rev-parse', 'HEAD'], input.signal)
   }
 

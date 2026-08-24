@@ -18,6 +18,8 @@ import {
 } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
 import { sha256 } from '../../src/state/hashes.js'
+import { compactAgentView } from '../../src/workflow/agent-view.js'
+import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const temporary: string[] = []
 
@@ -1465,5 +1467,118 @@ describe('install authorization uses verdict and hard boundaries', () => {
       retention: 'temporary',
       verificationTask: 'test calculator',
     }, execution())).rejects.toThrow(/verdict does not authorize direct use/i)
+  })
+
+  it('records contribution eligibility only for verified full-fit local installs and exposes it on the compact view', async () => {
+    async function installLocal(options: {
+      fit: ReviewRecord['fit']
+      verification: VerificationEvidence
+      license?: string
+    }) {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-contrib-'))
+      temporary.push(root)
+      const tgz = path.join(root, 'plugin.tgz')
+      await writeFile(tgz, 'reviewed bytes')
+      const local = attestedReview({
+        sourceSnapshot: {
+          kind: 'local',
+          path: path.join(root, 'source'),
+          baseReviewId: `review_${'b'.repeat(64)}`,
+          baseCommit: 'c'.repeat(40),
+          statusHash: 'd'.repeat(64),
+        },
+        installSpec: `file:${tgz.replaceAll('\\', '/')}`,
+        fit: options.fit,
+        license: options.license ?? 'MIT',
+        recommendation: 'use',
+      })
+      const store = new StateStore(root)
+      await store.put('reviews', local)
+      const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+      const installer = new PluginInstaller(
+        ctx,
+        config(root),
+        store,
+        {
+          profileTargetAbsent: async () => true,
+          materializeLocal: async (_review: ReviewRecord, artifactRoot: string) => {
+            await mkdir(artifactRoot, { recursive: true })
+            const artifact = path.join(artifactRoot, 'package.tgz')
+            const bytes = Buffer.from('reviewed bytes')
+            await writeFile(artifact, bytes)
+            return {
+              installSpec: `file:${artifact.replaceAll('\\', '/')}`,
+              artifactRoot,
+              artifactSha256: sha256(bytes),
+            }
+          },
+          install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+          profileSourceMatches: async () => true,
+          readInstalledVerificationFixtures: async () => jsonFixtures(),
+          verifyHost: async () => options.verification,
+        } as unknown as DshLauncher,
+        async () => true,
+        undefined,
+        async () => ({
+          evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
+        }),
+        undefined,
+        'headless',
+      )
+      const result = await installer.install({
+        reviewId: local.id,
+        targetProfile: 'web',
+        retention: 'persistent',
+      }, execution())
+      return result
+    }
+
+    const eligible = await installLocal({ fit: 'full', verification: hostPassedEvidence })
+    expect(eligible.installOutcome).toBe('verified')
+    expect(eligible.contributionAdvice).toEqual({
+      eligible: true,
+      reason: expect.stringMatching(/Potentially eligible to suggest/i),
+    })
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: `workflow_${'a'.repeat(24)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-23T00:00:00.000Z',
+      updatedAt: '2026-08-23T00:00:00.000Z',
+      requirement: 'zhihu-search',
+      status: 'completed',
+      cursor: 'installed',
+      generation: 1,
+    }
+    const card = compactAgentView({
+      workflow,
+      installation: eligible,
+      lifecycleState: 'verified',
+    })
+    expect(card.state).toBe('completed')
+    expect(card.facts.installation).toMatchObject({
+      outcome: 'verified',
+      verified: true,
+      may_claim_verified: true,
+      contribution: {
+        eligible: true,
+        reason: expect.stringMatching(/explicit approval/i),
+      },
+    })
+    expect(JSON.stringify(card.facts.installation)).not.toMatch(/use_this|interrupt_|workflow_/)
+
+    const partial = await installLocal({ fit: 'partial', verification: hostPassedEvidence })
+    expect(partial.contributionAdvice?.eligible).toBe(false)
+    expect(compactAgentView({
+      workflow,
+      installation: partial,
+      lifecycleState: 'verified',
+    }).facts.installation).toMatchObject({
+      contribution: { eligible: false },
+    })
+
+    const unverified = await installLocal({ fit: 'full', verification: hostFailedEvidence })
+    expect(unverified.verified).toBe(false)
+    expect(unverified.contributionAdvice?.eligible === true).toBe(false)
   })
 })

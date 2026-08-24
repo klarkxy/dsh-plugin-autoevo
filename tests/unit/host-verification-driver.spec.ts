@@ -211,6 +211,59 @@ describe('Host verification driver', () => {
     expect(result.reason).toMatch(/Loader\/Fiber settled without an Agent turn/i)
   })
 
+  it('awaits only frozen candidate Fibers and never the observer ancestor', async () => {
+    let ancestorAwaited = false
+    let candidateInitialized = false
+    const candidate = {
+      id: 'include:calculator',
+      options: { id: 'calculator', name: 'dsh-tool-calculator' },
+    } as {
+      id: string
+      options: { id: string; name: string }
+      fiber?: { await(): Promise<void>; state: number }
+      _initTask?: Promise<void>
+    }
+    candidate._initTask = Promise.resolve().then(() => {
+      candidateInitialized = true
+      candidate.fiber = { await: async () => undefined, state: 2 }
+    })
+    const observer = {
+      id: 'autoevo-observer',
+      options: { id: 'autoevo-observer', name: 'dsh-plugin-autoevo-verification-observer' },
+      fiber: { await: async () => undefined, state: 1 },
+      parent: { tree: { entries: () => [candidate] } },
+    }
+    const ctx = {
+      loader: {
+        entries: () => [{
+          id: 'include',
+          options: { id: 'include', name: 'cordis:include' },
+          fiber: {
+            await: async () => {
+              ancestorAwaited = true
+              throw new Error('observer ancestor must not be awaited')
+            },
+            state: 1,
+          },
+        }],
+      },
+      tools: { get: () => undefined, execute: async () => ({ isError: true }) },
+      get: () => undefined,
+      fiber: { entry: observer },
+    } as unknown as Context
+    const result = await runHostVerification(ctx, {
+      receiptPath: path.resolve('receipt.jsonl'),
+      expectedTools: [],
+      layer: 'bundle_activation',
+      packageName: 'dsh-tool-calculator',
+      fixtureDigest: fixtureDigestFor([]),
+      activatedFibersJson: JSON.stringify([{ id: 'calculator', name: 'dsh-tool-calculator' }]),
+    })
+    expect(ancestorAwaited).toBe(false)
+    expect(candidateInitialized).toBe(true)
+    expect(result).toMatchObject({ status: 'passed', sourceMatched: true, exitCode: 0 })
+  })
+
   it('activates a carrier bundle by insert id and name, not the npm package', async () => {
     const ctx = {
       loader: {

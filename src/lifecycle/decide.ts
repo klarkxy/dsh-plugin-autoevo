@@ -237,6 +237,7 @@ function resolveInstallFromDecision(
     ? interrupt.facts.installProfiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : []
   const evolutionTarget = evolutionTargetFromInterrupt(interrupt, decision.candidateId)
+  const liveReplacement = evolutionTarget?.kind === 'github_exact' || evolutionTarget?.kind === 'owned_chain'
   const targetProfile = (evolutionTarget?.profile ?? profiles[0])?.trim()
   if (!targetProfile) {
     throw new EvolutionError(
@@ -250,11 +251,11 @@ function resolveInstallFromDecision(
       'Replacement profile is not in the current AutoEvo-capable install profile set',
     )
   }
-  const retention = evolutionTarget ? 'persistent' : (decision.retention ?? 'temporary')
+  const retention = evolutionTarget || liveReplacement ? 'persistent' : (decision.retention ?? 'temporary')
   if (retention !== 'temporary' && retention !== 'persistent') {
     throw new EvolutionError('invalid_input', 'decision retention must be temporary or persistent')
   }
-  if (evolutionTarget && decision.retention === 'temporary') {
+  if (liveReplacement && decision.retention === 'temporary') {
     throw new EvolutionError(
       'invalid_input',
       'Replacing an installed plugin requires persistent retention',
@@ -273,7 +274,7 @@ function resolveInstallFromDecision(
     targetProfile,
     retention,
     verificationTask: requirement,
-    ...(evolutionTarget ? {
+    ...(liveReplacement && evolutionTarget ? {
       replacement: {
         profile: evolutionTarget.profile,
         packageName: evolutionTarget.packageName,

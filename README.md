@@ -40,7 +40,7 @@ dsh plugin --profile web add --save-exact "file:C:/tmp/autoevo-pack/dsh-plugin-a
 
 ## 能力进化模式
 
-安装后，AutoEvo 默认会全新安装用户 Agent preset **能力进化**（id `evolution`，模板版本 V13）。官方创造模式仍可供用户手动切换，AutoEvo 负责治理：能力进化不继承创造模式。社区插件复用、审查安装、已有能力升级由 AutoEvo 治理；create / modify / correction 在当前能力进化会话对托管源施工，Host 不再拉起子 Agent，也不回退到 `code`。改进过的插件可在明确批准后贡献回上游。当前没有旧用户迁移路径：发布包只认当前 V13 的精确托管内容，其他现有或手改 preset 一律保留，不会覆盖。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装，**不会**删除已有 preset。`sourceDir` 默认为 `<stateDir>/sources`，用于托管 modify/create 的普通 git 源仓库。当前运行时是 Policy V8。completed 的安装可在用户新的顶层消息明确要求清理并重来后，按工作流精确清理再开全新发现；故障 `recovery_required` 仍走 sealed interrupt，两条路径不得混同。
+安装后，AutoEvo 默认会全新安装用户 Agent preset **能力进化**（id `evolution`，模板版本 V13）。官方创造模式仍可供用户手动切换，AutoEvo 负责治理：能力进化不继承创造模式。社区插件复用、审查安装、已有能力升级由 AutoEvo 治理；create / modify / correction 在当前能力进化会话对托管源施工，Host 不再拉起子 Agent，也不回退到 `code`。改进过的插件可在明确批准后贡献回上游。当前没有旧 preset 迁移路径：发布包只认当前 V13 的精确托管内容，其他现有或手改 preset 一律保留，不会覆盖。配置项 `evolutionPreset` 默认为 `true`；设为 `false` 只跳过安装，**不会**删除已有 preset。工作流、审查、安装回执继续保存在 `<dshHome>/autoevo/`，兼容既有 Host 账本；托管 git 源默认进入当前会话工作区 `.autoevo/sources/`。装进 DSH profile 的插件不依赖工作区源文件。当前运行时是 Policy V8。completed 的安装可在用户新的顶层消息明确要求清理并重来后，按工作流精确清理再开全新发现；故障 `recovery_required` 仍走 sealed interrupt，两条路径不得混同。
 
 > [!WARNING]
 > **不要使用智力或工具调用能力过低的 LLM 运行能力进化。** 最终安装、修改、新建和停止决定由当前 LLM 理解用户自然语言后提交为结构化 `decision`；Host 负责校验真实新用户回合、当前 interrupt 绑定的 action/candidate、review、session、boot 与防重放边界，但不会再用关键词替模型重做语义理解。弱模型可能在合法选项之间选错动作或候选。请使用具备可靠指令遵循、上下文保持和结构化工具调用能力的模型。

@@ -6,12 +6,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
-import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type EvolutionTarget, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import type { ManagedChildHost } from '../../src/managed-child.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { testingCreatorFoundation, testingCreatorPreflight } from '../../src/creator-foundation.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
+import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
@@ -22,6 +23,64 @@ class NativeRunner implements CommandRunner {
   async run(request: CommandRequest): Promise<CommandResult> {
     if (request.argv[0] === 'dsh' && request.argv.includes('--version')) {
       return { exitCode: 0, signal: null, stdout: '0.1.0-rc.6\n', stderr: '' }
+    }
+    if (request.argv[0] === 'gh' && request.argv[1] === 'api') {
+      const endpoint = request.argv.at(-1)!
+      const commitMatch = /^repos\/acme\/repaired\/commits\/([a-f0-9]{40})$/u.exec(endpoint)
+      if (commitMatch) {
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: JSON.stringify({ sha: commitMatch[1], commit: { committer: { date: new Date().toISOString() } } }),
+          stderr: '',
+        }
+      }
+      if (endpoint === 'repos/acme/repaired') {
+        return { exitCode: 0, signal: null, stdout: JSON.stringify({ default_branch: 'main' }), stderr: '' }
+      }
+      if (/^repos\/acme\/repaired\/git\/trees\/[a-f0-9]{40}\?recursive=1$/u.test(endpoint)) {
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: JSON.stringify({
+            truncated: false,
+            tree: [
+              { path: 'package.json', type: 'blob', sha: '1'.repeat(40), size: 256 },
+              { path: 'cordis.patch.yml', type: 'blob', sha: '2'.repeat(40), size: 64 },
+              { path: 'lib/index.js', type: 'blob', sha: '3'.repeat(40), size: 64 },
+              { path: 'LICENSE', type: 'blob', sha: '4'.repeat(40), size: 4 },
+            ],
+          }),
+          stderr: '',
+        }
+      }
+      const blobMatch = /^repos\/acme\/repaired\/git\/blobs\/([1-4])\1{39}$/u.exec(endpoint)
+      if (blobMatch) {
+        const contents: Record<string, string> = {
+          '1': `${JSON.stringify({
+            name: 'dsh-plugin-repaired',
+            version: '1.0.0',
+            type: 'module',
+            main: './lib/index.js',
+            dsh: { bundle: { patch: './cordis.patch.yml' } },
+            peerDependencies: {
+              '@deepseek-ai/cordis': '^4.0.1',
+              '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0',
+            },
+            license: 'MIT',
+          }, null, 2)}\n`,
+          '2': '- id: repaired\n  name: dsh-plugin-repaired\n',
+          '3': 'export function apply() {}\n',
+          '4': 'MIT\n',
+        }
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: JSON.stringify({ encoding: 'base64', content: Buffer.from(contents[blobMatch[1]!]!).toString('base64') }),
+          stderr: '',
+        }
+      }
+      return { exitCode: 1, signal: null, stdout: '', stderr: `unexpected gh endpoint: ${endpoint}` }
     }
     return await new Promise((resolve, reject) => {
       const [command, ...args] = request.argv
@@ -99,7 +158,7 @@ describe('managed create vertical flow', () => {
     const preflight = testingCreatorPreflight()
     const runner = new NativeRunner()
     const cfg = config(root)
-    const store = new StateStore(cfg.stateDir)
+    const store = new StateStore(cfg.stateDir!)
     const service = new CapabilityEvolutionService(
       { get: () => undefined } as unknown as Context,
       cfg,
@@ -146,7 +205,7 @@ describe('managed create vertical flow', () => {
     const preflight = testingCreatorPreflight()
     const runner = new NativeRunner()
     const cfg = config(root)
-    const store = new StateStore(cfg.stateDir)
+    const store = new StateStore(cfg.stateDir!)
     const service = new CapabilityEvolutionService(
       { get: () => undefined } as unknown as Context,
       cfg,
@@ -189,7 +248,7 @@ describe('managed create vertical flow', () => {
     temporary.push(root)
     const runner = new NativeRunner()
     const cfg = config(root)
-    const store = new StateStore(cfg.stateDir)
+    const store = new StateStore(cfg.stateDir!)
     const child: ManagedChildHost = {
       async run() {
         throw new Error('child must not start')
@@ -220,4 +279,157 @@ describe('managed create vertical flow', () => {
     expect(flow.managedSourceId).toBeUndefined()
     expect(flow.creatorRecords).toEqual([expect.objectContaining({ operation: 'create', status: 'unavailable' })])
   }, 20_000)
+
+  it('reclaims and freshly freezes a completed managed repair in a later workflow', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-repair-reclaim-'))
+    temporary.push(root)
+    const runner = new NativeRunner()
+    const cfg = config(root)
+    const store = new StateStore(cfg.stateDir!)
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      undefined,
+      undefined,
+      undefined,
+      testingCreatorFoundation(testingCreatorPreflight()),
+    )
+    const firstFlow = workflow()
+    const agent = { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent
+    const prepared = await service.prepareCreate(resolution(root), { agent }, firstFlow)
+    const pkgPath = path.join(prepared.path!, 'package.json')
+    const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+    await writeFile(pkgPath, `${JSON.stringify({ ...pkg, name: 'dsh-plugin-repaired', license: 'MIT' }, null, 2)}\n`)
+    await writeFile(path.join(prepared.path!, 'LICENSE'), 'MIT\n')
+    const frozen = await service.finishManagedWork(prepared.resolution, { agent }, firstFlow)
+    const initialReceipt = await service.sources.readReceipt(firstFlow.managedSourceId!)
+    expect(frozen.review?.sourceSnapshot.kind).toBe('local')
+    expect(initialReceipt?.artifactHash).toMatch(/^[a-f0-9]{64}$/u)
+
+    const githubReview: ReviewRecord = {
+      ...frozen.review!,
+      id: `review_${'7'.repeat(64)}`,
+      sourceSnapshot: {
+        kind: 'github',
+        repository: 'acme/repaired',
+        requestedRef: initialReceipt!.baseCommit,
+        commit: initialReceipt!.baseCommit,
+        defaultBranch: 'main',
+      },
+      installSpec: `github:acme/repaired#${initialReceipt!.baseCommit}`,
+    }
+    const repairedReview: ReviewRecord = {
+      ...frozen.review!,
+      id: `review_${'8'.repeat(64)}`,
+      createdAt: new Date(Date.now() + 1_000).toISOString(),
+      sourceSnapshot: {
+        kind: 'local',
+        path: initialReceipt!.path,
+        baseReviewId: githubReview.id,
+        baseCommit: initialReceipt!.baseCommit,
+        statusHash: frozen.review!.sourceSnapshot.kind === 'local'
+          ? frozen.review!.sourceSnapshot.statusHash
+          : '9'.repeat(64),
+      },
+    }
+    await store.put('reviews', githubReview)
+    await store.put('reviews', repairedReview)
+    await service.sources.writeReceipt({ ...initialReceipt!, repository: 'acme/repaired', reviewId: repairedReview.id })
+    await service.releaseManagedSource(firstFlow, { agent })
+
+    const target: EvolutionTarget = {
+      kind: 'reviewed_snapshot',
+      repository: 'acme/repaired',
+      commit: initialReceipt!.baseCommit,
+      packageName: 'dsh-plugin-repaired',
+      profile: 'web',
+      dependencySpec: repairedReview.installSpec!,
+      specDigest: dependencySpecDigest(repairedReview.installSpec!),
+      reviewId: repairedReview.id,
+      sourceId: firstFlow.managedSourceId!,
+    }
+    const secondResolution: ResolutionRecord = {
+      ...resolution(root),
+      id: `resolution_${'c'.repeat(24)}`,
+      requirement: 'continue the completed managed repair',
+      localCandidates: [{
+        kind: 'plugin',
+        name: target.packageName,
+        description: 'managed repair',
+        availability: 'known_source',
+        confidence: 0.99,
+        fit: 'partial',
+        evolutionTarget: target,
+      }],
+      authorization: {
+        state: 'selection_required',
+        resolutionId: `resolution_${'c'.repeat(24)}`,
+        reason: 'review managed snapshot',
+      },
+    }
+    const secondFlow: WorkflowRecord = {
+      ...workflow(),
+      id: `workflow_${'d'.repeat(24)}`,
+      requirement: secondResolution.requirement,
+      resolutionId: secondResolution.id,
+      candidateSnapshot: [{
+        id: `candidate_${'e'.repeat(24)}`,
+        index: 1,
+        kind: 'local',
+        name: target.packageName,
+        identity: target.packageName,
+        digest: 'f'.repeat(64),
+        repository: target.repository,
+        evolutionTarget: target,
+      }],
+      pendingReviewedCandidateId: `candidate_${'e'.repeat(24)}`,
+    }
+    await store.put('resolutions', secondResolution)
+    await store.put('workflows', secondFlow)
+    const reclaimed = await service.reviewExisting(secondResolution, target, { agent }, secondFlow)
+    expect(reclaimed.review.sourceSnapshot).toMatchObject({
+      kind: 'local',
+      path: initialReceipt!.path,
+      baseCommit: initialReceipt!.baseCommit,
+    })
+    expect(reclaimed.review.resolutionId).toBe(secondResolution.id)
+    if (reclaimed.review.sourceSnapshot.kind !== 'local') throw new Error('reclaimed review must be local')
+    const freshRoot = await store.getReview(reclaimed.review.sourceSnapshot.baseReviewId)
+    expect(freshRoot).toMatchObject({
+      resolutionId: secondResolution.id,
+      sourceSnapshot: {
+        kind: 'github',
+        repository: target.repository,
+        commit: target.commit,
+      },
+    })
+    expect(reclaimed.review.installSpec).toMatch(/^file:.*\.tgz$/u)
+    expect(reclaimed.review.installSpec).not.toBe(repairedReview.installSpec)
+    expect(await service.sources.readReceipt(firstFlow.managedSourceId!)).toMatchObject({
+      activeWorkflowId: secondFlow.id,
+      reviewId: reclaimed.review.id,
+      artifactHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    await service.releaseManagedSource(secondFlow, { agent })
+    expect(secondFlow.managedSourceId).toBe(firstFlow.managedSourceId)
+    expect(await service.sources.readReceipt(firstFlow.managedSourceId!)).toMatchObject({
+      activeWorkflowId: null,
+      reviewId: reclaimed.review.id,
+    })
+
+    // A read-only review/re-freeze can release the source while the workflow
+    // keeps its durable managedSourceId. A later fresh modify decision must
+    // reclaim that clean completed tip instead of trying to resume a stale
+    // process-owned lock.
+    const preparedModify = await service.prepareModify(reclaimed.resolution, reclaimed.review, { agent }, secondFlow)
+    expect(preparedModify.path).toBe(initialReceipt!.path)
+    expect(await service.sources.readReceipt(firstFlow.managedSourceId!)).toMatchObject({
+      activeWorkflowId: secondFlow.id,
+      reviewId: reclaimed.review.id,
+    })
+    await service.releaseManagedSource(secondFlow, { agent })
+  }, 30_000)
 })

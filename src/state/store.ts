@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { InstallationRecord, ResolutionRecord, ReviewRecord } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import type { WorkflowRecord } from '../workflow/contracts.js'
+import { ensureAutoEvoGitignore } from '../workspace-layout.js'
 
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows'
 type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord
@@ -15,7 +16,15 @@ function assertRecordId(id: string): void {
 }
 
 export class StateStore {
-  constructor(readonly root: string) {}
+  private readonly resolveRoot: () => string
+
+  constructor(root: string | (() => string)) {
+    this.resolveRoot = typeof root === 'function' ? root : () => root
+  }
+
+  get root(): string {
+    return this.resolveRoot()
+  }
 
   trialRoot(installationId: string): string {
     assertRecordId(installationId)
@@ -26,6 +35,7 @@ export class StateStore {
     assertRecordId(record.id)
     const directory = path.join(this.root, kind)
     await mkdir(directory, { recursive: true })
+    if (path.basename(this.root) === '.autoevo') await ensureAutoEvoGitignore(this.root)
     const target = path.join(directory, `${record.id}.json`)
     const temporary = path.join(directory, `.${record.id}.${randomUUID()}.tmp`)
     await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
@@ -84,8 +94,16 @@ export class StateStore {
     return installations
   }
 
+  async listAllReviews(): Promise<ReviewRecord[]> {
+    return this.readReviews()
+  }
+
   async listReviews(resolutionId: string): Promise<ReviewRecord[]> {
     assertRecordId(resolutionId)
+    return (await this.readReviews()).filter((record) => record.resolutionId === resolutionId)
+  }
+
+  private async readReviews(): Promise<ReviewRecord[]> {
     const directory = path.join(this.root, 'reviews')
     let entries: string[]
     try {
@@ -97,8 +115,7 @@ export class StateStore {
     const reviews: ReviewRecord[] = []
     for (const entry of entries.sort()) {
       if (!/^review_[a-f0-9]{16,64}\.json$/u.test(entry)) continue
-      const record = JSON.parse(await readFile(path.join(directory, entry), 'utf8')) as ReviewRecord
-      if (record.resolutionId === resolutionId) reviews.push(record)
+      reviews.push(JSON.parse(await readFile(path.join(directory, entry), 'utf8')) as ReviewRecord)
     }
     return reviews
   }

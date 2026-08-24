@@ -3,8 +3,9 @@ import Schema from '@deepseek-ai/schemastery'
 
 export interface Config {
   dshHome?: string
+  /** Host receipts and artifacts. Empty uses `<dshHome>/autoevo`. */
   stateDir?: string
-  /** Managed plugin source repositories. Defaults to `<stateDir>/sources`. */
+  /** Managed plugin source repositories. Empty uses `<workspace>/.autoevo/sources`. */
   sourceDir?: string
   ghCommand?: string
   gitCommand?: string
@@ -22,8 +23,9 @@ export interface Config {
 
 export interface RuntimeConfig {
   dshHome: string
-  stateDir: string
-  /** Optional; omitted callers resolve to `<stateDir>/sources` at the SourceManager boundary. */
+  /** Optional override. Normalized config uses `<dshHome>/autoevo`. */
+  stateDir?: string
+  /** Optional override. Omitted callers use `<workspace>/.autoevo/sources`. */
   sourceDir?: string
   ghCommand: string
   gitCommand: string
@@ -40,8 +42,8 @@ export interface RuntimeConfig {
 
 export const Config: Schema<Config> = Schema.object({
   dshHome: Schema.string().default('').description('DSH home directory. Empty uses DSH_HOME or ./.dsh.'),
-  stateDir: Schema.string().default('').description('AutoEvo state directory. Empty uses <dshHome>/autoevo.'),
-  sourceDir: Schema.string().default('').description('Managed plugin source directory. Empty uses <stateDir>/sources.'),
+  stateDir: Schema.string().default('').description('AutoEvo Host state directory. Empty uses <dshHome>/autoevo.'),
+  sourceDir: Schema.string().default('').description('Managed plugin source directory. Empty uses <workspace>/.autoevo/sources.'),
   ghCommand: Schema.string().default('gh').description('GitHub CLI executable.'),
   gitCommand: Schema.string().default('git').description('git executable.'),
   dshCommand: Schema.string().default('dsh').description('dsh executable.'),
@@ -57,8 +59,8 @@ export const Config: Schema<Config> = Schema.object({
   'en-US': {
     $description: 'Capability reuse and safe evolution',
     dshHome: 'DSH home directory. Empty uses DSH_HOME or ./.dsh.',
-    stateDir: 'AutoEvo state directory. Empty uses <dshHome>/autoevo.',
-    sourceDir: 'Managed plugin source directory. Empty uses <stateDir>/sources.',
+    stateDir: 'AutoEvo Host state directory. Empty uses <dshHome>/autoevo.',
+    sourceDir: 'Managed plugin source directory. Empty uses <workspace>/.autoevo/sources.',
     ghCommand: 'GitHub CLI executable.',
     gitCommand: 'git executable.',
     dshCommand: 'dsh executable.',
@@ -74,8 +76,8 @@ export const Config: Schema<Config> = Schema.object({
   'zh-CN': {
     $description: '能力复用与安全进化',
     dshHome: 'DSH 主目录。留空则使用环境变量 DSH_HOME 或当前目录下的 .dsh。',
-    stateDir: 'AutoEvo 状态目录。留空则使用 <dshHome>/autoevo。',
-    sourceDir: '托管插件源仓库目录。留空则使用 <stateDir>/sources。',
+    stateDir: 'AutoEvo Host 状态目录。留空则使用 <dshHome>/autoevo。',
+    sourceDir: '托管插件源仓库目录。留空则使用当前工作区下的 .autoevo/sources。',
     ghCommand: 'GitHub CLI 可执行文件。',
     gitCommand: 'git 可执行文件。',
     dshCommand: 'dsh 可执行文件。',
@@ -96,7 +98,7 @@ export function normalizeConfig(input: Config): RuntimeConfig {
   return {
     dshHome,
     stateDir,
-    sourceDir: path.resolve(input.sourceDir || path.join(stateDir, 'sources')),
+    ...(input.sourceDir ? { sourceDir: path.resolve(input.sourceDir) } : {}),
     ghCommand: input.ghCommand || 'gh',
     gitCommand: input.gitCommand || 'git',
     dshCommand: input.dshCommand || 'dsh',

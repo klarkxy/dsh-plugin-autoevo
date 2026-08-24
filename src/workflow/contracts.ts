@@ -142,7 +142,7 @@ export interface CandidateSnapshotItem {
   repository?: string
   localName?: string
   localKind?: 'tool' | 'skill' | 'plugin'
-  availability?: 'available' | 'available_via_tool_search' | 'installed_in_profile'
+  availability?: import('../contracts.js').CandidateAvailability
   fit?: 'full' | 'partial' | 'none'
   semanticFit?: 'full' | 'partial' | 'none'
   surfaceMatch?: boolean
@@ -611,7 +611,7 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   review_candidates: { id: 'review_candidates', labelEn: 'Review selected candidates', labelZh: '审查选中的候选', placement: 'primary' },
-  review_existing: { id: 'review_existing', labelEn: 'Review the installed plugin source', labelZh: '审查已安装插件的已知来源', placement: 'primary' },
+  review_existing: { id: 'review_existing', labelEn: 'Review the known plugin source', labelZh: '审查这份插件的已知来源', placement: 'primary' },
   search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件', placement: 'primary' },
   reuse_local: { id: 'reuse_local', labelEn: 'Use existing local capability unchanged', labelZh: '原样使用已有本地能力', placement: 'primary' },
   create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建', placement: 'advanced' },
@@ -776,13 +776,19 @@ export function optionsFor(
         .find(([, reviewId]) => reviewId === review.id)?.[0]
       if (mapped) return mapped
       const source = review.sourceSnapshot
-      return source.kind === 'github'
-        ? remoteSnapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase())?.id
-        : undefined
+      if (source.kind !== 'github') return undefined
+      return snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase()
+        || item.evolutionTarget?.repository.toLowerCase() === source.repository.toLowerCase())?.id
     }
     const consumed = workflow?.consumedVerificationAttempts ?? []
+    const failedSameSpec = (review: ReviewRecord): boolean => {
+      const candidateId = candidateIdFor(review)
+      const target = snapshot.find((item) => item.id === candidateId)?.evolutionTarget
+      return Boolean(target?.kind === 'failed_install' && review.installSpec === target.dependencySpec)
+    }
     const usableIds = reviews.filter((item) => isDirectlyUsableReview(item, workflow)
-      && !consumed.some((attempt) => sameVerificationAttempt(attempt, item)))
+      && !consumed.some((attempt) => sameVerificationAttempt(attempt, item))
+      && !failedSameSpec(item))
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
     const repairableIds = reviews.filter((item) => item.fit !== 'none' && item.license !== null)
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
@@ -811,7 +817,10 @@ export function optionsFor(
   if (reusableLocalIds.length > 0) {
     options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: reusableLocalIds })
   }
-  options.push(WORKFLOW_OPTIONS.search_more)
+  const lineageOnly = evolvableLocalIds.length > 0
+    && remoteSnapshot.length === 0
+    && workflow?.intent?.operation === 'evolve_existing'
+  if (!lineageOnly) options.push(WORKFLOW_OPTIONS.search_more)
   options.push(WORKFLOW_OPTIONS.stop)
   return options
 }

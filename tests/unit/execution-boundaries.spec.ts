@@ -58,6 +58,9 @@ describe('parent execution boundaries', () => {
     expect(parent.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/kind:new/i)
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('pwsh', { command: 'dsh plugin remove dsh-xai' }))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('bash', { command: 'gh pr create' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'gh pr create --title fix --body ready' }))).toBeUndefined()
   })
 })
 
@@ -117,6 +120,8 @@ describe('constructor execution boundaries', () => {
     expect(constructor.guard(exec('subagent'))).toMatch(/nested agent\/subagent\/workflow|denies nested/i)
     expect(constructor.guard(exec('write', { path: path.join(os.tmpdir(), 'outside.ts') }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
+    expect(constructor.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
+    expect(constructor.guard(exec('pwsh', { command: 'gh pr create --fill' }))).toMatch(/GitHub CLI/i)
   })
 })
 

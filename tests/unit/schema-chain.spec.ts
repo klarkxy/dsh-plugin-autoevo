@@ -91,6 +91,22 @@ describe('model JSON to Host schema chain', () => {
       requiredSurface: 'native_dsh_plugin',
       targetName: 'dsh-xai',
     })
+    expect(parseRequestIntent({
+      operation: 'evolve_existing',
+      required_surface: 'native_dsh_plugin',
+      target_name: 'zhihu-search',
+      evolve_reason: 'repair',
+    })).toEqual({
+      operation: 'evolve_existing',
+      requiredSurface: 'native_dsh_plugin',
+      targetName: 'zhihu-search',
+      evolveReason: 'repair',
+    })
+    expect(() => parseRequestIntent({
+      operation: 'discover_or_reuse',
+      required_surface: 'any',
+      evolve_reason: 'repair',
+    })).toThrow(/evolve_reason is only valid/i)
     expect(FORGED_RESUME_HOST_KEYS).toEqual(expect.arrayContaining([
       'selectionReceipt',
       'actionCommitment',

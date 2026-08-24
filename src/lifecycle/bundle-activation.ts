@@ -69,8 +69,11 @@ export function parseActivatedFibersJson(value: string | undefined): ActivatedFi
 }
 
 export function entryIdentity(entry: ActivationEntry): { id?: string; name?: string } {
-  const id = boundedToken(entry.id, MAX_FIBER_ID)
-    ?? boundedToken(entry.options?.id, MAX_FIBER_ID)
+  // Loader's public Entry.id is path-qualified inside an include tree
+  // (`include:child`), while a bundle patch freezes the local options.id
+  // (`child`). Prefer the local patch identity when Loader exposes both.
+  const id = boundedToken(entry.options?.id, MAX_FIBER_ID)
+    ?? boundedToken(entry.id, MAX_FIBER_ID)
   const name = boundedToken(entry.options?.name, MAX_FIBER_NAME)
     ?? boundedToken(entry.name, MAX_FIBER_NAME)
   return { ...(id ? { id } : {}), ...(name ? { name } : {}) }

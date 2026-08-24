@@ -103,7 +103,10 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
     ...(item.semanticFit ? { semanticFit: item.semanticFit } : {}),
     ...(item.surfaceMatch !== undefined ? { surfaceMatch: item.surfaceMatch } : {}),
     ...(item.reuseEligible !== undefined ? { reuseEligible: item.reuseEligible } : {}),
-    ...(item.evolutionTarget ? { evolutionTarget: item.evolutionTarget } : {}),
+    ...(item.evolutionTarget ? {
+      repository: item.evolutionTarget.repository,
+      evolutionTarget: item.evolutionTarget,
+    } : {}),
     ...(item.profileEvidence ? { installation: {
       source: item.profileEvidence.source,
       profile: item.profileEvidence.profile,
@@ -215,6 +218,9 @@ function endpointForLocalReuse(candidate: CandidateSnapshotItem): ExecutionEndpo
   }
   if (candidate.availability === 'available') {
     return { kind: 'exact_tool', name }
+  }
+  if (candidate.availability === 'known_source') {
+    throw new EvolutionError('invalid_input', 'Known-source lineage cannot be reused unchanged; review it first')
   }
   if (candidate.availability === 'installed_in_profile') return { kind: 'none' }
   throw new EvolutionError('invalid_input', 'reuse_local cannot derive an exact endpoint from this snapshot candidate', {

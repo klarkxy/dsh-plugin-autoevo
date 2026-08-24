@@ -22,6 +22,7 @@ import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
 import type { CommandResult, CommandRunner } from '../process/runner.js'
 import { sha256 } from '../state/hashes.js'
+import { resolveStateRoot } from '../workspace-layout.js'
 import { activationTargetsFromPatch } from './bundle-activation.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
 
@@ -384,7 +385,7 @@ export class DshLauncher {
   ): Promise<VerificationEvidence> {
     const startedAt = Date.now()
     const before = new Set((await collectSessionFiles(dshHome)).map((file) => file.path))
-    const verificationRoot = path.join(this.config.stateDir, 'verifications', randomUUID())
+    const verificationRoot = path.join(resolveStateRoot(this.config, cwd), 'verifications', randomUUID())
     const receiptPath = path.join(verificationRoot, 'tool-roundtrip.jsonl')
     const overlayPath = path.join(verificationRoot, 'observer.cordis.yml')
     await mkdir(verificationRoot, { recursive: true })
@@ -581,7 +582,7 @@ export class DshLauncher {
     activatedFibers?: readonly ActivatedFiber[]
     signal?: AbortSignal
   }): Promise<VerificationEvidence> {
-    const verificationRoot = path.join(this.config.stateDir, 'verifications', randomUUID())
+    const verificationRoot = path.join(resolveStateRoot(this.config, input.cwd), 'verifications', randomUUID())
     const receiptPath = path.join(verificationRoot, 'host-verification.jsonl')
     const overlayPath = path.join(verificationRoot, 'host-driver.cordis.yml')
     await mkdir(verificationRoot, { recursive: true })

@@ -13,9 +13,9 @@
     {
       "id": "scratch-authorized-host-tool",
       "prompt": "Create a live, session-only Cordis Plugin that adds a model-callable tool returning the current UTC time. No matching local capability or acceptable reviewed candidate exists; capability_workflow has returned create_authorized.",
-      "expected_output": "Uses only exact Host/Builtin/Tool inspection needed for the tool inside the Host-launched workspace-write child, performs one authorized new definition there, runs the returned package, and verifies a real tool call/result.",
+      "expected_output": "Uses only the exact Host/Builtin/Tool inspection needed for the tool in the current session's guarded construction workflow, performs one authorized new definition there, runs the returned package, and verifies a real tool call/result.",
       "assertions": [
-        "Uses the current create_authorized Host-child grant and does not call cordis_define(kind:new) on the parent session.",
+        "Uses the current create_authorized grant in the current session without dispatching a separate construction session.",
         "Avoids broad inspect/list calls.",
         "Reports a real dynamic Tool verification, not only successful definition."
       ]

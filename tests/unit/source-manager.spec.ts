@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import type { CommandRunner } from '../../src/process/runner.js'
+import { normalizeConfig } from '../../src/config.js'
 import { SourceManager, sourceIdForRepository, _testing as sourceTesting } from '../../src/source-manager.js'
+import { runInWorkspace } from '../../src/workspace-layout.js'
 
 const temporary: string[] = []
 
@@ -13,11 +15,15 @@ afterEach(async () => {
   await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true })))
 })
 
-function config(root: string, sourceDir?: string): RuntimeConfig {
+function config(
+  root: string,
+  sourceDir: string | false = path.join(root, 'sources'),
+  stateDir: string | false = root,
+): RuntimeConfig {
   return {
     dshHome: path.join(root, 'dsh-home'),
-    stateDir: root,
-    ...(sourceDir !== undefined ? { sourceDir } : {}),
+    ...(stateDir === false ? {} : { stateDir }),
+    ...(sourceDir === false ? {} : { sourceDir }),
     ghCommand: 'gh',
     gitCommand: 'git',
     dshCommand: 'dsh',
@@ -132,12 +138,126 @@ function scriptedGit(state: {
 }
 
 describe('SourceManager defaults and provenance', () => {
-  it('defaults omitted sourceDir to <stateDir>/sources', async () => {
+  it('keeps Host state under dshHome while leaving sources bound to the session workspace', () => {
+    const cfg = normalizeConfig({ dshHome: path.resolve('C:/dsh') })
+    expect(cfg.stateDir).toBe(path.resolve('C:/dsh/autoevo'))
+    expect(cfg.sourceDir).toBeUndefined()
+  })
+
+  it('defaults omitted sourceDir to <workspace>/.autoevo/sources', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-default-'))
     temporary.push(root)
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    expect(manager.sourceRoot).toBe(path.resolve(root, 'sources'))
-    expect(manager.sourcePath('acme_calculator')).toBe(path.resolve(root, 'sources', 'acme_calculator'))
+    const workspace = path.join(root, 'project')
+    const manager = new SourceManager(config(root, false), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
+    expect(() => manager.sourceRoot).toThrow(/session workspace/i)
+    expect(manager.sourceRootFor(workspace)).toBe(path.resolve(workspace, '.autoevo', 'sources'))
+    expect(manager.sourcePath('acme_calculator', workspace)).toBe(path.resolve(workspace, '.autoevo', 'sources', 'acme_calculator'))
+  })
+
+  it('materializes into the session workspace and keeps Host control under stateDir', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-workspace-'))
+    temporary.push(root)
+    const workspace = path.join(root, 'project')
+    const commit = 'c'.repeat(40)
+    const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
+    const receipt = await manager.materializeReviewedGithub({
+      review: review(commit),
+      workflowId: `workflow_${'d'.repeat(24)}`,
+      workspaceCwd: workspace,
+    })
+    expect(receipt.path).toBe(path.resolve(workspace, '.autoevo', 'sources', sourceIdForRepository('acme/calculator')))
+    expect(manager.receiptPath(receipt.sourceId).startsWith(path.resolve(root, 'source-control'))).toBe(true)
+    expect(await readFile(path.join(workspace, '.autoevo', '.gitignore'), 'utf8')).toMatch(/AutoEvo workspace state/i)
+  })
+
+  it('keeps receipts and locks under dshHome while sources stay in the session workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-unified-'))
+    temporary.push(root)
+    const workspace = path.join(root, 'project')
+    const commit = 'c'.repeat(40)
+    const manager = new SourceManager(config(root, false, false), scriptedGit({ head: commit, branch: 'main' }))
+    const autoevo = path.resolve(workspace, '.autoevo')
+    await runInWorkspace(workspace, async () => {
+      const receipt = await manager.materializeReviewedGithub({
+        review: review(commit),
+        workflowId: `workflow_${'d'.repeat(24)}`,
+        workspaceCwd: workspace,
+      })
+      expect(receipt.path).toBe(path.join(autoevo, 'sources', sourceIdForRepository('acme/calculator')))
+      const controlRoot = path.resolve(root, 'dsh-home', 'autoevo', 'source-control')
+      expect(manager.receiptPath(receipt.sourceId)).toBe(path.join(controlRoot, `${receipt.sourceId}.json`))
+      expect(manager.lockPath(receipt.sourceId).startsWith(controlRoot)).toBe(true)
+      expect(await readFile(path.join(autoevo, '.gitignore'), 'utf8')).toMatch(/Installed DSH plugins do not depend/i)
+    })
+  })
+
+  it('uses one Host lock namespace when sourceDir is shared across workspaces', () => {
+    const root = path.resolve('C:/autoevo-shared-lock')
+    const sharedSources = path.join(root, 'shared-sources')
+    const first = new SourceManager(config(root, sharedSources, false), scriptedGit({
+      head: 'c'.repeat(40),
+      branch: 'main',
+    }))
+    const second = new SourceManager(config(root, sharedSources, false), scriptedGit({
+      head: 'c'.repeat(40),
+      branch: 'main',
+    }))
+    const sourceId = sourceIdForRepository('acme/calculator')
+    expect(first.sourceRootFor('C:/workspace-a')).toBe(sharedSources)
+    expect(second.sourceRootFor('C:/workspace-b')).toBe(sharedSources)
+    expect(first.lockPath(sourceId)).toBe(second.lockPath(sourceId))
+    expect(first.lockPath(sourceId)).toBe(path.join(root, 'dsh-home', 'autoevo', 'source-control', `${sourceId}.lock`))
+  })
+
+  it('creates a new plugin source under the session workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-create-ws-'))
+    temporary.push(root)
+    const workspace = path.join(root, 'project')
+    const manager = new SourceManager(config(root, false), scriptedGit({
+      head: 'c'.repeat(40),
+      branch: 'main',
+      dirty: '?? package.json\n?? cordis.patch.yml\n?? lib/index.js\n?? README.md\n',
+    }))
+    const receipt = await manager.initializeCreateSource({
+      resolutionId: `resolution_${'a'.repeat(24)}`,
+      workflowId: `workflow_${'d'.repeat(24)}`,
+      packageName: 'dsh-plugin-new',
+      workspaceCwd: workspace,
+    })
+    expect(receipt.path.startsWith(path.resolve(workspace, '.autoevo', 'sources'))).toBe(true)
+    expect(path.basename(path.dirname(receipt.path))).toBe('sources')
+  })
+
+  it('relocates materialization into the current workspace when a receipt points elsewhere', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-reloc-'))
+    temporary.push(root)
+    const workspace = path.join(root, 'project')
+    const commit = 'c'.repeat(40)
+    const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
+    const sourceId = sourceIdForRepository('acme/calculator')
+    const stalePath = path.join(root, 'legacy', sourceId)
+    await mkdir(stalePath, { recursive: true })
+    await mkdir(path.join(root, 'source-control'), { recursive: true })
+    await writeFile(manager.receiptPath(sourceId), `${JSON.stringify({
+      sourceId,
+      repository: 'acme/calculator',
+      path: stalePath,
+      baseCommit: commit,
+      branch: 'autoevo/old',
+      headCommit: commit,
+      reviewId: review().id,
+      artifactHash: null,
+      activeWorkflowId: null,
+      gitConfigHash: 'a'.repeat(64),
+    }, null, 2)}\n`, 'utf8')
+    const receipt = await manager.materializeReviewedGithub({
+      review: review(commit),
+      workflowId: `workflow_${'d'.repeat(24)}`,
+      workspaceCwd: workspace,
+    })
+    expect(receipt.path).toBe(path.resolve(workspace, '.autoevo', 'sources', sourceId))
+    expect(manager.pathUnderSourceRoot(receipt.path, workspace)).toBe(true)
+    expect(manager.pathUnderSourceRoot(stalePath, workspace)).toBe(false)
   })
 
   it('materializes exact reviewed commit provenance onto autoevo/<workflow-id>', async () => {
@@ -184,6 +304,58 @@ describe('SourceManager defaults and provenance', () => {
     await manager.completeWorkflow(receipt.sourceId, secondId)
     state.dirty = ' M package.json\n'
     await expect(manager.inspectCompletedSource(receipt.sourceId)).resolves.toBeUndefined()
+  })
+
+  it('adopts an inactive legacy receipt only after clean repository revalidation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-legacy-'))
+    temporary.push(root)
+    const commit = 'c'.repeat(40)
+    const sourceId = sourceIdForRepository('acme/calculator')
+    const cfg = config(root)
+    const manager = new SourceManager(cfg, scriptedGit({ head: commit, branch: 'autoevo/legacy' }))
+    const legacyRoot = path.join(cfg.sourceDir!, '.autoevo-control')
+    const sourcePath = path.join(cfg.sourceDir!, sourceId)
+    await mkdir(path.join(sourcePath, '.git', 'hooks'), { recursive: true })
+    await writeFile(path.join(sourcePath, '.git', 'config'), '[core]\nrepositoryformatversion = 0\n', 'utf8')
+    await mkdir(legacyRoot, { recursive: true })
+    await writeFile(path.join(legacyRoot, `${sourceId}.json`), `${JSON.stringify({
+      sourceId,
+      repository: 'acme/calculator',
+      path: sourcePath,
+      baseCommit: commit,
+      branch: 'autoevo/legacy',
+      headCommit: commit,
+      reviewId: review().id,
+      artifactHash: 'a'.repeat(64),
+      activeWorkflowId: null,
+      gitConfigHash: 'a'.repeat(64),
+    }, null, 2)}\n`, 'utf8')
+    const receipt = await manager.readReceipt(sourceId)
+    expect(receipt?.path).toBe(path.resolve(sourcePath))
+    expect(await manager.receiptForManagedPath(sourcePath)).toMatchObject({ sourceId, activeWorkflowId: null })
+  })
+
+  it('does not adopt a legacy receipt owned by an active workflow', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-legacy-active-'))
+    temporary.push(root)
+    const sourceId = sourceIdForRepository('acme/calculator')
+    const cfg = config(root)
+    const manager = new SourceManager(cfg, scriptedGit({ head: 'c'.repeat(40), branch: 'autoevo/legacy' }))
+    const legacyRoot = path.join(cfg.sourceDir!, '.autoevo-control')
+    await mkdir(legacyRoot, { recursive: true })
+    await writeFile(path.join(legacyRoot, `${sourceId}.json`), `${JSON.stringify({
+      sourceId,
+      repository: 'acme/calculator',
+      path: path.join(cfg.sourceDir!, sourceId),
+      baseCommit: 'c'.repeat(40),
+      branch: 'autoevo/legacy',
+      headCommit: 'c'.repeat(40),
+      reviewId: review().id,
+      artifactHash: 'a'.repeat(64),
+      activeWorkflowId: `workflow_${'d'.repeat(24)}`,
+      gitConfigHash: 'a'.repeat(64),
+    }, null, 2)}\n`, 'utf8')
+    await expect(manager.readReceipt(sourceId)).resolves.toBeUndefined()
   })
 
   it('rejects a dirty tree before continuing', async () => {
