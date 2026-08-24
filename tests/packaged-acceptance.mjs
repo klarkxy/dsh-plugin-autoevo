@@ -207,10 +207,16 @@ try {
   const extractDir = path.join(blankHome, 'extracted')
   await mkdir(extractDir, { recursive: true })
   const tarPath = (value) => value.replaceAll('\\', '/')
+  // bsdtar (CI windows) handles drive-letter paths natively; GNU tar (Git Bash)
+  // reads `C:` as a remote host and needs --force-local. Try plain first.
   try {
-    await run('tar', ['--force-local', '-xzf', tarPath(tarball), '-C', tarPath(extractDir)])
+    await run('tar', ['-xzf', tarPath(tarball), '-C', tarPath(extractDir)])
   } catch {
-    await run('tar', ['--force-local', '-xf', tarPath(tarball), '-C', tarPath(extractDir)])
+    try {
+      await run('tar', ['--force-local', '-xzf', tarPath(tarball), '-C', tarPath(extractDir)])
+    } catch {
+      await run('tar', ['--force-local', '-xf', tarPath(tarball), '-C', tarPath(extractDir)])
+    }
   }
   const packedRoot = path.join(extractDir, 'package')
   await assertPackedPolicyV8(packedRoot)
