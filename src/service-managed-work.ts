@@ -161,7 +161,7 @@ export async function prepareManagedModification(
     const reuseHere = Boolean(completed
       && completed.repository?.toLowerCase() === review.sourceSnapshot.repository.toLowerCase()
       && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()
-      && deps.sources.pathUnderSourceRoot(completed.path, resolution.cwd))
+      && await deps.sources.pathUnderSourceRoot(completed.path, resolution.cwd))
     if (reuseHere && completed) {
       receipt = await deps.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
     } else {

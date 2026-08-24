@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -198,8 +198,8 @@ describe('SourceManager defaults and provenance', () => {
       workspaceCwd: workspace,
     })
     expect(receipt.path).toBe(path.resolve(workspace, '.autoevo', 'sources', sourceId))
-    expect(manager.pathUnderSourceRoot(receipt.path, workspace)).toBe(true)
-    expect(manager.pathUnderSourceRoot(stalePath, workspace)).toBe(false)
+    expect(await manager.pathUnderSourceRoot(receipt.path, workspace)).toBe(true)
+    expect(await manager.pathUnderSourceRoot(stalePath, workspace)).toBe(false)
   })
 
   it('materializes exact reviewed commit provenance onto autoevo/<workflow-id>', async () => {
@@ -483,5 +483,117 @@ describe('SourceManager defaults and provenance', () => {
     await rm(artifacts, { recursive: true, force: true })
     await expect(stat(receipt.path)).resolves.toMatchObject({ isDirectory: expect.any(Function) })
     await expect(stat(manager.receiptPath(receipt.sourceId))).resolves.toBeTruthy()
+  })
+
+  it('accepts a symlink-aliased stateDir for the disabled-hooks containment check', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-state-'))
+    temporary.push(root)
+    const realState = path.join(root, 'real-state')
+    await mkdir(realState, { recursive: true })
+    const aliasState = path.join(root, 'alias-state')
+    await symlink(realState, aliasState, process.platform === 'win32' ? 'junction' : 'dir')
+    const commit = 'c'.repeat(40)
+    const manager = new SourceManager(
+      config(root, path.join(root, 'sources'), aliasState),
+      scriptedGit({ head: commit, branch: 'main' }),
+    )
+    const receipt = await manager.materializeReviewedGithub({
+      review: review(commit),
+      workflowId: `workflow_${'d'.repeat(24)}`,
+    })
+    expect(receipt.headCommit).toBe(commit)
+  })
+
+  it('still rejects a disabled-hooks directory that genuinely escapes stateDir', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-hooks-escape-'))
+    temporary.push(root)
+    const state = path.join(root, 'state')
+    await mkdir(state, { recursive: true })
+    const outside = path.join(root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, path.join(state, 'source-control'), process.platform === 'win32' ? 'junction' : 'dir')
+    const manager = new SourceManager(
+      config(root, path.join(root, 'sources'), state),
+      scriptedGit({ head: 'c'.repeat(40), branch: 'main' }),
+    )
+    await expect(manager.materializeReviewedGithub({
+      review: review(),
+      workflowId: `workflow_${'d'.repeat(24)}`,
+    })).rejects.toThrow(/escaped AutoEvo stateDir/i)
+  })
+
+  it('accepts a symlink-aliased sourceDir for managed source containment and receipt equality', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-source-'))
+    temporary.push(root)
+    const realSources = path.join(root, 'real-sources')
+    await mkdir(realSources, { recursive: true })
+    const aliasSources = path.join(root, 'alias-sources')
+    await symlink(realSources, aliasSources, process.platform === 'win32' ? 'junction' : 'dir')
+    const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
+    const manager = new SourceManager(config(root, aliasSources), scriptedGit(state))
+    const workflowId = `workflow_${'d'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    expect(receipt.path).toBe(await realpath(manager.sourcePath(receipt.sourceId)))
+    expect(await manager.pathUnderSourceRoot(receipt.path)).toBe(true)
+    await writeFile(path.join(receipt.path, 'lib.js'), 'export const x = 1\n', 'utf8')
+    state.dirty = '?? lib.js\n'
+    const committed = await manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'fix: managed child change',
+    })
+    expect(committed.headCommit).not.toBe(receipt.headCommit)
+    await manager.completeWorkflow(receipt.sourceId, workflowId)
+    expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBeNull()
+  })
+
+  it('still rejects symlink source roots under a symlink-aliased sourceDir', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-escape-'))
+    temporary.push(root)
+    const realSources = path.join(root, 'real-sources')
+    await mkdir(realSources, { recursive: true })
+    const aliasSources = path.join(root, 'alias-sources')
+    await symlink(realSources, aliasSources, process.platform === 'win32' ? 'junction' : 'dir')
+    const manager = new SourceManager(config(root, aliasSources), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
+    const outside = path.join(root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, manager.sourcePath('linked'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(manager.assertPathContainment('linked')).rejects.toThrow(/symlink|escaped/i)
+  })
+
+  it('relocates into a symlink-aliased workspace when a receipt points elsewhere', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-source-alias-reloc-'))
+    temporary.push(root)
+    const realWorkspace = path.join(root, 'real-workspace')
+    await mkdir(realWorkspace, { recursive: true })
+    const aliasWorkspace = path.join(root, 'alias-workspace')
+    await symlink(realWorkspace, aliasWorkspace, process.platform === 'win32' ? 'junction' : 'dir')
+    const commit = 'c'.repeat(40)
+    const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
+    const sourceId = sourceIdForRepository('acme/calculator')
+    const stalePath = path.join(root, 'legacy', sourceId)
+    await mkdir(stalePath, { recursive: true })
+    await mkdir(path.join(root, 'source-control'), { recursive: true })
+    await writeFile(manager.receiptPath(sourceId), `${JSON.stringify({
+      sourceId,
+      repository: 'acme/calculator',
+      path: stalePath,
+      baseCommit: commit,
+      branch: 'autoevo/old',
+      headCommit: commit,
+      reviewId: review().id,
+      artifactHash: null,
+      activeWorkflowId: null,
+      gitConfigHash: 'a'.repeat(64),
+    }, null, 2)}\n`, 'utf8')
+    const receipt = await manager.materializeReviewedGithub({
+      review: review(commit),
+      workflowId: `workflow_${'d'.repeat(24)}`,
+      workspaceCwd: aliasWorkspace,
+    })
+    expect(receipt.path).toBe(await realpath(manager.sourcePath(sourceId, aliasWorkspace)))
+    expect(await manager.pathUnderSourceRoot(receipt.path, aliasWorkspace)).toBe(true)
+    expect(await manager.pathUnderSourceRoot(stalePath, aliasWorkspace)).toBe(false)
   })
 })

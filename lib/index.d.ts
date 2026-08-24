@@ -1800,7 +1800,7 @@ declare class SourceManager {
   get sourceRoot(): string;
   sourcePath(sourceId: string, workspaceCwd?: string): string;
   /** True when `candidate` is inside the managed sources root for this session. */
-  pathUnderSourceRoot(candidate: string, workspaceCwd?: string): boolean;
+  pathUnderSourceRoot(candidate: string, workspaceCwd?: string): Promise<boolean>;
   /**
    * Resume/finalize follow a Host receipt. Materialize/initialize pass
    * `workspaceCwd` so a new or relocated tree lands in the session workspace.
@@ -1809,6 +1809,8 @@ declare class SourceManager {
   receiptPath(sourceId: string): string;
   lockPath(sourceId: string): string;
   private isManagedSourceDir;
+  /** Containment of a realpath'd managed source against canonicalized base roots. */
+  private isCanonicalManagedSourceDir;
   private ensureWorkspaceLayout;
   readReceipt(sourceId: string): Promise<SourceReceipt | undefined>;
   receiptForManagedPath(candidate: string): Promise<SourceReceipt | undefined>;

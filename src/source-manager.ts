@@ -75,6 +75,22 @@ function forbiddenUntrackedPath(status: string): string | undefined {
 }
 
 /**
+ * Canonicalize a path for security comparisons: realpath when it exists,
+ * path.resolve when it does not yet (e.g. a base dir not yet created).
+ * Windows temp dirs may use 8.3 short-name aliases (CI runners) and base
+ * roots may themselves be symlinks, so both sides of a containment or
+ * equality check must be canonicalized the same way.
+ */
+async function canonicalPath(candidate: string): Promise<string> {
+  try {
+    return await realpath(candidate)
+  } catch (error) {
+    if (!isNotFound(error)) throw error
+    return path.resolve(candidate)
+  }
+}
+
+/**
  * Cross-platform lock-holder liveness probe.
  * - non-positive PID => dead/invalid (eligible for stale recovery)
  * - kill(pid, 0) success => live
@@ -140,8 +156,11 @@ export class SourceManager {
   }
 
   /** True when `candidate` is inside the managed sources root for this session. */
-  pathUnderSourceRoot(candidate: string, workspaceCwd?: string): boolean {
-    return isPathInside(this.sourceRootFor(workspaceCwd), candidate)
+  async pathUnderSourceRoot(candidate: string, workspaceCwd?: string): Promise<boolean> {
+    return isPathInside(
+      await canonicalPath(this.sourceRootFor(workspaceCwd)),
+      await canonicalPath(candidate),
+    )
   }
 
   /**
@@ -177,6 +196,18 @@ export class SourceManager {
     if (path.basename(parent) === 'sources' && path.basename(path.dirname(parent)) === '.autoevo') return true
     if (this.config.stateDir) {
       return path.resolve(parent) === path.resolve(this.config.stateDir, 'sources')
+    }
+    return false
+  }
+
+  /** Containment of a realpath'd managed source against canonicalized base roots. */
+  private async isCanonicalManagedSourceDir(resolved: string, sourceId: string): Promise<boolean> {
+    const parent = path.dirname(resolved)
+    if (path.basename(resolved) !== sourceId) return false
+    if (this.config.sourceDir) return parent === await canonicalPath(this.config.sourceDir)
+    if (path.basename(parent) === 'sources' && path.basename(path.dirname(parent)) === '.autoevo') return true
+    if (this.config.stateDir) {
+      return parent === await canonicalPath(path.join(this.config.stateDir, 'sources'))
     }
     return false
   }
@@ -240,7 +271,7 @@ export class SourceManager {
       || receipt.activeWorkflowId !== null
       || receipt.repository?.toLowerCase() !== input.repository.toLowerCase()
       || receipt.baseCommit.toLowerCase() !== input.baseCommit.toLowerCase()) return undefined
-    const inCurrentWorkspace = this.pathUnderSourceRoot(receipt.path, input.workspaceCwd)
+    const inCurrentWorkspace = await this.pathUnderSourceRoot(receipt.path, input.workspaceCwd)
     const inLegacyRoot = path.resolve(receipt.path) === path.resolve(this.legacySourceRoot, receipt.sourceId)
     if (!inCurrentWorkspace && !inLegacyRoot) return undefined
     const completed = await this.inspectCompletedSource(receipt.sourceId, input.signal)
@@ -328,7 +359,7 @@ export class SourceManager {
       throw new EvolutionError('unsafe_path', 'Host disabled-hooks directory is not empty')
     }
     const resolved = await realpath(hooksDir)
-    if (!isPathInside(resolveStateRoot(this.config), resolved)) {
+    if (!isPathInside(await canonicalPath(resolveStateRoot(this.config)), resolved)) {
       throw new EvolutionError('unsafe_path', 'Host disabled-hooks directory escaped AutoEvo stateDir')
     }
     return resolved
@@ -432,12 +463,12 @@ export class SourceManager {
       throw new EvolutionError('unsafe_path', 'Managed source root must not be a symlink', { sourceId })
     }
     const resolved = await realpath(root)
-    if (!this.isManagedSourceDir(resolved, sourceId)) {
+    if (!(await this.isCanonicalManagedSourceDir(resolved, sourceId))) {
       throw new EvolutionError('unsafe_path', 'Managed source realpath escaped sourceDir', { sourceId, resolved })
     }
-    if (receipt && path.resolve(receipt.path) !== resolved) {
+    if (receipt && await canonicalPath(receipt.path) !== resolved) {
       const relocating = Boolean(workspaceCwd || this.config.sourceDir)
-        && path.resolve(this.sourcePath(sourceId, workspaceCwd)) === resolved
+        && await canonicalPath(this.sourcePath(sourceId, workspaceCwd)) === resolved
       if (!relocating) {
         throw new EvolutionError('unsafe_path', 'Managed source realpath does not match the Host receipt', { sourceId, resolved })
       }
