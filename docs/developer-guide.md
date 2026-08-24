@@ -24,7 +24,7 @@ pnpm check
 
 | 命令 | 覆盖范围 | 何时使用 |
 | --- | --- | --- |
-| `pnpm lint` | `src/`、`tests/` TypeScript lint | 快速语法/规范检查 |
+| `pnpm lint` | flat 配置 `eslint.config.mjs`，`eslint src tests`；解析级检查 TS 与 `tests/**/*.mjs` | 快速语法/规范检查 |
 | `pnpm typecheck` | `tsc --noEmit` | 公共类型或合同变化 |
 | `pnpm test` | 全部 Vitest 单元与集成测试 | 逻辑变更 |
 | `pnpm build` | 用 tsdown 重建 `lib/` | 源码或导出变化 |
@@ -55,6 +55,14 @@ src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
 ├─ contracts.ts                # Policy V8 公共合同、review/install receipts
+├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
+├─ service-resolution.ts       # 解析、候选池进出与授权流转
+├─ service-review.ts           # 审查编排与重验证
+├─ service-modification.ts     # 修改 blocker 与 WorkOrder 派生
+├─ service-semantic-review.ts  # 独立 semantic reviewer 编排
+├─ service-managed-work.ts     # 托管 create/modify 执行与 receipt
+├─ semantic-host.ts            # semantic 会话 Host 装配与输入校验
+├─ internal-utils.ts           # 共享小工具（类型守卫、路径 containment 等）
 ├─ workflow/                   # 图引擎、生命周期映射、Agent 展示协议
 ├─ resolver/                   # 本地/已装来源、intent、lineage 与 profile ownership
 ├─ discovery/                  # scoped GitHub 发现与归一化
@@ -69,9 +77,12 @@ presets/evolution/             # 托管的「能力进化」用户 preset
 skills/autoevo-plugin-creator/ # 随包的 Agent 指导与参考，不是授权边界
 tests/unit/                    # 合同、状态与 fail-closed 回归
 tests/integration/             # 托管 create/modify/evolve 闭环
+tests/helpers/                 # 共享测试夹具（临时目录、运行时配置、记录构造）
 tests/*.mjs                    # Loader、打包和 E2E acceptance
 lib/                           # tsdown 生成且提交/发布的运行产物
 ```
+
+`src/workflow/engine.ts` 是薄 façade；引擎实现按继承链拆分为 `engine-core.ts`、`engine-driver.ts`、`engine-recovery.ts`、`engine-resume.ts`，候选快照在 `candidates.ts`，selection receipt / commitment / lease 铸造在 `grants.ts`。
 
 `lib/` 是生成目录，但当前仓库会跟踪并发布它。不要直接编辑 `lib/`；修改 `src/` 后运行 `pnpm build`，并把对应生成差异一起审查。
 
@@ -95,36 +106,12 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 5. 工作流与两道确认门
 
-Policy 当前为 V8。旧 Policy 的 selection、review、commitment 或 lease 不会跨版本复用；Host fail closed 并要求重新发现。
+Policy 当前为 V8。状态机、两道确认门与生命周期映射以[架构说明](architecture.md#4-数据与状态) §4 为准；这里只列改动工作流时容易踩的边界：
 
-```text
-bootstrap / resolve
-  ↓
-model-controlled discovery pool
-  ↓ capability_workflow_refine (有界、可选)
-  ↓ capability_workflow_present (密封 1–5 个候选)
-Gate 1: fresh user selection
-  ↓
-exact source review
-  ↓
-Gate 2: fresh structured decision
-  ↓
-commitment / lease / one-time DSH approval
-  ↓
-reuse | install | managed modify/create | stop
-  ↓
-Host verification / recovery / receipt
-```
-
-内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`：有界事实、预算、候选作用域动作和合法工具；不能看到可伪造的 repository、review ID 或 install spec 控制面。
-
-关键边界：
-
-- Gate 1 选择只能来自 `capability_workflow_present` 密封的候选快照。
-- Gate 2 的最终决定必须来自审查之后的新鲜真实用户回合。
-- `use_this` / `modify_this` 绑定当前候选 ID；模型不能自报 review 或路径。
-- DSH approval 只授权一次副作用，不能替代 Gate 1/2。
+- 内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`；永远不要接受模型自报的 repository、review ID、路径或 install spec，`use_this` / `modify_this` 只绑定密封候选快照中的候选 ID。
 - 同回合重复 resume 不获得新授权；防重放失败不会消费当前合法 interrupt。
+- DSH `allowed-once` approval 只授权一次副作用，不能替代 Gate 1/2。
+- 旧 Policy 的 selection、review、commitment 或 lease 不跨版本复用；Host fail closed 并要求重新发现。
 
 ## 6. Resolver 与来源 lineage
 
@@ -158,24 +145,12 @@ Host verification / recovery / receipt
 
 ## 8. 数据与配置
 
-默认布局：
+调试时最常用到的路径：
 
-```text
-<workspace>/.autoevo/
-└─ sources/<source-id>/
+- `<workspace>/.autoevo/sources/<source-id>/`：托管源码工作树；
+- `<dshHome>/autoevo/`：Host receipts（`resolutions/`、`reviews/`、`workflows/`、`installations/`、`source-control/`）与 `artifacts/`、`trials/`、`verifications/`。
 
-<dshHome>/autoevo/
-├─ resolutions/
-├─ reviews/
-├─ workflows/
-├─ installations/
-├─ source-control/
-├─ artifacts/
-├─ trials/
-└─ verifications/
-```
-
-`StateStore` 用同目录临时文件加原子 rename 写 receipt。任何 profile 变更前先持久化 provisional installation；最终写回失败时必须保留可恢复锚点或补偿清理，不能谎报未安装。
+完整布局以[架构说明](architecture.md#4-数据与状态) §4 为准。`StateStore` 用同目录临时文件加原子 rename 写 receipt。任何 profile 变更前先持久化 provisional installation；最终写回失败时必须保留可恢复锚点或补偿清理，不能谎报未安装。
 
 ### `Config`
 
@@ -200,16 +175,11 @@ Host verification / recovery / receipt
 
 审查 receipt 绑定 Policy、需求、精确来源、已检查文件 hash、manifest facts、实际 DSH runtime 与兼容性。安装前重新审查并比较材料。
 
-安装器的关键顺序：
+安装器的关键顺序（完整实现见 `src/lifecycle/install.ts`）：
 
-1. 验证最新 review、selection receipt、commitment/lease 和 target profile；
-2. 物化 owned snapshot/tgz，并再次比较路径、size、hash；
-3. 取得 DSH `allowed-once` approval；
-4. 写 provisional installation receipt；
-5. 对 persistent 安装执行 exact reviewed bundle 的隔离最小 DSH（`autoevo-verify` / 仅 `dsh-base`）预检；
-6. 修改 profile，并对账 exact dependency 与可见 package target；
-7. 执行 Host 验证与目标进程热加载；
-8. 写最终 receipt，或进入 `failed_absent` / `recovery_required`。
+1. 验证最新 review、selection receipt、commitment/lease 与 target profile；物化 owned snapshot/tgz 并复核路径、size、hash；
+2. 取得 DSH `allowed-once` approval 后写 provisional receipt，对 persistent 安装执行隔离最小 DSH（`autoevo-verify` / 仅 `dsh-base`）预检，再修改 profile 并对账 exact dependency 与可见 package target；
+3. 执行 Host 验证与目标进程热加载，写最终 receipt；失败进入 `failed_absent` / `recovery_required`。
 
 三层验证不能互换：
 
@@ -233,7 +203,7 @@ Host verification / recovery / receipt
 | 托管创建/修改/升级 | `tests/integration/managed-*.spec.ts` |
 | Cordis 加载 | `tests/loader-smoke.mjs` |
 | 发布包真实入口 | `tests/packaged-acceptance.mjs` |
-| 本地与对抗 E2E | `tests/e2e-runner.mjs` |
+| 本地/对抗/市场 E2E | `tests/e2e-runner.mjs` |
 | 文档导航与关键语义 | `tests/unit/documentation.spec.ts` |
 
 修复回归时先跑最窄测试，再跑 `pnpm check:fast`；涉及工作流、profile、打包或 Loader 时至少跑 `pnpm check`。发布候选跑 `pnpm check:release`。
@@ -252,12 +222,14 @@ Host verification / recovery / receipt
 
 检查顺序：
 
-1. workflow `status`、cursor、当前 interrupt 与 failure；
-2. review 的 exact source、Policy、fit、risk、compatibility 与 installSpec；
-3. installation 的 `installState`、`installOutcome`、verification layer、`loaded`、`verified`、`restartRequired`；
-4. source receipt 的 review/artifact hash、activeWorkflowId 与 Git 状态；
-5. live profile dependency spec 和 Loader 可见 target；
-6. 最后才检查模型是否错误解释用户决定。
+| 步骤 | 检查内容 |
+| --- | --- |
+| 1 | workflow `status`、cursor、当前 interrupt 与 failure |
+| 2 | review 的 exact source、Policy、fit、risk、compatibility 与 installSpec |
+| 3 | installation 的 `installState`、`installOutcome`、verification layer、`loaded`、`verified`、`restartRequired` |
+| 4 | source receipt 的 review/artifact hash、activeWorkflowId 与 Git 状态 |
+| 5 | live profile dependency spec 和 Loader 可见 target |
+| 6 | 最后才检查模型是否错误解释用户决定 |
 
 HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载，更不能证明目标插件功能可用。真实功能证据需要看到目标工具 call/result。
 
@@ -273,7 +245,8 @@ HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载
 4. 更新对应的用户、开发、架构、安全或样例文档；
 5. 检查 diff 中的凭据、本机路径、账号、私有地址和专有逻辑；
 6. `git diff --check`，确认工作树中未混入临时 artifact；
-7. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
+7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的发布 tag（`documentation.spec.ts` 会校验一致性）；
+8. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
 
 仓库 CI 负责验收，不自动创建 release。commit、push、tag、发布或上游 PR 都是独立动作，需要维护者明确授权。AutoEvo installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
 
@@ -285,6 +258,6 @@ HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载
 - [真实样例目录](real-world-samples.md)
 - `src/index.ts`
 - `src/contracts.ts`
-- `src/workflow/engine.ts`
+- `src/workflow/engine-core.ts` 及 `engine-driver.ts` / `engine-recovery.ts` / `engine-resume.ts`（`engine.ts` 为薄 façade）
 - `src/lifecycle/install.ts`
 - `src/source-manager.ts`

@@ -28,15 +28,17 @@ Each topic has one canonical home: operating procedures live in the User Guide, 
 
 ## Install
 
-Install into the DSH profile you actually use. This example targets `web`:
+Install into the DSH profile you actually use. This example targets `web` (run DSH through npx; no global install needed):
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
 ```
 
-Restart the target DSH profile after installing or upgrading AutoEvo so it loads the new bundle. Once AutoEvo is running and installs another capability, that later workflow uses `restartRequired: true` to tell you whether the capability's target profile needs another restart.
+Start the profile day to day with `npx @deepseek-ai/dsh web`. Note the unscoped `dsh` package on npm is an unrelated project — the command must carry the `@deepseek-ai/` prefix.
 
-The latest installable release is `v0.5.1`; repository version `0.5.3` is the next unreleased version. Node.js must satisfy `>=22.19.0 || >=24.0.0`; current development and acceptance use DSH `0.1.0-rc.6` and Cordis `4.0.1`.
+Restart the target DSH profile after installing or upgrading AutoEvo so it loads the new bundle; whether later capability installs need another restart is covered in [User Guide §5](docs/user-guide.en.md#5-outcomes-and-next-steps).
+
+The install command uses the latest release tag; the `package.json` version may be ahead of the latest published release. Node.js must satisfy `>=22.19.0 || >=24.0.0`; current development and acceptance use DSH `0.1.0-rc.6` and Cordis `4.0.1`.
 
 ## Quick start
 
@@ -48,7 +50,7 @@ The latest installable release is `v0.5.1`; repository version `0.5.3` is the ne
 3. When AutoEvo presents 1–5 candidates, use a fresh chat message to choose the candidate to review.
 4. After review, use another fresh message to decide whether to reuse, install, improve, search again, create from scratch, or stop.
 
-Those replies are two separate confirmation gates. A one-time DSH approval authorizes a concrete side effect; it never replaces candidate selection or the final user decision. Ordinary language is enough—internal action names are not passphrases.
+Those replies are two separate confirmation gates; the full flow and rationale are in [User Guide §3](docs/user-guide.en.md#3-your-first-complete-workflow).
 
 Install demo (select preset → describe the need → shortlist → review → confirm → installed):
 
@@ -66,20 +68,16 @@ Install demo (select preset → describe the need → shortlist → review → c
 | Result | Meaning | Next step |
 | --- | --- | --- |
 | `verified` | The Host completed the expected tool round trip | Use the capability |
-| `activated` | The bundle loaded, but no tool round trip was observed | Try it in the target profile |
-| `awaiting_user_test` | The capability requires a real client/profile test | Perform one real use test |
+| `activated` / `awaiting_user_test` | Loaded without round-trip evidence, or needs a real client/profile test | Try it once in the target profile |
 | `restartRequired: true` | A non-failure install result exists, but the current process did not fully hot-load it | Restart the target profile |
-| `failed_absent` | Installation failed and the Host proved the target is absent | Inspect diagnostics before retrying |
-| `recovery_required` | Install or cleanup state cannot be determined safely | Recover first; do not reinstall blindly |
+| `failed_absent` / `recovery_required` | Installation failed, or install/cleanup state cannot be determined safely | Inspect diagnostics; recover first when the state is unclear |
 
 `installed` and `loaded` do not mean functionally verified. Only `verified` supports that claim. See [Outcomes and next steps](docs/user-guide.en.md#5-outcomes-and-next-steps).
 
 ## Safety boundary
 
-- Discovery, review, and diagnosis are read-only by default. Install, removal, modify, and create require a real user decision; side effects also require one-time DSH approval.
-- Modify and create work stays visible in the current Capability Evolution session inside a Host-managed Git source. AutoEvo does not start a hidden child Agent and does not fall back to `code`.
-- On Windows, the sandbox is integrity-oriented partial isolation, not a confidentiality, credential, or network sandbox. Installed third-party code ultimately runs with the current user's authority.
-- A weak model may map natural language to the wrong legal action or candidate. Use a model with reliable instruction following, context retention, and structured tool use.
+- Discovery, review, and diagnosis are read-only by default. Install, removal, modify, and create require a real user decision and one-time DSH approval; installed third-party code ultimately runs with the current user's authority.
+- See the [Security Model](docs/security.md) for the full trust boundary, and [User Guide §8](docs/user-guide.en.md#8-safety-and-privacy) for safety and privacy notes in daily use.
 
 ## Develop
 

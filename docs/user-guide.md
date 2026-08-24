@@ -16,15 +16,15 @@
 
 ## 2. 安装、升级与首次加载
 
-安装稳定版本：
+安装 [§1](#1-使用前准备) 所列的发布版本（通过 npx 运行 DSH，无需全局安装；注意命令必须带 `@deepseek-ai/` 前缀，npm 上无 scoped 的 `dsh` 是无关项目）：
 
 ```powershell
-dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
 ```
 
-安装或升级 AutoEvo 后，重启该 DSH profile，让新 bundle 生效。`restartRequired: true` 是 AutoEvo 已经运行后安装其它能力时的结果字段，不是安装 AutoEvo 自身的免重启保证。
+安装或升级 AutoEvo 后，重启该 DSH profile，让新 bundle 生效。结果字段 `restartRequired` 的含义见[结果状态与下一步](#5-结果状态与下一步)。
 
-安装成功后，DSH 的用户 preset 列表中会出现 **能力进化**（id `evolution`，界面通常标记为自定义）。AutoEvo 只升级自己管理且未被修改的 preset；同名外来目录或用户改过的内容会被保留并提示诊断。
+安装成功后，在 DSH 的用户 preset 列表中查找 id 为 `evolution` 的 preset（显示名为 **能力进化**）。AutoEvo 只升级自己管理且未被修改的 preset；同名外来目录或用户改过的内容会被保留并提示诊断。
 
 如果不想让 AutoEvo 安装或升级 preset，可将配置项 `evolutionPreset` 设为 `false`。这只会停止后续物化，不会删除已经存在的 preset。
 
@@ -59,7 +59,7 @@ Host 审查候选的精确来源、manifest、必要源码、兼容性和安全�
 - 继续搜索；
 - 停止。
 
-自然语言就是正式决定，不需要输入 `use_this`、`modify_this` 等内部 action。Host 会验证这条回复是否来自当前真实回合、是否绑定当前候选与审查；涉及副作用时还会再请求 DSH 一次性 approval。
+自然语言即可，它就是正式决定，不需要输入内部 action 名称。Host 会验证这条回复来自当前真实回合，并绑定当前候选与审查。涉及副作用时，还会再请求一次 DSH 一次性 approval。
 
 ```text
 需求
@@ -103,7 +103,7 @@ AutoEvo 不会为这一步启动隐藏子 Agent。历史失败或已移除来源
 
 ### 4.5 停止
 
-任何确认门都可以明确停止。停止不会被当成安装或创建授权；DSH approval 也不能代替“停止/继续”的真实选择。
+任何确认门都可以明确停止。停止不会被当成安装或创建授权，DSH approval 也不能覆盖这个决定。聊天确认与 DSH approval 的分工见[常见问题](#9-常见问题)。
 
 ## 5. 结果状态与下一步
 
@@ -113,9 +113,9 @@ AutoEvo 不会为这一步启动隐藏子 Agent。历史失败或已移除来源
 | --- | --- | --- |
 | `installed: true` | Host 证明目标 profile 与审查来源匹配，且结果属于非失败完成态 | 继续看 `verified`、`loaded` 和 outcome |
 | `loaded: true` | Host 证明 bundle 已在目标进程加载 | 不要因此直接宣称功能已验证 |
-| `verified` / `verified: true` | Host 的 `tool_roundtrip` 覆盖预期工具并成功返回 | 可以把功能称为已验证 |
-| `activated` | `bundle_activation` 通过，只证明 Loader/Fiber 收口 | 在目标 profile 中实际调用功能 |
-| `awaiting_user_test` | persistent `manual_runtime` 完成，Host 没有自动功能夹具 | 到真实客户端或 profile 试用一次 |
+| `verified` / `verified: true` | Host 的 `tool_roundtrip`（自动真实工具往返）覆盖预期工具并成功返回 | 可以把功能称为已验证 |
+| `activated` | `bundle_activation`（无工具时的 bundle 加载检查）通过，只证明 Loader/Fiber 收口 | 在目标 profile 中实际调用功能 |
+| `awaiting_user_test` | persistent `manual_runtime`（留给你人工运行验证）完成，Host 没有自动功能夹具 | 到真实客户端或 profile 试用一次 |
 | `restartRequired: true` | 已有非失败结果，但当前进程没有完整热加载 | 重启对应 profile 后再试 |
 | `failed_absent` | 安装命令失败，且 profile 与可见 package target 都不存在 | 先诊断原因，再决定是否重试 |
 | `recovery_required` | 安装、替换或清理的真实状态不能安全确定 | 走恢复流程，不要盲目重装或手删 |
@@ -142,7 +142,7 @@ AutoEvo 的诊断是只读、有预算且脱敏的：不会自动重试，不会
 
 ### 已完成安装后清理并重新开始
 
-这是另一条流程。用新的顶层消息明确说：
+这是另一条流程。同样可以直接说，但要用一条新的顶层消息：
 
 > 清理这次已完成的安装，然后从头重新发现。
 
@@ -158,7 +158,7 @@ AutoEvo 对重复诊断、重复验证和修改次数设有限制。重复失败
 2. 从安装它的同一个 profile 移除依赖：
 
    ```powershell
-   dsh plugin --profile web remove dsh-plugin-autoevo
+   npx @deepseek-ai/dsh plugin --profile web remove dsh-plugin-autoevo
    ```
 
 3. 重启对应的 DSH profile。
@@ -167,9 +167,9 @@ AutoEvo 对重复诊断、重复验证和修改次数设有限制。重复失败
 
 ## 8. 安全与隐私提示
 
-- GitHub README、源码、manifest 和市场摘要都按不可信数据处理；审查结论来自 Host 派生事实和内容 hash。
+- 信任边界与审查证据的完整模型见[安全模型](security.md)：GitHub README、源码、manifest 和市场摘要都按不可信数据处理，审查结论以 Host 派生事实和内容 hash 为准。
 - 安装第三方插件最终会让其以当前用户权限运行。隔离 profile 不是恶意代码沙箱。
-- `forwardedCredentialEnv` 只配置允许转发的环境变量名；不要把密钥写进 prompt、文档、fixture 或仓库。
+- `forwardedCredentialEnv` 是 AutoEvo 的配置项，只列出允许转发给被装能力的环境变量名，不包含取值。不要把密钥写进 prompt、文档、fixture 或仓库。
 - 修改/创建源码可能包含本机路径、账号或专有逻辑。贡献上游前应重新检查 diff，并单独取得 fork、push 或 PR 授权。
 
 ## 9. 常见问题

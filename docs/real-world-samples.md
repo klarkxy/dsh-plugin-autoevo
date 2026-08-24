@@ -6,8 +6,6 @@
 
 执行时先复制对应的中文用户回合，不要把它们拼成一条自动批准指令。发现、选择、审查和最终 `use_this` / `modify_this` / `create_new` 决定仍须来自新的顶层用户回合。
 
-机器可读目录位于仓库路径 `tests/fixtures/real-world-samples.json`，由 `tests/unit/real-world-samples.spec.ts` 校验。发布包不携带测试源码。
-
 ## 最小推荐集
 
 首次验证或演示时，按下列五组顺序走完即可覆盖最常见的复用、拒绝、安装、修复和创建决策：
@@ -20,17 +18,4 @@
 
 其余三组覆盖已安装升级、状态不明的安装恢复，以及依赖用户真实客户端测试的运行面。
 
-## 样例总览
-
-| ID | 用户目标 | 前置夹具 | 权威成功证据 | 清理 | 自动化状态 |
-| --- | --- | --- | --- | --- | --- |
-| `reuse-local-unchanged` | 找到本地能力后原样使用 | 本地候选 | `session-c4c5d09d-03ad-4c52-8657-a58c930db1d2` / `workflow_51eaaa4f1713af0e00890069` | 无安装物 | real-live-passed |
-| `stop-after-review` | 审查后明确停止 | full review | `confirmation-gates` | 无 profile 变更 | implemented |
-| `remote-verified-install` | 远端审查并安装 | 受控市场与 Host fixture | marketplace E2E | receipt 驱动移除 | implemented |
-| `installed-upgrade-replacement` | 已装能力修改并替换 | 隔离 profile、冻结规格 | managed-installed-evolve-flow | 还原隔离 profile | implemented |
-| `failed-install-repair` | 修复历史失败来源并首次安装 | `failed_absent` lineage | `session-af8d6384-6c1c-4b2a-af69-94c8044fae83` / `workflow_afb5a08eed8e5fa45dba77f4` / `installation_1d6f36d4c23346512e20e58f`，随后真实 `mcp__zhihu__search` 返回 2 条来源链接 | receipt 精确清理 | real-live-passed |
-| `scratch-create-and-install` | 无候选时创建 | `create_authorized` 受管源码 | managed-create-flow | 释放 source lock | implemented |
-| `sealed-install-failure-recovery` | 对账失败后的恢复 | failure/reconciliation receipt | install-outcomes | receipt 精确清理 | implemented |
-| `manual-runtime-and-completed-restart` | 用户测试与重启后确认 | persistent manual runtime | 生命周期状态边界 | receipt 精确移除 | planned |
-
-每个样例的完整中文回合、分类、夹具、证据及清理步骤均以 JSON 为准。样例不记录令牌、Cookie、完整私密日志或用户工作区路径。
+机器可读目录是 `tests/fixtures/real-world-samples.json`（当前 `schema_version: 1`，发布包不携带测试源码，GitHub 仓库中可查看），由 `tests/unit/real-world-samples.spec.ts` 校验；每个样例的完整中文回合、分类、夹具、证据及清理步骤均以 JSON 为准。样例不记录令牌、Cookie、完整私密日志或用户工作区路径。

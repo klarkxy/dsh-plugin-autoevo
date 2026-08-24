@@ -18,7 +18,7 @@ pnpm check
 
 | Command | Coverage | Use |
 | --- | --- | --- |
-| `pnpm lint` | TypeScript lint for `src/` and `tests/` | Fast source check |
+| `pnpm lint` | Flat config `eslint.config.mjs`, `eslint src tests`; parse-level check for TS and `tests/**/*.mjs` | Fast source check |
 | `pnpm typecheck` | `tsc --noEmit` | Public types/contracts |
 | `pnpm test` | Vitest unit and integration tests | Logic changes |
 | `pnpm build` | Rebuild tracked `lib/` with tsdown | Source/export changes |
@@ -49,6 +49,14 @@ src/
 ├─ index.ts                    # Cordis/DSH entry and service composition
 ├─ config.ts                   # Public config schema/defaults
 ├─ contracts.ts                # Policy V8 contracts and receipts
+├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
+├─ service-resolution.ts       # Resolution, candidate pool, authorization flow
+├─ service-review.ts           # Review orchestration and revalidation
+├─ service-modification.ts     # Modification blockers and WorkOrder derivation
+├─ service-semantic-review.ts  # Independent semantic reviewer orchestration
+├─ service-managed-work.ts     # Managed create/modify execution and receipts
+├─ semantic-host.ts            # Semantic session Host wiring and input validation
+├─ internal-utils.ts           # Shared helpers (type guards, path containment)
 ├─ workflow/                   # Graph engine, lifecycle mapping, Agent view
 ├─ resolver/                   # Intent, local/installed source, lineage, profile ownership
 ├─ discovery/                  # scoped GitHub discovery and normalization
@@ -63,49 +71,54 @@ presets/evolution/             # Managed Capability Evolution user preset
 skills/autoevo-plugin-creator/ # Packaged guidance/reference, not enforcement
 tests/unit/                    # Contracts, state, fail-closed regression
 tests/integration/             # Managed create/modify/evolve flows
+tests/helpers/                 # Shared fixtures (temp dirs, runtime config, records)
 tests/*.mjs                    # Loader, package, and E2E acceptance
 lib/                           # Generated, tracked, and published output
 ```
+
+`src/workflow/engine.ts` is now a thin façade; the implementation is split across the `engine-core.ts` → `engine-driver.ts` → `engine-recovery.ts` → `engine-resume.ts` inheritance chain, with candidate snapshots in `candidates.ts` and selection receipt / commitment / lease minting in `grants.ts`.
 
 Do not edit `lib/` directly. Change `src/`, run `pnpm build`, and review/include the generated diff.
 
 ## 4. Runtime entry
 
-The package is ESM. Default runtime is `lib/index.js` from `src/index.ts`; subpath exports expose `./evolution-mode` and `./verification-observer`. `cordis.patch.yml` mounts `id: autoevo` and supplies `dshHome` / `stateDir`.
+The package is ESM:
 
-`apply()` normalizes config; creates `StateStore`, the command runner, `CreationGuard`, `ExecutionGuard`, and `CapabilityEvolutionService`; materializes `presets/evolution`; installs policy and execution hooks; and registers `capability_workflow*` plus `plugin_remove`.
+- Default entry: `lib/index.js`, from `src/index.ts`.
+- Subpath exports: `./evolution-mode`, `./verification-observer`.
+- `cordis.patch.yml` mounts the bundle as `id: autoevo` and passes `dshHome` / `stateDir`.
+
+`apply()` is responsible for:
+
+1. Normalizing `Config`;
+2. Creating the `StateStore`, runner, `CreationGuard`, `ExecutionGuard`, and `CapabilityEvolutionService`;
+3. Safely materializing `presets/evolution`;
+4. Installing the fixed reuse policy and tool-execution hooks;
+5. Registering `capability_workflow*` and `plugin_remove`.
 
 Prompts and presets are guidance, not authorization. Enforcement comes from persisted receipts, fresh-turn guards, execution guards, ActionCommitment/ExecutionLease, and one-time DSH approval.
 
 ## 5. Workflow and two gates
 
-Policy is V8. Persisted decisions, reviews, commitments, and leases from another policy fail closed and require new discovery.
+Policy is V8. The state machine, both confirmation gates, and the lifecycle mapping are canonical in [Architecture](architecture.md#4-数据与状态) §4; this section only lists the boundaries developers most often trip over:
 
-```text
-resolve
-  ↓ model-controlled bounded discovery/refinement
-sealed 1–5 candidate shortlist
-  ↓ Gate 1: fresh user candidate selection
-exact source review
-  ↓ Gate 2: fresh structured decision
-commitment / lease / one-time DSH approval
-  ↓
-reuse | install | managed modify/create | stop
-  ↓
-Host verification / recovery / receipt
-```
-
-Internal graph cursors are not public lifecycle states. The model sees `AgentWorkflowViewV2`: bounded facts, budgets, candidate-scoped actions, and legal tools. It cannot supply trusted repository paths, review IDs, or install specs.
-
-Gate 1 accepts only candidates sealed by `capability_workflow_present`. Gate 2 must use a fresh real user turn after review. DSH approval authorizes one side effect but never replaces either gate.
+- Internal graph cursors are not public lifecycle states. The model only sees the versioned `AgentWorkflowViewV2`; never accept model-supplied repositories, review IDs, paths, or install specs — `use_this` / `modify_this` bind only candidate IDs from the sealed snapshot.
+- Repeating resume within the same turn grants no new authorization; replay-protection failures do not consume the current valid interrupt.
+- A DSH `allowed-once` approval authorizes one side effect; it never replaces Gate 1 or Gate 2.
+- Selections, reviews, commitments, and leases from another policy version are never reused; the Host fails closed and requires new discovery.
 
 ## 6. Resolver and lineage
 
 Resolution is local-first: Agent-visible tools, skills, bridges, then Host-owned `topic:dsh-plugin` GitHub search. Remote summaries are untrusted; only strict GitHub identities and bounded summaries enter the pool.
 
-Live profile ownership—not inventory—is authoritative for installed sources. Replacement is limited to `github_exact` and receipt-owned `owned_chain`. Historical `failed_install` / `reviewed_snapshot` entries that are absent or removed become a first install after full revalidation and re-freeze; never relax live-spec drift protection to force replacement.
+Installed sources must be resolved from live profile ownership, never inferred from local inventory alone. Replacement applies only to:
 
-`src/resolver/lineage.ts` and `SourceManager.validateCompletedSnapshot()` bind receipt, path, repository, base commit, review/artifact hashes, clean Git state/config/hooks, and workspace containment.
+- `github_exact`: the profile genuinely depends on an exact GitHub SHA;
+- `owned_chain`: an AutoEvo installation receipt proves the current install chain.
+
+Historical `failed_install` / `reviewed_snapshot` entries whose state is `not_installed` or `removed` are treated as a first install after full revalidation, re-claim, re-review, and re-freeze; never relax `assertReplacementBinding()`'s live-spec drift protection.
+
+`src/resolver/lineage.ts` and `SourceManager.validateCompletedSnapshot()` together prevent an arbitrary local review from impersonating a managed source: receipt, path, repository, base commit, review ID, artifact hash, clean HEAD/branch, Git config/hooks, and workspace containment must all match.
 
 ## 7. Managed source lifecycle
 
@@ -122,20 +135,16 @@ Default source root is `<workspace>/.autoevo/sources/`. Construction stays visib
 
 Runtime does not create child Agents. `src/managed-child.ts` is a legacy compatibility surface whose `run()` rejects the old path; do not expose it as an extension API.
 
-Cancellation uses an independent bounded cleanup lifetime, checkpoints bounded edits, validates state, and releases locks. Do not collapse cancel, timeout, and executable lookup failure.
+Cancellation or exceptions never reuse the cancelled signal for cleanup. The Host checkpoints bounded edits, validates state, and releases locks under an independent bounded lifetime; never misreport a cancel/timeout as a missing Git executable.
 
 ## 8. Data and configuration
 
-```text
-<workspace>/.autoevo/sources/<source-id>/
+The paths most often needed when debugging:
 
-<dshHome>/autoevo/
-├─ resolutions/  reviews/  workflows/  installations/
-├─ source-control/  artifacts/  trials/
-└─ verifications/
-```
+- `<workspace>/.autoevo/sources/<source-id>/`: managed source worktrees;
+- `<dshHome>/autoevo/`: Host receipts (`resolutions/`, `reviews/`, `workflows/`, `installations/`, `source-control/`) plus `artifacts/`, `trials/`, and `verifications/`.
 
-`StateStore` writes with same-directory temporary files and atomic rename. Persist a provisional installation before profile mutation; on final-write failure preserve a recovery anchor or compensate owned temporary state.
+The full layout is canonical in [Architecture](architecture.md#4-数据与状态) §4. `StateStore` writes receipts with same-directory temporary files and atomic rename. Persist a provisional installation before any profile mutation; on final-write failure preserve a recovery anchor or compensate, never falsely report "not installed".
 
 | Config | Default / purpose |
 | --- | --- |
@@ -156,7 +165,11 @@ Cancellation uses an independent bounded cleanup lifetime, checkpoints bounded e
 
 Review receipts bind policy, requirement, exact source, inspected hashes, manifest facts, actual DSH runtime, and compatibility. Installation re-reviews materials before mutation.
 
-Persistent install materializes and rechecks an owned snapshot/tgz, obtains one-time approval, writes a provisional receipt, preflights the exact reviewed bundle in an isolated minimal DSH (`autoevo-verify`, `dsh-base` only) Loader, mutates and reconciles the target profile, performs Host verification and hot-load, then writes a final or recovery receipt.
+Install order in brief (full implementation in `src/lifecycle/install.ts`):
+
+1. Validate the latest review, selection receipt, commitment/lease, and target profile; materialize the owned snapshot/tgz and recheck path, size, and hash;
+2. Obtain one-time DSH approval, write a provisional receipt, preflight persistent installs in an isolated minimal DSH (`autoevo-verify`, `dsh-base` only), then mutate the profile and reconcile the exact dependency against the visible package target;
+3. Run Host verification and destination-process hot-load, then write the final receipt; failures land in `failed_absent` / `recovery_required`.
 
 | Layer | Outcome | Valid claim |
 | --- | --- | --- |
@@ -178,22 +191,52 @@ Persistent install materializes and rechecks an owned snapshot/tgz, obtains one-
 | Managed create/modify/evolve | `tests/integration/managed-*.spec.ts` |
 | Cordis load | `tests/loader-smoke.mjs` |
 | Packed runtime | `tests/packaged-acceptance.mjs` |
-| Local/adversarial/market E2E | `tests/e2e-runner.mjs` |
+| Local/adversarial/marketplace E2E | `tests/e2e-runner.mjs` |
 | Documentation contracts | `tests/unit/documentation.spec.ts` |
 
 Start with the narrowest regression, then run `pnpm check:fast`. Workflow/profile/package/Loader changes should run at least `pnpm check`; release candidates run `pnpm check:release`.
 
 ## 11. Debug real DSH failures
 
-Inspect persisted facts before model summaries: workflow, review, installation, source-control receipt, target profile manifest, and Loader-visible target. Distinguish exact install state/outcome, verification layer, live loading, and functional roundtrip.
+Read persisted facts first; do not guess from model summaries:
 
-HTTP 200 proves only that a Web service is reachable. It does not prove AutoEvo tools loaded or a target capability worked. `dsh --profile web --help` may enter profile preparation and write state; do not assume it is read-only.
+```text
+<dshHome>/autoevo/workflows/
+<dshHome>/autoevo/reviews/
+<dshHome>/autoevo/installations/
+<dshHome>/autoevo/source-control/
+<dshHome>/profiles/<profile>/package.json
+```
+
+Check in order:
+
+| Step | What to inspect |
+| --- | --- |
+| 1 | workflow `status`, cursor, current interrupt, and failure |
+| 2 | review exact source, policy, fit, risk, compatibility, and installSpec |
+| 3 | installation `installState`, `installOutcome`, verification layer, `loaded`, `verified`, `restartRequired` |
+| 4 | source receipt review/artifact hashes, `activeWorkflowId`, and Git state |
+| 5 | live profile dependency spec and Loader-visible target |
+| 6 | only then check whether the model misread the user decision |
+
+HTTP 200 proves only that a Web service is reachable; it does not prove AutoEvo tools loaded, let alone that the target capability works. Real functional evidence requires seeing the target tool call/result.
+
+`dsh --profile web --help` may enter profile preparation and write files; do not assume it is read-only diagnostics.
 
 ## 12. Contribution and release
 
-Preserve user changes and record owned paths; run proportionate checks; rebuild/review `lib/`; update the canonical documentation owner; scan diffs for secrets/local/private data; run `git diff --check`; inspect pack contents; and run `pnpm check:release` for a release candidate.
+Before committing:
 
-CI verifies gates but does not publish a release. Commit, push, tag, publish, and upstream PR are separate maintainer-authorized actions. `contributionAdvice.eligible` is advice eligibility, not publication authority.
+1. Preserve existing user changes and declare the owned paths for this change;
+2. Run tests proportionate to the change scope;
+3. Rebuild and review `lib/` after source changes;
+4. Update the canonical owner doc (user, developer, architecture, security, or samples);
+5. Scan the diff for credentials, local paths, accounts, private addresses, and proprietary logic;
+6. Run `git diff --check` and confirm no temporary artifacts slipped into the worktree;
+7. At release time, sync the published tag in the install command across README.md, README.en.md, user-guide.md, and user-guide.en.md (`documentation.spec.ts` enforces consistency);
+8. For a release candidate, run `pnpm check:release` and inspect pack contents.
+
+CI verifies gates but does not publish a release. Commit, push, tag, publish, and upstream PR are separate maintainer-authorized actions. `contributionAdvice.eligible` means a contribution can be suggested, not publication authority.
 
 ## References
 
@@ -203,6 +246,6 @@ CI verifies gates but does not publish a release. Commit, push, tag, publish, an
 - [Real-world Samples](real-world-samples.md) (Chinese)
 - `src/index.ts`
 - `src/contracts.ts`
-- `src/workflow/engine.ts`
+- `src/workflow/engine-core.ts` plus `engine-driver.ts` / `engine-recovery.ts` / `engine-resume.ts` (`engine.ts` is a thin façade)
 - `src/lifecycle/install.ts`
 - `src/source-manager.ts`

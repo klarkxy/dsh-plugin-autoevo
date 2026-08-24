@@ -55,10 +55,6 @@ capability_workflow
                            plugin_remove
 ```
 
-能力进化 preset 是官方创造模式的超集：标准编码面、运行时检查、活进程插件实验、preset 创作 skill 与委托工具都在。父会话额外负责发现、审查、授权、安装、恢复治理；`create_new` / `modify_this` / 定向纠错在当前会话对 `<workspace>/.autoevo/sources/` 中的托管 git 源进行，Host 账本继续保存在 `<dshHome>/autoevo/`，绝不回退到 `code`，也绝不 `agents.create`。只有进入托管施工后，才收紧为源内文件读写、只读 git、shell 测试、官方 Creator skill 与 `cordis_inspect_*`。Creator Foundation 在克隆、初始化或写入托管源码前预检父会话施工目录。Windows 上为完整性导向的部分隔离。
-
-父回合取消后，没有子 Agent 可 dispose。取消后的编辑以独立 cleanup timeout 创建 WIP checkpoint；workflow 转到 `recovery_required`，随后验证干净工作树并释放 source lock。runner 区分 cancel、timeout 与 executable lookup failure。
-
 启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V14）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V14 为 no-op；未改过的 V13 可升级到 V14；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装，且永不自动删除。
 
 ## 3. DSH 接缝
@@ -122,7 +118,7 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 
 ## 5. 状态语义
 
-- `installState`：`installed`、`not_installed` 或 `unknown`。持久安装命令异常后必须读取 Profile dependency 协调状态；读取也失败时保持 `unknown` 并要求恢复，不能断言未安装。
+- `installState`：`installed`、`not_installed` 或 `unknown`。
 - `installOutcome`：`pending | verified | activated | awaiting_user_test | failed_absent | recovery_required`。`verified`、`activated`、`awaiting_user_test` 都是非失败完成态；只有 `verified` 表示功能已验证。
 - `installed`：兼容旧调用方的布尔投影；非失败完成态且精确 profile 来源匹配后为 true。
 - `loaded`：Host 证明 bundle 已加载；`tool_roundtrip` 还要求 Host 执行了预期工具。
@@ -148,18 +144,46 @@ GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，H
 
 本节只列运行时与 Policy 入口。本地搭建、测试矩阵、调试顺序和发布前检查见[开发者指南](developer-guide.md)。
 
-- `src/resolver/local.ts`：本地工具、技能和 tool-search 桥。
+**Service 装配与 Host 接缝：**
+
+- `src/service.ts`：`CapabilityEvolutionService` 装配，组合下列 resolution / review / modification / semantic-review / managed-work 子模块。
+- `src/service-resolution.ts`：resolution 决策回执、显式候选与 next-step 指引。
+- `src/service-review.ts`：GitHub / 本地审查编排、冻结规格与改后重审。
+- `src/service-modification.ts`：修改阻塞项、验收标准与 WorkOrder 输入。
+- `src/service-semantic-review.ts`：ReviewerRequest 铸造、有界审查文件与裁决绑定。
+- `src/service-managed-work.ts`：托管施工全周期：Creator 预检、取消保留、modify/create 准备与 finish 收口。
+- `src/semantic-host.ts`：`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 的 DSH 子 Agent 实现与有界注释；不是安装完成的可信门槛。
 - `src/creation-guard.ts`：Host 用户回合、session/boot/interrupt 绑定与 Cordis 新建拒绝。
 - `src/creator-foundation.ts`：官方 Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
 - `src/managed-child.ts`：历史 Host-owned 子会话兼容接口；运行时不再创建子 Agent。
+- `src/internal-utils.ts`：`isRecord`、路径包含判断与 PID 存活探测等共享内部工具。
+
+**工作流引擎：**
+
+- `src/workflow/engine.ts`：`WorkflowEngine` 对外类型，以继承链组合以下分层实现。
+- `src/workflow/engine-core.ts`：引擎基类：owner/发现控制断言、interrupt 签发、checkpoint 与视图构建。
+- `src/workflow/engine-driver.ts`：start/refine/present/diagnose：发现预算、模型控制检查点与有界诊断。
+- `src/workflow/engine-recovery.ts`：completed 清理重开与故障恢复计划。
+- `src/workflow/engine-resume.ts`：resume 校验、LLM 决策解析与 candidate→review 绑定。
+- `src/workflow/candidates.ts`：候选 ID、快照密封与发现池预算常量。
+- `src/workflow/grants.ts`：SelectionReceipt / ActionCommitment / ExecutionLease 铸造。
+
+**生命周期：**
+
 - `src/source-manager.ts`：普通 Git 源、排他锁、hookless commit 与来源回执。
-- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。
-- `src/github/discovery.ts`：严格 `owner/repository` 标识校验，以及 `topic:dsh-plugin` 的 `gh api` 搜索。
-- `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
-- `src/workflow/engine.ts`：固定图工作流引擎、interrupt/resume、checkpoint。
 - `src/lifecycle/install.ts`：批准、重验证、状态机和失败清理。
 - `src/lifecycle/snapshot.ts`：完整本地文件绑定、owned snapshot 与固定 tgz。
 - `src/lifecycle/launcher.ts`：DSH CLI、隔离安装进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
 - `src/host-verification-driver.ts`：按 frozen runtime-surface 选择验证层；plugin 自报不得铸造 `tool_roundtrip`；`manual_runtime` 不拉起验证子进程。
 - `src/verification-observer.ts`：记录 Host 工具名/callId 往返与完成轮 hash；不记录模型正文，也不作为语义成功门槛。
 - `src/lifecycle/remove.ts`：receipt 驱动的精确移除。
+
+**审查：**
+
+- `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
+
+**发现：**
+
+- `src/resolver/local.ts`：本地工具、技能和 tool-search 桥。
+- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。
+- `src/github/discovery.ts`：严格 `owner/repository` 标识校验，以及 `topic:dsh-plugin` 的 `gh api` 搜索。
