@@ -7,6 +7,7 @@ import {
   OFFICIAL_CREATOR_SKILLS,
   REQUIRED_INSPECT_TOOLS,
 } from './creator-foundation.js'
+import { isPathInside, isRecord, toolAliases } from './internal-utils.js'
 
 export type ExecutionRole = 'parent' | 'child' | 'constructor'
 
@@ -47,10 +48,6 @@ const PACKAGE_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])(?:npm|pnpm|yarn)(?:\.cmd)?\
 const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
 const RELEASE_DEPLOY_INSTALL_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:release|deploy)\b|dsh(?:\.cmd)?\s+(?:release|deploy|publish|install)\b)/iu
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 function shellCommandText(args: unknown): string {
   if (!isRecord(args)) return ''
   for (const key of ['command', 'cmd', 'script']) {
@@ -58,11 +55,6 @@ function shellCommandText(args: unknown): string {
     if (typeof value === 'string') return value
   }
   return ''
-}
-
-function toolAliases(name: string): string[] {
-  const normalized = name.trim().toLowerCase()
-  return [normalized, normalized.replace(/^dsh[_-]/u, ''), normalized.replace(/[_-]/gu, '')]
 }
 
 function normalizeEndpointName(name: string): string {
@@ -154,10 +146,7 @@ function writePathFromArguments(args: unknown): string | undefined {
 }
 
 function isPathInsideRoot(target: string, root: string): boolean {
-  const resolvedRoot = path.resolve(root)
-  const resolvedTarget = path.resolve(target)
-  const relative = path.relative(resolvedRoot, resolvedTarget)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+  return isPathInside(root, target)
 }
 
 /**

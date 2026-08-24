@@ -429,11 +429,6 @@ export interface ReviewRecord {
   reviewerVerdict?: ReviewerVerdict
 }
 
-export interface ReviewResult extends ReviewRecord {
-  authorization: ResolutionAuthorization
-  nextStep?: string
-}
-
 export type InstallationRetention = 'temporary' | 'persistent'
 export type InstallationState = 'installed' | 'not_installed' | 'unknown'
 /**

@@ -50,6 +50,17 @@ The latest installable release is `v0.5.1`; repository version `0.5.3` is the ne
 
 Those replies are two separate confirmation gates. A one-time DSH approval authorizes a concrete side effect; it never replaces candidate selection or the final user decision. Ordinary language is enough—internal action names are not passphrases.
 
+Install demo (select preset → describe the need → shortlist → review → confirm → installed):
+
+<p align="center">
+  <img src="example/install/01-select-evolution.png" alt="Select the Capability Evolution preset" width="320">
+  <img src="example/install/02-ask.png" alt="Describe the need" width="320">
+  <img src="example/install/03-shortlist.png" alt="Candidate shortlist" width="320">
+  <img src="example/install/04-review.png" alt="Review result" width="320">
+  <img src="example/install/05-confirm.png" alt="Confirm install" width="320">
+  <img src="example/install/06-installed.png" alt="Installed" width="320">
+</p>
+
 ## Understand the outcome
 
 | Result | Meaning | Next step |

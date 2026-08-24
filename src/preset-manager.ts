@@ -13,6 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
+import { isNotFound, isPathInside, isProcessAlive, normalizeLf } from './internal-utils.js'
 import {
   EVOLUTION_PRESET_ID,
   EVOLUTION_PRESET_KNOWN_MANIFESTS,
@@ -56,11 +57,6 @@ interface PhysicalEvolutionPresetPaths {
 
 function posixJoin(...parts: string[]): string {
   return parts.join('/')
-}
-
-function isPathInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 function assertContained(root: string, candidate: string, label: string): string {
@@ -121,10 +117,6 @@ async function pathExists(target: string): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-function isNotFound(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
 }
 
 /**
@@ -189,7 +181,7 @@ async function listExactChildren(directory: string): Promise<string[]> {
 
 /** Managed preset files are text. Hash and write LF so Windows autocrlf checkouts stay upgradeable. */
 function normalizeManagedText(bytes: Uint8Array): Buffer {
-  return Buffer.from(Buffer.from(bytes).toString('utf8').replace(/\r\n/gu, '\n').replace(/\r/gu, '\n'), 'utf8')
+  return Buffer.from(normalizeLf(Buffer.from(bytes).toString('utf8')), 'utf8')
 }
 
 async function hashFile(filePath: string): Promise<string> {
@@ -383,17 +375,7 @@ function migrationLockPath(presetsRoot: string): string {
 }
 
 async function isPidAlive(pid: number): Promise<boolean> {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error
-      ? String((error as { code: unknown }).code)
-      : undefined
-    if (code === 'ESRCH') return false
-    return true
-  }
+  return isProcessAlive(pid)
 }
 
 async function acquireMigrationLock(presetsRoot: string): Promise<string> {

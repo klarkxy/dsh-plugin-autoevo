@@ -5,21 +5,12 @@ export {
   isDirectlyUsableReview,
   reviewCandidateDigest,
   reviewerBindingDigest,
-  reviewerVerdictAllowsDirectUse,
   reviewSnapshotDigest,
-  type DirectUseHostBoundary,
   type InstallCommitmentBinding,
-  type ReviewCandidateContext,
 } from './direct-use.js'
 export {
-  evaluatePluginContent,
-  inspectLocalDirectory,
   needsSemanticReviewer,
   reviewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
-  type ContentSnapshot,
-  type GithubReviewEvidence,
-  type LocalReviewResult,
-  type ReviewContentInput,
 } from './review.js'

@@ -36,9 +36,6 @@ export const EVOLUTION_PRESET_MANAGED_CONTENT_FILES = [
   'skills/editing-cordis-compositions/SKILL.md',
 ] as const
 
-export type EvolutionPresetManagedContentFile =
-  (typeof EVOLUTION_PRESET_MANAGED_CONTENT_FILES)[number]
-
 export interface EvolutionPresetManifest {
   owner: typeof EVOLUTION_MODE_OWNER
   schemaVersion: typeof EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION

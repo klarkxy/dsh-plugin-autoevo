@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeConfig } from './config.js'
+import { isNotFound, isPathInside, isProcessAlive } from './internal-utils.js'
 import type { ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
 import type { CommandRunner } from './process/runner.js'
@@ -52,15 +53,6 @@ interface SourceLock {
   branch?: string
 }
 
-function isNotFound(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code: string }).code === 'ENOENT')
-}
-
-function isPathInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
-}
-
 const FORBIDDEN_UNTRACKED_PREFIXES = [
   '.pnpm-store',
   'node_modules',
@@ -90,17 +82,7 @@ function forbiddenUntrackedPath(status: string): string | undefined {
  * - EPERM / unknown errors => treat as live (fail closed)
  */
 export function isLockHolderAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error
-      ? String((error as { code: unknown }).code)
-      : undefined
-    if (code === 'ESRCH') return false
-    return true
-  }
+  return isProcessAlive(pid)
 }
 
 export function sourceIdForRepository(repository: string): string {
@@ -140,7 +122,7 @@ export class SourceManager {
     return resolveSourceRoot(this.config, workspaceCwd || currentWorkspaceCwd())
   }
 
-  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir tests. */
+  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir unit and integration tests. */
   get sourceRoot(): string {
     return this.sourceRootFor()
   }

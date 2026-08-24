@@ -11,6 +11,7 @@ import type {
 import { EvolutionError } from './errors.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
 import { newBootId, newTurnId, ownerSessionId } from './host-identity.js'
+import { isRecord } from './internal-utils.js'
 import { assertUseThisReceipt } from './lifecycle/decide.js'
 import {
   assertDirectUseAllowed,
@@ -80,10 +81,6 @@ function shellCommandText(args: unknown): string {
     if (typeof value === 'string') return value
   }
   return ''
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function clearHostGrant(state: AgentGateState): void {

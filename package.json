@@ -45,6 +45,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "example/install",
     "docs/user-guide.md",
     "docs/user-guide.en.md",
     "docs/developer-guide.md",
@@ -66,7 +67,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --no-config-lookup --ext .ts --parser @typescript-eslint/parser src tests",
+    "lint": "eslint src tests",
     "test": "vitest run",
     "test:loader": "node tests/loader-smoke.mjs",
     "test:packaged": "node tests/packaged-acceptance.mjs",

@@ -2,6 +2,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { EvolutionError } from './errors.js'
 import { EVOLUTION_PRESET_ID } from './evolution-contracts.js'
+import { isRecord, normalizeLf, toolAliases } from './internal-utils.js'
 import { hashObject, sha256 } from './state/hashes.js'
 
 export const CREATOR_PRESET_ID = 'cordis' as const
@@ -123,10 +124,6 @@ interface SkillsLike {
   >
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 function creatorUnavailable(message: string, details: Record<string, unknown> = {}): EvolutionError {
   return new EvolutionError('command_failed', message, {
     reason: 'creator_foundation_unavailable',
@@ -144,16 +141,11 @@ function rejectCodePreset(actual: string | undefined): void {
 }
 
 export function normalizeComposition(text: string): string {
-  return text.replace(/\r\n/gu, '\n').replace(/\r/gu, '\n')
+  return normalizeLf(text)
 }
 
 export function compositionSha256(text: string): string {
   return sha256(normalizeComposition(text))
-}
-
-function toolAliases(name: string): string[] {
-  const normalized = name.trim().toLowerCase()
-  return [normalized, normalized.replace(/^dsh[_-]/u, ''), normalized.replace(/[_-]/gu, '')]
 }
 
 function catalogNameSet(names: readonly string[]): Set<string> {

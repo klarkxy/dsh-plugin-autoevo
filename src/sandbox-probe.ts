@@ -5,6 +5,7 @@ import type { SandboxExecutionPolicy, SandboxProvider } from '@deepseek-ai/dsh-s
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { EvolutionError } from './errors.js'
+import { isPathInside } from './internal-utils.js'
 import type { CommandRunner } from './process/runner.js'
 
 export interface LiveSandboxStack {
@@ -26,11 +27,6 @@ export interface SandboxProbeResult {
 
 function normalizePath(value: string): string {
   return path.resolve(value)
-}
-
-function isPathInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(normalizePath(parent), normalizePath(candidate))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 async function exists(candidate: string): Promise<boolean> {

@@ -50,6 +50,17 @@ dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5
 
 这两次用户回复是两道独立确认门。DSH 的一次性 approval 只批准具体副作用，不能替代候选选择或最终决定。自然语言即可，不需要背内部 action 名称。
 
+安装演示（选择 preset → 描述需求 → 候选短名单 → 审查 → 确认 → 已安装）：
+
+<p align="center">
+  <img src="example/install/01-select-evolution.png" alt="选择能力进化 preset" width="320">
+  <img src="example/install/02-ask.png" alt="描述需求" width="320">
+  <img src="example/install/03-shortlist.png" alt="候选短名单" width="320">
+  <img src="example/install/04-review.png" alt="审查结果" width="320">
+  <img src="example/install/05-confirm.png" alt="确认安装" width="320">
+  <img src="example/install/06-installed.png" alt="已安装" width="320">
+</p>
+
 ## 怎样理解结果
 
 | 结果 | 含义 | 下一步 |

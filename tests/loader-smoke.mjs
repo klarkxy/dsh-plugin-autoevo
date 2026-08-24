@@ -161,7 +161,7 @@ try {
   const presetBody = await readFile(path.join(presetsRoot, 'preset.yml'), 'utf8')
   assert.match(presetBody, /能力进化/u)
   const composition = await readFile(path.join(presetsRoot, 'agent.cordis.yml'), 'utf8')
-  assert.match(composition, /Policy V8/u)
+  assert.match(composition, /official Creator plus AutoEvo governance/u)
   assert.match(composition, /awaiting a user test/u)
   const managed = await readdir(presetsRoot)
   assert.ok(managed.includes('agent.cordis.yml'))

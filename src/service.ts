@@ -1,47 +1,31 @@
-import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { satisfies, valid, validRange } from 'semver'
 import type { RuntimeConfig } from './config.js'
 import {
   DEFAULT_REQUEST_INTENT,
   POLICY_VERSION,
-  type DecisionReceipt,
   type EvolutionTarget,
   type InstallationRecord,
   type NavigationInput,
-  type RemotePluginCandidate,
   type RemoveInput,
   type RequestIntent,
   type ResolutionAuthorization,
   type ResolutionRecord,
   type ResumeInput,
-  type ReviewerRequest,
-  type ReviewerVerdict,
   type ReviewMode,
   type ReviewRecord,
 } from './contracts.js'
 import type { CreationGuard } from './creation-guard.js'
 import {
-  appendCreatorRecord,
-  assertCreatorReceipt,
-  assertWorkOrderScope,
   createCreatorFoundation,
-  createCreatorWorkOrder,
-  mintCreatorReceipt,
   type CreatorFoundation,
-  type CreatorFoundationPreflight,
-  type CreatorOperation,
-  type CreatorWorkOrder,
 } from './creator-foundation.js'
-import { discoverRemoteCandidates, FIND_PLUGIN_REPOSITORY } from './discovery/remote.js'
+import { discoverRemoteCandidates } from './discovery/remote.js'
 import { EvolutionError } from './errors.js'
 import { validateGithubRepository } from './github/index.js'
 import {
   authorizationFromDecision,
   newDecisionReceipt,
-  nextStepForAuthorization,
   reviewIdentity,
 } from './lifecycle/decide.js'
 import { sessionCwd } from './host-identity.js'
@@ -63,36 +47,58 @@ import { resolveLocalCapabilities } from './resolver/local.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
-  hostDirectUseBoundary,
   isDirectlyUsableReview,
-  needsSemanticReviewer,
-  reviewCandidateDigest,
-  reviewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
-  reviewSnapshotDigest,
 } from './review/index.js'
+import { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
 import type { ContentFile } from './review/review.js'
 import {
-  mintReviewerRequest,
-  requirementHashFor,
-  REVIEWER_VERSION,
-  type BoundedReviewFile,
-  type SemanticReviewerHost,
-} from './semantic-reviewer.js'
+  childCheckEvidence,
+  modificationAcceptance,
+  modificationBlockers,
+  modificationDelta,
+  modificationWorkOrder,
+} from './service-modification.js'
+import {
+  finishManagedWork,
+  prepareManagedCreation,
+  prepareManagedModification,
+  type ManagedWorkDeps,
+} from './service-managed-work.js'
+import {
+  addExplicitCandidate,
+  assertRequirement,
+  authorizationForResolution,
+  newResolutionId,
+  waitingAuthorization,
+  waitingConfirmation,
+  withNextStep,
+} from './service-resolution.js'
+import {
+  dshRuntimeVersion,
+  lineageRootReview,
+  materialReviewFacts,
+  revalidateReview,
+  reviewAndFreezeManagedSource,
+  shouldReviewAdaptiveThird,
+} from './service-review.js'
+import {
+  assertSemanticReviewerBinding,
+  attachSemanticReview,
+  boundedReviewerFiles,
+} from './service-semantic-review.js'
+import type { SemanticReviewerHost } from './semantic-reviewer.js'
 import type { SemanticVerifierHost } from './semantic-verifier.js'
-import { SourceManager, sourceIdForCreate, sourceIdForRepository, type SourceReceipt } from './source-manager.js'
+import { SourceManager } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
-import { resolveStateRoot, runInWorkspace } from './workspace-layout.js'
+import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
 import type {
   MarketplaceStepResult,
   DiscoveryPresentInput,
   DiscoveryRefineInput,
-  ModificationAttemptEvidence,
-  ModificationBlocker,
-  ModificationOutcome,
   ValidatedResume,
   WorkflowDiagnoseInput,
   WorkflowExec,
@@ -103,535 +109,17 @@ import type {
   WorkflowView,
 } from './workflow/contracts.js'
 
-export function addExplicitCandidate(
-  resolution: ResolutionRecord,
-  repositoryInput: string,
-): { resolution: ResolutionRecord, candidate: RemotePluginCandidate } {
-  const repository = validateGithubRepository(repositoryInput)
-  if (repository.toLowerCase() === FIND_PLUGIN_REPOSITORY.toLowerCase()) {
-    throw new EvolutionError(
-      'invalid_input',
-      'dsh-find-plugin is marketplace infrastructure, not a capability candidate',
-      { repository },
-    )
-  }
-  const existing = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-  if (existing) return { resolution, candidate: existing }
-
-  const candidate: RemotePluginCandidate = {
-    repository,
-    name: repository.split('/')[1]!,
-    description: '',
-    stars: 0,
-    updatedAt: null,
-    topics: ['dsh-plugin'],
-  }
-  return {
-    candidate,
-    resolution: {
-      ...resolution,
-      remoteCandidates: [...resolution.remoteCandidates, candidate],
-    },
-  }
-}
-
-const MAX_BLOCKER_SUMMARY = 500
-
-function boundedReviewText(value: string, limit = MAX_BLOCKER_SUMMARY): string {
-  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim()
-  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`
-}
-
-function modificationBlockers(review: ReviewRecord): ModificationBlocker[] {
-  const blockers = new Map<string, ModificationBlocker>()
-  if (review.compatibility.status === 'incompatible') {
-    const runtime = review.compatibility.runtimeVersion && valid(review.compatibility.runtimeVersion)
-    const incompatiblePeers = runtime
-      ? Object.entries(review.manifest.peerDependencies)
-        .filter(([name, range]) => name.startsWith('@deepseek-ai/dsh-')
-          && (!validRange(range) || !satisfies(runtime, range, { includePrerelease: true })))
-      : []
-    if (incompatiblePeers.length > 0) {
-      for (const [name, range] of incompatiblePeers) {
-        const key = `compatibility:${hashObject({ name, runtime }).slice(0, 24)}`
-        blockers.set(key, {
-          key,
-          kind: 'compatibility',
-          summary: boundedReviewText(`${name} peer range ${range} excludes active runtime ${runtime}.`),
-        })
-      }
-    } else {
-      const summary = boundedReviewText(review.compatibility.reason)
-      const key = `compatibility:${hashObject({ summary, runtime: review.compatibility.runtimeVersion }).slice(0, 24)}`
-      blockers.set(key, { key, kind: 'compatibility', summary })
-    }
-  }
-  for (const capability of review.missingCapabilities) {
-    const summary = boundedReviewText(capability)
-    const key = `missing:${hashObject(summary).slice(0, 16)}`
-    blockers.set(key, { key, kind: 'missing_capability', summary })
-  }
-  for (const finding of review.findings.filter((item) => item.severity === 'block')) {
-    const source = boundedReviewText(finding.source, 200)
-    const identityEvidence = finding.evidenceHash ?? boundedReviewText(finding.detail, 300)
-    const key = `finding:${hashObject({ code: finding.code, source, identityEvidence }).slice(0, 24)}`
-    blockers.set(key, {
-      key,
-      kind: 'security_finding',
-      summary: boundedReviewText(`${finding.code} at ${finding.source}: ${finding.detail}`),
-    })
-  }
-  const boundary = hostDirectUseBoundary(review)
-  if (boundary === 'not_materializable') {
-    blockers.set(`host_boundary:${boundary}`, {
-      key: `host_boundary:${boundary}`,
-      kind: 'host_boundary',
-      summary: 'The reviewed source cannot yet be materialized as an installable DSH bundle.',
-    })
-  }
-  return [...blockers.values()]
-}
-
-function blockerStillPresent(blocker: ModificationBlocker, review: ReviewRecord): boolean {
-  return modificationBlockers(review).some((current) => current.key === blocker.key)
-}
-
-function modificationDelta(baseline: readonly ModificationBlocker[], review: ReviewRecord): {
-  resolved: ModificationBlocker[]
-  unresolved: ModificationBlocker[]
-  introduced: ModificationBlocker[]
-} {
-  const baselineKeys = new Set(baseline.map((item) => item.key))
-  return {
-    resolved: baseline.filter((item) => !blockerStillPresent(item, review)),
-    unresolved: baseline.filter((item) => blockerStillPresent(item, review)),
-    introduced: modificationBlockers(review).filter((item) => !baselineKeys.has(item.key)),
-  }
-}
-
-function modificationAcceptance(input: {
-  baselineReview: ReviewRecord
-  baselineBlockers: readonly ModificationBlocker[]
-  postReview: ReviewRecord
-  meaningfulInstruction: boolean
-  attempt: number
-}): ReturnType<typeof modificationDelta> & {
-  evaluatorStable: boolean
-  status: ModificationOutcome['status']
-  canCorrect: boolean
-} {
-  const delta = modificationDelta(input.baselineBlockers, input.postReview)
-  const evaluatorStable = input.postReview.policyVersion === input.baselineReview.policyVersion
-    && input.postReview.compatibility.runtimeVersion === input.baselineReview.compatibility.runtimeVersion
-  const status: ModificationOutcome['status'] = !evaluatorStable
-    ? 'indeterminate'
-    : delta.unresolved.length > 0 || delta.introduced.length > 0
-      ? 'unresolved'
-      : input.meaningfulInstruction ? 'indeterminate' : 'resolved'
-  return {
-    ...delta,
-    evaluatorStable,
-    status,
-    canCorrect: input.attempt === 1
-      && evaluatorStable
-      && delta.unresolved.length > 0
-      && delta.introduced.length === 0,
-  }
-}
-
-const TOOLCHAIN_TOKEN = String.raw`vitest|\btsc\b|typescript|typecheck|test runner|dev toolchain|\btoolchain\b`
-const TOOLCHAIN_MISSING = String.raw`unavailable|not (?:found|installed|present|available)|is not recognized|command not found|ENOENT|未安装|不可用|找不到|缺失`
-const TEST_FAILURE = String.raw`(?:tests?|test run).{0,60}(?:failed|failure)|测试.{0,40}失败`
-const CLAUSE_BREAKS = new Set(['.', ';', '\n', '。', '；'])
-
-function reportsUnavailableLocalToolchain(report: string): boolean {
-  return new RegExp(String.raw`(?:${TOOLCHAIN_TOKEN}).{0,80}(?:${TOOLCHAIN_MISSING})`, 'iu').test(report)
-    || new RegExp(String.raw`(?:${TOOLCHAIN_MISSING}).{0,80}(?:${TOOLCHAIN_TOKEN})`, 'iu').test(report)
-    || /(?:cannot find|can't find|could not find) (?:module|package) ['"`]?(?:vitest|typescript|tsc)\b/iu.test(report)
-    || /本地(?:开发)?(?:测试)?工具链?.{0,24}(?:不可用|未安装|缺失)/iu.test(report)
-}
-
-function clauseContaining(text: string, start: number, end: number): string {
-  let from = 0
-  for (let i = start - 1; i >= 0; i--) {
-    if (CLAUSE_BREAKS.has(text[i]!)) {
-      from = i + 1
-      break
-    }
-  }
-  let to = text.length
-  for (let i = end; i < text.length; i++) {
-    if (CLAUSE_BREAKS.has(text[i]!)) {
-      to = i
-      break
-    }
-  }
-  return text.slice(from, to)
-}
-
-function reportsGenuineTestFailure(report: string): boolean {
-  // Tight assertion evidence is independent of a missing sibling tool such as tsc.
-  if (/\bAssertionError\b|\b\d+ failing assertions?\b|\bexpected \d+ to (?:be|equal) \d+\b/iu.test(report)) return true
-  for (const match of report.matchAll(new RegExp(TEST_FAILURE, 'giu'))) {
-    const start = match.index
-    const clause = clauseContaining(report, start, start + match[0].length)
-    // "npm test failed because vitest is not recognized" stays unavailable; unexplained test failures do not.
-    if (!reportsUnavailableLocalToolchain(clause)) return true
-  }
-  return false
-}
-
-function childCheckEvidence(taskResult: string): ModificationAttemptEvidence['checks'] {
-  const report = taskResult.replace(/\s*AUTOEVO_CHILD_COMPLETED\s*$/u, '')
-  if (reportsGenuineTestFailure(report)) {
-    return {
-      source: 'child_reported',
-      status: 'failed',
-      summary: 'The managed child reported that tests failed; Host did not independently observe the command result.',
-    }
-  }
-  // Command failures caused only by missing local tools are not assertion failures.
-  if (reportsUnavailableLocalToolchain(report)) {
-    return {
-      source: 'child_reported',
-      status: 'unavailable',
-      summary: 'Checks could not run because the local toolchain was unavailable; the plugin is not verified. The managed child reported missing local test tools; Host did not independently observe the command result.',
-    }
-  }
-  if (/skipped (?:the )?(?:test|tests|test run)|tests? (?:were )?not run|未运行测试|跳过测试/iu.test(report)) {
-    return { source: 'child_reported', status: 'skipped', summary: 'The managed child reported that tests were skipped.' }
-  }
-  if (/(?:tests?|test run).{0,60}(?:passed|successful)|测试.{0,40}通过/iu.test(report)) {
-    return { source: 'child_reported', status: 'passed', summary: 'The managed child reported that tests passed; Host did not independently observe the command result.' }
-  }
-  if (new RegExp(TEST_FAILURE, 'iu').test(report)) {
-    return { source: 'child_reported', status: 'failed', summary: 'The managed child reported that tests failed; Host did not independently observe the command result.' }
-  }
-  return { source: 'unknown', status: 'unknown', summary: 'Host did not independently observe a test command result.' }
-}
-
-function authenticatedModificationInstruction(resolution: ResolutionRecord, review: ReviewRecord): string | undefined {
-  return [...(resolution.decisions ?? [])].reverse().find((item) => item.phase === 'gate2'
-    && item.action === 'modify_this'
-    && item.reviewId === review.id)?.userMessage?.trim()
-}
-
-function hasMeaningfulModificationInstruction(instruction: string | undefined): instruction is string {
-  if (!instruction) return false
-  const normalized = instruction.normalize('NFKC').trim().toLowerCase()
-  return !new Set(['modify_this', 'modify', '在这个上改', '修改这个', '改这个', '先改进已审查候选']).has(normalized)
-}
-
-function modificationWorkOrder(
-  resolution: ResolutionRecord,
-  review: ReviewRecord,
-  cwd: string,
-  blockers = modificationBlockers(review),
-  focusedCorrection = false,
-  lineageKind?: import('./contracts.js').EvolutionTargetKind,
-): CreatorWorkOrder {
-  const userInstruction = authenticatedModificationInstruction(resolution, review)
-  const repairFiber = lineageKind === 'failed_install'
-    || resolution.intent?.evolveReason === 'repair'
-    || /fiber was not present after loader settle/iu.test(resolution.reasons.join('\n'))
-    || /loader|wrapping fiber|包装/iu.test(resolution.requirement)
-  return createCreatorWorkOrder({
-    operation: focusedCorrection ? 'correct' : 'modify',
-    requirement: resolution.requirement,
-    cwd,
-    blockers,
-    baselineReviewId: review.id,
-    acceptanceTargets: [
-      focusedCorrection
-        ? 'Investigate why the remaining Host-observed blockers persist'
-        : 'Host re-review must no longer report the baseline blockers',
-      'Host re-review must not introduce a new blocking target',
-      'Preserve package identity and choose the implementation path without expanding scope',
-      ...(repairFiber
-        ? ['Host re-review and later install must produce a Loader-visible wrapping Fiber; do not reinstall the failed specification unchanged']
-        : []),
-      ...(userInstruction ? [`Apply the authenticated user modification instruction: ${userInstruction}`] : []),
-    ],
-  })
-}
-
-function newResolutionId(requirement: string): string {
-  return `resolution_${hashObject({ requirement, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
-}
-
-function materialReviewFacts(review: ReviewRecord): unknown {
-  const sourceIdentity = review.sourceSnapshot.kind === 'github'
-    ? {
-        kind: 'github' as const,
-        repository: review.sourceSnapshot.repository,
-        commit: review.sourceSnapshot.commit,
-      }
-    : review.sourceSnapshot
-  return {
-    policyVersion: review.policyVersion,
-    requirement: review.requirement,
-    sourceIdentity,
-    inspectedFiles: review.inspectedFiles,
-    manifest: review.manifest,
-    compatibility: review.compatibility,
-  }
-}
-
-function assertRequirement(requirement: string): string {
-  const value = requirement.normalize('NFKC').trim()
-  if (!value || value.length > 2_000) {
-    throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
-  }
-  return value
-}
-
-function shouldReviewAdaptiveThird(
-  mode: ReviewMode,
-  reviews: ReviewRecord[],
-  workflow?: WorkflowRecord,
-): boolean {
-  return mode === 'fixed' || !reviews.some((item) => isDirectlyUsableReview(item, workflow))
-}
-
-function waitingAuthorization(
-  resolutionId: string,
-  decision: ResolutionRecord['decision'],
-  remoteDiscoveryComplete: boolean,
-  _remoteCandidateSource?: ResolutionRecord['remoteCandidateSource'],
-): ResolutionAuthorization {
-  if (!remoteDiscoveryComplete && decision !== 'use_local') {
-    return {
-      state: 'selection_required',
-      resolutionId,
-      reason: 'Remote discovery did not finish. Retry capability_workflow; nothing will be created until the user chooses.',
-    }
-  }
-  return {
-    state: 'selection_required',
-    resolutionId,
-    reason: 'Waiting for the user to choose a candidate, create new, or stop.',
-  }
-}
-
-export function lineageRootReview(base: ReviewRecord, reviews: readonly ReviewRecord[]): ReviewRecord {
-  const byId = new Map(reviews.map((item) => [item.id, item]))
-  byId.set(base.id, base)
-  const seen = new Set<string>()
-  let current = base
-  while (current.sourceSnapshot.kind === 'local') {
-    if (seen.has(current.id)) {
-      throw new EvolutionError('invalid_input', 'baseReviewId lineage is cyclic')
-    }
-    seen.add(current.id)
-    const parent = byId.get(current.sourceSnapshot.baseReviewId)
-    if (!parent) {
-      throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
-    }
-    current = parent
-  }
-  return current
-}
-
-function latestDecision(resolution: ResolutionRecord): DecisionReceipt | undefined {
-  const decisions = resolution.decisions ?? []
-  return decisions[decisions.length - 1]
-}
-
-function authorizationForResolution(
-  resolution: ResolutionRecord,
-  reviews: readonly ReviewRecord[] = [],
-): ResolutionAuthorization {
-  const legacy = resolution.schemaVersion !== 2 || resolution.policyVersion !== POLICY_VERSION || !resolution.authorization
-  if (legacy) {
-    return {
-      state: 'selection_required',
-      resolutionId: resolution.id,
-      reason: 'This resolution predates the current user-choice policy; run capability_workflow again.',
-    }
-  }
-
-  const decision = latestDecision(resolution)
-  if (decision?.phase === 'gate2') {
-    const review = decision.reviewId
-      ? reviews.find((item) => item.id === decision.reviewId)
-      : undefined
-    return authorizationFromDecision(
-      resolution.id,
-      decision.action,
-      decision.selectedRepositories,
-      review,
-    )
-  }
-
-  if (resolution.remoteCandidateSource === 'marketplace-setup' && resolution.decision === 'inspect_remote') {
-    return resolution.authorization?.state === 'market_required'
-      ? resolution.authorization
-      : waitingAuthorization(resolution.id, resolution.decision, Boolean(resolution.remoteDiscoveryComplete), resolution.remoteCandidateSource)
-  }
-
-  const selected = resolution.selectedRepositories ?? []
-  if (selected.length > 0) {
-    const reviewed = selected.some((repository) => reviews.some((review) => review.sourceSnapshot.kind === 'github'
-      && review.sourceSnapshot.repository.toLowerCase() === repository.toLowerCase()))
-    return {
-      state: reviewed ? 'confirmation_required' : 'selection_required',
-      resolutionId: resolution.id,
-      reason: reviewed
-        ? 'A selected plugin was reviewed. The user must choose use this, create new, or stop.'
-        : 'Review only the repositories the user selected.',
-      selectedRepositories: selected,
-    }
-  }
-
-  return resolution.authorization ?? waitingAuthorization(
-    resolution.id,
-    resolution.decision,
-    Boolean(resolution.remoteDiscoveryComplete),
-    resolution.remoteCandidateSource,
-  )
-}
-
-function withNextStep(record: ResolutionRecord): ResolutionRecord {
-  const authorization = record.authorization
-  if (!authorization) return record
-  return { ...record, nextStep: nextStepForAuthorization(record.requirement, authorization) }
-}
+export { addExplicitCandidate } from './service-resolution.js'
+export { lineageRootReview } from './service-review.js'
+export { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
+export {
+  assertSemanticReviewerBinding,
+  attachSemanticReview,
+  boundedReviewerFiles,
+} from './service-semantic-review.js'
 
 function asToolExec(exec: WorkflowExec): ToolRunContext {
   return exec as ToolRunContext
-}
-
-export { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
-
-export function boundedReviewerFiles(files: readonly ContentFile[], inspected: ReviewRecord['inspectedFiles']): BoundedReviewFile[] {
-  return inspected.map((item) => {
-    const file = files.find((entry) => entry.path === item.path)
-    return {
-      path: item.path,
-      sha256: item.sha256,
-      bytes: item.bytes,
-      text: file ? Buffer.from(file.content).toString('utf8') : '',
-    }
-  })
-}
-
-function isReviewerIntegrityError(error: unknown): boolean {
-  return error instanceof EvolutionError && (error.code === 'invalid_input' || error.code === 'review_rejected')
-}
-
-function hostMintedUncertain(
-  review: ReviewRecord,
-  workflowId: string,
-  snapshotDigest: string,
-  candidateDigest: string,
-  evidence: string,
-): { request: ReviewerRequest; verdict: ReviewerVerdict } {
-  const request = mintReviewerRequest({
-    workflowId,
-    review,
-    snapshotDigest,
-    candidateDigest,
-  })
-  const completedAt = new Date().toISOString()
-  return {
-    request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
-    verdict: {
-      requestId: request.id,
-      reviewId: review.id,
-      requirementHash: requirementHashFor(review.requirement),
-      snapshotDigest,
-      candidateDigest,
-      reviewerSessionId: 'host',
-      reviewerVersion: REVIEWER_VERSION,
-      decision: 'uncertain',
-      evidence: [evidence.slice(0, 300)],
-      conditions: [],
-      semanticCoverage: 'none',
-      createdAt: completedAt,
-    },
-  }
-}
-
-export function assertSemanticReviewerBinding(
-  review: ReviewRecord,
-  result: { request: ReviewerRequest; verdict: ReviewerVerdict },
-  expected: { snapshotDigest: string; candidateDigest: string },
-): void {
-  if (result.request.reviewId !== review.id || result.verdict.reviewId !== review.id) {
-    throw new EvolutionError('invalid_input', 'Semantic reviewer result is not bound to this review', {
-      reviewId: review.id,
-    })
-  }
-  if (result.request.id !== result.verdict.requestId) {
-    throw new EvolutionError('invalid_input', 'Semantic reviewer verdict is not bound to its request')
-  }
-  if (result.request.snapshotDigest !== expected.snapshotDigest
-    || result.verdict.snapshotDigest !== expected.snapshotDigest
-    || result.request.candidateDigest !== expected.candidateDigest
-    || result.verdict.candidateDigest !== expected.candidateDigest) {
-    throw new EvolutionError('invalid_input', 'Semantic reviewer result digest mismatch', {
-      expectedSnapshot: expected.snapshotDigest,
-      expectedCandidate: expected.candidateDigest,
-    })
-  }
-  if (result.verdict.requirementHash !== requirementHashFor(review.requirement)) {
-    throw new EvolutionError('invalid_input', 'Semantic reviewer requirement hash mismatch')
-  }
-}
-
-export async function attachSemanticReview(input: {
-  host: SemanticReviewerHost
-  review: ReviewRecord
-  files: readonly ContentFile[]
-  exec: WorkflowExec
-  workflow?: WorkflowRecord
-  timeoutMs: number
-}): Promise<ReviewRecord> {
-  if (!needsSemanticReviewer(input.review)) return input.review
-  if (!input.exec.agent) {
-    throw new EvolutionError('invalid_input', 'A live top-level Agent is required to attach a semantic reviewer')
-  }
-  if ((input.exec.agent.session?.header?.delegationDepth ?? 0) !== 0) {
-    throw new EvolutionError('invalid_input', 'Semantic review requires a top-level parent Agent')
-  }
-  const snapshotDigest = reviewSnapshotDigest(input.review)
-  const candidateDigest = reviewCandidateDigest(input.review, input.workflow)
-  const workflowId = input.workflow?.id
-    ?? `workflow_${hashObject({ resolutionId: input.review.resolutionId, reviewId: input.review.id }).slice(0, 24)}`
-  try {
-    const result = await input.host.run({
-      parent: input.exec.agent,
-      workflowId,
-      review: input.review,
-      candidateDigest,
-      snapshotDigest,
-      files: boundedReviewerFiles(input.files, input.review.inspectedFiles),
-      timeoutMs: input.timeoutMs,
-      ...(input.exec.signal ? { signal: input.exec.signal } : {}),
-    })
-    assertSemanticReviewerBinding(input.review, result, { snapshotDigest, candidateDigest })
-    return {
-      ...input.review,
-      reviewerRequestId: result.request.id,
-      reviewerRequest: result.request,
-      reviewerVerdict: result.verdict,
-    }
-  } catch (error) {
-    if (isReviewerIntegrityError(error)) throw error
-    const minted = hostMintedUncertain(
-      input.review,
-      workflowId,
-      snapshotDigest,
-      candidateDigest,
-      error instanceof Error ? error.message : String(error),
-    )
-    return {
-      ...input.review,
-      reviewerRequestId: minted.request.id,
-      reviewerRequest: minted.request,
-      reviewerVerdict: minted.verdict,
-    }
-  }
 }
 
 export class CapabilityEvolutionService implements WorkflowHost {
@@ -673,6 +161,17 @@ export class CapabilityEvolutionService implements WorkflowHost {
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
     this.engine = new WorkflowEngine(store, creationGuard, this)
+  }
+
+  private managedWorkDeps(): ManagedWorkDeps {
+    return {
+      runner: this.runner,
+      config: this.config,
+      launcher: this.launcher,
+      store: this.store,
+      sources: this.sources,
+      creatorFoundation: this.creatorFoundation,
+    }
   }
 
   private withWorkspace<T>(exec: { agent?: ToolRunContext['agent'] }, fn: () => T): T {
@@ -904,7 +403,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         repository,
       })
     }
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
     const evidence = await reviewGithubPluginWithFiles({
       runner: this.runner,
       config: this.config,
@@ -917,7 +416,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
-    const waiting = withNextStep(this.waitingConfirmation(resolution, review, workflow))
+    const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
   }
@@ -969,7 +468,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         }
         const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
         const selectedResolution = { ...resolution, selectedRepositories: selected }
-        const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+        const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
         const upstreamEvidence = await reviewGithubPluginWithFiles({
           runner: this.runner,
           // This immutable upstream snapshot is a lineage anchor only. The
@@ -999,7 +498,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         workflow.updatedAt = new Date().toISOString()
         await this.store.put('workflows', workflow)
         try {
-          return await this.reviewAndFreezeManagedSource({
+          return await reviewAndFreezeManagedSource(this.managedWorkDeps(), {
             resolution: selectedResolution,
             sourceId,
             path: receipt.path,
@@ -1014,7 +513,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         }
       }
     }
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
     const evidence = await reviewGithubPluginWithFiles({
       runner: this.runner,
       config: this.config,
@@ -1031,7 +530,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
     const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
     const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
-    const waiting = withNextStep(this.waitingConfirmation({ ...resolution, selectedRepositories: selected }, review, workflow))
+    const waiting = withNextStep(waitingConfirmation({ ...resolution, selectedRepositories: selected }, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
   }
@@ -1054,7 +553,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         throw new EvolutionError('invalid_input', 'This repository was not selected for read-only review', { repository })
       }
     }
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
     const reviews: ReviewRecord[] = []
     const failures: Array<{ repository: string; code: string; message: string }> = []
     const reviewOne = async (repository: string): Promise<ReviewRecord> => {
@@ -1100,7 +599,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     reviews.sort((left, right) => rank(left) - rank(right))
     const primary = reviews[0]
     const waiting = primary
-      ? withNextStep(this.waitingConfirmation({ ...resolution, selectedRepositories: ordered }, primary, workflow))
+      ? withNextStep(waitingConfirmation({ ...resolution, selectedRepositories: ordered }, primary, workflow))
       : resolution
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, reviews, failures }
@@ -1128,7 +627,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     if (base.resolutionId !== resolution.id || root.resolutionId !== resolution.id || root.sourceSnapshot.kind !== 'github') {
       throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
     }
-    const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
+    const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
     const local = await reviewLocalPlugin({
       runner: this.runner,
       config: this.config,
@@ -1145,7 +644,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
     }
     const review = await this.persistReviewed(local.record, local.files, exec, workflow)
-    const waiting = withNextStep(this.waitingConfirmation(resolution, review, workflow))
+    const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
   }
@@ -1181,125 +680,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return record
   }
 
-  private requireParentAgent(exec: WorkflowExec): NonNullable<WorkflowExec['agent']> {
-    if (!exec.agent) {
-      throw new EvolutionError('invalid_input', 'A live parent Agent session is required for managed modify/create')
-    }
-    return exec.agent
-  }
-
-  private rememberCreator(
-    workflow: WorkflowRecord,
-    operation: CreatorOperation,
-    status: 'verified' | 'unavailable',
-    receipt?: import('./creator-foundation.js').CreatorFoundationReceipt,
-  ): void {
-    workflow.creatorRecords = appendCreatorRecord(workflow.creatorRecords, {
-      operation,
-      status,
-      createdAt: new Date().toISOString(),
-      ...(receipt ? { receipt } : {}),
-    })
-  }
-
-  private async preflightCreator(
-    workflow: WorkflowRecord,
-    operation: CreatorOperation,
-    exec: WorkflowExec,
-  ): Promise<CreatorFoundationPreflight> {
-    try {
-      const parent = this.requireParentAgent(exec)
-      return await this.creatorFoundation.preflight({
-        ...(exec.signal ? { signal: exec.signal } : {}),
-        parentCtx: parent.ctx,
-        parentScope: parent,
-      })
-    } catch (error) {
-      this.rememberCreator(workflow, operation, 'unavailable')
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      throw error
-    }
-  }
-
-  private async preserveCancelledManagedWork(input: {
-    sourceId: string
-    workflowId: string
-    reviewId: string
-    cause: unknown
-  }): Promise<never> {
-    let checkpoint: SourceReceipt
-    try {
-      // Cancellation belongs to the user turn, not to Host cleanup.  Checkpoint
-      // with the runner's own bounded timeout so an already-aborted signal
-      // cannot strand a dirty tree behind a live workflow lock.
-      checkpoint = await this.sources.preserveInterruptedChild({
-        sourceId: input.sourceId,
-        workflowId: input.workflowId,
-        reviewId: input.reviewId,
-      })
-    } catch (preserveError) {
-      throw new EvolutionError(
-        'command_failed',
-        'Managed child was cancelled and its edits require explicit source recovery',
-        {
-          recoveryRequired: true,
-          cancelled: true,
-          sourceId: input.sourceId,
-          childDiagnostic: hashObject({ cause: input.cause instanceof Error ? input.cause.message : String(input.cause) }),
-          preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
-        },
-      )
-    }
-    throw new EvolutionError(
-      'command_failed',
-      'Managed child was cancelled; its bounded edits were checkpointed for recovery',
-      {
-        recoveryRequired: true,
-        cancelled: true,
-        sourceId: input.sourceId,
-        branch: checkpoint.branch,
-        headCommit: checkpoint.headCommit,
-      },
-    )
-  }
-
-  private async reviewAndFreezeManagedSource(input: {
-    resolution: ResolutionRecord
-    sourceId: string
-    path: string
-    baseReviewId: string
-    lineageRootCommit: string
-    workflowId: string
-    exec: WorkflowExec
-  }): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
-    const runtimeVersion = await this.dshRuntimeVersion(input.resolution.cwd, input.exec.signal)
-    const local = await reviewLocalPlugin({
-      runner: this.runner,
-      config: this.config,
-      // The receipt has already bound this exact managed path. Its parent is
-      // the narrowest valid review root and preserves legacy stateDir sources.
-      workspaceRoot: path.dirname(input.path),
-      path: input.path,
-      baseReviewId: input.baseReviewId,
-      lineageRootCommit: input.lineageRootCommit,
-      resolutionId: input.resolution.id,
-      requirement: input.resolution.requirement,
-      ...(runtimeVersion ? { runtimeVersion } : {}),
-    })
-    const artifactRoot = path.join(resolveStateRoot(this.config, input.resolution.cwd), 'review-artifacts', `${local.record.id}-${randomUUID()}`)
-    const materialized = await this.launcher.materializeLocal(local.record, artifactRoot, input.exec.signal)
-    const review: ReviewRecord = { ...local.record, installSpec: materialized.installSpec }
-    await this.store.put('reviews', review)
-    await this.sources.recordReviewedArtifact({
-      sourceId: input.sourceId,
-      workflowId: input.workflowId,
-      reviewId: review.id,
-      artifactHash: materialized.artifactSha256,
-    })
-    const waiting = withNextStep(this.waitingConfirmation(input.resolution, review))
-    await this.store.put('resolutions', waiting)
-    return { resolution: waiting, review }
+  private revalidate(review: ReviewRecord, signal?: AbortSignal): Promise<boolean> {
+    return revalidateReview(this.managedWorkDeps(), review, signal)
   }
 
   async prepareModify(
@@ -1308,63 +690,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }> {
-    const preflight = await this.preflightCreator(workflow, 'modify', exec)
-    let sourceKey = workflow.managedSourceId
-    if (!sourceKey && review.sourceSnapshot.kind === 'local') {
-      const managed = await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
-      if (!managed || managed.reviewId !== review.id) {
-        throw new EvolutionError('invalid_input', 'Local review is not the current tip of a managed source')
-      }
-      sourceKey = managed.sourceId
-    }
-    let receipt: SourceReceipt
-    if (sourceKey) {
-      const completed = await this.sources.inspectCompletedSource(sourceKey, exec.signal)
-      if (completed) {
-        if (completed.reviewId !== review.id) {
-          throw new EvolutionError('invalid_input', 'Completed managed source is not the current reviewed tip')
-        }
-        receipt = await this.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
-      } else {
-        receipt = await this.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
-      }
-    } else if (review.sourceSnapshot.kind === 'github') {
-      sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
-      const completed = await this.sources.inspectCompletedSource(sourceKey, exec.signal)
-      const reuseHere = Boolean(completed
-        && completed.repository?.toLowerCase() === review.sourceSnapshot.repository.toLowerCase()
-        && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()
-        && this.sources.pathUnderSourceRoot(completed.path, resolution.cwd))
-      if (reuseHere && completed) {
-        receipt = await this.sources.claimCompletedSourceForWorkflow(sourceKey, workflow.id, exec.signal)
-      } else {
-        receipt = await this.sources.materializeReviewedGithub({
-          review,
-          workflowId: workflow.id,
-          workspaceCwd: resolution.cwd,
-          ...(exec.signal ? { signal: exec.signal } : {}),
-        })
-      }
-    } else {
-      throw new EvolutionError('invalid_input', 'Local modification requires a managed source receipt')
-    }
-    workflow.managedSourceId = sourceKey
-    const parent = this.requireParentAgent(exec)
-    const workOrder = modificationWorkOrder(
-      resolution,
-      review,
-      receipt.path,
-      undefined,
-      false,
-      workflow.candidateSnapshot?.find((item) => item.evolutionTarget)?.evolutionTarget?.kind,
-    )
-    await this.store.put('reviews', review)
-    workflow.pendingPath = receipt.path
-    workflow.pendingWorkOrder = workOrder
-    this.rememberCreator(workflow, workOrder.operation, 'verified', mintCreatorReceipt(preflight, parent.id))
-    workflow.updatedAt = new Date().toISOString()
-    await this.store.put('workflows', workflow)
-    return { resolution, path: receipt.path }
+    return prepareManagedModification(this.managedWorkDeps(), resolution, review, exec, workflow)
   }
 
   async prepareCreate(
@@ -1372,63 +698,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }> {
-    const preflight = await this.preflightCreator(workflow, 'create', exec)
-    const sourceKey = sourceIdForCreate(resolution.id)
-    const receipt = await this.sources.initializeCreateSource({
-      resolutionId: resolution.id,
-      workflowId: workflow.id,
-      workspaceCwd: resolution.cwd,
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    workflow.managedSourceId = sourceKey
-    let reviewId = `scaffold_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 24)}`
-    try {
-      const scaffoldBaseId = `review_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 64)}`
-      const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, exec.signal)
-      const scaffold = await reviewLocalPlugin({
-        runner: this.runner,
-        config: this.config,
-        workspaceRoot: this.sources.sourceRootFor(resolution.cwd),
-        path: receipt.path,
-        baseReviewId: scaffoldBaseId,
-        lineageRootCommit: receipt.baseCommit,
-        resolutionId: resolution.id,
-        requirement: resolution.requirement,
-        ...(runtimeVersion ? { runtimeVersion } : {}),
-      })
-      reviewId = scaffold.record.id
-      await this.store.put('reviews', scaffold.record)
-      workflow.lastReviewId = scaffold.record.id
-      workflow.lineageTipReviewId = scaffold.record.id
-      const workOrder = createCreatorWorkOrder({
-        operation: 'create',
-        requirement: resolution.requirement,
-        cwd: receipt.path,
-        acceptanceTargets: [
-          'Implement the requirement on the trusted scaffold as a complete DSH plugin bundle',
-          'Add focused tests or self-checks where practical',
-          'Do not install, publish, or claim success from this construction phase',
-        ],
-      })
-      const parent = this.requireParentAgent(exec)
-      workflow.pendingPath = receipt.path
-      workflow.pendingWorkOrder = workOrder
-      this.rememberCreator(workflow, 'create', 'verified', mintCreatorReceipt(preflight, parent.id))
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      return { resolution, path: receipt.path }
-    } catch (error) {
-      this.rememberCreator(workflow, 'create', 'unavailable')
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      if (!exec.signal?.aborted) throw error
-      return await this.preserveCancelledManagedWork({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId,
-        cause: error,
-      })
-    }
+    return prepareManagedCreation(this.managedWorkDeps(), resolution, exec, workflow)
   }
 
   async finishManagedWork(
@@ -1436,162 +706,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord; continueConstruction?: boolean }> {
-    const sourceKey = workflow.managedSourceId
-    const cwd = workflow.pendingPath
-    const workOrder = workflow.pendingWorkOrder
-    if (!sourceKey || !cwd || !workOrder) {
-      throw new EvolutionError('invalid_input', 'In-session construction is missing a Host-managed source and work order')
-    }
-    if (exec.signal?.aborted) {
-      this.rememberCreator(workflow, workOrder.operation, 'unavailable')
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      return await this.preserveCancelledManagedWork({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: workOrder.baselineReview?.reviewId ?? workflow.lineageTipReviewId ?? workflow.lastReviewId ?? 'unknown',
-        cause: new EvolutionError('command_failed', 'Managed construction was cancelled'),
-      })
-    }
-    assertWorkOrderScope(workOrder, cwd)
-    const parent = this.requireParentAgent(exec)
-    const preflight = await this.preflightCreator(workflow, workOrder.operation, exec)
-    const receipt = mintCreatorReceipt(preflight, parent.id)
-    assertCreatorReceipt(receipt, preflight)
-    this.rememberCreator(workflow, workOrder.operation, 'verified', receipt)
-    const baselineReviewId = workOrder.baselineReview?.reviewId
-      ?? workflow.lineageTipReviewId
-      ?? workflow.lastReviewId
-    if (!baselineReviewId) {
-      throw new EvolutionError('invalid_input', 'In-session construction is missing a baseline review')
-    }
-    const baselineReview = await this.store.getReview(baselineReviewId)
-    const source = await this.sources.readReceipt(sourceKey)
-    if (!source || source.activeWorkflowId !== workflow.id) {
-      throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
-    }
-    try {
-      const committed = await this.sources.finalizeChildCommit({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: baselineReview.id,
-        message: workOrder.operation === 'create'
-          ? `feat: implement AutoEvo workflow ${workflow.id}`
-          : workOrder.operation === 'correct'
-            ? `fix: complete AutoEvo workflow ${workflow.id}`
-            : `fix: satisfy AutoEvo workflow ${workflow.id}`,
-        ...(exec.signal ? { signal: exec.signal } : {}),
-      })
-      const finalized = await this.reviewAndFreezeManagedSource({
-        resolution,
-        sourceId: sourceKey,
-        path: source.path,
-        baseReviewId: baselineReview.id,
-        lineageRootCommit: source.baseCommit,
-        workflowId: workflow.id,
-        exec,
-      })
-      const attempt = (workflow.modificationOutcome?.attempts.length ?? 0) + 1
-      if (workOrder.operation === 'create') {
-        delete workflow.pendingWorkOrder
-        workflow.lastReviewId = finalized.review.id
-        workflow.lineageTipReviewId = finalized.review.id
-        workflow.updatedAt = new Date().toISOString()
-        await this.store.put('workflows', workflow)
-        return { ...finalized, path: source.path }
-      }
-      const baselineBlockers = modificationBlockers(
-        workflow.modificationOutcome
-          ? await this.store.getReview(workflow.modificationOutcome.baselineReviewId)
-          : baselineReview,
-      )
-      const outcomeBaseline = workflow.modificationOutcome
-        ? await this.store.getReview(workflow.modificationOutcome.baselineReviewId)
-        : baselineReview
-      const instruction = authenticatedModificationInstruction(resolution, outcomeBaseline)
-      const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
-      const attempts: ModificationAttemptEvidence[] = [
-        ...(workflow.modificationOutcome?.attempts ?? []),
-        {
-          attempt,
-          childSessionId: parent.id,
-          commit: committed.headCommit,
-          changedFiles: committed.changedFiles,
-          changedFilesTruncated: committed.changedFilesTruncated,
-          postReviewId: finalized.review.id,
-          completionMarkerObserved: true,
-          checks: {
-            source: 'unknown',
-            status: 'unknown',
-            summary: 'Host did not independently observe a test command result.',
-          },
-        },
-      ]
-      const acceptance = modificationAcceptance({
-        baselineReview: outcomeBaseline,
-        baselineBlockers,
-        postReview: finalized.review,
-        meaningfulInstruction,
-        attempt,
-      })
-      const outcome: ModificationOutcome = {
-        contractVersion: 1,
-        policyVersion: outcomeBaseline.policyVersion,
-        baselineReviewId: outcomeBaseline.id,
-        ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
-        baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
-        maxAttempts: 2,
-        automaticCorrectionUsed: attempt > 1,
-        status: acceptance.status,
-        attempts,
-        resolvedBlockers: acceptance.resolved,
-        unresolvedBlockers: acceptance.unresolved,
-        introducedBlockers: acceptance.introduced,
-      }
-      workflow.modificationOutcome = outcome
-      workflow.lastReviewId = finalized.review.id
-      workflow.lineageTipReviewId = finalized.review.id
-      if (outcome.status === 'unresolved' && !acceptance.canCorrect) {
-        workflow.lastFailure = {
-          stage: 'review',
-          code: acceptance.introduced.length > 0 ? 'modify_introduced_blocker' : 'modify_targets_unresolved',
-          message: acceptance.introduced.length > 0
-            ? `Host re-review found ${acceptance.introduced.length} new blocking modification target(s); automatic correction stopped without expanding scope.`
-            : `Host re-review still reports ${acceptance.unresolved.length} original modification target(s) after one focused correction.`,
-          retryable: false,
-        }
-      } else {
-        delete workflow.lastFailure
-      }
-      if (acceptance.canCorrect) {
-        workflow.pendingWorkOrder = modificationWorkOrder(
-          finalized.resolution,
-          outcomeBaseline,
-          source.path,
-          acceptance.unresolved,
-          true,
-        )
-        workflow.pendingPath = source.path
-        workflow.updatedAt = new Date().toISOString()
-        await this.store.put('workflows', workflow)
-        return { ...finalized, path: source.path, continueConstruction: true }
-      }
-      delete workflow.pendingWorkOrder
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      return { ...finalized, path: source.path }
-    } catch (error) {
-      this.rememberCreator(workflow, workOrder.operation, 'unavailable')
-      workflow.updatedAt = new Date().toISOString()
-      await this.store.put('workflows', workflow)
-      if (!exec.signal?.aborted) throw error
-      return await this.preserveCancelledManagedWork({
-        sourceId: sourceKey,
-        workflowId: workflow.id,
-        reviewId: baselineReviewId,
-        cause: error,
-      })
-    }
+    return finishManagedWork(this.managedWorkDeps(), resolution, exec, workflow)
   }
 
   async applyDecision(
@@ -1751,106 +866,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     // Lock release is Host cleanup. It must outlive an aborted user turn and is
     // already bounded by the command runner's timeout.
     await this.sources.completeWorkflow(workflow.managedSourceId, workflow.id)
-  }
-
-  private waitingConfirmation(
-    resolution: ResolutionRecord,
-    review: ReviewRecord,
-    workflow?: WorkflowRecord,
-  ): ResolutionRecord {
-    const chinese = prefersChinese(resolution.requirement)
-    const usable = isDirectlyUsableReview(review, workflow)
-    const authorization: ResolutionAuthorization = {
-      state: 'confirmation_required',
-      resolutionId: resolution.id,
-      reason: chinese
-        ? usable
-          ? '审查已完成。简要比较候选并等待用户明确选择安装、修改、新建或先停。'
-          : '审查已完成，但当前候选不能直接安装。简要说明阻断项，并等待用户选择修改、继续比较、新建或先停。'
-        : usable
-          ? 'Review finished. Compare the candidates briefly, then wait for an explicit install, modify, create, or stop decision.'
-          : 'Review finished, but the current candidate is not directly installable. Explain the blockers briefly, then wait for modify, compare, create, or stop.',
-      selectedRepositories: resolution.selectedRepositories ?? [],
-      reviewId: review.id,
-      reviewIdentity: reviewIdentity(review),
-    }
-    return {
-      ...resolution,
-      authorization,
-      reasons: [...resolution.reasons, authorization.reason],
-    }
-  }
-
-  private async revalidate(review: ReviewRecord, signal?: AbortSignal): Promise<boolean> {
-    let lastError: unknown
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const resolution = await this.store.getResolution(review.resolutionId)
-        const runtimeVersion = await this.dshRuntimeVersion(resolution.cwd, signal)
-        let current: ReviewRecord
-        if (review.sourceSnapshot.kind === 'github') {
-          current = await reviewGithubPlugin({
-            runner: this.runner,
-            config: this.config,
-            cwd: resolution.cwd,
-            repository: review.sourceSnapshot.repository,
-            ref: review.sourceSnapshot.commit,
-            resolutionId: resolution.id,
-            requirement: resolution.requirement,
-            ...(runtimeVersion ? { runtimeVersion } : {}),
-            ...(signal ? { signal } : {}),
-          })
-        } else {
-          const prior = await this.store.listReviews(resolution.id)
-          const managed = await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
-          const root = managed ? undefined : lineageRootReview(review, prior)
-          if (!managed && root?.sourceSnapshot.kind !== 'github') return false
-          const lineageRootCommit = managed?.baseCommit
-            ?? (root?.sourceSnapshot.kind === 'github' ? root.sourceSnapshot.commit : undefined)
-          if (!lineageRootCommit) return false
-          current = (await reviewLocalPlugin({
-            runner: this.runner,
-            config: this.config,
-            workspaceRoot: managed ? path.dirname(review.sourceSnapshot.path) : resolution.cwd,
-            path: review.sourceSnapshot.path,
-            baseReviewId: review.sourceSnapshot.baseReviewId,
-            lineageRootCommit,
-            resolutionId: resolution.id,
-            requirement: resolution.requirement,
-            ...(runtimeVersion ? { runtimeVersion } : {}),
-          })).record
-        }
-        return hashObject(materialReviewFacts(current)) === hashObject(materialReviewFacts(review))
-      } catch (error) {
-        if (signal?.aborted) throw error
-        lastError = error
-      }
-    }
-    throw new EvolutionError(
-      'command_failed',
-      'Review revalidation could not complete after retry; the previous review was not marked expired',
-      {
-        causeCode: lastError instanceof EvolutionError ? lastError.code : 'command_failed',
-        diagnosticHash: hashObject({ cause: lastError instanceof Error ? lastError.message : String(lastError) }),
-      },
-    )
-  }
-
-  private async dshRuntimeVersion(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
-    try {
-      const result = await this.runner.run({
-        argv: [this.config.dshCommand, ...this.config.dshCommandArgs, '--version'],
-        cwd,
-        allowFailure: true,
-        timeoutMs: this.config.commandTimeoutMs,
-        ...(signal ? { signal } : {}),
-      })
-      if (result.exitCode !== 0) return undefined
-      const candidate = result.stdout.trim().split(/\s+/u)[0]
-      return candidate ? valid(candidate) ?? undefined : undefined
-    } catch {
-      return undefined
-    }
   }
 }
 

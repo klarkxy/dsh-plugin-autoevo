@@ -190,7 +190,7 @@ async function assertPackedPolicyV8(packedRoot) {
   assert.match(state, /Policy V8 discovery/u)
 
   const preset = await readFile(path.join(packedRoot, 'presets', 'evolution', 'agent.cordis.yml'), 'utf8')
-  assert.match(preset, /Policy V8/u)
+  assert.match(preset, /official Creator plus AutoEvo governance/u)
   assert.match(preset, /awaiting a user test/u)
   assert.doesNotMatch(preset, /independent semantic verifier/u)
 }
@@ -206,10 +206,11 @@ try {
   const tarball = await realpath(path.join(packDir, tarballs[0]))
   const extractDir = path.join(blankHome, 'extracted')
   await mkdir(extractDir, { recursive: true })
+  const tarPath = (value) => value.replaceAll('\\', '/')
   try {
-    await run('tar', ['-xzf', tarball, '-C', extractDir])
+    await run('tar', ['--force-local', '-xzf', tarPath(tarball), '-C', tarPath(extractDir)])
   } catch {
-    await run('tar', ['-xf', tarball, '-C', extractDir])
+    await run('tar', ['--force-local', '-xf', tarPath(tarball), '-C', tarPath(extractDir)])
   }
   const packedRoot = path.join(extractDir, 'package')
   await assertPackedPolicyV8(packedRoot)
@@ -248,8 +249,8 @@ try {
     env: dshEnv,
     timeoutMs: 300_000,
   })
-  assert.match(result.stdout, /AUTOEVO_PACKAGED_V13_SESSION_OK/u)
-  const evidenceLine = result.stdout.split(/\r?\n/u).find((line) => line.includes('AUTOEVO_PACKAGED_V13_SESSION_OK'))
+  assert.match(result.stdout, /AUTOEVO_PACKAGED_SESSION_OK/u)
+  const evidenceLine = result.stdout.split(/\r?\n/u).find((line) => line.includes('AUTOEVO_PACKAGED_SESSION_OK'))
   assert.ok(evidenceLine)
   const evidence = JSON.parse(evidenceLine)
   assert.equal(evidence.preset, 'evolution')
@@ -269,7 +270,7 @@ try {
   assert.equal(evidence.recoverInterruptOptional, true)
 
   const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
-  assert.equal(manifest.templateVersion, '13')
+  assert.equal(manifest.templateVersion, '14')
   process.stdout.write(`${JSON.stringify({
     status: 'passed',
     installedFrom: path.basename(tarball),

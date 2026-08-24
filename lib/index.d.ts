@@ -1254,6 +1254,9 @@ declare function hostLayerSuccess(input: {
 }): boolean;
 declare function verificationChildEnv(dshHome: string, parent?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 //#endregion
+//#region src/semantic-host.d.ts
+declare function requirementHashFor(requirement: string): string;
+//#endregion
 //#region src/semantic-verifier.d.ts
 declare const VERIFIER_SUBMIT_TOOL = "autoevo_submit_verification";
 declare const VERIFIER_VERSION = "1";
@@ -1302,6 +1305,7 @@ declare function verificationVerdictAllowsCompletion(verdict: VerificationVerdic
   requirement: string;
   evidenceDigest: string;
 }): boolean;
+/** Real Host-owned DSH semantic verifier lifecycle. */
 declare class DshSemanticVerifierHost implements SemanticVerifierHost {
   private readonly ctx;
   constructor(ctx: Context);
@@ -1764,48 +1768,6 @@ interface ManagedChildHost {
   run(request: ManagedChildRequest): Promise<ManagedChildResult>;
 }
 //#endregion
-//#region src/semantic-reviewer.d.ts
-declare const REVIEWER_SUBMIT_TOOL = "autoevo_submit_review";
-declare const REVIEWER_VERSION = "1";
-interface BoundedReviewFile {
-  path: string;
-  sha256: string;
-  bytes: number;
-  text: string;
-}
-/** Internal Host input. Never accepted on ResumeInput. */
-interface ReviewerRunInput {
-  parent: Agent;
-  workflowId: string;
-  review: ReviewRecord;
-  candidateDigest: string;
-  snapshotDigest: string;
-  files: readonly BoundedReviewFile[];
-  signal?: AbortSignal;
-  timeoutMs: number;
-}
-interface SemanticReviewerResult {
-  request: ReviewerRequest;
-  verdict: ReviewerVerdict;
-}
-interface SemanticReviewerHost {
-  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
-}
-declare function requirementHashFor(requirement: string): string;
-declare function mintReviewerRequest(input: {
-  workflowId: string;
-  review: ReviewRecord;
-  snapshotDigest: string;
-  candidateDigest: string;
-  createdAt?: string;
-}): ReviewerRequest;
-/** Real Host-owned DSH semantic reviewer lifecycle. */
-declare class DshSemanticReviewerHost implements SemanticReviewerHost {
-  private readonly ctx;
-  constructor(ctx: Context);
-  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
-}
-//#endregion
 //#region src/source-manager.d.ts
 interface SourceReceipt {
   sourceId: string;
@@ -1834,7 +1796,7 @@ declare class SourceManager {
   private legacyLockPath;
   /** Explicit `sourceDir` override, or `<workspace>/.autoevo/sources`; Host control remains under stateDir. */
   sourceRootFor(workspaceCwd?: string): string;
-  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir tests. */
+  /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir unit and integration tests. */
   get sourceRoot(): string;
   sourcePath(sourceId: string, workspaceCwd?: string): string;
   /** True when `candidate` is inside the managed sources root for this session. */
@@ -1923,6 +1885,47 @@ declare class SourceManager {
   }): Promise<SourceReceipt>;
 }
 //#endregion
+//#region src/semantic-reviewer.d.ts
+declare const REVIEWER_SUBMIT_TOOL = "autoevo_submit_review";
+declare const REVIEWER_VERSION = "1";
+interface BoundedReviewFile {
+  path: string;
+  sha256: string;
+  bytes: number;
+  text: string;
+}
+/** Internal Host input. Never accepted on ResumeInput. */
+interface ReviewerRunInput {
+  parent: Agent;
+  workflowId: string;
+  review: ReviewRecord;
+  candidateDigest: string;
+  snapshotDigest: string;
+  files: readonly BoundedReviewFile[];
+  signal?: AbortSignal;
+  timeoutMs: number;
+}
+interface SemanticReviewerResult {
+  request: ReviewerRequest;
+  verdict: ReviewerVerdict;
+}
+interface SemanticReviewerHost {
+  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
+}
+declare function mintReviewerRequest(input: {
+  workflowId: string;
+  review: ReviewRecord;
+  snapshotDigest: string;
+  candidateDigest: string;
+  createdAt?: string;
+}): ReviewerRequest;
+/** Real Host-owned DSH semantic reviewer lifecycle. */
+declare class DshSemanticReviewerHost implements SemanticReviewerHost {
+  private readonly ctx;
+  constructor(ctx: Context);
+  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
+}
+//#endregion
 //#region src/service.d.ts
 declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly ctx;
@@ -1937,6 +1940,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly engine;
   private readonly creatorFoundation;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
+  private managedWorkDeps;
   private withWorkspace;
   start(requirement: string, exec: ToolRunContext, intent?: RequestIntent): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -1978,11 +1982,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
-  private requireParentAgent;
-  private rememberCreator;
-  private preflightCreator;
-  private preserveCancelledManagedWork;
-  private reviewAndFreezeManagedSource;
+  private revalidate;
   prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
@@ -2009,9 +2009,6 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private currentProfileOwner;
   private persistReviewed;
   releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void>;
-  private waitingConfirmation;
-  private revalidate;
-  private dshRuntimeVersion;
 }
 //#endregion
 //#region src/index.d.ts

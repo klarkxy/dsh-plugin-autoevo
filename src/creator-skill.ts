@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { Context } from '@deepseek-ai/cordis'
-import type { SkillDefinition, SkillRegistration } from '@deepseek-ai/dsh-skill'
+import type { SkillRegistration } from '@deepseek-ai/dsh-skill'
 import { parse } from 'yaml'
 
 export const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
@@ -45,16 +44,6 @@ export function creatorSkillRegistration(): SkillRegistration {
     path: CREATOR_SKILL_PATH,
     resourceBase: { kind: 'directory', path: CREATOR_SKILL_DIRECTORY },
   }
-}
-
-export function isAutoEvoCreatorSkill(skill: Pick<SkillDefinition, 'name' | 'provider' | 'content'>): boolean {
-  return skill.name === CREATOR_SKILL_NAME
-    && skill.provider === CREATOR_SKILL_PROVIDER
-    && skill.content.includes(CREATOR_SKILL_MARKER)
-}
-
-export function registerCreatorSkill(ctx: Context): () => void {
-  return ctx.skills.register(creatorSkillRegistration())
 }
 
 export function isWorkflowSkill(name: string): boolean {

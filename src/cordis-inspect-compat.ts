@@ -7,6 +7,10 @@
  * rejects duplicate ids. Share only first-party registrations with equivalent
  * manifest and query implementations, and keep their underlying registration
  * alive until the final preset releases it.
+ *
+ * TODO: revisit this seam when the DSH dependency moves past rc.6 — if the
+ * registry dedupes standing preset mounts itself, delete this module and its
+ * install call in index.ts (see tests/unit/cordis-inspect-compat.spec.ts).
  */
 
 const SHAREABLE_PROVIDER_IDS = new Set(['Service', 'Event', 'Builtin', 'Tool'])
@@ -151,5 +155,3 @@ export function installCordisInspectCompatibility(
     if (patch.references === 0) patch.release()
   })
 }
-
-export const _testing = { manifestFingerprint, queryFingerprint, registrationFingerprint }

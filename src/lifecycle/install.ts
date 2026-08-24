@@ -819,9 +819,9 @@ export class PluginInstaller {
       )
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
 
-    // Workflow currently treats only `verified` as graph success. `activated`
-    // and `awaiting_user_test` are the Host install outcomes for
-    // bundle_activation / manual_runtime; cursor mapping is a later node.
+    // Workflow maps `verified` to the installed/restart_required success nodes;
+    // `activated` and `awaiting_user_test` (Host install outcomes for
+    // bundle_activation / manual_runtime) map to their own distinct success nodes.
     let installOutcome: InstallOutcome
     if (runtimeRecoveryRequired) installOutcome = 'recovery_required'
     else if (verified) installOutcome = 'verified'
