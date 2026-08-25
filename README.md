@@ -74,6 +74,8 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 `installed` 或 `loaded` 不等于功能已验证；只有 `verified` 才能这样表述。完整状态和恢复步骤见[使用指南](docs/user-guide.md#5-结果状态与下一步)。
 
+AutoEvo 还跟踪每个包的安装版本链：`capability_versions` 列出版本，`capability_rollback` 回滚到历史版本（仍走标准批准安装），`capability_adopt` 把工作流外手工安装的插件登记入台账，`capability_updates` 只读检查上游更新。详见[使用指南 §4.6](docs/user-guide.md#46-版本领养与上游更新)。
+
 ## 安全边界
 
 - 发现、审查和诊断默认只读；安装、移除、修改和新建需要真实用户决定，副作用还需 DSH 一次性批准；安装的第三方代码最终以当前用户权限运行。

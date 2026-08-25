@@ -33,6 +33,9 @@ export const HARD_SKIP_FINDING_CODES = new Set([
 /** Lexical/regex observations that require a semantic reviewer, not a Host skip. */
 export const SEMANTIC_CONTEXT_FINDING_CODES = new Set([
   'prompt_injection',
+  'hidden_instructions',
+  'data_exfiltration',
+  'credential_access',
   'dynamic_evaluation',
 ])
 
@@ -462,31 +465,90 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
       if (protocol) findings.push(finding('non_registry_dependency', 'warning', 'package.json', `${group} entry ${name} uses ${protocol.toLowerCase()} source`, packageHash))
     }
   }
+  const INVISIBLE_UNICODE = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u2066-\u2069]/u
+  const UNICODE_TAGS = /[\u{E0000}-\u{E007F}]/u
+  const COMMENTED_INSTRUCTION = /<!--[\s\S]*?\b(?:ignore|bypass|override|instructions?|system\s+prompt|assistant|agent|llm)\b[\s\S]*?-->/i
+  const EMBEDDED_DATA_URI = /data:[\w/+.-]{1,64};base64,[A-Za-z0-9+/]{100,}={0,2}/i
+  const LONG_BASE64_BLOB = /[A-Za-z0-9+/]{200,}={0,2}/
+  const PROMPT_INJECTION = /ignore\s+(?:all\s+)?previous\s+instructions|(?:disregard|forget)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|messages?)|system\s+message|you\s+are\s+chatgpt|do\s+not\s+obey|never\s+refuse\b|always\s+comply\b|do\s+not\s+(?:warn|lecture|moralize)\b|(?:developer|god|jailbreak)\s+mode\s+(?:is\s+)?(?:enabled|activated|unlocked)\b|(?:enable|activate|enter)\s+(?:developer|god|jailbreak)\s+mode\b/i
+  const EXFIL_ENDPOINT = /discord(?:app)?\.com\/api\/webhooks|webhook\.site|requestbin\.(?:com|net)|ngrok[\w-]*\.(?:io|app|com|dev)|api\.telegram\.org/i
+  const EXFIL_INSTRUCTION = /(?:send|post|upload|forward|exfiltrate)\w*\s+(?:(?:the|all|your|their|this)\s+)*(?:conversation|chat|context|history|credentials?|secrets?|environment|env)(?:\s+(?:history|data|logs?|records?|files?))?\s+(?:to|into)\s+(?:an?\s+)?(?:external|remote|third[\s-]?party|https?:\/\/)/i
+  const CREDENTIAL_PATHS = /\.ssh\/id_[\w.-]*|\.aws\/credentials|\.git-credentials|\.netrc\b|\/etc\/shadow\b/i
+  const ENV_HARVEST = /Object\.(?:keys|entries|values)\s*\(\s*process\.env\s*\)|\{\s*\.\.\.process\.env\s*\}/
+  const DYNAMIC_EVAL = /(?:\b|new\s+)(?:globalThis\.)?Function\s*\(|(?:^|[^\w.$])eval\s*\(/m
+  const OBFUSCATED_IDENTIFIER = /_0x[0-9a-f]{4,}/
+  const PIPE_TO_SHELL = /\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|node|python[\d.]*)\b/i
+  const EVAL_REMOTE_FETCH = /\beval\s*\(\s*await\s+fetch\s*\(|new\s+Function\s*\(\s*await\s+fetch\s*\(/
+  const TLS_DISABLED = /rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['"]?0|\bcurl\b[^\n]*\s-k(?:\s|$)|--insecure\b|strict-ssl\s*=\s*false/i
+  const DESTRUCTIVE_OPERATION = /\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(?:\/(?:\s|['"]|$)|~(?=\s|['"]|$)|\$HOME\b)|\bdel\s+\/f\s+\/s\s+\/q\b|\bgit\s+push\b[^\n]*\s--force\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[a-z]*f[a-z]*d[a-z]*x\b/i
+  const PERSISTENCE_MECHANISM = /\bcrontab\b|~\/.(?:bashrc|zshrc|profile)\b|\/etc\/systemd\/|\blaunchctl\b|\w\.plist['"\s]|CurrentVersion\\\\Run\b|\bnohup\b|\bsetsid\b/i
+  const CLOUD_METADATA = /169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200/
   for (const file of files) {
     const extension = path.posix.extname(file.path).toLowerCase()
     const executableSource = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx']).has(extension)
     const testOnly = /(^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:spec|test)\.[cm]?[jt]sx?$/i.test(file.path)
-    if (!executableSource || testOnly || file.path.endsWith('.d.ts')) continue
     const text = Buffer.from(file.content).toString('utf8')
     const fileHash = sha256(file.content)
-    if (executableSource) {
-      const childProcessImport = /(?:from\s*['"](?:node:)?child_process['"]|require\s*\(\s*['"](?:node:)?child_process['"]\s*\))/i.test(text)
-      const processExecution = /\b(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(|\b\w+\.(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(/.test(text)
-      if (childProcessImport) findings.push(finding('child_process', 'warning', file.path, 'imports child_process', fileHash))
-      if (childProcessImport && processExecution) {
-        findings.push(finding('process_execution', 'warning', file.path, 'invokes an imported process execution API', fileHash))
-      }
-      if (/(?:\b|new\s+)(?:globalThis\.)?Function\s*\(|(?:^|[^\w.$])eval\s*\(/m.test(text)) {
-        findings.push(finding('dynamic_evaluation', 'block', file.path, 'uses dynamic evaluation', fileHash))
-      }
-      if (/\bprocess\.env\b/.test(text)) findings.push(finding('environment_access', 'warning', file.path, 'accesses process environment', fileHash))
-      if (/(?:from\s*['"](?:node:)?fs(?:\/promises)?['"]|require\s*\(\s*['"](?:node:)?fs(?:\/promises)?['"]\s*\))/i.test(text)) {
-        findings.push(finding('filesystem_access', 'warning', file.path, 'imports filesystem APIs', fileHash))
-      }
-      if (/\bfetch\s*\(|\b(?:curl|wget)\b/i.test(text)) findings.push(finding('network_access', 'warning', file.path, 'accesses network APIs', fileHash))
-      if (/ignore\s+(?:all\s+)?previous\s+instructions|system\s+message|you\s+are\s+chatgpt|do\s+not\s+obey/i.test(text)) {
-        findings.push(finding('prompt_injection', 'block', file.path, 'contains prompt-injection-like instruction text', fileHash))
-      }
+    // Text-surface rules scan every file: documentation and skill files are a
+    // classic carrier for hidden instructions and exfiltration lures.
+    if (INVISIBLE_UNICODE.test(text)) {
+      findings.push(finding('hidden_instructions', 'block', file.path, 'contains invisible or bidirectional Unicode formatting characters', fileHash))
+    } else if (UNICODE_TAGS.test(text)) {
+      findings.push(finding('hidden_instructions', 'block', file.path, 'contains Unicode tag block characters', fileHash))
+    } else if (COMMENTED_INSTRUCTION.test(text)) {
+      findings.push(finding('hidden_instructions', 'block', file.path, 'hides instruction-like text inside an HTML comment', fileHash))
+    } else if (EMBEDDED_DATA_URI.test(text) || (LONG_BASE64_BLOB.test(text) && !executableSource)) {
+      findings.push(finding('hidden_instructions', 'block', file.path, 'embeds an opaque encoded payload in text', fileHash))
+    } else if (text.includes('\0')) {
+      findings.push(finding('hidden_instructions', 'block', file.path, 'contains NUL bytes in text', fileHash))
+    }
+    if (PROMPT_INJECTION.test(text)) {
+      findings.push(finding('prompt_injection', 'block', file.path, 'contains prompt-injection-like instruction text', fileHash))
+    }
+    if (EXFIL_ENDPOINT.test(text)) {
+      findings.push(finding('data_exfiltration', 'block', file.path, 'references a known webhook or tunnel collection endpoint', fileHash))
+    } else if (EXFIL_INSTRUCTION.test(text)) {
+      findings.push(finding('data_exfiltration', 'block', file.path, 'instructs sending conversation or credential data to an external endpoint', fileHash))
+    }
+    if (!executableSource || testOnly || file.path.endsWith('.d.ts')) continue
+    const childProcessImport = /(?:from\s*['"](?:node:)?child_process['"]|require\s*\(\s*['"](?:node:)?child_process['"]\s*\))/i.test(text)
+    const processExecution = /\b(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(|\b\w+\.(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(/.test(text)
+    if (childProcessImport) findings.push(finding('child_process', 'warning', file.path, 'imports child_process', fileHash))
+    if (childProcessImport && processExecution) {
+      findings.push(finding('process_execution', 'warning', file.path, 'invokes an imported process execution API', fileHash))
+    }
+    if (DYNAMIC_EVAL.test(text)) {
+      findings.push(finding('dynamic_evaluation', 'block', file.path, 'uses dynamic evaluation', fileHash))
+    }
+    if (/\bprocess\.env\b/.test(text)) findings.push(finding('environment_access', 'warning', file.path, 'accesses process environment', fileHash))
+    if (/(?:from\s*['"](?:node:)?fs(?:\/promises)?['"]|require\s*\(\s*['"](?:node:)?fs(?:\/promises)?['"]\s*\))/i.test(text)) {
+      findings.push(finding('filesystem_access', 'warning', file.path, 'imports filesystem APIs', fileHash))
+    }
+    if (/\bfetch\s*\(|\b(?:curl|wget)\b/i.test(text)) findings.push(finding('network_access', 'warning', file.path, 'accesses network APIs', fileHash))
+    if (CREDENTIAL_PATHS.test(text)) {
+      findings.push(finding('credential_access', 'block', file.path, 'reads credential store paths', fileHash))
+    } else if (ENV_HARVEST.test(text)) {
+      findings.push(finding('credential_access', 'block', file.path, 'enumerates or spreads the process environment', fileHash))
+    }
+    if (OBFUSCATED_IDENTIFIER.test(text)) {
+      findings.push(finding('obfuscated_code', 'block', file.path, 'uses obfuscator-style hexadecimal identifiers', fileHash))
+    } else if (LONG_BASE64_BLOB.test(text) && DYNAMIC_EVAL.test(text)) {
+      findings.push(finding('obfuscated_code', 'block', file.path, 'combines a long encoded blob with dynamic evaluation', fileHash))
+    }
+    if (PIPE_TO_SHELL.test(text) || EVAL_REMOTE_FETCH.test(text)) {
+      findings.push(finding('remote_code_execution', 'block', file.path, 'downloads and executes remote code', fileHash))
+    }
+    if (TLS_DISABLED.test(text)) {
+      findings.push(finding('tls_verification_disabled', 'warning', file.path, 'disables TLS certificate verification', fileHash))
+    }
+    if (DESTRUCTIVE_OPERATION.test(text)) {
+      findings.push(finding('destructive_operation', 'warning', file.path, 'invokes destructive filesystem or git operations', fileHash))
+    }
+    if (PERSISTENCE_MECHANISM.test(text)) {
+      findings.push(finding('persistence_mechanism', 'warning', file.path, 'installs a persistence mechanism', fileHash))
+    }
+    if (CLOUD_METADATA.test(text)) {
+      findings.push(finding('cloud_metadata_access', 'block', file.path, 'queries a cloud instance metadata endpoint', fileHash))
     }
   }
   return findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source))

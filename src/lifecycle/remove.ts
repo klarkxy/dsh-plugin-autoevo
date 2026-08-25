@@ -44,14 +44,15 @@ async function requestRemovalApproval(
 
 async function removalRequirement(store: StateStore, record: InstallationRecord): Promise<string> {
   try {
-    return (await store.getReview(record.reviewId)).requirement
+    if (record.reviewId) return (await store.getReview(record.reviewId)).requirement
   } catch {
-    if (!record.workflowId) return ''
-    try {
-      return (await store.getWorkflow(record.workflowId)).requirement
-    } catch {
-      return ''
-    }
+    // Fall through to the workflow receipt below.
+  }
+  if (!record.workflowId) return ''
+  try {
+    return (await store.getWorkflow(record.workflowId)).requirement
+  } catch {
+    return ''
   }
 }
 

@@ -55,7 +55,7 @@ live E2E 会访问外部市场或 GitHub，不应在缺少网络/认证时冒充
 src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
-├─ contracts.ts                # Policy V8 公共合同、review/install receipts
+├─ contracts.ts                # Policy V9 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
 ├─ service-review.ts           # 审查编排与重验证
@@ -101,13 +101,13 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 2. 建立 `StateStore`、runner、`CreationGuard`、`ExecutionGuard` 与 `CapabilityEvolutionService`；
 3. 安全物化 `presets/evolution`；
 4. 注入固定复用策略和工具执行 hooks；
-5. 注册 `capability_workflow*` 与 `plugin_remove`。
+5. 注册 `capability_workflow*`、`capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates` 与 `plugin_remove`。
 
 提示词与 preset 是行为指导，不是权限边界。真实授权由 workflow receipts、fresh-turn guard、execution guard、ActionCommitment、ExecutionLease 和 DSH `allowed-once` approval 共同约束。
 
 ## 5. 工作流与两道确认门
 
-Policy 当前为 V8。状态机、两道确认门与生命周期映射以[架构说明](architecture.md#4-数据与状态) §4 为准；这里只列改动工作流时容易踩的边界：
+Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构说明](architecture.md#4-数据与状态) §4 为准；这里只列改动工作流时容易踩的边界：
 
 - 内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`；永远不要接受模型自报的 repository、review ID、路径或 install spec，`use_this` / `modify_this` 只绑定密封候选快照中的候选 ID。
 - 同回合重复 resume 不获得新授权；防重放失败不会消费当前合法 interrupt。

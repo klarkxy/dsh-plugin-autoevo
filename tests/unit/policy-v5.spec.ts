@@ -98,10 +98,10 @@ function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn
   }
 }
 
-describe('Policy V8 legacy invalidation', () => {
-  it('exports Policy V8 contracts and semantic hosts for consumers', () => {
-    expect(POLICY_VERSION).toBe('8')
-    expect(exportedPolicyVersion).toBe('8')
+describe('Policy V9 legacy invalidation', () => {
+  it('exports Policy V9 contracts and semantic hosts for consumers', () => {
+    expect(POLICY_VERSION).toBe('9')
+    expect(exportedPolicyVersion).toBe('9')
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')

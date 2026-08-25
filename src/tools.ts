@@ -87,6 +87,18 @@ function presentCapabilityToolCall(name: string, args: unknown): ToolCallView {
   if (name === 'plugin_remove') {
     return genericPendingCard(args, 'Removing the selected plugin', '正在移除所选插件', 'delete')
   }
+  if (name === 'capability_versions') {
+    return genericPendingCard(args, 'Listing installed versions of a capability', '正在列出能力的安装版本', 'read')
+  }
+  if (name === 'capability_rollback') {
+    return genericPendingCard(args, 'Rolling back to a previous installed version', '正在回滚到先前安装的版本', 'execute')
+  }
+  if (name === 'capability_adopt') {
+    return genericPendingCard(args, 'Adopting an unmanaged installed plugin into Host tracking', '正在把未登记的已装插件纳入托管台账', 'read')
+  }
+  if (name === 'capability_updates') {
+    return genericPendingCard(args, 'Checking upstream updates for tracked installations', '正在检查已跟踪安装的上游更新', 'read')
+  }
   if (name === 'capability_workflow_resume') return presentResumePendingCard(recordArgs(args))
   return genericPendingCard(args, 'Working on the capability request', '正在处理能力请求', 'other')
 }
@@ -272,6 +284,61 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           workflowId: args.workflow_id,
           ...(args.interrupt_id ? { interruptId: args.interrupt_id } : {}),
         }, exec) as WorkflowView) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_versions',
+      description: 'List the Host-tracked installation version chain for one capability package, newest lineage last, with the live active version and artifact availability. Read-only.',
+      parameters: {
+        package_name: { type: 'string', description: 'Exact package name. Either package_name or installation_id is required.' },
+        installation_id: { type: 'string', description: 'Any installation id of the package; resolves the package name from the receipt.' },
+      },
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_versions', args),
+      async execute(args) {
+        return await service.listVersions({
+          ...(args.package_name ? { packageName: args.package_name } : {}),
+          ...(args.installation_id ? { installationId: args.installation_id } : {}),
+        }) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_rollback',
+      description: 'Roll back one capability to a previously installed version by reinstalling its linked reviewed source through the standard approved install path. Defaults to the direct predecessor of the given current installation. Never bypasses user approval.',
+      parameters: {
+        installation_id: { type: 'string', required: true, description: 'The currently active installation id to roll back from.' },
+        target_installation_id: { type: 'string', description: 'The version to restore. Omit to use the direct predecessor.' },
+      },
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_rollback', args),
+      async execute(args, exec) {
+        return await service.rollback({
+          installationId: args.installation_id,
+          ...(args.target_installation_id ? { targetInstallationId: args.target_installation_id } : {}),
+        }, exec) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_adopt',
+      description: 'Without package_name, scan the current profile for installed plugins the Host does not track and list them. With package_name, register one such plugin as an adopted installation receipt so it becomes visible to capability_versions and capability_updates. Adopted receipts have no review and cannot be rolled back to.',
+      parameters: {
+        package_name: { type: 'string', description: 'Exact package name from the orphan scan. Omit to only list untracked installed plugins.' },
+      },
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_adopt', args),
+      async execute(args) {
+        if (!args.package_name) return await service.scanOrphans() as unknown as JsonValue
+        return await service.adopt({ packageName: args.package_name }) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_updates',
+      description: 'Read-only check comparing every tracked installation pinned to an exact GitHub commit against its upstream default-branch head and latest release. Reports update availability; never installs or upgrades anything.',
+      parameters: {},
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_updates', args),
+      async execute(_args, exec) {
+        return await service.checkUpdates(exec) as unknown as JsonValue
       },
     }),
     defineTool({

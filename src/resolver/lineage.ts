@@ -224,7 +224,7 @@ export function lineageCandidateFromRecords(input: {
       profile: bestInstall.targetProfile,
       dependencySpec: bestInstall.installSpec,
       installation: bestInstall,
-      reviewId: bestInstall.reviewId,
+      ...(bestInstall.reviewId ? { reviewId: bestInstall.reviewId } : {}),
     })
     if (!target) return undefined
     return knownSourceCandidate(packageName, parsed.repository, target, failed)

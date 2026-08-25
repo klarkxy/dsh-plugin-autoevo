@@ -246,6 +246,8 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       const diagnosticAvailable = Boolean(
         workflow.lastFailure
         || workflow.reviewFailures?.length
+        || workflow.status === 'failed'
+        || workflow.error
         || (resolution && !resolution.remoteDiscoveryComplete)
         || (installation
           && !installation.verified
@@ -436,11 +438,15 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           const installProfiles = workflow.cursor === 'await_confirmation'
             ? await this.host.listInstallProfiles?.() ?? []
             : []
+          const managedActionsAvailable = workflow.cursor === 'await_confirmation'
+            ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
+            : true
           const base = interruptPayload(workflow.cursor, resolution, reviews, {
             ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
             ...(installProfiles.length > 0 ? { installProfiles } : {}),
             ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
             workflow,
+            managedActionsAvailable,
           })
           const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
           if (!sessionId) {

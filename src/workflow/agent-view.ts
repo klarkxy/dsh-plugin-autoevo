@@ -496,6 +496,8 @@ export function compactAgentView(view: WorkflowView): AgentWorkflowViewV2 {
   const diagnosticAvailable = Boolean(
     view.workflow.lastFailure
     || view.workflow.reviewFailures?.length
+    || view.workflow.status === 'failed'
+    || view.workflow.error
     || (view.resolution && !view.resolution.remoteDiscoveryComplete)
     || (view.installation && !view.installation.verified && !successInstall),
   )

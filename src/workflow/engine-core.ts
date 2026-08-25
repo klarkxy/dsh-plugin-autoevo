@@ -179,7 +179,7 @@ export abstract class WorkflowEngineCore {
     workflow.lastFailure = {
       stage: 'workflow',
       code: 'policy_restart_required',
-      message: 'This workflow predates Policy V8. Call capability_workflow again to start a fresh discovery. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
+      message: 'This workflow predates Policy V9. Call capability_workflow again to start a fresh discovery. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
       retryable: false,
     }
     await this.checkpoint(workflow)
@@ -200,11 +200,15 @@ export abstract class WorkflowEngineCore {
     const installProfiles = workflow.cursor === 'await_confirmation'
       ? await this.host.listInstallProfiles?.() ?? []
       : []
+    const managedActionsAvailable = workflow.cursor === 'await_confirmation'
+      ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
+      : true
     const base = interruptPayload(workflow.cursor, resolution, reviews, {
       ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
       ...(installProfiles.length > 0 ? { installProfiles } : {}),
       ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
       workflow,
+      managedActionsAvailable,
     })
     const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
     if (!sessionId) {

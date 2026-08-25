@@ -69,6 +69,7 @@ export function interruptPayload(
     installProfiles?: string[]
     pendingPath?: string
     workflow?: WorkflowRecord
+    managedActionsAvailable?: boolean
   } = {},
 ): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
   if (cursor === 'await_selection') {
@@ -81,7 +82,8 @@ export function interruptPayload(
   if (cursor === 'await_confirmation') {
     return {
       kind: 'await_confirmation',
-      options: optionsFor('await_confirmation', resolution, reviews, extras.workflow, extras.installProfiles),
+      options: optionsFor('await_confirmation', resolution, reviews, extras.workflow, extras.installProfiles,
+        extras.managedActionsAvailable ?? true),
       facts: confirmationFacts(resolution, reviews, extras.workflow, extras),
     }
   }
@@ -571,7 +573,15 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
       const review = ctx.workflow.lastReviewId
         ? await ctx.host.getReview(ctx.workflow.lastReviewId)
         : undefined
-      if (!review) throw error
+      if (!review) {
+        ctx.workflow.lastFailure = {
+          stage: 'managed_child',
+          code: error instanceof EvolutionError ? error.code : 'command_failed',
+          message: error instanceof Error ? error.message : String(error),
+          retryable: error instanceof EvolutionError && error.code === 'command_failed',
+        }
+        throw error
+      }
       ctx.workflow.lastFailure = {
         stage: 'managed_child',
         code: error instanceof EvolutionError ? error.code : 'command_failed',

@@ -49,7 +49,7 @@ Keep one canonical procedure. Other files should summarize and link. Never turn 
 src/
 ├─ index.ts                    # Cordis/DSH entry and service composition
 ├─ config.ts                   # Public config schema/defaults
-├─ contracts.ts                # Policy V8 contracts and receipts
+├─ contracts.ts                # Policy V9 contracts and receipts
 ├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
 ├─ service-resolution.ts       # Resolution, candidate pool, authorization flow
 ├─ service-review.ts           # Review orchestration and revalidation
@@ -95,13 +95,13 @@ The package is ESM:
 2. Creating the `StateStore`, runner, `CreationGuard`, `ExecutionGuard`, and `CapabilityEvolutionService`;
 3. Safely materializing `presets/evolution`;
 4. Installing the fixed reuse policy and tool-execution hooks;
-5. Registering `capability_workflow*` and `plugin_remove`.
+5. Registering `capability_workflow*`, `capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates`, and `plugin_remove`.
 
 Prompts and presets are guidance, not authorization. Enforcement comes from persisted receipts, fresh-turn guards, execution guards, ActionCommitment/ExecutionLease, and one-time DSH approval.
 
 ## 5. Workflow and two gates
 
-Policy is V8. The state machine, both confirmation gates, and the lifecycle mapping are canonical in [Architecture](architecture.md#4-数据与状态) §4; this section only lists the boundaries developers most often trip over:
+Policy is V9. The state machine, both confirmation gates, and the lifecycle mapping are canonical in [Architecture](architecture.md#4-数据与状态) §4; this section only lists the boundaries developers most often trip over:
 
 - Internal graph cursors are not public lifecycle states. The model only sees the versioned `AgentWorkflowViewV2`; never accept model-supplied repositories, review IDs, paths, or install specs — `use_this` / `modify_this` bind only candidate IDs from the sealed snapshot.
 - Repeating resume within the same turn grants no new authorization; replay-protection failures do not consume the current valid interrupt.

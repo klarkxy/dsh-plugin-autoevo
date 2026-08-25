@@ -105,6 +105,15 @@ AutoEvo 不会为这一步启动隐藏子 Agent。历史失败或已移除来源
 
 任何确认门都可以明确停止。停止不会被当成安装或创建授权，DSH approval 也不能覆盖这个决定。聊天确认与 DSH approval 的分工见[常见问题](#9-常见问题)。
 
+### 4.6 版本、领养与上游更新
+
+AutoEvo 为每个包保留安装回执链。四个配套工具：
+
+- `capability_versions`：按包名列出 Host 记录的版本链，标出当前 live 版本与产物可用性，只读。
+- `capability_rollback`：回滚到该包的某个历史版本（缺省为直接前任）。走标准审查来源重装路径，仍需 DSH 一次性批准；没有关联审查的领养回执不能作为回滚目标。
+- `capability_adopt`：不带参数时扫描当前 profile 中未登记的已装插件；带 `package_name` 时把其中一个登记为领养回执，之后可被版本与更新工具追踪。领养回执没有审查记录，`verified` 为 false。
+- `capability_updates`：对精确 GitHub pin 的安装只读对比上游默认分支头部 commit 与最新 release，报告是否有更新。升级本身仍走 §4.3 的修改流程。
+
 ## 5. 结果状态与下一步
 
 ### 安装回执字段

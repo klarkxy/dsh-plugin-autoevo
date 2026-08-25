@@ -4,6 +4,7 @@ import type { RuntimeConfig } from './config.js'
 import {
   DEFAULT_REQUEST_INTENT,
   POLICY_VERSION,
+  type AdoptInput,
   type EvolutionTarget,
   type InstallationRecord,
   type NavigationInput,
@@ -14,6 +15,8 @@ import {
   type ResumeInput,
   type ReviewMode,
   type ReviewRecord,
+  type RollbackInput,
+  type VersionsInput,
 } from './contracts.js'
 import type { CreationGuard } from './creation-guard.js'
 import {
@@ -95,6 +98,23 @@ import type { SemanticVerifierHost } from './semantic-verifier.js'
 import { SourceManager } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
+import {
+  adoptInstallation,
+  scanOrphanedInstallations,
+  type AdoptDeps,
+  type OrphanScan,
+} from './service-adopt.js'
+import {
+  checkCapabilityUpdates,
+  type CapabilityUpdateReport,
+  type UpdateTrackingDeps,
+} from './service-updates.js'
+import {
+  listCapabilityVersions,
+  rollbackInstallation,
+  type CapabilityVersionList,
+  type VersionTrackingDeps,
+} from './service-versions.js'
 import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
 import type {
@@ -206,6 +226,62 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
     return this.withWorkspace(exec, () => this.remover.remove(input, exec))
+  }
+
+  listVersions(input: VersionsInput): Promise<CapabilityVersionList> {
+    return listCapabilityVersions(this.versionTrackingDeps(), input)
+  }
+
+  rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord> {
+    return this.withWorkspace(exec, () => rollbackInstallation(this.versionTrackingDeps(), input, exec))
+  }
+
+  scanOrphans(): Promise<OrphanScan> {
+    return scanOrphanedInstallations(this.adoptDeps())
+  }
+
+  adopt(input: AdoptInput): Promise<InstallationRecord> {
+    return adoptInstallation(this.adoptDeps(), input)
+  }
+
+  checkUpdates(exec: ToolRunContext): Promise<CapabilityUpdateReport> {
+    const deps: UpdateTrackingDeps = {
+      store: this.store,
+      config: this.config,
+      runner: this.runner,
+      cwd: sessionCwd(exec.agent) ?? process.cwd(),
+    }
+    return checkCapabilityUpdates(deps, { ...(exec.signal ? { signal: exec.signal } : {}) })
+  }
+
+  private adoptDeps(): AdoptDeps {
+    return {
+      store: this.store,
+      config: this.config,
+      currentProfile: () => this.currentProfileOwner(),
+    }
+  }
+
+  private versionTrackingDeps(): VersionTrackingDeps {
+    return {
+      store: this.store,
+      config: this.config,
+      launcher: this.launcher,
+      // No workflow-commitment authorizer: rollback is not bound to a capability
+      // workflow, but the installer still requests one-time user approval.
+      createRollbackInstaller: () => new PluginInstaller(
+        this.ctx,
+        this.config,
+        this.store,
+        this.launcher,
+        (review, signal) => this.revalidate(review, signal),
+        undefined,
+        undefined,
+        undefined,
+        ISOLATED_VERIFICATION_PROFILE,
+        () => this.currentProfileOwner(),
+      ),
+    }
   }
 
   cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult> {
@@ -847,6 +923,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   listInstallProfiles(): Promise<string[]> {
     return this.currentProfileOwner().then((profile) => [profile])
+  }
+
+  managedWorkAvailable(exec: WorkflowExec): boolean {
+    return this.creationGuard.isManagedWorkAvailable(exec.agent)
   }
 
   enableTargetProfile(): Promise<string | undefined> {

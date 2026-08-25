@@ -546,6 +546,46 @@ describe('workflow engine autonomous discovery', () => {
       .rejects.toThrow(/call budget is exhausted/i)
   })
 
+  it('diagnoses a prepare_create managed-child failure without a linked review', async () => {
+    const record = resolution()
+    record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
+    record.remoteDiscoveryComplete = false
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'diagnose-create-failure')
+    workflowHost.prepareCreate = async () => {
+      throw new EvolutionError('command_failed', 'Managed construction requires the Capability Evolution parent session', {
+        reason: 'creator_foundation_unavailable',
+      })
+    }
+    let refineCalls = 0
+    workflowHost.refineRemote = async (current) => {
+      refineCalls += 1
+      return refineCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+    }
+    const turn = exec()
+    const started = await engine.start('calculator', turn)
+    await engine.refine({ workflowId: started.workflow.id, queries: ['first'] }, turn)
+    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['second'] }, turn)
+    expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
+    expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toContain('create_new')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '没有合适的，新建一个' }] })
+
+    await expect(engine.resume({
+      workflowId: exhausted.workflow.id,
+      interruptId: exhausted.workflow.interrupt!.interruptId,
+      decision: { action: 'create_new' },
+    }, turn)).rejects.toThrow(/Capability Evolution parent session/i)
+    const failed = await store.getWorkflow(started.workflow.id)
+    expect(failed).toMatchObject({ status: 'failed', cursor: 'prepare_create' })
+    expect(failed.lastFailure).toMatchObject({ stage: 'managed_child', code: 'command_failed' })
+
+    const diagnosed = await engine.diagnose({ workflowId: started.workflow.id, probes: ['managed_child'] }, turn)
+    expect(diagnosed.diagnosis?.facts).toEqual([expect.objectContaining({
+      probe: 'managed_child',
+      status: 'failed',
+      code: 'command_failed',
+    })])
+  })
+
   it('cleans the exact linked installation and starts a new audited workflow after a fresh user recovery request', async () => {
     const record = resolution('calculator')
     const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'recover')

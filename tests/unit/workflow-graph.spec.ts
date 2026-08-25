@@ -229,6 +229,37 @@ describe('workflow graph transitions', () => {
     const modify = interruptPayload('await_modify_work', resolution(), [review()], { workflow: workflow('await_modify_work') })
     expect(modify.facts).toMatchObject({ reviewId: review().id, repository: 'acme/one' })
   })
+
+  it('hides managed actions at confirmation when the preset cannot run managed work', () => {
+    const confirmationWorkflow = workflow('await_confirmation')
+    confirmationWorkflow.reviewedCandidateIds = [confirmationWorkflow.candidateSnapshot![0]!.id]
+    confirmationWorkflow.reviewIdsByCandidate = {
+      [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
+    }
+    const confirmationReview = withApprovedVerdict(review(), confirmationWorkflow)
+    const confirmation = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
+      workflow: confirmationWorkflow,
+      installProfiles: ['web'],
+      managedActionsAvailable: false,
+    })
+    expect(confirmation.options.map((item) => item.id)).toEqual([
+      'use_this',
+      'search_more',
+      'stop',
+    ])
+    const available = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
+      workflow: confirmationWorkflow,
+      installProfiles: ['web'],
+      managedActionsAvailable: true,
+    })
+    expect(available.options.map((item) => item.id)).toEqual([
+      'use_this',
+      'search_more',
+      'modify_this',
+      'create_new',
+      'stop',
+    ])
+  })
 })
 
 describe('workflow graph nodes', () => {

@@ -32,6 +32,10 @@ try {
   await root.loader.await()
 
   const expected = [
+    'capability_adopt',
+    'capability_rollback',
+    'capability_updates',
+    'capability_versions',
     'capability_workflow',
     'capability_workflow_diagnose',
     'capability_workflow_present',
@@ -70,7 +74,7 @@ try {
   assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), expected)
   const policy = assembly.sections.find((section) => section.name === 'autoevo:reuse-policy')
   assert.ok(policy)
-  assert.match(policy.text, /runtime Policy V8/u)
+  assert.match(policy.text, /runtime Policy V9/u)
   assert.match(policy.text, /user's original requirement/u)
   assert.match(policy.text, /Host-provided snapshot or pool/u)
   assert.match(policy.text, /fresh top-level user message/u)
@@ -95,7 +99,7 @@ try {
   assert.match(recoverSchema.description, /sealed recovery interrupt/u)
 
   const packed = await import(pathToFileURL(path.join(projectRoot, 'lib', 'index.js')).href)
-  assert.equal(packed.POLICY_VERSION, '8')
+  assert.equal(packed.POLICY_VERSION, '9')
   assert.deepEqual([...packed.VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
   assert.equal(packed.classifyRuntimeSurface({
     llmDependency: false,

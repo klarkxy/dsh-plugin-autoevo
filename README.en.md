@@ -74,6 +74,8 @@ Install demo (select preset → describe the need → shortlist → review → c
 
 `installed` and `loaded` do not mean functionally verified. Only `verified` supports that claim. See [Outcomes and next steps](docs/user-guide.en.md#5-outcomes-and-next-steps).
 
+AutoEvo also tracks an installation version chain per package: `capability_versions` lists versions, `capability_rollback` restores a historical version (still through the standard approved install), `capability_adopt` registers plugins installed outside the workflow into the ledger, and `capability_updates` checks upstream releases read-only. See [User guide §4.6](docs/user-guide.en.md#46-versions-adoption-and-upstream-updates).
+
 ## Safety boundary
 
 - Discovery, review, and diagnosis are read-only by default. Install, removal, modify, and create require a real user decision and one-time DSH approval; installed third-party code ultimately runs with the current user's authority.

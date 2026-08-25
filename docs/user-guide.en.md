@@ -98,6 +98,15 @@ Creation is available only after discovery is complete, no suitable candidate re
 
 You can stop at either gate. Stop is never treated as install or create authority, and a DSH approval cannot override it. See the [FAQ](#9-faq) for how chat confirmation and DSH approval divide their roles.
 
+### 4.6 Versions, adoption, and upstream updates
+
+AutoEvo keeps an installation receipt chain per package. Four companion tools:
+
+- `capability_versions`: lists the Host-tracked version chain for one package, marking the live version and artifact availability. Read-only.
+- `capability_rollback`: rolls back to a historical version of the package (the direct predecessor by default). It reinstalls the linked reviewed source through the standard install path and still requires one-time DSH approval; adopted receipts have no linked review and cannot be rollback targets.
+- `capability_adopt`: without arguments, scans the current profile for installed plugins the Host does not track; with `package_name`, registers one as an adopted receipt so the version and update tools can track it. Adopted receipts have no review and are never `verified`.
+- `capability_updates`: read-only comparison of exact GitHub-pinned installations against the upstream default-branch head and latest release. Upgrading itself still goes through the improve flow in §4.3.
+
 ## 5. Outcomes and next steps
 
 | Field / outcome | Exact meaning | Next step |

@@ -512,6 +512,12 @@ export class CreationGuard {
     assertUseThisReceipt(review, resolution)
   }
 
+  /** Managed child construction (modify/create) requires the evolution preset. */
+  isManagedWorkAvailable(agent: Agent | undefined): boolean {
+    if (!agent) return false
+    return this.inEvolutionMode(agent)
+  }
+
   private inEvolutionMode(agent: Agent): boolean {
     return this.options.isEvolutionMode?.(agent) === true
   }

@@ -197,7 +197,7 @@ async function runScenario() {
       marker: expectedMarker,
       guard: 'allowed live cordis_define(kind:new) outside Capability Evolution mode',
       workflow: 'autonomous discovery sealed at Gate 1',
-      policyVersion: '8',
+      policyVersion: '9',
     }
   }
 
@@ -207,7 +207,7 @@ async function runScenario() {
     assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
-    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '8' }
+    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '9' }
   }
 
   if (scenario === 'marketplace-flow') {

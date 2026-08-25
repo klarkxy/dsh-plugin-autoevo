@@ -1,10 +1,14 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '8'
+export const POLICY_VERSION = '9'
 
 export const TOOL_NAMES = [
   'capability_workflow',
   'capability_workflow_resume',
   'capability_workflow_recover',
+  'capability_versions',
+  'capability_rollback',
+  'capability_adopt',
+  'capability_updates',
   'plugin_remove',
 ] as const
 
@@ -532,9 +536,12 @@ export interface InstallationRecord {
   schemaVersion: 1
   id: string
   createdAt: string
-  reviewId: string
+  /** Linked review for managed installs; adopted (workflow-external) installs have none. */
+  reviewId?: string
   /** Current-policy installations are bound to the workflow that authorized them. */
   workflowId?: string
+  /** Missing means managed; adopted receipts register an already-installed plugin. */
+  origin?: 'managed' | 'adopted'
   targetProfile: string
   retention: InstallationRetention
   dshHome: string
@@ -596,6 +603,21 @@ export interface InstallInput {
 
 export interface RemoveInput {
   installationId: string
+}
+
+export interface VersionsInput {
+  packageName?: string
+  installationId?: string
+}
+
+export interface RollbackInput {
+  installationId: string
+  /** Defaults to the direct predecessor of the current installation. */
+  targetInstallationId?: string
+}
+
+export interface AdoptInput {
+  packageName?: string
 }
 
 /** Model-interpreted final authorization intent, bounded by the current interrupt. */

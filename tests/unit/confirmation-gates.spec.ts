@@ -330,6 +330,29 @@ function makeService(
 }
 
 describe('conversational confirmation gates', () => {
+  it('hides managed create/modify options when the preset cannot run managed work', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-standard-'))
+    temporary.push(root)
+    const guard = new CreationGuard({ isEvolutionMode: () => false })
+    const store = new StateStore(root)
+    const service = new CapabilityEvolutionService(
+      hostCtx(root),
+      config(root),
+      discoveryRunner([]),
+      store,
+      guard,
+    )
+    const turn = exec()
+    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    expect(started.workflow.cursor).toBe('await_confirmation')
+    expect(started.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining([
+      'search_more',
+      'stop',
+    ]))
+    expect(started.workflow.interrupt?.options.map((item) => item.id)).not.toContain('create_new')
+    expect(started.workflow.interrupt?.options.map((item) => item.id)).not.toContain('modify_this')
+  })
+
   it('does not mint create authorization from start itself or after empty completed discovery without create-new', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-empty-'))
     temporary.push(root)

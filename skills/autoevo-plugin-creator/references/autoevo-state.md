@@ -20,7 +20,7 @@
 
 The grant belongs to the current Agent and current resolution. Starting another workflow revokes it. Managed construction remains bound to the current work order and source receipt. Do not retry after an approval rejection without a new user decision.
 
-Policy-mismatched persisted state is not executable; start a fresh Policy V8 discovery. This is a fail-closed guard, not a legacy-user migration path. Mechanical verification is Host-driven: do not assign it to an ordinary model, do not judge success yourself, and do not treat a semantic verifier as the completion gate.
+Policy-mismatched persisted state is not executable; start a fresh Policy V9 discovery. This is a fail-closed guard, not a legacy-user migration path. Mechanical verification is Host-driven: do not assign it to an ordinary model, do not judge success yourself, and do not treat a semantic verifier as the completion gate.
 
 `capability_workflow_diagnose` is read-only and available only after an incomplete or failed stage. It returns redacted facts under a per-failure budget; it never retries, installs, edits, or cleans up. Repeated identical invalid resumes are blocked for the remainder of the current user turn without consuming authorization. After repeated verification or modify failure, present a human decision or diagnosis exit instead of looping.
 

@@ -580,6 +580,8 @@ export interface WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>
   getInstallation(id: string): Promise<InstallationRecord>
   listInstallProfiles?(): Promise<string[]>
+  /** Whether managed child construction (modify/create) is available for this exec. */
+  managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>
   cleanupInstallation?(installationId: string, exec: WorkflowExec): Promise<{
     installationId: string
     removed: boolean
@@ -759,6 +761,7 @@ export function optionsFor(
   reviews: ReviewRecord[] = [],
   workflow?: WorkflowRecord,
   installProfiles: string[] = [],
+  managedActionsAvailable = true,
 ): WorkflowOption[] {
   if (kind === 'await_modify_work') {
     return [WORKFLOW_OPTIONS.stop]
@@ -824,10 +827,13 @@ export function optionsFor(
     if (reusableLocalIds.length > 0) {
       options.push({ ...WORKFLOW_OPTIONS.reuse_local, candidateIds: reusableLocalIds })
     }
-    if (repairableIds.length > 0 && !modificationAttemptsExhausted(workflow?.modificationOutcome)) {
+    if (managedActionsAvailable
+      && repairableIds.length > 0 && !modificationAttemptsExhausted(workflow?.modificationOutcome)) {
       options.push({ ...WORKFLOW_OPTIONS.modify_this, candidateIds: repairableIds })
     }
-    if (resolution.remoteDiscoveryComplete) options.push(WORKFLOW_OPTIONS.create_new)
+    if (managedActionsAvailable && resolution.remoteDiscoveryComplete) {
+      options.push(WORKFLOW_OPTIONS.create_new)
+    }
     options.push(WORKFLOW_OPTIONS.stop)
     return options
   }

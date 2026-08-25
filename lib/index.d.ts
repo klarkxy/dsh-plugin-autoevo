@@ -52,8 +52,8 @@ declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
-declare const POLICY_VERSION = "8";
-declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "plugin_remove"];
+declare const POLICY_VERSION = "9";
+declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
@@ -476,9 +476,12 @@ interface InstallationRecord {
   schemaVersion: 1;
   id: string;
   createdAt: string;
-  reviewId: string;
+  /** Linked review for managed installs; adopted (workflow-external) installs have none. */
+  reviewId?: string;
   /** Current-policy installations are bound to the workflow that authorized them. */
   workflowId?: string;
+  /** Missing means managed; adopted receipts register an already-installed plugin. */
+  origin?: 'managed' | 'adopted';
   targetProfile: string;
   retention: InstallationRetention;
   dshHome: string;
@@ -538,6 +541,18 @@ interface InstallInput {
 }
 interface RemoveInput {
   installationId: string;
+}
+interface VersionsInput {
+  packageName?: string;
+  installationId?: string;
+}
+interface RollbackInput {
+  installationId: string;
+  /** Defaults to the direct predecessor of the current installation. */
+  targetInstallationId?: string;
+}
+interface AdoptInput {
+  packageName?: string;
 }
 /** Model-interpreted final authorization intent, bounded by the current interrupt. */
 interface AuthorizationDecisionInput {
@@ -1111,6 +1126,8 @@ interface WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles?(): Promise<string[]>;
+  /** Whether managed child construction (modify/create) is available for this exec. */
+  managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>;
   cleanupInstallation?(installationId: string, exec: WorkflowExec): Promise<{
     installationId: string;
     removed: boolean;
@@ -1194,6 +1211,8 @@ declare class CreationGuard {
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
   assertInstallAuthorized(agent: Agent | undefined, review: ReviewRecord, resolution: Pick<ResolutionRecord, 'id' | 'decisions'>, binding?: InstallCommitmentBinding): void;
+  /** Managed child construction (modify/create) requires the evolution preset. */
+  isManagedWorkAvailable(agent: Agent | undefined): boolean;
   private inEvolutionMode;
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
@@ -1955,6 +1974,65 @@ declare class DshSemanticReviewerHost implements SemanticReviewerHost {
   run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
 }
 //#endregion
+//#region src/service-adopt.d.ts
+interface OrphanedInstallation {
+  packageName: string;
+  dependencySpec: string;
+  configuredBundle: boolean;
+  repository?: string;
+  commit?: string;
+}
+interface OrphanScan {
+  profile: string;
+  orphans: OrphanedInstallation[];
+}
+//#endregion
+//#region src/service-updates.d.ts
+interface CapabilityUpdateEntry {
+  packageName: string;
+  installationId: string;
+  origin?: 'managed' | 'adopted';
+  repository: string;
+  installedSha: string;
+  upstreamSha?: string;
+  upstreamCommittedAt?: string | null;
+  latestRelease?: {
+    tag: string;
+    publishedAt: string | null;
+  } | null;
+  updateAvailable: boolean;
+  error?: string;
+}
+interface SkippedInstallation {
+  packageName: string | null;
+  installationId: string;
+  reason: string;
+}
+interface CapabilityUpdateReport {
+  updates: CapabilityUpdateEntry[];
+  skipped: SkippedInstallation[];
+  guidance: string;
+}
+//#endregion
+//#region src/service-versions.d.ts
+interface CapabilityVersionEntry {
+  installationId: string;
+  installSpec: string;
+  createdAt: string;
+  installOutcome?: string;
+  origin?: InstallationRecord['origin'];
+  verified: boolean;
+  removed: boolean;
+  active: boolean;
+  artifactAvailable: boolean;
+  predecessorInstallationId?: string;
+  supersededByInstallationId?: string;
+}
+interface CapabilityVersionList {
+  packageName: string;
+  versions: CapabilityVersionEntry[];
+}
+//#endregion
 //#region src/service.d.ts
 declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly ctx;
@@ -1978,6 +2056,13 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   diagnose(input: WorkflowDiagnoseInput, exec: ToolRunContext): Promise<WorkflowView>;
   recover(input: WorkflowRecoveryInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
+  listVersions(input: VersionsInput): Promise<CapabilityVersionList>;
+  rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord>;
+  scanOrphans(): Promise<OrphanScan>;
+  adopt(input: AdoptInput): Promise<InstallationRecord>;
+  checkUpdates(exec: ToolRunContext): Promise<CapabilityUpdateReport>;
+  private adoptDeps;
+  private versionTrackingDeps;
   cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult>;
   bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
@@ -2035,6 +2120,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles(): Promise<string[]>;
+  managedWorkAvailable(exec: WorkflowExec): boolean;
   enableTargetProfile(): Promise<string | undefined>;
   enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
   private currentProfileOwner;
