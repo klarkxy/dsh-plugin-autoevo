@@ -8,6 +8,9 @@ import type { RuntimeConfig } from '../../src/config.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import type { CommandRequest, CommandRunner } from '../../src/process/runner.js'
 import { fixtureDigestFor } from '../../src/host-verification-driver.js'
+import { EvolutionError } from '../../src/errors.js'
+import { sha256 } from '../../src/state/hashes.js'
+import { parse } from 'yaml'
 
 const temporary = trackTempDirs()
 
@@ -254,5 +257,130 @@ describe('Host-owned launcher verification', () => {
     }))
     expect(await launcher.profileDependencySpec(directory, 'web', 'dsh-xai')).toBe(newSpec)
     expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-xai', newSpec)).toBe(true)
+  })
+})
+
+describe('git-hosted install build-script allowlisting', () => {
+  function pnpmGitPrepareError(...versionedNames: string[]): string {
+    const details = versionedNames
+      .map((name) => `The git-hosted package "${name}" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist.`)
+      .join('\n')
+    return ` ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  Failed to prepare git-hosted package: ${details}`
+  }
+
+  async function seedProfileWorkspace(directory: string, extra = ''): Promise<string> {
+    const profileRoot = path.join(directory, 'profiles', 'web')
+    await mkdir(profileRoot, { recursive: true })
+    const workspacePath = path.join(profileRoot, 'pnpm-workspace.yaml')
+    await writeFile(workspacePath, `packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n${extra}`)
+    return workspacePath
+  }
+
+  function scriptedRunner(...outcomes: Array<{ exitCode: number, stderr?: string }>): {
+    runner: CommandRunner
+    requests: CommandRequest[]
+  } {
+    const requests: CommandRequest[] = []
+    let index = 0
+    return {
+      requests,
+      runner: {
+        async run(request) {
+          requests.push(request)
+          const outcome = outcomes[Math.min(index, outcomes.length - 1)]
+          index += 1
+          return { exitCode: outcome?.exitCode ?? 0, signal: null, stdout: '', stderr: outcome?.stderr ?? '' }
+        },
+      },
+    }
+  }
+
+  it('allowlists the reported package and retries a blocked git prepare', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-prepare-'))
+    temporary.push(directory)
+    const workspacePath = await seedProfileWorkspace(directory)
+    const stderr = pnpmGitPrepareError('acme-tool@0.1.1')
+    const { runner, requests } = scriptedRunner({ exitCode: 1, stderr }, { exitCode: 0 })
+
+    const result = await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+    expect(result.exitCode).toBe(0)
+    expect(requests).toHaveLength(2)
+    expect(parse(await readFile(workspacePath, 'utf8'))).toMatchObject({
+      packages: ['.'],
+      nodeLinker: 'hoisted',
+      autoInstallPeers: false,
+      onlyBuiltDependencies: ['acme-tool'],
+    })
+  })
+
+  it('parses scoped package names and merges with an existing allowlist', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-scoped-'))
+    temporary.push(directory)
+    const workspacePath = await seedProfileWorkspace(directory, 'onlyBuiltDependencies:\n  - existing-pkg\n')
+    const stderr = pnpmGitPrepareError('@acme/tool@2.0.0')
+    const { runner } = scriptedRunner({ exitCode: 1, stderr }, { exitCode: 0 })
+
+    await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+    expect(parse(await readFile(workspacePath, 'utf8')).onlyBuiltDependencies)
+      .toEqual(['@acme/tool', 'existing-pkg'])
+  })
+
+  it('allowlists newly reported transitive git dependencies on each attempt', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-transitive-'))
+    temporary.push(directory)
+    const workspacePath = await seedProfileWorkspace(directory)
+    const { runner, requests } = scriptedRunner(
+      { exitCode: 1, stderr: pnpmGitPrepareError('pkg-a@1.0.0') },
+      { exitCode: 1, stderr: pnpmGitPrepareError('pkg-b@2.0.0') },
+      { exitCode: 0 },
+    )
+
+    const result = await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+    expect(result.exitCode).toBe(0)
+    expect(requests).toHaveLength(3)
+    expect(parse(await readFile(workspacePath, 'utf8')).onlyBuiltDependencies)
+      .toEqual(['pkg-a', 'pkg-b'])
+  })
+
+  it('throws the runner-shaped command_failed error when the retry still fails', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-fail-'))
+    temporary.push(directory)
+    await seedProfileWorkspace(directory)
+    const stderr = pnpmGitPrepareError('acme-tool@0.1.1')
+    const { runner, requests } = scriptedRunner({ exitCode: 1, stderr })
+
+    const failure = await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(requests).toHaveLength(2)
+    expect(failure).toBeInstanceOf(EvolutionError)
+    expect(failure).toMatchObject({
+      code: 'command_failed',
+      message: 'dsh exited with code 1',
+      details: { command: 'dsh', exitCode: 1, diagnosticHash: sha256(stderr) },
+    })
+  })
+
+  it('does not retry or touch the workspace file for unrelated install failures', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-unrelated-'))
+    temporary.push(directory)
+    const workspacePath = await seedProfileWorkspace(directory)
+    const before = await readFile(workspacePath, 'utf8')
+    const { runner, requests } = scriptedRunner({ exitCode: 1, stderr: 'some other pnpm failure' })
+
+    const failure = await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(requests).toHaveLength(1)
+    expect(failure).toBeInstanceOf(EvolutionError)
+    expect(await readFile(workspacePath, 'utf8')).toBe(before)
   })
 })
