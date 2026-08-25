@@ -57,12 +57,12 @@ declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
-type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source';
+type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source' | 'host_bundled';
 type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
-type NavigationKind = 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'stop' | 'finish_managed_work';
+type NavigationKind = 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'enable_builtin' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
 type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing';
@@ -157,6 +157,16 @@ interface LocalCapabilityCandidate {
     packageName: string;
     dependencySpec: string;
     configuredBundle: boolean;
+  };
+  /**
+   * Host-shipped opt-in capability (bundled inside the dsh CLI, resolvable from
+   * every profile, but not yet mounted into the composition). Enabling mounts a
+   * patch row; no package installation or review is involved.
+   */
+  hostBundled?: {
+    packageName: string;
+    version: string;
+    mountId: string;
   };
 }
 interface RemotePluginCandidate {
@@ -573,6 +583,12 @@ type ExecutionEndpoint = {
   kind: 'bridge';
   tools: readonly string[];
   target: string;
+} | {
+  kind: 'host_bundled_enable';
+  packageName: string;
+  version: string;
+  mountId: string;
+  targetProfile: string;
 };
 interface FrozenCandidateIdentity {
   kind: 'local' | 'remote';
@@ -747,7 +763,7 @@ declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cu
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'review_existing' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
+type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'review_existing' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'enable_builtin' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
 type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
 type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
@@ -792,6 +808,11 @@ interface CandidateSnapshotItem {
   surfaceMatch?: boolean;
   reuseEligible?: boolean;
   evolutionTarget?: EvolutionTarget;
+  hostBundled?: {
+    packageName: string;
+    version: string;
+    mountId: string;
+  };
   installation?: {
     source: 'host_profile_manifest';
     profile: string;
@@ -1081,6 +1102,10 @@ interface WorkflowHost {
   }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
   applyNavigation?(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
+  /** Active Host profile an enable_builtin commitment targets, when determinable. */
+  enableTargetProfile?(): Promise<string | undefined>;
+  /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
+  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
@@ -1352,6 +1377,8 @@ declare class DshLauncher {
     forwardCredentials?: boolean;
   }): Promise<CommandResult>;
   remove(dshHome: string, profile: string, packageName: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
+  /** Compose the profile tree without booting it; fails loudly on unresolvable mount rows. */
+  dumpConfig(dshHome: string, profile: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   hasProfileDependency(dshHome: string, profile: string, packageName: string): Promise<boolean>;
   profileDependencySpec(dshHome: string, profile: string, packageName: string): Promise<string | undefined>;
   /** Verify that the target profile records the exact reviewed source and loads that bundle. */
@@ -2008,6 +2035,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   listInstallProfiles(): Promise<string[]>;
+  enableTargetProfile(): Promise<string | undefined>;
+  enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
   private currentProfileOwner;
   private persistReviewed;
   releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void>;

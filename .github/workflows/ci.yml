@@ -25,5 +25,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm add -D @deepseek-ai/dsh@0.1.1-rc.2
+      - run: git checkout -- package.json pnpm-lock.yaml
       - run: pnpm check
       - run: pnpm pack:dry-run

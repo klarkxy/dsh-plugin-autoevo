@@ -109,7 +109,10 @@ export function applyIntentToCandidate(
     || candidate.evolutionTarget?.kind === 'failed_install'
     || candidate.evolutionTarget?.kind === 'reviewed_snapshot'
   if (knownSource && requestFit !== 'none') requestFit = 'partial'
-  const reuseEligible = !knownSource && surfaceMatch && named && semanticFit === 'full'
+  // host_bundled candidates must be mounted before use; they are never
+  // "usable unchanged", so they take enable_builtin instead of reuse_local.
+  const reuseEligible = !knownSource && candidate.availability !== 'host_bundled'
+    && surfaceMatch && named && semanticFit === 'full'
   const evolutionTarget = candidate.profileEvidence && named && intent.operation !== 'reuse_existing'
     ? evolutionTargetFromProfile({
         packageName: candidate.profileEvidence.packageName,

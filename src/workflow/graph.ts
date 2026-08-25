@@ -121,6 +121,7 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
   if (node === 'review_existing') return executeReviewExisting(ctx)
   if (node === 'review_local') return executeReviewLocal(ctx)
   if (node === 'install_verify') return executeInstallVerify(ctx)
+  if (node === 'enable_builtin') return executeEnableBuiltin(ctx)
   if (node === 'prepare_modify') return executePrepareModify(ctx)
   if (node === 'prepare_create') return executePrepareCreate(ctx)
   if (node === 'complete_managed_work') return executeCompleteManagedWork(ctx)
@@ -440,6 +441,31 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
     }
     if (!retryable) recordVerificationAttempt(ctx.workflow, review)
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }
+  }
+}
+
+async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionResult> {
+  const current = await requireResolution(ctx)
+  if (!ctx.host.enableBuiltin) {
+    throw new EvolutionError('invalid_input', 'This workflow host does not support built-in capability enablement')
+  }
+  try {
+    await ctx.host.enableBuiltin(ctx.workflow, ctx.exec)
+    return { kind: 'done', node: 'restart_required', resolution: current }
+  } catch (error) {
+    if (ctx.exec.signal?.aborted) throw error
+    ctx.workflow.lastFailure = {
+      stage: 'install',
+      code: error instanceof EvolutionError ? error.code : 'command_failed',
+      message: error instanceof Error ? error.message : String(error),
+      retryable: error instanceof EvolutionError && error.code === 'command_failed',
+      ...(error instanceof EvolutionError
+        && typeof error.details.diagnosticHash === 'string'
+        && /^[a-f0-9]{64}$/u.test(error.details.diagnosticHash)
+        ? { diagnosticHash: error.details.diagnosticHash }
+        : {}),
+    }
+    return { kind: 'done', node: 'recovery_required', resolution: current }
   }
 }
 

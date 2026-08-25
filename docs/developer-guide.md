@@ -11,6 +11,7 @@
 - Node.js `>=22.19.0 || >=24.0.0`；CI 使用 Node 24。
 - pnpm；CI 当前使用 `10.29.2`。
 - Git；远端审查和 live GitHub discovery E2E 还需要可用的 GitHub CLI。
+- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 会临时注入最新 `@deepseek-ai/dsh@0.1.1-rc.2`；本地使用已安装的 0.1.1.x，或设置 `DSH_PACKAGE_ROOT`。
 - Windows / PowerShell 是主要实测环境，但核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
 初始化并运行日常验收：

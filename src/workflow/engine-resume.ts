@@ -294,6 +294,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     let repositories: string[] = []
     let pendingReviewIds: string[] = []
     let reuseCandidate: CandidateSnapshotItem | undefined
+    let builtinCandidate: CandidateSnapshotItem | undefined
     if (navigation.kind === 'review_candidates') {
       if (requestedIds.length < 1 || requestedIds.length > 3) {
         throw new EvolutionError('invalid_input', 'review_candidates requires one to three candidate_ids')
@@ -333,6 +334,15 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         throw new EvolutionError('invalid_input', 'reuse_local requires a reusable local candidate from this snapshot')
       }
       reuseCandidate = candidate
+    } else if (navigation.kind === 'enable_builtin') {
+      if (requestedIds.length !== 1) {
+        throw new EvolutionError('invalid_input', 'enable_builtin requires exactly one candidate_id')
+      }
+      const candidate = snapshot.find((item) => item.id === requestedIds[0])
+      if (!candidate || candidate.kind !== 'local' || candidate.availability !== 'host_bundled' || !candidate.hostBundled) {
+        throw new EvolutionError('invalid_input', 'enable_builtin requires a host-bundled local candidate from this snapshot')
+      }
+      builtinCandidate = candidate
     }
 
     const turn = this.creationGuard.consumeDecisionTurn(exec.agent, interrupt)
@@ -403,6 +413,34 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       latest.actionCommitment = commitment
       latest.executionLease = lease
       latest.cursor = 'reuse_local'
+    } else if (navigation.kind === 'enable_builtin') {
+      const candidate = builtinCandidate!
+      const bundled = candidate.hostBundled!
+      const targetProfile = this.host.enableTargetProfile
+        ? await this.host.enableTargetProfile()
+        : undefined
+      if (!targetProfile) {
+        throw new EvolutionError('invalid_input', 'enable_builtin requires an active Host profile')
+      }
+      const commitment = mintActionCommitment({
+        receipt,
+        action: 'enable_builtin',
+        candidate,
+        endpoint: {
+          kind: 'host_bundled_enable',
+          packageName: bundled.packageName,
+          version: bundled.version,
+          mountId: bundled.mountId,
+          targetProfile,
+        },
+        targetProfile,
+      })
+      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.grantHostSelection(exec.agent, receipt, commitment)
+      latest.selectionReceipt = receipt
+      latest.actionCommitment = commitment
+      delete latest.executionLease
+      latest.cursor = 'enable_builtin'
     } else {
       this.creationGuard.invalidateExecutionLease(exec.agent)
       latest.selectionReceipt = receipt

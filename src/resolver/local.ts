@@ -5,6 +5,7 @@ import type { LocalCapabilityCandidate, RequestIntent } from '../contracts.js'
 import { DEFAULT_REQUEST_INTENT, TOOL_NAMES } from '../contracts.js'
 import { isWorkflowSkill } from '../creator-skill.js'
 import { applyIntentToCandidate, suppressesRemoteDiscovery } from './intent.js'
+import { resolveHostBundledCapabilities } from './host-bundled.js'
 import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
 import { resolveLoadedPluginCapabilities } from './plugins.js'
 import { resolveProfilePluginCapabilities } from './profile.js'
@@ -104,6 +105,8 @@ export interface LocalCapabilityOptions {
   dshHome?: string
   activeProfile?: string
   intent?: RequestIntent
+  /** Resolved Host dsh CLI package root; enables host-bundled opt-in candidates. */
+  dshPackageRoot?: string
 }
 
 function mergeProfileAndLoadedCandidates(
@@ -196,6 +199,20 @@ export async function resolveLocalCapabilities(
     : []
   const loadedCandidates = await resolveLoadedPluginCapabilities(ctx, requirement, matchConfidence)
   candidates.push(...mergeProfileAndLoadedCandidates(profileCandidates, loadedCandidates))
+
+  if (options.dshPackageRoot && options.dshHome) {
+    const bundledCandidates = await resolveHostBundledCapabilities({
+      dshPackageRoot: options.dshPackageRoot,
+      dshHome: options.dshHome,
+      requirement,
+      match: matchConfidence,
+      ...(options.activeProfile ? { activeProfile: options.activeProfile } : {}),
+    }).catch(() => [])
+    const knownNames = new Set(candidates.map((candidate) => candidate.name))
+    for (const bundled of bundledCandidates) {
+      if (!knownNames.has(bundled.name)) candidates.push(bundled)
+    }
+  }
 
   const intent = options.intent ?? DEFAULT_REQUEST_INTENT
   for (const candidate of candidates) {

@@ -42,6 +42,7 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
       repository: item.evolutionTarget.repository,
       evolutionTarget: item.evolutionTarget,
     } : {}),
+    ...(item.hostBundled ? { hostBundled: item.hostBundled } : {}),
     ...(item.profileEvidence ? { installation: {
       source: item.profileEvidence.source,
       profile: item.profileEvidence.profile,
@@ -60,6 +61,7 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
       reuseEligible: item.reuseEligible,
       evolutionTarget: item.evolutionTarget,
       profileEvidence: item.profileEvidence,
+      hostBundled: item.hostBundled,
     }),
   }
 }

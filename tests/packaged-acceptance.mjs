@@ -4,9 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { hostDshVersion, resolveHostDsh, skipUnlessHarnessDsh } from './helpers/host-dsh.mjs'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
-const dshBin = path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const hostDsh = await resolveHostDsh()
+if (skipUnlessHarnessDsh(hostDshVersion(hostDsh.bin))) process.exit(0)
+const dshBin = hostDsh.bin
 const driver = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'packaged-preset-driver.mjs')).href
 const blankHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-packaged-blank-'))
 const dshHome = path.join(blankHome, 'dsh')
@@ -242,7 +245,7 @@ try {
         name: '@deepseek-ai/dsh-agent-presets',
         config: {
           default: 'standard',
-          roots: [{ path: path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'config', 'agent-presets'), trust: 'system' }],
+          roots: [{ path: hostDsh.presets, trust: 'system' }],
           includeUserRoot: true,
         },
       },

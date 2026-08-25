@@ -119,6 +119,8 @@ const ANCHOR_DEFINITIONS: ReadonlyArray<CapabilityAnchorDefinition> = [
   { key: 'email', patterns: [/邮件/u, /email/iu, /mail/iu], aliases: ['邮件', 'email', 'mail'], weight: 0.8 },
   { key: 'database', patterns: [/数据库/u, /database/iu, /sql/iu], aliases: ['数据库', 'database', 'sql'], weight: 0.85 },
   { key: 'image', patterns: [/图片/u, /图像/u, /image/iu, /vision/iu], aliases: ['图片', '图像', 'image', 'vision'], weight: 0.8 },
+  { key: 'time', patterns: [/时间/u, /耗时/u, /当前时刻/u, /\btime(?:stamp)?\b/iu, /\belapsed\b/iu], aliases: ['时间', '当前时间', '耗时', 'time', 'current time', 'timestamp', 'elapsed', 'elapsed time'], weight: 0.9 },
+  { key: 'tmux', patterns: [/tmux/iu, /窗格/u], aliases: ['tmux', 'pane', 'window location', '窗格'], weight: 0.9 },
   // Zhihu is a domain-specific anchor, so it outweighs generic actions such
   // as searching or creating content in mixed requirements.
   { key: 'zhihu', patterns: [/zhihu/iu, /知乎/u], aliases: ['zhihu', '知乎', 'zhihu search'], weight: 1.4 },

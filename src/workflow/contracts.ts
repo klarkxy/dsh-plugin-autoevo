@@ -88,6 +88,7 @@ export type WorkflowNodeId =
   | 'install_verify'
   | 'prepare_create'
   | 'reuse_local'
+  | 'enable_builtin'
   | 'stopped'
   | 'market_restart_required'
   | 'market_setup_required'
@@ -148,6 +149,11 @@ export interface CandidateSnapshotItem {
   surfaceMatch?: boolean
   reuseEligible?: boolean
   evolutionTarget?: EvolutionTarget
+  hostBundled?: {
+    packageName: string
+    version: string
+    mountId: string
+  }
   installation?: {
     source: 'host_profile_manifest'
     profile: string
@@ -565,6 +571,10 @@ export interface WorkflowHost {
     navigation: NavigationInput,
     repositories: string[],
   ): Promise<ResolutionRecord>
+  /** Active Host profile an enable_builtin commitment targets, when determinable. */
+  enableTargetProfile?(): Promise<string | undefined>
+  /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
+  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>
   getResolution(id: string): Promise<ResolutionRecord>
   getReview(id: string): Promise<ReviewRecord>
@@ -614,6 +624,7 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   review_existing: { id: 'review_existing', labelEn: 'Review the known plugin source', labelZh: '审查这份插件的已知来源', placement: 'primary' },
   search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件', placement: 'primary' },
   reuse_local: { id: 'reuse_local', labelEn: 'Use existing local capability unchanged', labelZh: '原样使用已有本地能力', placement: 'primary' },
+  enable_builtin: { id: 'enable_builtin', labelEn: 'Enable the built-in Host capability', labelZh: '直接启用内置能力', placement: 'primary' },
   create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建', placement: 'advanced' },
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
@@ -764,6 +775,12 @@ export function optionsFor(
   const evolvableLocalIds = snapshot
     .filter((item) => item.kind === 'local' && item.evolutionTarget)
     .map((item) => item.id)
+  const builtinIds = snapshot
+    .filter((item) => item.kind === 'local' && item.availability === 'host_bundled' && item.hostBundled)
+    .map((item) => item.id)
+  if (kind === 'await_selection' && builtinIds.length > 0) {
+    options.push({ ...WORKFLOW_OPTIONS.enable_builtin, candidateIds: builtinIds })
+  }
   if (kind === 'await_selection' && remoteSnapshot.length > 0) {
     options.push({ ...WORKFLOW_OPTIONS.review_candidates, candidateIds: remoteSnapshot.map((item) => item.id) })
   }

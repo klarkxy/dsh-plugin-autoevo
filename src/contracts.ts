@@ -21,7 +21,7 @@ export type AuthorizationState =
   | 'use_review'
   | 'modify_review'
   | 'create_authorized'
-export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source'
+export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source' | 'host_bundled'
 export type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup'
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 export type DecisionPhase = 'gate1' | 'gate2'
@@ -35,6 +35,7 @@ export type NavigationKind =
   | 'review_existing'
   | 'search_more'
   | 'reuse_local'
+  | 'enable_builtin'
   | 'stop'
   | 'finish_managed_work'
 export type ReviewMode = 'fixed' | 'adaptive'
@@ -146,6 +147,16 @@ export interface LocalCapabilityCandidate {
     packageName: string
     dependencySpec: string
     configuredBundle: boolean
+  }
+  /**
+   * Host-shipped opt-in capability (bundled inside the dsh CLI, resolvable from
+   * every profile, but not yet mounted into the composition). Enabling mounts a
+   * patch row; no package installation or review is involved.
+   */
+  hostBundled?: {
+    packageName: string
+    version: string
+    mountId: string
   }
 }
 
@@ -629,6 +640,7 @@ export type ExecutionEndpoint =
   | { kind: 'none' }
   | { kind: 'exact_tool'; name: string }
   | { kind: 'bridge'; tools: readonly string[]; target: string }
+  | { kind: 'host_bundled_enable'; packageName: string; version: string; mountId: string; targetProfile: string }
 
 export interface FrozenCandidateIdentity {
   kind: 'local' | 'remote'

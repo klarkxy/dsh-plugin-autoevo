@@ -249,28 +249,11 @@ describe('Creator records and legacy workflow JSON', () => {
   })
 })
 
-describe('isolated and installed DSH Creator compositions', () => {
-  it('hashes the isolated dev DSH 0.1.0-rc.6 official cordis preset without touching Web', async () => {
-    const presetDir = path.join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh', 'config', 'agent-presets', 'cordis')
-    const composition = await readFile(path.join(presetDir, 'agent.cordis.yml'), 'utf8')
-    expect(composition).toMatch(/@deepseek-ai\/dsh-tool-cordis/u)
-    expect(composition).toMatch(/@deepseek-ai\/dsh-tool-fs/u)
-    expect(composition).toMatch(/@deepseek-ai\/dsh-tool-skill/u)
-    expect(composition).toMatch(/@deepseek-ai\/dsh-tool-todo/u)
-    expect(composition).toContain('customSkillDirs')
-    expect(await readFile(path.join(presetDir, 'skills', 'cordis-plugin-development', 'SKILL.md'), 'utf8'))
-      .toContain('name: cordis-plugin-development')
-    expect(await readFile(path.join(presetDir, 'skills', 'editing-cordis-compositions', 'SKILL.md'), 'utf8'))
-      .toContain('name: editing-cordis-compositions')
-    expect(compositionSha256(composition)).toMatch(/^[a-f0-9]{64}$/u)
-    const pkg = JSON.parse(await readFile(path.join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')) as { version?: string }
-    expect(pkg.version).toBe('0.1.0-rc.6')
-  })
-
-  it('smokes an installed DSH 0.1.1-rc.1 cordis composition when present, without touching Web', async () => {
+describe('installed DSH Creator compositions', () => {
+  it('smokes an installed DSH 0.1.1 cordis composition when present, without touching Web', async () => {
     const version = await dshVersionIfPresent()
     if (!version) return
-    if (!/0\.1\.1-rc\.1/u.test(version)) return
+    if (!/^0\.1\.1(?:-|$)/u.test(version)) return
     const composition = await installedCordisComposition()
     if (!composition) return
     expect(composition).toMatch(/@deepseek-ai\/dsh-tool-cordis/u)

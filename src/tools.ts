@@ -62,6 +62,9 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   if (navKind === 'reuse_local') {
     return genericPendingCard(args, 'Using the existing local capability unchanged', '正在原样使用已有本地能力', 'read')
   }
+  if (navKind === 'enable_builtin') {
+    return genericPendingCard(args, 'Enabling the built-in Host capability', '正在启用内置能力', 'execute')
+  }
   return genericPendingCard(args, 'Continuing the capability workflow', '正在继续能力工作流', 'other')
 }
 
@@ -165,7 +168,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_resume',
-      description: 'Interpret a fresh user reply at a sealed Host gate, or finish in-session construction after an authorized modify/create. Use navigation for candidate review/search/local reuse/finish construction, or decision for the final reviewed use/modify/create/stop choice. Host validates the current interrupt except for finish construction, which continues the already-authorized turn.',
+      description: 'Interpret a fresh user reply at a sealed Host gate, or finish in-session construction after an authorized modify/create. Use navigation for candidate review/search/local reuse/built-in enable/finish construction, or decision for the final reviewed use/modify/create/stop choice. Host validates the current interrupt except for finish construction, which continues the already-authorized turn.',
       parameters: {
         workflow_id: { type: 'string', required: true, description: 'Workflow id returned by capability_workflow.' },
         interrupt_id: { type: 'string', description: 'interrupt_id from the current interrupt payload. Required at user gates; omit when finishing in-session construction.' },
@@ -175,7 +178,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           properties: {
             kind: {
               type: 'string',
-              enum: ['review_candidates', 'review_existing', 'search_more', 'reuse_local', 'stop', 'finish_managed_work'],
+              enum: ['review_candidates', 'review_existing', 'search_more', 'reuse_local', 'enable_builtin', 'stop', 'finish_managed_work'],
               required: true,
             },
             candidate_ids: { type: 'array', items: { type: 'string' } },

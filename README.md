@@ -38,7 +38,7 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 安装或升级后重启对应的 DSH profile，让它加载新 bundle；之后为其它能力执行安装时是否需要再次重启，见[使用指南 §5](docs/user-guide.md#5-结果状态与下一步)。
 
-安装命令使用最新发布 tag；仓库 `package.json` 中的版本号可能领先于最新发布版。Node.js 要求 `>=22.19.0 || >=24.0.0`；当前开发与验收基于 DSH `0.1.0-rc.6`、Cordis `4.0.1`。
+安装命令使用最新发布 tag；仓库 `package.json` 中的版本号可能领先于最新发布版。Node.js 要求 `>=22.19.0 || >=24.0.0`；当前开发与验收基于 DSH `0.1.1-rc.2`、Cordis `4.0.1`。
 
 ## 快速体验
 

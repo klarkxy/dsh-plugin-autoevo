@@ -9,6 +9,7 @@ This guide is for maintainers who change AutoEvo Host seams, workflow behavior, 
 - Node.js `>=22.19.0 || >=24.0.0`; CI uses Node 24.
 - pnpm; CI currently uses `10.29.2`.
 - Git; live GitHub discovery and review also require GitHub CLI.
+- Host DSH CLI for packaged acceptance and E2E must not be a repo-root dependency — `npx @deepseek-ai/dsh` would then shadow the real CLI. CI injects the current `@deepseek-ai/dsh@0.1.1-rc.2`; locally use an installed 0.1.1.x or set `DSH_PACKAGE_ROOT`.
 - Windows/PowerShell is the primary exercised environment. Core execution uses argv runners and must not depend on interactive shell state.
 
 ```powershell

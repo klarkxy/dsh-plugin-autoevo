@@ -38,7 +38,7 @@ Start the profile day to day with `npx @deepseek-ai/dsh web`. Note the unscoped 
 
 Restart the target DSH profile after installing or upgrading AutoEvo so it loads the new bundle; whether later capability installs need another restart is covered in [User Guide §5](docs/user-guide.en.md#5-outcomes-and-next-steps).
 
-The install command uses the latest release tag; the `package.json` version may be ahead of the latest published release. Node.js must satisfy `>=22.19.0 || >=24.0.0`; current development and acceptance use DSH `0.1.0-rc.6` and Cordis `4.0.1`.
+The install command uses the latest release tag; the `package.json` version may be ahead of the latest published release. Node.js must satisfy `>=22.19.0 || >=24.0.0`; current development and acceptance use DSH `0.1.1-rc.2` and Cordis `4.0.1`.
 
 ## Quick start
 

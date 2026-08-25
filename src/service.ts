@@ -44,6 +44,8 @@ import {
   shouldSkipRemoteDiscovery,
 } from './resolver/lineage.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
+import { resolveBundledDshRoot } from './resolver/host-bundled.js'
+import { enableBuiltinMount } from './lifecycle/enable-builtin.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
@@ -213,10 +215,17 @@ export class CapabilityEvolutionService implements WorkflowHost {
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
     const activeProfile = await this.currentProfileOwner().catch(() => undefined)
+    const dshPackageRoot = await resolveBundledDshRoot({
+      dshHome: this.config.dshHome,
+      config: this.config,
+      runner: this.runner,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    }).catch(() => undefined)
     const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec), {
       dshHome: this.config.dshHome,
       intent,
       ...(activeProfile ? { activeProfile } : {}),
+      ...(dshPackageRoot ? { dshPackageRoot } : {}),
     })
     const [reviews, installations] = await Promise.all([
       this.store.listAllReviews(),
@@ -838,6 +847,37 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   listInstallProfiles(): Promise<string[]> {
     return this.currentProfileOwner().then((profile) => [profile])
+  }
+
+  enableTargetProfile(): Promise<string | undefined> {
+    return this.currentProfileOwner().catch(() => undefined)
+  }
+
+  async enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void> {
+    const commitment = workflow.actionCommitment
+    const endpoint = commitment?.endpoint
+    if (!commitment || commitment.requestedAction !== 'enable_builtin' || endpoint?.kind !== 'host_bundled_enable') {
+      throw new EvolutionError('invalid_input', 'enable_builtin requires a frozen host-bundled enablement commitment')
+    }
+    const bundledRoot = await resolveBundledDshRoot({
+      dshHome: this.config.dshHome,
+      config: this.config,
+      runner: this.runner,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    }).catch(() => undefined)
+    if (!bundledRoot) {
+      throw new EvolutionError('command_failed', 'The Host dsh package root is unavailable; cannot revalidate the built-in capability', {
+        command: this.config.dshCommand,
+      })
+    }
+    await enableBuiltinMount({
+      launcher: this.launcher,
+      dshHome: this.config.dshHome,
+      bundledRoot,
+      endpoint,
+      cwd: workflow.cwd ?? process.cwd(),
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
   }
 
   private currentProfileOwner(): Promise<string> {

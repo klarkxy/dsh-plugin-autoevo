@@ -369,6 +369,23 @@ export class DshLauncher {
     return this.runner.run(signal ? { ...request, signal, allowFailure: true } : { ...request, allowFailure: true })
   }
 
+  /** Compose the profile tree without booting it; fails loudly on unresolvable mount rows. */
+  async dumpConfig(
+    dshHome: string,
+    profile: string,
+    cwd: string,
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
+    const request = {
+      argv: this.argv('--profile', profile, '--dump-config'),
+      cwd,
+      env: this.childEnv(dshHome, false),
+      timeoutMs: Math.max(this.config.commandTimeoutMs, 120_000),
+      allowFailure: true as const,
+    }
+    return this.runner.run(signal ? { ...request, signal } : request)
+  }
+
   async hasProfileDependency(dshHome: string, profile: string, packageName: string): Promise<boolean> {
     const safePackageName = assertSafePackageName(packageName)
     try {

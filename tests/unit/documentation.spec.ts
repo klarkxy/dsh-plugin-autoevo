@@ -77,6 +77,18 @@ describe('documentation set', () => {
     }
   })
 
+  it('does not install @deepseek-ai/dsh at the repo root', () => {
+    const pkg = JSON.parse(read('package.json')) as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+      optionalDependencies?: Record<string, string>
+      peerDependencies?: Record<string, string>
+    }
+    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const) {
+      expect(pkg[field]?.['@deepseek-ai/dsh'], field).toBeUndefined()
+    }
+  })
+
   it('does not revive the removed child-agent construction contract', () => {
     const governedDocs = [
       ...documentationFiles,

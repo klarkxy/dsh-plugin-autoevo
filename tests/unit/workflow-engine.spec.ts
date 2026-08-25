@@ -100,6 +100,10 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     async latestReview() {
       return undefined
     },
+    async enableTargetProfile() {
+      return 'web'
+    },
+    enableBuiltin: vi.fn(async () => {}),
     getResolution(id) {
       return store.getResolution(id)
     },
@@ -405,6 +409,76 @@ describe('workflow engine autonomous discovery', () => {
     expect(reused.workflow.selectionReceipt).toMatchObject({ kind: 'reuse_local', candidateIds: [candidate.id] })
     expect(reused.workflow.selectionReceipt?.candidateDigests[candidate.id]).toBe(candidate.digest)
     expect(reused.workflow.executionLease).toMatchObject({ candidateId: candidate.id, candidateDigest: candidate.digest, endpoint: { kind: 'exact_tool', name: 'pwsh' } })
+  })
+
+  it('enables a host-bundled candidate directly and ends at restart_required', async () => {
+    const record = resolution('current time')
+    record.localCandidates = [{
+      kind: 'plugin',
+      name: '@deepseek-ai/dsh-time-context',
+      description: 'Opt-in durable per-step context with the current time and elapsed time',
+      availability: 'host_bundled',
+      confidence: 0.92,
+      fit: 'full',
+      reuseEligible: false,
+      hostBundled: {
+        packageName: '@deepseek-ai/dsh-time-context',
+        version: '0.1.1-rc.2',
+        mountId: 'time-context',
+      },
+    }]
+    const { guard, engine, workflowHost } = await makeEngine(record, 'enable-builtin')
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'current time', turn)
+    const candidate = selection.workflow.candidateSnapshot![0]!
+    expect(selection.workflow.interrupt?.options.map((option) => option.id)).toContain('enable_builtin')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '直接启用' }] })
+    // Terminal settlement clears the grant on the shared record object; capture at execution time.
+    let capturedCommitment: unknown
+    let capturedReceipt: unknown
+    vi.mocked(workflowHost.enableBuiltin!).mockImplementation(async (workflow) => {
+      capturedCommitment = structuredClone(workflow.actionCommitment)
+      capturedReceipt = structuredClone(workflow.selectionReceipt)
+    })
+
+    const enabled = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+    }, turn)
+
+    expect(enabled.workflow).toMatchObject({ status: 'completed', cursor: 'restart_required' })
+    expect(capturedCommitment).toMatchObject({
+      requestedAction: 'enable_builtin',
+      candidateId: candidate.id,
+      targetProfile: 'web',
+      endpoint: {
+        kind: 'host_bundled_enable',
+        packageName: '@deepseek-ai/dsh-time-context',
+        version: '0.1.1-rc.2',
+        mountId: 'time-context',
+        targetProfile: 'web',
+      },
+    })
+    expect(capturedReceipt).toMatchObject({ kind: 'enable_builtin', candidateIds: [candidate.id] })
+    expect(enabled.workflow.executionLease).toBeUndefined()
+    expect(workflowHost.enableBuiltin).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects enable_builtin for a non-bundled candidate', async () => {
+    const { guard, engine } = await makeEngine(resolution(), 'enable-builtin-invalid')
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn)
+    const candidate = selection.workflow.candidateSnapshot![0]!
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '启用' }] })
+
+    const invalid = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+    }, turn)
+
+    expect(invalid.status).toBe('invalid_resume')
   })
 
   it('keeps Gate 1 candidate scope sealed for navigation and leaves authorization unconsumed', async () => {

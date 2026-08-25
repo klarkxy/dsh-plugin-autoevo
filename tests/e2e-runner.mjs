@@ -4,13 +4,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { hostDshVersion, resolveHostDsh, skipUnlessHarnessDsh } from './helpers/host-dsh.mjs'
 
 const scenario = process.argv[2] ?? 'resolve-local'
 const supported = new Set(['resolve-local', 'adversarial-define', 'marketplace-flow'])
 if (!supported.has(scenario)) throw new Error(`unknown E2E scenario: ${scenario}`)
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
-const dshBin = path.join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const hostDsh = await resolveHostDsh()
+if (skipUnlessHarnessDsh(hostDshVersion(hostDsh.bin))) process.exit(0)
+const dshBin = hostDsh.bin
 const scriptedPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'scripted-llm.mjs')).href
 const approvalPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'approval-allow-once.mjs')).href
 const cordisDefineProbe = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'cordis-define-probe.mjs')).href
