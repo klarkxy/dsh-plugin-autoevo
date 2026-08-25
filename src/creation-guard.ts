@@ -33,7 +33,7 @@ interface AgentGateState {
   currentTurnId?: string
   turnSequence: number
   consumedTurnIds: Set<string>
-  waitingKind?: 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
+  waitingKind?: 'await_clarification' | 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
   interruptWatermarkTurnId?: string
   sessionId?: string
   selectionReceipt?: SelectionReceipt
@@ -63,11 +63,11 @@ export function extractUserFacingText(message: UserFacingMessage): string {
   const parts: string[] = []
   for (const block of message.content ?? []) {
     if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') continue
-    const text = block.text.normalize('NFKC').trim()
-    if (!text || SKIP_USER_TEXT.test(text)) continue
-    parts.push(text)
+    const classified = block.text.normalize('NFKC').trim()
+    if (!classified || SKIP_USER_TEXT.test(classified)) continue
+    parts.push(block.text)
   }
-  return parts.join('\n').trim()
+  return parts.join('\n')
 }
 
 export function isDshPluginAddCommand(value: string): boolean {
@@ -525,9 +525,11 @@ export class CreationGuard {
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined {
     if (!exec.agent || !this.inEvolutionMode(exec.agent)) return undefined
     const state = this.states.get(exec.agent)
+    const clarificationWaiting = state?.waitingKind === 'await_clarification'
     const discoveryOpen = state?.waitingKind === 'await_discovery'
     const recoveryWaiting = state?.waitingKind === 'await_recovery'
-    const waiting = state?.waitingKind === 'await_selection'
+    const waiting = clarificationWaiting
+      || state?.waitingKind === 'await_selection'
       || state?.waitingKind === 'await_confirmation'
       || recoveryWaiting
       || (!state?.waitingKind && (
@@ -542,7 +544,10 @@ export class CreationGuard {
     if (ASK_USER_TOOLS.has(exec.name) && waiting) {
       return 'AutoEvo is already waiting at a sealed user gate. Present the natural-language choices in chat and stop. A tool answer is not an authenticated fresh top-level user turn.'
     }
-    if (exec.name === FIND_PLUGIN_TOOL && exec.parent === undefined) {
+    if (exec.name === FIND_PLUGIN_TOOL) {
+      if (clarificationWaiting) {
+        return 'Answer the sealed clarification through capability_workflow_resume before any discovery. Clarification grants no mutation authority.'
+      }
       if (recoveryWaiting) {
         return hasFreshReply
           ? 'Recovery is pending. Do not search. Call capability_workflow_recover with the sealed workflow_id and interrupt_id to clean up the exact owned installation and start a new discovery.'
@@ -558,6 +563,9 @@ export class CreationGuard {
         return 'Discovery is finished. Present the current shortlist in chat. Do not search, and do not call capability_workflow_resume until the user replies.'
       }
       return 'Do not call find_dsh_plugin. Call capability_workflow with the user\'s original requirement.'
+    }
+    if (exec.name === WEB_SEARCH_TOOL && clarificationWaiting) {
+      return 'Answer the sealed clarification through capability_workflow_resume before any discovery.'
     }
     if (exec.name === WEB_SEARCH_TOOL && discoveryOpen) return undefined
     if (exec.name === WEB_SEARCH_TOOL && recoveryWaiting) {
@@ -595,7 +603,8 @@ export class CreationGuard {
   }
 
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
-    // Live cordis_define(kind:new) is a Creator experiment; Host-managed construction does not consume it.
+    // The outer Policy V10 execution guard denies every parent live definition.
+    // This inner guard remains responsible for managed-construction protocol state.
   }
 
   private managedConstructionDenial(agent: Agent): string | undefined {

@@ -16,6 +16,7 @@ import type {
   WorkflowOptionId,
 } from '../contracts.js'
 import { creatorAgentFacts, type CreatorRecord } from '../creator-foundation.js'
+import { EvolutionError } from '../errors.js'
 import { isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import { hashObject } from '../state/hashes.js'
@@ -73,6 +74,7 @@ export function securityFindingFacts(findings: readonly ReviewFinding[]): Securi
 export type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed'
 
 export type WorkflowNodeId =
+  | 'await_clarification'
   | 'resolve_local'
   | 'discover_remote'
   | 'ensure_market'
@@ -99,8 +101,9 @@ export type WorkflowNodeId =
   | 'recovery_required'
   | 'create_authorized'
   | 'modify_authorized'
+  | 'superseded'
 
-export type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
+export type InterruptKind = 'await_clarification' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
 
 export type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery'
 
@@ -384,13 +387,23 @@ export function modificationAttemptsExhausted(outcome: ModificationOutcome | und
 }
 
 export interface WorkflowRecord {
-  schemaVersion: 1 | 2
+  schemaVersion: 1 | 2 | 3
   id: string
   policyVersion: string
   createdAt: string
   updatedAt: string
   requirement: string
   requirementNormalized?: string
+  /** Non-authoritative model summary retained only for diagnostics/search presentation. */
+  requestSummary?: string
+  /** Exact Host-owned search input. V10 starts with requirement and appends one raw clarification answer. */
+  searchRequirement?: string
+  clarificationQuestion?: string
+  clarificationAnswer?: string
+  clarifiedIntent?: RequestIntent
+  startedTurnId?: string
+  supersededByWorkflowId?: string
+  supersededAt?: string
   cwd?: string
   ownerSessionId?: string
   bootId?: string
@@ -597,6 +610,7 @@ export interface WorkflowExec {
 }
 
 export const INTERRUPT_NODES: ReadonlySet<WorkflowNodeId> = new Set([
+  'await_clarification',
   'await_selection',
   'await_confirmation',
 ])
@@ -619,9 +633,11 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
   'recovery_required',
   'create_authorized',
   'modify_authorized',
+  'superseded',
 ])
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
+  clarify_requirement: { id: 'clarify_requirement', labelEn: 'Answer the one clarification before search', labelZh: '回答搜寻前的唯一澄清问题', placement: 'primary' },
   review_candidates: { id: 'review_candidates', labelEn: 'Review selected candidates', labelZh: '审查选中的候选', placement: 'primary' },
   review_existing: { id: 'review_existing', labelEn: 'Review the known plugin source', labelZh: '审查这份插件的已知来源', placement: 'primary' },
   search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件', placement: 'primary' },
@@ -639,7 +655,8 @@ export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
 }
 
 export function isInterruptKind(value: string | undefined): value is InterruptKind {
-  return value === 'await_selection'
+  return value === 'await_clarification'
+    || value === 'await_selection'
     || value === 'await_confirmation'
     || value === 'await_recovery'
 }
@@ -695,7 +712,7 @@ export function confirmationFacts(
       missingCapabilities: review.missingCapabilities,
       verificationLayer: reviewLayer ?? 'manual_runtime',
       ...(reviewLayer === 'manual_runtime' ? {
-        installRetentionRule: 'This candidate verifies only at manual_runtime: install requires retention persistent, skips the sandboxed trial, and ends awaiting a manual user test in the target client or profile.',
+        installRetentionRule: 'This candidate verifies only at manual_runtime: adoption is persistent, Host still performs its isolated preflight and bundle-activation checks, and completion awaits a manual user test in the target client or profile.',
       } : {}),
       findings: compact?.findings ?? [],
       findingDetails: compact?.findingDetails ?? [],
@@ -757,15 +774,17 @@ export function createWorkFacts(workflow?: WorkflowRecord): Record<string, unkno
 
 export function optionsFor(
   kind: InterruptKind,
-  resolution: ResolutionRecord,
+  resolution: ResolutionRecord | undefined,
   reviews: ReviewRecord[] = [],
   workflow?: WorkflowRecord,
   installProfiles: string[] = [],
   managedActionsAvailable = true,
 ): WorkflowOption[] {
+  if (kind === 'await_clarification') return [WORKFLOW_OPTIONS.clarify_requirement, WORKFLOW_OPTIONS.stop]
   if (kind === 'await_modify_work') {
     return [WORKFLOW_OPTIONS.stop]
   }
+  if (!resolution) throw new EvolutionError('invalid_input', 'Workflow decision gate is missing a resolution')
   const options: WorkflowOption[] = []
   const snapshot = workflow?.candidateSnapshot ?? []
   const remoteSnapshot = snapshot.filter((item) => item.kind === 'remote')
@@ -844,6 +863,9 @@ export function optionsFor(
     && remoteSnapshot.length === 0
     && workflow?.intent?.operation === 'evolve_existing'
   if (!lineageOnly) options.push(WORKFLOW_OPTIONS.search_more)
+  if (kind === 'await_selection' && snapshot.length === 0 && managedActionsAvailable && resolution.remoteDiscoveryComplete) {
+    options.push(WORKFLOW_OPTIONS.create_new)
+  }
   options.push(WORKFLOW_OPTIONS.stop)
   return options
 }

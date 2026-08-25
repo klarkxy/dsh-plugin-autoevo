@@ -8,7 +8,7 @@ import {
   type ReviewRecord,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
-import { ownerSessionId } from '../host-identity.js'
+import { normalizeRequirement, ownerSessionId } from '../host-identity.js'
 import { assertOptionAllowed, resolveDecisionFromModel, resolveDecisionTarget } from '../lifecycle/decide.js'
 import {
   INTERRUPT_NODES,
@@ -97,6 +97,51 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
           interruptId: workflow.interrupt?.interruptId,
         })
       }
+      if (workflow.cursor === 'await_clarification') {
+        const expectedDigest = this.clarificationSnapshotDigest(workflow)
+        if (expectedDigest !== workflow.interrupt.snapshotDigest) {
+          throw new EvolutionError('invalid_input', 'Clarification interrupt snapshot digest mismatch')
+        }
+        if (this.creationGuard.isAwaitingFreshUserTurn(exec.agent, workflow.interrupt)) {
+          return await this.view(workflow, undefined, { status: 'parked', alreadyWaiting: true })
+        }
+        if (input.decision || !input.navigation) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification accepts read-only navigation only')
+        }
+        if (input.navigation.kind === 'stop') {
+          this.creationGuard.consumeDecisionTurn(exec.agent, workflow.interrupt)
+          workflow.generation += 1
+          workflow.status = 'running'
+          workflow.consumedInterruptIds = [...(workflow.consumedInterruptIds ?? []), input.interruptId]
+          delete workflow.interrupt
+          this.clearWorkflowGrant(workflow)
+          workflow.cursor = 'stopped'
+          return await this.runUntilPark(workflow, exec)
+        }
+        if (input.navigation.kind !== 'clarify_requirement' || !input.navigation.clarifiedIntent) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification requires clarify_requirement with clarified_intent')
+        }
+        if (input.navigation.candidateIds?.length || input.navigation.reviewMode) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification does not accept candidate_ids or review_mode')
+        }
+        const turn = this.creationGuard.previewDecisionTurn(exec.agent, workflow.interrupt)
+        const normalizedAnswer = normalizeRequirement(turn.message)
+        if (!normalizedAnswer || normalizedAnswer.length > 2_000) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification answer must contain 1 to 2000 characters')
+        }
+        this.creationGuard.consumeDecisionTurn(exec.agent, workflow.interrupt)
+        workflow.clarificationAnswer = turn.message
+        workflow.clarifiedIntent = input.navigation.clarifiedIntent
+        workflow.searchRequirement = `${workflow.requirement}\n\nClarification:\n${turn.message}`
+        workflow.generation += 1
+        workflow.status = 'running'
+        workflow.consumedInterruptIds = [...(workflow.consumedInterruptIds ?? []), input.interruptId]
+        delete workflow.interrupt
+        delete workflow.invalidResumeAttempt
+        this.clearWorkflowGrant(workflow)
+        workflow.cursor = 'resolve_local'
+        return await this.runUntilPark(workflow, exec)
+      }
       if (!workflow.resolutionId) {
         throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
       }
@@ -142,7 +187,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
           throw error
         }
       }
-      if (workflow.cursor !== 'await_confirmation') {
+      const emptyCandidateGate = workflow.cursor === 'await_selection'
+        && (workflow.candidateSnapshot?.length ?? 0) === 0
+      if (workflow.cursor !== 'await_confirmation' && !emptyCandidateGate) {
         return await this.invalidResumeView(
           workflow,
           resolution,

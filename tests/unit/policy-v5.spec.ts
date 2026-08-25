@@ -98,10 +98,10 @@ function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn
   }
 }
 
-describe('Policy V9 legacy invalidation', () => {
-  it('exports Policy V9 contracts and semantic hosts for consumers', () => {
-    expect(POLICY_VERSION).toBe('9')
-    expect(exportedPolicyVersion).toBe('9')
+describe('Policy V10 legacy invalidation', () => {
+  it('exports Policy V10 contracts and semantic hosts for consumers', () => {
+    expect(POLICY_VERSION).toBe('10')
+    expect(exportedPolicyVersion).toBe('10')
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')
@@ -342,7 +342,7 @@ describe('Policy V9 legacy invalidation', () => {
     },
   )
 
-  it('starts a fresh V8 workflow instead of replaying an unfinished old-policy one', async () => {
+  it('starts a fresh V10 workflow instead of replaying an unfinished old-policy one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-start-'))
     temporary.push(root)
     const store = new StateStore(root)

@@ -49,7 +49,7 @@ Keep one canonical procedure. Other files should summarize and link. Never turn 
 src/
 ├─ index.ts                    # Cordis/DSH entry and service composition
 ├─ config.ts                   # Public config schema/defaults
-├─ contracts.ts                # Policy V9 contracts and receipts
+├─ contracts.ts                # Policy V10 contracts and receipts
 ├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
 ├─ service-resolution.ts       # Resolution, candidate pool, authorization flow
 ├─ service-review.ts           # Review orchestration and revalidation

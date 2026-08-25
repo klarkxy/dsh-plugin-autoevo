@@ -220,10 +220,10 @@ describe('interrupt binding and host-turn decisions', () => {
       decision: { action: 'stop' },
     }, turn)).rejects.toThrow(/service restart|reissued interrupt/i)
 
-    const reused = await engine2.start('calculator', turn)
-    expect(reused.workflow.id).toBe(started.workflow.id)
-    expect(reused.workflow.interrupt?.bootId).toBe('boot_new')
-    expect(reused.workflow.interrupt?.interruptId).not.toBe(oldInterrupt)
+    const reissued = await store.getWorkflow(started.workflow.id)
+    expect(reissued.id).toBe(started.workflow.id)
+    expect(reissued.interrupt?.bootId).toBe('boot_new')
+    expect(reissued.interrupt?.interruptId).not.toBe(oldInterrupt)
   })
 
   it('rejects candidate snapshot digest mismatch', async () => {
@@ -276,6 +276,7 @@ describe('interrupt binding and host-turn decisions', () => {
       guard,
     )
     const turn = exec('session-reuse', 'C:/workspace/app')
+    remember(guard, turn.agent, 'Need a  Calculator  tool')
     const first = await service.start('Need a  Calculator  tool', turn)
     const second = await service.start('need a calculator tool', turn)
     expect(second.workflow.id).toBe(first.workflow.id)

@@ -8,7 +8,7 @@ English | [中文](README.md)
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` is the capability-reuse and safe-evolution layer for DeepSeek Harness (DSH). The Capability Evolution preset is a superset of official Creator mode: runtime inspect, live plugin experiments, preset authoring, and delegation stay available. When an Agent needs a reusable capability, AutoEvo checks local tools and skills first, then discovers, reviews, and installs community plugins. If a candidate is close but incomplete, it can be changed, re-reviewed, and installed from a Host-managed source.
+`dsh-plugin-autoevo` is the capability-reuse and safe-evolution layer for DeepSeek Harness (DSH). In the **Capability Evolution** preset, every capability request—including a temporary experiment—is Search-first. The Host preserves the user's original wording, allows at most one clarification, and then checks real local and remote candidates. A close candidate can be changed in a Host-bound managed source, re-reviewed, and installed; every user-adopted capability is persisted.
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -47,8 +47,9 @@ The install command uses the latest release tag; the `package.json` version may 
 
    > I need a DSH plugin that can calculate scientific notation. Search for an existing one first.
 
-3. When AutoEvo presents 1–5 candidates, use a fresh chat message to choose the candidate to review.
-4. After review, use another fresh message to decide whether to reuse, install, improve, search again, create from scratch, or stop.
+3. If material ambiguity blocks useful search, answer the single clarification. AutoEvo then presents 1–5 candidates or explicitly reports no match.
+4. With candidates, use a fresh chat message to choose one for review. With no candidates, choose continued search, creating a new capability, or stopping.
+5. After review, use another fresh message to decide whether to reuse, install, improve, search again, create from scratch, or stop.
 
 Those replies are two separate confirmation gates; the full flow and rationale are in [User Guide §3](docs/user-guide.en.md#3-your-first-complete-workflow).
 

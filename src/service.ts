@@ -182,7 +182,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       () => this.currentProfileOwner(),
     )
     this.remover = new PluginRemover(ctx, config, store, this.launcher)
-    this.engine = new WorkflowEngine(store, creationGuard, this)
+    this.engine = new WorkflowEngine(store, creationGuard, this, true)
   }
 
   private managedWorkDeps(): ManagedWorkDeps {
@@ -200,8 +200,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return runInWorkspace(sessionCwd(exec.agent), fn)
   }
 
-  start(requirement: string, exec: ToolRunContext, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<WorkflowView> {
-    return this.withWorkspace(exec, () => this.engine.start(requirement, exec, intent))
+  start(
+    requirement: string,
+    exec: ToolRunContext,
+    intent: RequestIntent = DEFAULT_REQUEST_INTENT,
+    clarificationQuestion?: string,
+  ): Promise<WorkflowView> {
+    return this.withWorkspace(exec, () => this.engine.start(requirement, exec, intent, clarificationQuestion))
   }
 
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {

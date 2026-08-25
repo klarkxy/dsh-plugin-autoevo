@@ -586,6 +586,82 @@ describe('workflow engine autonomous discovery', () => {
     })])
   })
 
+  it.each([
+    {
+      name: 'recovery-required result',
+      finish: async () => {
+        throw new EvolutionError('command_failed', 'managed construction needs recovery', {
+          recoveryRequired: true,
+        })
+      },
+      expectedCursor: 'recovery_required',
+      rejects: false,
+    },
+    {
+      name: 'unexpected exception',
+      finish: async () => {
+        throw new Error('managed construction crashed')
+      },
+      expectedCursor: 'complete_managed_work',
+      rejects: true,
+    },
+  ])('releases constructor state after $name', async ({ finish, expectedCursor, rejects }) => {
+    const record = resolution('new capability')
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = false
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, `constructor-exit-${rejects}`)
+    let refinementCalls = 0
+    workflowHost.refineRemote = async (current) => {
+      refinementCalls += 1
+      return refinementCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+    }
+    workflowHost.prepareCreate = async (current, _exec, workflow) => {
+      const sourceRoot = path.join(root, 'managed-source')
+      workflow.pendingPath = sourceRoot
+      workflow.managedSourceId = 'managed-new-capability'
+      return { resolution: current, path: sourceRoot }
+    }
+    workflowHost.finishManagedWork = finish
+
+    const turn = exec(`session-constructor-exit-${rejects}`, root)
+    const discovery = await engine.start('new capability', turn, {
+      operation: 'discover_or_reuse',
+      requiredSurface: 'native_dsh_plugin',
+    })
+    await engine.refine({ workflowId: discovery.workflow.id, queries: ['first search'] }, turn)
+    const started = await engine.refine({ workflowId: discovery.workflow.id, queries: ['second search'] }, turn)
+    expect(started.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '创建新的能力' }] })
+    const constructing = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'create_new' },
+    }, turn)
+    expect(constructing.workflow.cursor, JSON.stringify({
+      options: started.workflow.interrupt?.options,
+      resumeHint: constructing.resumeHint,
+    })).toBe('await_modify_work')
+    expect(guard.constructionRoot(turn.agent)).toBe(path.join(root, 'managed-source'))
+
+    const finishPromise = engine.resume({
+      workflowId: constructing.workflow.id,
+      navigation: { kind: 'finish_managed_work' },
+    }, turn)
+    if (rejects) {
+      await expect(finishPromise).rejects.toThrow(/managed construction crashed/i)
+    } else {
+      await expect(finishPromise).resolves.toMatchObject({
+        workflow: { cursor: expectedCursor, status: 'interrupted' },
+      })
+    }
+
+    expect(guard.constructionRoot(turn.agent)).toBeUndefined()
+    const stored = await store.getWorkflow(constructing.workflow.id)
+    expect(stored.cursor).toBe(expectedCursor)
+    if (rejects) expect(stored.status).toBe('failed')
+  })
+
   it('cleans the exact linked installation and starts a new audited workflow after a fresh user recovery request', async () => {
     const record = resolution('calculator')
     const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'recover')
@@ -828,6 +904,91 @@ describe('workflow engine autonomous discovery', () => {
     expect(old.selectionReceipt).toEqual({ id: 'selection_old' })
 
     await expect(engine.recover({ workflowId: workflow.id }, turn)).rejects.toThrow(/not waiting for a recovery decision/i)
+  })
+
+  it('keeps a completed V9 temporary receipt readable and explicitly removes it before a fresh V10 workflow', async () => {
+    const record = resolution('calculator')
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'legacy-v9-completed')
+    await store.put('resolutions', record)
+    const workflowId = `workflow_${'a'.repeat(24)}`
+    const installationId = `installation_${'d'.repeat(24)}`
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      reviewId: `review_${'e'.repeat(24)}`,
+      workflowId,
+      targetProfile: 'headless',
+      retention: 'temporary',
+      dshHome: root,
+      packageName: 'dsh-plugin-demo',
+      installSpec: 'file:demo.tgz',
+      installState: 'installed',
+      installOutcome: 'activated',
+      installed: true,
+      loaded: true,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'legacy temporary activation',
+      },
+    } satisfies InstallationRecord)
+    await store.put('workflows', {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: '9',
+      createdAt: '2026-08-21T00:00:00.000Z',
+      updatedAt: '2026-08-21T00:00:00.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: process.cwd(),
+      ownerSessionId: 'session-1',
+      bootId: 'boot_engine',
+      resolutionId: record.id,
+      status: 'completed',
+      cursor: 'activated',
+      generation: 4,
+      lastInstallationId: installationId,
+      lastReviewId: `review_${'e'.repeat(24)}`,
+      completionTurnId: 'turn_install',
+    } satisfies WorkflowRecord)
+    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    workflowHost.cleanupInstallation = cleanupInstallation
+    const turn = exec()
+    const currentRequest = '现在清理旧试装并找农历转换能力'
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: currentRequest }] })
+
+    const restarted = await engine.recover({ workflowId }, turn)
+
+    expect(cleanupInstallation).toHaveBeenCalledWith(installationId, expect.objectContaining({ agent: turn.agent }))
+    expect(restarted.workflow).toMatchObject({
+      schemaVersion: 3,
+      policyVersion: POLICY_VERSION,
+      requirement: currentRequest,
+      searchRequirement: currentRequest,
+      recoveredFromWorkflowId: workflowId,
+      cursor: 'await_discovery',
+      status: 'interrupted',
+    })
+    expect(await store.getWorkflow(workflowId)).toMatchObject({
+      policyVersion: '9',
+      status: 'completed',
+      recovery: {
+        action: 'cleanup_and_restart',
+        cleanup: 'removed',
+        installationId,
+        restartRequired: true,
+        restartedAsWorkflowId: restarted.workflow.id,
+      },
+    })
   })
 
   it('rejects completed-install restart when the receipt is not the unreplaced owned success receipt', async () => {
@@ -1123,7 +1284,7 @@ describe('workflow engine autonomous discovery', () => {
     const installed = await engine.resume({
       workflowId: reviewed.workflow.id,
       interruptId: reviewed.workflow.interrupt!.interruptId,
-      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      decision: { action: 'use_this', candidateId },
     }, turn)
     expect(installed.workflow.lastFailure).toBeUndefined()
     expect(installs).toEqual([{ retention: 'persistent', replacement: undefined }])
@@ -1352,7 +1513,7 @@ describe('workflow engine autonomous discovery', () => {
     const installed = await engine.resume({
       workflowId: finished.workflow.id,
       interruptId: finished.workflow.interrupt!.interruptId,
-      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      decision: { action: 'use_this', candidateId },
     }, turn)
     expect(installs).toEqual([expect.objectContaining({
       retention: 'persistent',
@@ -1363,5 +1524,65 @@ describe('workflow engine autonomous discovery', () => {
       }),
     })])
     expect(installed.workflow.cursor).toBe('restart_required')
+  })
+
+  it('captures the original wording, clarifies once, and searches only after a fresh answer', async () => {
+    const { engine, guard, workflowHost } = await makeEngine(resolution('summary'), 'clarification')
+    const turn = exec('session-clarification')
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '  帮我处理日期，但先别猜  ' }] })
+    const started = await engine.start('date conversion summary', turn, {
+      operation: 'discover_or_reuse',
+      requiredSurface: 'native_dsh_plugin',
+    }, '你需要哪一种日历转换？')
+    expect(started.workflow).toMatchObject({
+      schemaVersion: 3,
+      cursor: 'await_clarification',
+      requirement: '  帮我处理日期，但先别猜  ',
+      requestSummary: 'date conversion summary',
+    })
+    expect(bootstrap).not.toHaveBeenCalled()
+
+    const sameTurn = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      navigation: {
+        kind: 'clarify_requirement',
+        clarifiedIntent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      },
+    }, turn)
+    expect(sameTurn.alreadyWaiting).toBe(true)
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '是公历转农历，保留原格式。' }] })
+    const searched = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      navigation: {
+        kind: 'clarify_requirement',
+        clarifiedIntent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      },
+    }, turn)
+    expect(searched.workflow.clarificationAnswer).toBe('是公历转农历，保留原格式。')
+    expect(searched.workflow.actionCommitment).toBeUndefined()
+    expect(bootstrap).toHaveBeenCalledWith(
+      '  帮我处理日期，但先别猜  \n\nClarification:\n是公历转农历，保留原格式。',
+      turn,
+      { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+    )
+  })
+
+  it('supersedes a pending clarification when a fresh top-level requirement starts', async () => {
+    const { engine, guard, store } = await makeEngine(resolution('first'), 'supersede')
+    const turn = exec('session-supersede')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '第一个含糊需求' }] })
+    const first = await engine.start('first summary', turn, undefined, '你具体指什么？')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '现在改成找农历转换插件' }] })
+    const second = await engine.start('lunar calendar plugin', turn)
+    expect(second.workflow.id).not.toBe(first.workflow.id)
+    expect(await store.getWorkflow(first.workflow.id)).toMatchObject({
+      status: 'completed',
+      cursor: 'superseded',
+      supersededByWorkflowId: second.workflow.id,
+    })
   })
 })

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { POLICY_VERSION, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type AuthorizationDecisionInput, type ReviewRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import {
   assertUseThisReceipt,
@@ -93,9 +93,9 @@ describe('resume validation', () => {
       guard,
       agent,
       interrupt: current,
-      decision: { action: 'modify_this', candidateId, retention: 'persistent' },
+      decision: { action: 'modify_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
       requirement: 'grok',
-    })).toThrow(/does not accept retention/i)
+    })).toThrow(/do not accept retention/i)
     expect(resolveDecisionFromModel({
       guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'grok',
     })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
@@ -112,7 +112,7 @@ describe('resume validation', () => {
     expect(guard.consumeDecisionTurn(agent, current).message).toHaveLength(2_001)
   })
 
-  it('defaults use_this retention to temporary unless the same confirmation selects persistent', () => {
+  it('makes every use_this decision persistent', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
@@ -124,63 +124,48 @@ describe('resume validation', () => {
       requirement: 'grok',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'temporary', verificationTask: 'grok' },
-    })
-  })
-
-  it('uses model-interpreted retention and Host-derived profile facts', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
-    const current = interrupt(['use_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '以后都用它' }] })
-    expect(resolveDecisionFromModel({
-      guard,
-      agent,
-      interrupt: current,
-      decision: { action: 'use_this', candidateId, retention: 'persistent' },
-      requirement: 'grok',
-    })).toMatchObject({
-      optionId: 'use_this',
       install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
     })
   })
 
-  it('rejects temporary retention for manual_runtime candidates at the decision gate without consuming the turn', () => {
+  it('rejects legacy public retention even when it says persistent', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['use_this', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '以后都用它' }] })
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'use_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
+      requirement: 'grok',
+    })).toThrow(/do not accept retention/i)
+  })
+
+  it('keeps manual_runtime adoption persistent and rejects legacy retention input', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
-    // Defaulted retention is temporary and must not reach install for a
-    // manual_runtime candidate; the fresh turn stays unconsumed so the user
-    // can reconfirm persistent at the same interrupt.
-    expect(() => resolveDecisionFromModel({
+    expect(resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
       requirement: 'grok',
       verificationLayer: 'manual_runtime',
-    })).toThrow(/requires persistent retention/i)
+    })).toMatchObject({ install: { retention: 'persistent' } })
+    const nextGuard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    nextGuard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
     expect(() => resolveDecisionFromModel({
-      guard,
+      guard: nextGuard,
       agent,
       interrupt: current,
-      decision: { action: 'use_this', candidateId, retention: 'temporary' },
+      decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
       requirement: 'grok',
       verificationLayer: 'manual_runtime',
-    })).toThrow(/requires persistent retention/i)
-    expect(resolveDecisionFromModel({
-      guard,
-      agent,
-      interrupt: current,
-      decision: { action: 'use_this', candidateId, retention: 'persistent' },
-      requirement: 'grok',
-      verificationLayer: 'manual_runtime',
-    })).toMatchObject({
-      optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
-    })
+    })).toThrow(/do not accept retention/i)
   })
 
-  it('keeps the temporary default for automatically verifiable candidates', () => {
+  it('keeps automatically verifiable candidates persistent too', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
@@ -193,7 +178,7 @@ describe('resume validation', () => {
       verificationLayer: 'tool_roundtrip',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'temporary', verificationTask: 'grok' },
+      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
     })
   })
 })
@@ -301,7 +286,7 @@ describe('install authorization receipts', () => {
       guard,
       agent,
       interrupt: current,
-      decision: { action: 'use_this', candidateId, retention: 'persistent' },
+      decision: { action: 'use_this', candidateId },
       requirement: 'dsh-xai',
     })
     expect(resume.install).toMatchObject({
@@ -322,9 +307,9 @@ describe('install authorization receipts', () => {
       guard,
       agent,
       interrupt: again,
-      decision: { action: 'use_this', candidateId, retention: 'temporary' },
+      decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
       requirement: 'dsh-xai',
-    })).toThrow(/persistent retention/i)
+    })).toThrow(/do not accept retention/i)
   })
 
   it('installs a reviewed or failed known source as a first persistent install, not a live-spec replacement', () => {
@@ -366,7 +351,7 @@ describe('install authorization receipts', () => {
         guard,
         agent,
         interrupt: current,
-        decision: { action: 'use_this', candidateId, retention: 'persistent' },
+        decision: { action: 'use_this', candidateId },
         requirement: 'zhihu-search',
       })
       expect(resume.install).toMatchObject({

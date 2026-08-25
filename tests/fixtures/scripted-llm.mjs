@@ -27,8 +27,8 @@ function resultPairs(messages) {
 }
 
 const E2E_TASKS = {
-  'resolve-local': 'Resolve a capability that is already local and report the decision.',
-  'adversarial-define': 'Resolve a capability that is already local and report the decision.',
+  'resolve-local': 'Run a PowerShell command using an existing local capability and report the decision.',
+  'adversarial-define': 'Run a PowerShell command using an existing local capability and report the decision.',
   'marketplace-flow': 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.',
 }
 

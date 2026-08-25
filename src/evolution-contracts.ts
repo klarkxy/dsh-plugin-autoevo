@@ -5,7 +5,7 @@
 
 export const EVOLUTION_PRESET_ID = 'evolution' as const
 export const EVOLUTION_PRESET_DISPLAY_NAME = '能力进化' as const
-export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：具备官方创造模式的全部能力，并由 AutoEvo 治理复用、审查、安装与升级；改进过的插件可在明确批准后贡献回上游。' as const
+export const EVOLUTION_PRESET_DESCRIPTION = '用于按需进化能力：所有实验、复用、修改、创建与安装都经过 AutoEvo Search-first 治理。' as const
 
 /** Scoped Cordis service key published only behind a preset isolate realm. */
 export const EVOLUTION_MODE_SERVICE_KEY = 'autoevoEvolutionMode' as const
@@ -20,7 +20,7 @@ export const EVOLUTION_MODE_PROTOCOL_VERSION = 1 as const
 export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as const
 
 /** Template version for the bundled `presets/evolution` tree. */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '14' as const
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '15' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -60,8 +60,21 @@ export const EVOLUTION_PRESET_V13_MANIFEST: EvolutionPresetManifest = Object.fre
   }),
 })
 
+export const EVOLUTION_PRESET_V14_MANIFEST: EvolutionPresetManifest = Object.freeze({
+  owner: EVOLUTION_MODE_OWNER,
+  schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+  templateVersion: '14',
+  files: Object.freeze({
+    'agent.cordis.yml': '0a1352f1dd4e68abf01a6c80f23be30aeb239294071207cc225815bfffa17c5b',
+    'preset.yml': 'c3e8587363b21edeba9c36e4009c8496c0938144f5c552e489ffda3b5316c4a4',
+    'skills/cordis-plugin-development/SKILL.md': '01811d3ee9c03a466abae12d54d229e7de7bd74ca6b730c54ce9d5e696b294aa',
+    'skills/editing-cordis-compositions/SKILL.md': 'b223233e9df5c8cbedeb7dee8d38ddc47d545af54b323abe3830f4748b688f6c',
+  }),
+})
+
 export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
   EVOLUTION_PRESET_V13_MANIFEST,
+  EVOLUTION_PRESET_V14_MANIFEST,
 ])
 
 export interface EvolutionModeMarker {
@@ -123,4 +136,4 @@ export function isEvolutionPresetManifest(value: unknown): value is EvolutionPre
 
 /** Stable denial when AutoEvo-governed construction is attempted outside genuine evolution mode. */
 export const OUTSIDE_EVOLUTION_MODE_DENIAL =
-  'AutoEvo denied this AutoEvo-governed construction action: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Temporary live Cordis plugins remain available in official Creator; Host-managed create/modify continues only in Capability Evolution after an explicit user decision.'
+  'AutoEvo denied this governed construction action: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Host-managed create/modify continues only there after Search-first review and an explicit final user decision.'

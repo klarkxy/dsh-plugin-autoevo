@@ -55,7 +55,7 @@ live E2E 会访问外部市场或 GitHub，不应在缺少网络/认证时冒充
 src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
-├─ contracts.ts                # Policy V9 公共合同、review/install receipts
+├─ contracts.ts                # Policy V10 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
 ├─ service-review.ts           # 审查编排与重验证

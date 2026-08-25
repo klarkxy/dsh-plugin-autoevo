@@ -1,6 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   DEFAULT_REQUEST_INTENT,
+  POLICY_VERSION,
   type RequestIntent,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
@@ -32,7 +33,11 @@ export abstract class WorkflowEngineRecovery extends WorkflowEngineDriver {
     let restart: RestartPlan | undefined
     const lockedView = await this.withLock(input.workflowId, async () => {
       const workflow = await this.store.getWorkflow(input.workflowId)
-      this.assertOwner(workflow, exec)
+      this.assertSameOwner(workflow, exec)
+      if (workflow.policyVersion !== POLICY_VERSION && !this.isCompletedCleanup(workflow)) {
+        await this.invalidateLegacyPolicyWorkflow(workflow, exec)
+        return await this.view(workflow, undefined)
+      }
       if (this.isSealedRecovery(workflow)) {
         return await this.recoverSealedInterrupt(workflow, input, exec, (next) => { restart = next })
       }
@@ -129,6 +134,9 @@ export abstract class WorkflowEngineRecovery extends WorkflowEngineDriver {
     if (!turnId || turnId === workflow.completionTurnId) {
       return await this.view(workflow, undefined, { status: 'parked', alreadyWaiting: true })
     }
+    if (workflow.policyVersion !== POLICY_VERSION && !this.creationGuard.lastUserMessage(exec.agent)) {
+      throw new EvolutionError('invalid_input', 'Legacy completed-install cleanup requires the current top-level user message before a fresh Policy V10 workflow can start')
+    }
     if (!workflow.lastInstallationId) {
       throw new EvolutionError('invalid_input', 'Completed-install restart requires the workflow-linked installation receipt; no cleanup was attempted')
     }
@@ -194,9 +202,12 @@ export abstract class WorkflowEngineRecovery extends WorkflowEngineDriver {
     setRestart: (restart: RestartPlan) => void,
   ): Promise<WorkflowView> {
     const sessionId = ownerSessionId(exec.agent)!
-    const normalized = workflow.requirementNormalized ?? normalizeRequirement(workflow.requirement)
+    const legacy = workflow.policyVersion !== POLICY_VERSION
+    const currentMessage = legacy ? this.creationGuard.lastUserMessage(exec.agent) : undefined
+    const requirement = currentMessage ?? workflow.requirement
+    const normalized = normalizeRequirement(requirement)
     const cwd = workflow.cwd ?? sessionCwd(exec.agent)
-    const restartedAsWorkflowId = newWorkflowId(workflow.requirement)
+    const restartedAsWorkflowId = newWorkflowId(requirement)
     workflow.status = 'completed'
     workflow.generation += 1
     if (input.consumeInterruptId) {
@@ -214,11 +225,11 @@ export abstract class WorkflowEngineRecovery extends WorkflowEngineDriver {
     }
     await this.checkpoint(workflow)
     setRestart({
-      requirement: workflow.requirement,
+      requirement,
       normalized,
       sessionId,
       cwd,
-      intent: workflow.intent ?? DEFAULT_REQUEST_INTENT,
+      intent: legacy ? DEFAULT_REQUEST_INTENT : (workflow.intent ?? DEFAULT_REQUEST_INTENT),
       oldWorkflowId: workflow.id,
       workflowId: restartedAsWorkflowId,
     })

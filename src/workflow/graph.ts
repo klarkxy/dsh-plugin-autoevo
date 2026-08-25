@@ -37,9 +37,17 @@ export interface NodeExecutionResult {
 }
 
 const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionId, WorkflowNodeId>>>> = {
+  await_clarification: {
+    clarify_requirement: 'resolve_local',
+    stop: 'stopped',
+  },
   await_confirmation: {
     use_this: 'install_verify',
     modify_this: 'prepare_modify',
+    create_new: 'prepare_create',
+    stop: 'stopped',
+  },
+  await_selection: {
     create_new: 'prepare_create',
     stop: 'stopped',
   },
@@ -62,7 +70,7 @@ export function transition(cursor: WorkflowNodeId, optionId: WorkflowOptionId): 
 
 export function interruptPayload(
   cursor: WorkflowNodeId,
-  resolution: ResolutionRecord,
+  resolution: ResolutionRecord | undefined,
   reviews: ReviewRecord[] = [],
   extras: {
     lastFailure?: WorkflowRecord['lastFailure']
@@ -72,6 +80,17 @@ export function interruptPayload(
     managedActionsAvailable?: boolean
   } = {},
 ): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
+  if (cursor === 'await_clarification') {
+    return {
+      kind: 'await_clarification',
+      options: optionsFor('await_clarification', undefined, reviews, extras.workflow),
+      facts: {
+        originalRequirement: extras.workflow?.requirement ?? '',
+        clarificationQuestion: extras.workflow?.clarificationQuestion ?? '',
+      },
+    }
+  }
+  if (!resolution) throw new EvolutionError('invalid_input', 'Workflow interrupt is missing a resolution')
   if (cursor === 'await_selection') {
     return {
       kind: 'await_selection',
@@ -177,7 +196,11 @@ async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecut
 }
 
 async function executeResolveLocal(ctx: GraphContext): Promise<NodeExecutionResult> {
-  const resolution = await ctx.host.bootstrapResolution(ctx.workflow.requirement, ctx.exec, ctx.workflow.intent)
+  const resolution = await ctx.host.bootstrapResolution(
+    ctx.workflow.searchRequirement ?? ctx.workflow.requirement,
+    ctx.exec,
+    ctx.workflow.clarifiedIntent ?? ctx.workflow.intent,
+  )
   ctx.workflow.resolutionId = resolution.id
   ctx.workflow.cwd = resolution.cwd
   const shouldDiscover = ctx.workflow.forceRemoteDiscovery || resolution.decision !== 'use_local'

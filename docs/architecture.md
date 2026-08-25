@@ -55,11 +55,11 @@ capability_workflow
                            plugin_remove
 ```
 
-启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V14）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V14 为 no-op；未改过的 V13 可升级到 V14；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装，且永不自动删除。
+启动时（`evolutionPreset !== false`）AutoEvo 把 bundled `presets/evolution`（V15）安全物化到 `<dshHome>/.agent-presets/evolution`：staging、backup、校验后原子替换；精确当前 V15 为 no-op；未改过的 V13/V14 可升级到 V15；未知或用户改过的内容保留并诊断；中断的 staging/backup 可确定性恢复。配置为 `false` 时跳过安装，且永不自动删除。
 
 ## 3. DSH 接缝
 
-入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V9 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
+入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V10 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
 
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
@@ -68,7 +68,7 @@ capability_workflow
 - `agentPresets`：可选地确认当前会话确实使用能力进化 preset，并在施工前验证父会话施工目录；不会创建子 Agent；
 - 当前会话的文件、shell 与工具调用仍受 DSH scope 和 AutoEvo `ExecutionGuard` 共同约束。
 
-`tools` 同时承载最终执行门禁。父会话保留创造模式的 inspect / define / run / mount 与委托工具，只拒绝直接装卸。进入托管施工阶段后，只允许托管仓库文件读写、shell 测试、todo、两个官方 Creator skill 与三个 `cordis_inspect_*` 只读工具，其它能力 fail closed。提示词不是授权边界。
+`tools` 同时承载最终执行门禁。Policy V10 父会话仅保留 Cordis inspect 与安全 stop，机械拒绝 live mutation、Creator 开发技能加载、直接或嵌套搜寻、普通模型委托、插件变更、非白名单 shell 与受保护根目录写入。进入托管施工阶段后，只允许托管仓库文件读写、todo、两个官方 Creator skill、三个 `cordis_inspect_*` 只读工具，以及精确的 `finish_managed_work` 回传；由于父会话 sandbox 不会重绑到更窄的托管根，模型可调用 shell 全部拒绝，构建与测试由 Host 在源码交接后执行。其它能力 fail closed。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -108,7 +108,7 @@ V2 resolution receipt 记录 `authorization` 与远端发现是否完整。inter
 
 Policy V3 起，最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不再用关键词或正则重做语义理解。`use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`，Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供 repository、path、review id 或 install spec。Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
 
-Policy V9：新 resolution / review / workflow / receipt 使用 `POLICY_VERSION = 9`。任何 policy 不匹配的持久记录都不得恢复或执行其中的 decision、interrupt、selection receipt、reviewer/verification verdict、commitment 或 lease；Host 只返回 `policy_restart_required` 并要求新建 V9 discovery。这是 fail-closed 防御，不是旧用户迁移功能。内部 graph cursor 不变；公开 `lifecycleState` 映射为 `searched -> selected -> reviewing -> approved|rejected|uncertain|skipped -> awaiting_confirmation -> committed -> leased -> executing -> verified|activated|awaiting_user_test|recovery_required`，外加 `modify_authorized`、`create_authorized`、`stopped`、`interrupted`，并保留 `restart_required` / `market_restart_required` / `market_setup_required` / `reuse_local` 等互不合并的终态。简单 UI 主操作为 `use_this` / `search_more`；`modify_this` / `create_new` / `stop` 放在 advanced/recovery。
+Policy V10：新 resolution / review / workflow / receipt 使用 `POLICY_VERSION = 10`，workflow schema V3 保存 Host 原样需求、模型搜索摘要和可选一次澄清。任何旧 policy 未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease；Host 要求从当前顶层用户原文重开。已完成安装与历史 temporary receipt 仍可读取和显式删除。公开状态额外包含等待澄清、无候选、已取消和 superseded。
 
 MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、lease、endpoint 或用户决定。机械验证完全由 Host 驱动，不把验证任务交给普通模型，也不把独立 semantic verifier 当作完成门槛。三层结果严格区分：`tool_roundtrip` passed 才是 `verified`；`bundle_activation` passed 是 `activated`；`manual_runtime` persistent 是 `awaiting_user_test`。三者都是非失败完成态，不阻塞正常聊天，但后二者不得冒充功能已验证。第三方默认没有 Host attestation，通常进入 `manual_runtime` / persistent；包清单 safe/risk 或候选自报不得升级为 `tool_roundtrip`。`manual_runtime` 的 temporary 必须在安装与批准副作用前拒绝。`taskResultMatchedExpectation` 只是诊断字段，不是 verified 真值。
 
@@ -128,7 +128,7 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 - `restartRequired`：非失败完成态已成立，但当前进程的 Loader 热加载无法完整完成；仅此时要求新进程加载 bundle。
 - `removed`：临时 owned trial 已删除，或持久安装 receipt 已完成 remove。
 
-临时安装只适用于 Host 能自动验证的层。`manual_runtime` 的 temporary 在批准、物化和安装前就被拒绝。自动层验证失败会删除 trial，并在 installation receipt 上写下 `removed: true`。
+用户可见安装一律持久化，公开决策不接受 `retention`。temporary trial 仅是 Host 内部隔离预检；失败会删除 trial，并在 installation receipt 上写下 `removed: true`。
 
 ## 6. 部分适配
 

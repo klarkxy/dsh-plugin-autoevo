@@ -8,7 +8,7 @@
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。能力进化 preset 是官方创造模式的超集：创造模式已有的运行时检查、活进程插件实验、preset 创作和委托工具都在。Agent 需要可复用的新能力时，AutoEvo 先检查本地工具和技能，再发现、审查并安装社区插件；候选只差一点时，可以在 Host 托管源码上完成修改、重审和安装。
+`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。在 **能力进化** preset 中，所有能力需求——包括临时实验——都先走 Search-first：Host 保留用户原话，必要时只澄清一次，然后检查本地与远程真实候选。候选只差一点时，可在 Host 绑定的托管源码中修改、重审和安装；用户最终采用的能力统一持久化。
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -47,8 +47,9 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
    > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
 
-3. AutoEvo 给出 1–5 个候选后，用新的正常聊天消息选择要审查的候选。
-4. 审查完成后，再用一条新的消息决定原样使用、安装、修改、继续搜索、从零创建或停止。
+3. 需求有实质歧义时，先回答一次澄清；随后 AutoEvo 给出 1–5 个候选，或明确告知没有匹配候选。
+4. 有候选时，用新的正常聊天消息选择要审查的候选；无候选时，选择继续搜寻、创建新能力或停止。
+5. 审查完成后，再用一条新的消息决定原样使用、安装、修改、继续搜索、从零创建或停止。
 
 这两次回复是两道独立的用户确认门；完整流程与原理见[使用指南 §3](docs/user-guide.md#3-第一次完整使用)。
 

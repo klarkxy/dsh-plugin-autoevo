@@ -85,6 +85,16 @@ function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: st
   guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
 }
 
+async function startWith(
+  service: CapabilityEvolutionService,
+  guard: CreationGuard,
+  turn: ToolRunContext,
+  requirement: string,
+) {
+  remember(guard, turn.agent, requirement)
+  return await service.start(requirement, turn)
+}
+
 async function resumeWith(
   service: CapabilityEvolutionService,
   guard: CreationGuard,
@@ -343,7 +353,7 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_confirmation')
     expect(started.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining([
       'search_more',
@@ -358,7 +368,7 @@ describe('conversational confirmation gates', () => {
     temporary.push(root)
     const { service, guard } = makeService(root, [])
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.resolution?.authorization?.state).toBe('selection_required')
     expect(started.resolution?.authorization?.state).not.toBe('create_authorized')
     expect(started.resolution?.selectedRepositories ?? []).toEqual([])
@@ -392,7 +402,7 @@ describe('conversational confirmation gates', () => {
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     expect(started.workflow.interrupt).toBeUndefined()
     expect(started.workflow.discoveryPool).toHaveLength(1)
@@ -426,7 +436,7 @@ describe('conversational confirmation gates', () => {
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     const candidateId = started.workflow.discoveryPool![0]!.id
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
 
@@ -475,7 +485,7 @@ describe('conversational confirmation gates', () => {
       files: grokBundle,
     })
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presentedIds = started.workflow.discoveryPool!.map((item) => item.id)
     const presented = await presentWith(service, turn, started.workflow.id, presentedIds)
@@ -506,7 +516,7 @@ describe('conversational confirmation gates', () => {
     }, reviewerHost(verdict))
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
@@ -567,7 +577,7 @@ describe('conversational confirmation gates', () => {
       store,
       guard,
     )
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     const rejected = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错', {
       action: 'use_this',
       candidateId: `candidate_${'f'.repeat(24)}`,
@@ -599,7 +609,7 @@ describe('conversational confirmation gates', () => {
       localStore,
       guard,
     )
-    const created = await localService.start('run a PowerShell command', localTurn)
+const created = await startWith(localService, guard, localTurn, 'run a PowerShell command')
     expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
     expect(created.resolution?.authorization?.state).toBe('selection_required')
     expect(created.workflow.cursor).toBe('await_discovery')
@@ -635,7 +645,7 @@ describe('conversational confirmation gates', () => {
     })
     useService.listInstallProfiles = async () => ['web']
     const useTurn = exec('session-use')
-    const resolved = await useService.start('我需要一个能在dsh里调用grok的能力。', useTurn)
+const resolved = await startWith(useService, useGuard, useTurn, '我需要一个能在dsh里调用grok的能力。')
     expect(resolved.workflow.cursor).toBe('await_discovery')
     const useCandidateId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
     const usePresented = await presentWith(useService, useTurn, resolved.workflow.id, [useCandidateId])
@@ -651,7 +661,7 @@ describe('conversational confirmation gates', () => {
     expect(stored.decisions).toContainEqual(expect.objectContaining({
       action: 'use_this',
       candidateId: useCandidateId,
-      retention: 'temporary',
+      retention: 'persistent',
       targetProfile: 'web',
       snapshotDigest: reviewed.workflow.interrupt!.snapshotDigest,
     }))
@@ -674,7 +684,7 @@ describe('conversational confirmation gates', () => {
       files: grokBundle,
     })
     const turn = exec()
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.resolution?.remoteCandidates.map((item) => item.repository)).toEqual([
       'MirDie/dsh-xai',
       'acme/dsh-grok-tui',
@@ -716,7 +726,7 @@ describe('conversational confirmation gates', () => {
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec('session-batch')
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presented = await presentWith(service, turn, started.workflow.id, started.workflow.discoveryPool!.map((item) => item.id))
     const ids = presented.workflow.candidateSnapshot!.map((item) => item.id)
@@ -771,7 +781,7 @@ describe('conversational confirmation gates', () => {
       files: grokHighRisk,
     }, reviewerHost('uncertain'))
     const turn = exec('session-adaptive')
-    const started = await service.start('我需要一个能在dsh里调用grok的能力。', turn)
+    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presented = await presentWith(service, turn, started.workflow.id, started.workflow.discoveryPool!.map((item) => item.id))
     const ids = presented.workflow.candidateSnapshot!.map((item) => item.id)

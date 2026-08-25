@@ -30,10 +30,10 @@ async function tempDir(prefix: string): Promise<string> {
   return dir
 }
 
-describe('evolution preset Creator-superset V14', () => {
-  it('trusts pristine V13 as the upgrade prior and ships V14 as current', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('14')
-    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS).toEqual([{
+describe('evolution preset Search-first V15', () => {
+  it('trusts pristine V13 and V14 as upgrade priors and ships V15 as current', () => {
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('15')
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[0]).toEqual({
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,
       templateVersion: '13',
@@ -41,7 +41,8 @@ describe('evolution preset Creator-superset V14', () => {
         'agent.cordis.yml': '521d2133694c5642e3e78fcd5ddfa7f2d7af6eab80244fdd2c22030dd586d55c',
         'preset.yml': 'd51f8ab85feeb76c73de0cb091735b7ddbdad4d2b3d8adfc878dd35b6e79bbbd',
       },
-    }])
+    })
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[1]?.templateVersion).toBe('14')
   })
 
   it('upgrades a pristine V13 install to the current Creator-superset template', async () => {
@@ -64,26 +65,26 @@ describe('evolution preset Creator-superset V14', () => {
       trustedPriorManifests: [matching],
     })
     expect(result.status).toBe('upgraded')
-    expect(result.templateVersion).toBe('14')
+    expect(result.templateVersion).toBe('15')
     expect(await readFile(path.join(target, 'skills', 'cordis-plugin-development', 'SKILL.md'), 'utf8'))
       .toContain('name: cordis-plugin-development')
   })
 
   it('installs the current template into a blank home and no-ops the exact current template', async () => {
-    const root = await tempDir('autoevo-v14-fresh')
+    const root = await tempDir('autoevo-v15-fresh')
     const dshHome = path.join(root, 'dsh')
     const templateDir = path.resolve(process.cwd(), 'presets', 'evolution')
 
     const first = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(first).toMatchObject({ status: 'installed', templateVersion: '14' })
+    expect(first).toMatchObject({ status: 'installed', templateVersion: '15' })
     const second = await materializeEvolutionPreset({ dshHome, enabled: true, templateDir })
-    expect(second).toMatchObject({ status: 'noop', templateVersion: '14' })
+    expect(second).toMatchObject({ status: 'noop', templateVersion: '15' })
 
     const manifest = JSON.parse(await readFile(
       path.join(first.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME),
       'utf8',
     ))
-    expect(manifest.templateVersion).toBe('14')
+    expect(manifest.templateVersion).toBe('15')
     expect(manifest.files['preset.yml']).toMatch(/^[a-f0-9]{64}$/u)
     expect(manifest.files['skills/cordis-plugin-development/SKILL.md']).toMatch(/^[a-f0-9]{64}$/u)
   })
@@ -154,6 +155,6 @@ describe('evolution preset Creator-superset V14', () => {
     const manifestA = JSON.parse(await readFile(path.join(a.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     const manifestB = JSON.parse(await readFile(path.join(b.targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME), 'utf8'))
     expect(manifestA).toEqual(manifestB)
-    expect(manifestA.templateVersion).toBe('14')
+    expect(manifestA.templateVersion).toBe('15')
   })
 })

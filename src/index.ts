@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,12 +17,13 @@ import {
 } from './evolution-contracts.js'
 import { AUTOEVO_AUTONOMY_CONTRACT } from './evolution-mode.js'
 import { newBootId } from './host-identity.js'
+import { sessionCwd } from './host-identity.js'
 import { materializeEvolutionPreset } from './preset-manager.js'
 import { DshCommandRunner } from './process/runner.js'
 import { CapabilityEvolutionService } from './service.js'
 import { StateStore } from './state/store.js'
 import { createTools } from './tools.js'
-import { resolveStateRoot } from './workspace-layout.js'
+import { resolveSourceRoot, resolveStateRoot } from './workspace-layout.js'
 
 export { CreationGuard } from './creation-guard.js'
 export { ExecutionGuard } from './execution-guard.js'
@@ -137,6 +140,26 @@ function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void {
 
 export const _testing = { createIsEvolutionMode, installCordisInspectCompatibilityWhenAvailable }
 
+function receiptOwnedRoots(stateRoot: string): string[] {
+  const directory = path.join(stateRoot, 'installations')
+  try {
+    return readdirSync(directory)
+      .filter((entry) => /^installation_[a-f0-9]{16,64}\.json$/u.test(entry))
+      .flatMap((entry) => {
+        try {
+          const record = JSON.parse(readFileSync(path.join(directory, entry), 'utf8')) as { ownedArtifactRoot?: unknown }
+          return typeof record.ownedArtifactRoot === 'string' && record.ownedArtifactRoot.trim()
+            ? [path.resolve(record.ownedArtifactRoot)]
+            : []
+        } catch {
+          return []
+        }
+      })
+  } catch {
+    return []
+  }
+}
+
 export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)
   const log = ctx.logger('autoevo')
@@ -147,7 +170,6 @@ export function apply(ctx: Context, input: Config): void {
     isEvolutionMode: createIsEvolutionMode(ctx),
     bootId: newBootId(),
   })
-  const parentExecutionGuard = new ExecutionGuard({ role: 'parent' })
   const isEvolutionMode = createIsEvolutionMode(ctx)
   const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard)
 
@@ -170,8 +192,19 @@ export function apply(ctx: Context, input: Config): void {
   })
   const guardFor = (agent: Agent | undefined): ExecutionGuard => {
     const root = creationGuard.constructionRoot(agent)
-    if (root) return new ExecutionGuard({ role: 'constructor', allowedRoot: root })
-    return parentExecutionGuard
+    if (root) return new ExecutionGuard({ role: 'constructor', allowedRoot: root, cwd: root })
+    const cwd = sessionCwd(agent)
+    const stateRoot = resolveStateRoot(config)
+    return new ExecutionGuard({
+      role: 'parent',
+      cwd,
+      protectedRoots: [
+        config.dshHome,
+        stateRoot,
+        resolveSourceRoot(config, cwd),
+        ...receiptOwnedRoots(stateRoot),
+      ],
+    })
   }
   ctx.on('tools/pre-execute', (exec, next) => {
     const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))

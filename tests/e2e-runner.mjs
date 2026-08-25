@@ -174,7 +174,7 @@ async function runScenario() {
   ]
   const mainPatch = await writePatch('main.cordis.yml', mainPatches)
   const task = scenario === 'resolve-local' || scenario === 'adversarial-define'
-    ? 'Resolve a capability that is already local and report the decision.'
+    ? 'Run a PowerShell command using an existing local capability and report the decision.'
     : 'Search GitHub for an existing Grok Build capability.'
   const result = await runDsh(['--profile', 'headless', '--patch', mainPatch, task], 600_000)
   const expectedMarker = scenario === 'resolve-local'
@@ -190,24 +190,24 @@ async function runScenario() {
     assert.match(result.stdout, /E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL/u)
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"8"/u)
-    assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
+    assert.match(result.stdout, /"policy_version":"10"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"9"/u)
     return {
       scenario,
       marker: expectedMarker,
       guard: 'allowed live cordis_define(kind:new) outside Capability Evolution mode',
       workflow: 'autonomous discovery sealed at Gate 1',
-      policyVersion: '9',
+      policyVersion: '10',
     }
   }
 
   if (scenario === 'resolve-local') {
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"8"/u)
-    assert.doesNotMatch(result.stdout, /"policy_version":"7"/u)
+    assert.match(result.stdout, /"policy_version":"10"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"9"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
-    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '9' }
+    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '10' }
   }
 
   if (scenario === 'marketplace-flow') {

@@ -52,7 +52,7 @@ declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
-declare const POLICY_VERSION = "9";
+declare const POLICY_VERSION = "10";
 declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
@@ -62,7 +62,7 @@ type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
-type NavigationKind = 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'enable_builtin' | 'stop' | 'finish_managed_work';
+type NavigationKind = 'clarify_requirement' | 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'enable_builtin' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
 type RequestOperation = 'discover_or_reuse' | 'reuse_existing' | 'evolve_existing';
@@ -106,6 +106,8 @@ interface NavigationInput {
   kind: NavigationKind;
   candidateIds?: string[];
   reviewMode?: ReviewMode;
+  /** Read-only reclassification after one Host-captured clarification answer. */
+  clarifiedIntent?: RequestIntent;
 }
 interface DecisionReceipt {
   id: string;
@@ -559,8 +561,6 @@ interface AuthorizationDecisionInput {
   action: AuthorizationAction;
   /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
   candidateId?: string;
-  /** Optional for use_this. Defaults to temporary when the user did not express a preference. */
-  retention?: InstallationRetention;
 }
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 interface ResumeInput {
@@ -778,8 +778,8 @@ declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cu
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
-type WorkflowNodeId = 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'review_existing' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'enable_builtin' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized';
-type InterruptKind = 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
+type WorkflowNodeId = 'await_clarification' | 'resolve_local' | 'discover_remote' | 'ensure_market' | 'await_discovery' | 'await_selection' | 'review_github' | 'review_existing' | 'await_confirmation' | 'prepare_modify' | 'await_modify_work' | 'complete_managed_work' | 'review_local' | 'install_verify' | 'prepare_create' | 'reuse_local' | 'enable_builtin' | 'stopped' | 'market_restart_required' | 'market_setup_required' | 'installed' | 'activated' | 'awaiting_user_test' | 'restart_required' | 'recovery_required' | 'create_authorized' | 'modify_authorized' | 'superseded';
+type InterruptKind = 'await_clarification' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
 type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
   id: WorkflowOptionId;
@@ -959,13 +959,23 @@ interface ConsumedVerificationAttempt {
   fixtureDigest?: string;
 }
 interface WorkflowRecord {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   id: string;
   policyVersion: string;
   createdAt: string;
   updatedAt: string;
   requirement: string;
   requirementNormalized?: string;
+  /** Non-authoritative model summary retained only for diagnostics/search presentation. */
+  requestSummary?: string;
+  /** Exact Host-owned search input. V10 starts with requirement and appends one raw clarification answer. */
+  searchRequirement?: string;
+  clarificationQuestion?: string;
+  clarificationAnswer?: string;
+  clarifiedIntent?: RequestIntent;
+  startedTurnId?: string;
+  supersededByWorkflowId?: string;
+  supersededAt?: string;
   cwd?: string;
   ownerSessionId?: string;
   bootId?: string;
@@ -1150,7 +1160,7 @@ interface AgentGateState {
   currentTurnId?: string;
   turnSequence: number;
   consumedTurnIds: Set<string>;
-  waitingKind?: 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
+  waitingKind?: 'await_clarification' | 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
   interruptWatermarkTurnId?: string;
   sessionId?: string;
   selectionReceipt?: SelectionReceipt;
@@ -1230,6 +1240,10 @@ interface ExecutionGuardOptions {
   role: ExecutionRole;
   /** Absolute managed-source root. Required for constructor path scoping. */
   allowedRoot?: string;
+  /** Session cwd used to resolve relative parent write targets. */
+  cwd?: string;
+  /** Host/profile/managed roots that the parent model may never modify. */
+  protectedRoots?: readonly string[];
 }
 /**
  * Final execution-layer guard for AutoEvo parent and in-parent managed construction.
@@ -2049,7 +2063,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   private managedWorkDeps;
   private withWorkspace;
-  start(requirement: string, exec: ToolRunContext, intent?: RequestIntent): Promise<WorkflowView>;
+  start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
   present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView>;

@@ -90,8 +90,8 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '用两三句话写审查结论和风险，只展示当前合法动作，然后停。不要提问。本回合不要再调用任何工具。安全发现只是静态观察，不得推断用途。审查层为 manual_runtime 的候选只能持久安装且需用户在真实客户端手动测试，先向用户说明这一点。用户要看其它候选时用 navigation；用户明确选择安装、修改、新建或先停时提交结构化 decision，安装时按用户的持久或临时偏好提交 retention。'
-      : 'Summarize the review conclusion and risk in two or three sentences, show only legal actions, then stop. Do not ask questions. Do not call any tools until the user replies. Security findings are static observations; do not infer purpose. A candidate whose verification layer is manual_runtime can only be installed with persistent retention and requires a manual user test in a real client; tell the user before the final choice. For another candidate, use navigation. For an explicit install, modify, create, or stop choice, submit a structured decision, submitting retention from the user\'s temporary or persistent preference for installs.'
+      ? '用两三句话写审查结论和风险，只展示当前合法动作，然后停。不要提问。本回合不要再调用任何工具。安全发现只是静态观察，不得推断用途。审查层为 manual_runtime 的候选需要用户在真实客户端手动测试，先向用户说明这一点。用户要看其它候选时用 navigation；用户明确选择使用、修改、新建或先停时提交结构化 decision。采用的能力始终持久安装，公开决策不接受 retention。'
+      : 'Summarize the review conclusion and risk in two or three sentences, show only legal actions, then stop. Do not ask questions. Do not call any tools until the user replies. Security findings are static observations; do not infer purpose. A manual_runtime candidate requires a manual user test in a real client; tell the user before the final choice. For another candidate, use navigation. For an explicit use, modify, create, or stop choice, submit a structured decision. Adopted capabilities are always installed persistently, and public decisions do not accept retention.'
   }
   if (authorization.state === 'create_authorized') {
     return zh
@@ -181,8 +181,9 @@ export function resolveDecisionTarget(
   interrupt: InterruptPayload,
 ): { repositories: string[]; candidateId?: string } {
   assertOptionAllowed(interrupt, decision.action)
-  if (decision.action !== 'use_this' && decision.retention !== undefined) {
-    throw new EvolutionError('invalid_input', `${decision.action} does not accept retention`)
+  const suppliedRetention = (decision as AuthorizationDecisionInput & { retention?: unknown }).retention
+  if (suppliedRetention !== undefined) {
+    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V10')
   }
   const option = interrupt.options.find((item) => item.id === decision.action)!
   const needsCandidate = decision.action === 'use_this' || decision.action === 'modify_this'
@@ -231,7 +232,7 @@ function resolveInstallFromDecision(
   interrupt: InterruptPayload,
   decision: AuthorizationDecisionInput,
   requirement: string,
-  verificationLayer?: VerificationLayerKind,
+  _verificationLayer?: VerificationLayerKind,
 ): WorkflowPendingInstall {
   const profiles = Array.isArray(interrupt.facts.installProfiles)
     ? interrupt.facts.installProfiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -251,25 +252,7 @@ function resolveInstallFromDecision(
       'Replacement profile is not in the current AutoEvo-capable install profile set',
     )
   }
-  const retention = evolutionTarget || liveReplacement ? 'persistent' : (decision.retention ?? 'temporary')
-  if (retention !== 'temporary' && retention !== 'persistent') {
-    throw new EvolutionError('invalid_input', 'decision retention must be temporary or persistent')
-  }
-  if (liveReplacement && decision.retention === 'temporary') {
-    throw new EvolutionError(
-      'invalid_input',
-      'Replacing an installed plugin requires persistent retention',
-    )
-  }
-  // Fail at the decision gate, while the interrupt is still open and the fresh
-  // user turn is unconsumed, instead of deep inside install where the same
-  // combination used to hard-fail the whole workflow.
-  if (verificationLayer === 'manual_runtime' && retention === 'temporary') {
-    throw new EvolutionError(
-      'invalid_input',
-      'This candidate verifies only at manual_runtime, which requires persistent retention; reconfirm persistent installation and a manual user test with the user, then resubmit the decision with retention persistent',
-    )
-  }
+  const retention = 'persistent' as const
   return {
     targetProfile,
     retention,

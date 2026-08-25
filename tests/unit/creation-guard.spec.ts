@@ -225,7 +225,7 @@ describe('evolution protocol automaton', () => {
     } as unknown as ToolExecution
   }
 
-  it('denies a model-direct find_dsh_plugin and allows a nested parent call', async () => {
+  it('denies direct and nested find_dsh_plugin calls', async () => {
     const guard = inModeGuard()
     resolveAs(guard, authorization('selection_required'))
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
@@ -241,9 +241,9 @@ describe('evolution protocol automaton', () => {
       ...tool('find_dsh_plugin', { query: 'screenshot' }),
       parent: Symbol('parent'),
     } as unknown as ToolExecution
-    await expect(guard.preExecute(nested, next)).resolves.toEqual({ kind: 'allow' })
-    expect(guard.guard(nested)).toBeUndefined()
-    expect(next).toHaveBeenCalledTimes(1)
+    await expect(guard.preExecute(nested, next)).resolves.toMatchObject({ kind: 'deny' })
+    expect(guard.guard(nested)).toMatch(/until the user replies|Do not search/i)
+    expect(next).not.toHaveBeenCalled()
   })
 
   it('tells the model to resume with navigation after a fresh user reply instead of waiting again', async () => {
@@ -364,9 +364,9 @@ describe('evolution protocol automaton', () => {
         { type: 'text', text: '具体看看3，我希望右键生成长图。' },
       ],
     })
-    expect(guard.lastUserMessage(agent)).toBe('具体看看3,我希望右键生成长图。')
+    expect(guard.lastUserMessage(agent)).toBe('具体看看3，我希望右键生成长图。')
     resolveAs(guard, authorization('selection_required'))
-    expect(guard.lastUserMessage(agent)).toBe('具体看看3,我希望右键生成长图。')
+    expect(guard.lastUserMessage(agent)).toBe('具体看看3，我希望右键生成长图。')
     expect(_testing.extractUserFacingText({
       content: [{ type: 'text', text: '<system-reminder>hidden' }],
     })).toBe('')

@@ -14,7 +14,7 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据
 
 同时满足以下条件才进入安装：
 
-1. 候选来自同一当前 Policy V9 resolution 的持久 review receipt；任何 policy 不匹配的 review 都不得授权；
+1. 候选来自同一当前 Policy V10 resolution 的持久 review receipt；任何 policy 不匹配的 review 都不得授权；
 2. Host hard boundaries：完整/非截断、可物化 snapshot，可识别的安全 package identity，不可变且安全的 installSpec/manifest bundle，可安装来源，没有 path/symlink/special-file/patch/sandbox/resource 逃逸，兼容性不是 explicitly incompatible；
 3. 当 `needsSemanticReviewer` 为真时（`dynamic_evaluation` / `prompt_injection` / `hidden_instructions` / `data_exfiltration` / `credential_access`），必须有绑定当前 ReviewerRequest/review/requirementHash/snapshotDigest/candidateDigest/session/version 的 `approved` 裁决；缺失、过期、伪造、rejected、uncertain 一律 fail closed。`process_execution`、`fetch`/`fs`/`process.env`、普通 lifecycle、`fit !== full`、兼容 `unknown` 不启动 reviewer，也不单独取消 `use_this`。MechanicalFacts、recommendation、keyword fit、star count 只用于展示/召回/路由；
 4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment（必要时 ExecutionLease）；reviewer/verifier 不能铸造授权，也不能把安装完成态升级为 `verified`；
@@ -32,9 +32,9 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 ## 2.1 父会话边界与托管源创建
 
-- 父会话边界：真正的能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。父会话保留官方创造模式的活进程插件实验、runtime inspect、preset 创作与委托工具，只在 `tools/pre-execute` 上拒绝直接的 DSH plugin install/remove；Host 不再创建子 Agent，绝不回退 `code`。`create_new` / `modify_this` / 定向纠错在当前会话进行，cwd 绑定托管 git 源，源码副作用前预检父会话施工目录；施工阶段只允许托管源内文件读写、shell 测试、todo、官方创造技能和三个 `cordis_inspect_*`，并拒绝 Cordis mutation、嵌套委托、装卸、Git 写入、依赖变更与发布部署。Windows 上为完整性导向的部分隔离，不宣称机密性或网络隔离。
+- 父会话边界：真正的能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。Policy V10 机械拒绝 Cordis define/run/mount/undefine/unmount、Creator 开发技能加载、直接与嵌套 `find_dsh_plugin`、插件变更、普通模型委托、非白名单 shell 和受保护根目录写入；仅保留 Cordis inspect、安全 stop 与普通工作区编辑。Gate 2 后的 `create_new` / `modify_this` 在绑定 workflow、user turn、boot identity 和唯一托管根后进行；施工阶段只允许根内文件读写、官方 Creator skill 与精确的 `finish_managed_work` 回传。父会话 sandbox 不会重绑到更窄托管根，因此模型 shell 全部拒绝；Host 在源码交接后执行构建、测试、安装与验证。
 - 发现预算：能力发现用用户原话进入 `capability_workflow`；模型在 Host 限定的两轮补查、五个补充查询和二十候选预算内自主收敛，只能用 `capability_workflow_present` 密封发现池中的 1–5 个候选，空池不能生成候选。
-- Gate 1/2 不可由 DSH approval 替代：Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定；`allowed-once` 只批准副作用，不代替用户决定。审查与安装仍要求当前 Policy V9 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合与防重放。
+- Gate 1/2 不可由 DSH approval 替代：Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定；`allowed-once` 只批准副作用，不代替用户决定。澄清回答只影响只读搜寻，不是 Gate 2。审查与安装仍要求当前 Policy V10 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合与防重放。
 - 调用与修改上限：相同无效参数在同一回合重复时断路，且不消费 interrupt、commitment 或 lease。诊断工具仅在关联失败或搜索不完整后可用，每个失败事件最多两次调用、八个探针；不启动子进程、不重试、不清理，并屏蔽凭据、完整路径、URL、原始 stderr 和施工会话正文。同一 review / source / layer / fixture 不得重复安装或验证；modify 最多两次。
 
 父回合取消后没有子 Agent 需要 dispose。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock；取消、超时与真实 executable 缺失分别报告。completed 安装的清理重开与 sealed `recovery_required` 是两条互不混同的路径。模型展示只包含版本化语义状态、定长事实、预算、硬约束、候选作用域动作和可用工具；市场描述与仓库内容始终标记为不可信数据，选择阶段误提交的 `use_this` 会安全归一化为只读审查。完整流程见[架构说明](architecture.md) §2 与 §4。

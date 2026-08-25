@@ -41,9 +41,10 @@ export abstract class WorkflowEngineCore {
     protected readonly store: StateStore,
     protected readonly creationGuard: CreationGuard,
     protected readonly host: WorkflowHost,
+    protected readonly requireHostCapturedRequirement = false,
   ) {}
 
-  protected assertOwner(workflow: WorkflowRecord, exec: ToolRunContext): void {
+  protected assertSameOwner(workflow: WorkflowRecord, exec: ToolRunContext): void {
     const sessionId = ownerSessionId(exec.agent)
     if (!sessionId || workflow.ownerSessionId !== sessionId) {
       throw new EvolutionError('invalid_input', 'Workflow belongs to a different owner session', {
@@ -51,6 +52,10 @@ export abstract class WorkflowEngineCore {
         actual: sessionId,
       })
     }
+  }
+
+  protected assertOwner(workflow: WorkflowRecord, exec: ToolRunContext): void {
+    this.assertSameOwner(workflow, exec)
     if (workflow.policyVersion !== POLICY_VERSION) {
       throw new EvolutionError('invalid_input', 'Workflow predates the current policy and cannot be controlled')
     }
@@ -179,7 +184,7 @@ export abstract class WorkflowEngineCore {
     workflow.lastFailure = {
       stage: 'workflow',
       code: 'policy_restart_required',
-      message: 'This workflow predates Policy V9. Call capability_workflow again to start a fresh discovery. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
+      message: 'This workflow predates Policy V10. Call capability_workflow again from the current user requirement. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
       retryable: false,
     }
     await this.checkpoint(workflow)
@@ -189,6 +194,10 @@ export abstract class WorkflowEngineCore {
     this.creationGuard.invalidateExecutionLease(exec.agent)
     if (workflow.cursor === 'recovery_required') {
       await this.issueRecoveryInterrupt(workflow, exec)
+      return
+    }
+    if (workflow.cursor === 'await_clarification') {
+      await this.issueClarificationInterrupt(workflow, exec)
       return
     }
     if (!workflow.resolutionId || !INTERRUPT_NODES.has(workflow.cursor)) return
@@ -231,6 +240,44 @@ export abstract class WorkflowEngineCore {
       snapshotDigest,
     }
     workflow.status = 'interrupted'
+    await this.checkpoint(workflow)
+  }
+
+  protected clarificationSnapshotDigest(workflow: WorkflowRecord): string {
+    return hashObject({
+      workflowId: workflow.id,
+      policyVersion: workflow.policyVersion,
+      generation: workflow.generation,
+      requirement: workflow.requirement,
+      clarificationQuestion: workflow.clarificationQuestion ?? null,
+    })
+  }
+
+  protected async issueClarificationInterrupt(workflow: WorkflowRecord, exec: ToolRunContext): Promise<void> {
+    const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
+    if (!sessionId) throw new EvolutionError('invalid_input', 'Cannot issue clarification without an owner session')
+    if (!workflow.clarificationQuestion) {
+      throw new EvolutionError('invalid_input', 'Clarification checkpoint is missing its question')
+    }
+    const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+    const snapshotDigest = this.clarificationSnapshotDigest(workflow)
+    const base = interruptPayload('await_clarification', undefined, [], { workflow })
+    workflow.bootId = this.creationGuard.bootId
+    workflow.ownerSessionId = sessionId
+    workflow.status = 'interrupted'
+    workflow.interrupt = {
+      ...base,
+      interruptId: newInterruptId({
+        ownerSessionId: sessionId,
+        bootId: this.creationGuard.bootId,
+        validAfterTurnId,
+        snapshotDigest,
+      }),
+      ownerSessionId: sessionId,
+      bootId: this.creationGuard.bootId,
+      validAfterTurnId,
+      snapshotDigest,
+    }
     await this.checkpoint(workflow)
   }
 
@@ -357,7 +404,7 @@ export abstract class WorkflowEngineCore {
 
   protected async invalidResumeView(
     workflow: WorkflowRecord,
-    resolution: ResolutionRecord,
+    resolution: ResolutionRecord | undefined,
     exec: ToolRunContext,
     input: ResumeInput,
     summary: string,

@@ -1,5 +1,5 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '9'
+export const POLICY_VERSION = '10'
 
 export const TOOL_NAMES = [
   'capability_workflow',
@@ -35,6 +35,7 @@ export type AuthorizationAction =
   | 'use_this'
   | 'modify_this'
 export type NavigationKind =
+  | 'clarify_requirement'
   | 'review_candidates'
   | 'review_existing'
   | 'search_more'
@@ -97,6 +98,8 @@ export interface NavigationInput {
   kind: NavigationKind
   candidateIds?: string[]
   reviewMode?: ReviewMode
+  /** Read-only reclassification after one Host-captured clarification answer. */
+  clarifiedIntent?: RequestIntent
 }
 
 export interface DecisionReceipt {
@@ -625,8 +628,6 @@ export interface AuthorizationDecisionInput {
   action: AuthorizationAction
   /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
   candidateId?: string
-  /** Optional for use_this. Defaults to temporary when the user did not express a preference. */
-  retention?: InstallationRetention
 }
 
 /** Public resume input keeps model interpretation separate from Host-owned facts. */

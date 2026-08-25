@@ -53,6 +53,9 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   if (navKind === 'review_candidates') {
     return genericPendingCard(args, 'Reviewing selected plugin candidates', '正在审查选中的插件候选', 'read')
   }
+  if (navKind === 'clarify_requirement') {
+    return genericPendingCard(args, 'Applying the clarification and starting search', '正在应用澄清并开始搜索', 'search')
+  }
   if (navKind === 'review_existing') {
     return genericPendingCard(args, 'Reviewing the plugin\'s known source; this is not a modification', '正在审查这份插件的已知来源，这不是修改', 'read')
   }
@@ -70,6 +73,9 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
 
 function presentCapabilityToolCall(name: string, args: unknown): ToolCallView {
   if (name === 'capability_workflow') {
+    if (typeof recordArgs(args).clarification_question === 'string') {
+      return genericPendingCard(args, 'Waiting for one clarification before search', '搜寻前需要一次澄清', 'other')
+    }
     return genericPendingCard(args, 'Searching for reusable plugins', '正在搜索可复用插件', 'search')
   }
   if (name === 'capability_workflow_refine') {
@@ -107,9 +113,10 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
   return [
     defineTool({
       name: 'capability_workflow',
-      description: 'Start autonomous capability discovery with the user\'s original requirement and a structured intent. Intent classifies read-only discovery only and grants no mutation. Returns Host-verified facts and a bounded candidate pool. Refine or present the pool using the dedicated tools; this call does not itself authorize review or mutation.',
+      description: 'Start autonomous capability discovery. Host preserves the current top-level user message as the authoritative requirement; requirement is only a non-authoritative search summary. Intent classifies read-only discovery only and grants no mutation. Optionally ask one material clarification before search.',
       parameters: {
-        requirement: { type: 'string', required: true, description: 'Concrete capability required by the current user task.' },
+        requirement: { type: 'string', required: true, description: 'Non-authoritative search summary. Host stores the current top-level user message as the original requirement.' },
+        clarification_question: { type: 'string', description: 'Optional single question, at most 300 characters, only when ambiguity materially changes the search surface.' },
         intent: {
           type: 'object',
           required: true,
@@ -141,7 +148,12 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
       output: jsonOutput,
       presentCall: (args) => presentCapabilityToolCall('capability_workflow', args),
       async execute(args, exec) {
-        return compactAgentView(await service.start(args.requirement, exec, parseRequestIntent(args.intent)) as WorkflowView) as unknown as JsonValue
+        return compactAgentView(await service.start(
+          args.requirement,
+          exec,
+          parseRequestIntent(args.intent),
+          args.clarification_question,
+        ) as WorkflowView) as unknown as JsonValue
       },
     }),
     defineTool({
@@ -190,11 +202,22 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           properties: {
             kind: {
               type: 'string',
-              enum: ['review_candidates', 'review_existing', 'search_more', 'reuse_local', 'enable_builtin', 'stop', 'finish_managed_work'],
+              enum: ['clarify_requirement', 'review_candidates', 'review_existing', 'search_more', 'reuse_local', 'enable_builtin', 'stop', 'finish_managed_work'],
               required: true,
             },
             candidate_ids: { type: 'array', items: { type: 'string' } },
             review_mode: { type: 'string', enum: ['fixed', 'adaptive'] },
+            clarified_intent: {
+              type: 'object',
+              additionalProperties: false,
+              description: 'Required only for clarify_requirement. Read-only reclassification after the Host-captured answer.',
+              properties: {
+                operation: { type: 'string', enum: ['discover_or_reuse', 'reuse_existing', 'evolve_existing'], required: true },
+                required_surface: { type: 'string', enum: ['any', 'native_dsh_plugin'], required: true },
+                target_name: { type: 'string' },
+                evolve_reason: { type: 'string', enum: ['repair', 'upgrade', 'improve_known_source'] },
+              },
+            },
           },
         },
         decision: {
@@ -211,11 +234,6 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
               type: 'string',
               description: 'Required for use_this or modify_this. Copy the id from that action\'s current candidate_ids.',
             },
-            retention: {
-              type: 'string',
-              enum: ['temporary', 'persistent'],
-              description: 'Optional for use_this. Interpret the user preference; defaults to temporary. A candidate whose review facts show verificationLayer manual_runtime requires persistent.',
-            },
           },
         },
       },
@@ -231,13 +249,15 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
               kind: args.navigation.kind,
               ...(args.navigation.candidate_ids ? { candidateIds: args.navigation.candidate_ids } : {}),
               ...(args.navigation.review_mode ? { reviewMode: args.navigation.review_mode } : {}),
+              ...(args.navigation.clarified_intent
+                ? { clarifiedIntent: parseRequestIntent(args.navigation.clarified_intent) }
+                : {}),
             },
           } : {}),
           ...(args.decision ? {
             decision: {
               action: args.decision.action,
               ...(args.decision.candidate_id ? { candidateId: args.decision.candidate_id } : {}),
-              ...(args.decision.retention ? { retention: args.decision.retention } : {}),
             },
           } : {}),
         }, exec) as WorkflowView) as unknown as JsonValue

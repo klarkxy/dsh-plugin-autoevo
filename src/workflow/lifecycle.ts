@@ -1,6 +1,6 @@
 import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../contracts.js'
 import { needsSemanticReviewer } from '../review/review.js'
-import type { WorkflowNodeId, WorkflowRecord } from './contracts.js'
+import { COMPLETED_CLEANUP_NODES, type WorkflowNodeId, type WorkflowRecord } from './contracts.js'
 
 /**
  * Public workflow lifecycle presentation. Internal `cursor` names stay on the
@@ -61,7 +61,10 @@ export function lifecycleStateFor(
   >,
   extras: LifecycleMappingInput = {},
 ): WorkflowLifecycleState {
-  if (workflow.policyVersion !== POLICY_VERSION || workflow.lastFailure?.code === 'policy_restart_required') {
+  const readableLegacyCompletion = workflow.policyVersion !== POLICY_VERSION
+    && workflow.status === 'completed'
+    && COMPLETED_CLEANUP_NODES.has(workflow.cursor)
+  if ((!readableLegacyCompletion && workflow.policyVersion !== POLICY_VERSION) || workflow.lastFailure?.code === 'policy_restart_required') {
     return 'interrupted'
   }
 

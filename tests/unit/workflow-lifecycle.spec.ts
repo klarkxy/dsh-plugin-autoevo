@@ -256,9 +256,9 @@ describe('public workflow lifecycle mapping', () => {
       expected: 'awaiting_user_test',
     },
     {
-      name: 'maps a stale policy version on awaiting_user_test to interrupted',
+      name: 'keeps a completed legacy install readable and removable',
       overrides: { policyVersion: '7', status: 'completed', cursor: 'awaiting_user_test' },
-      expected: 'interrupted',
+      expected: 'awaiting_user_test',
     },
     {
       name: 'maps activated as a completed lifecycle that is not verified or recovery',

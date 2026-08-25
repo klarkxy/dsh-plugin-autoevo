@@ -48,16 +48,33 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
-  async start(requirement: string, exec: ToolRunContext, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<WorkflowView> {
-    const normalized = normalizeRequirement(requirement)
-    if (!normalized || normalized.length > 2_000) {
+  async start(
+    requirement: string,
+    exec: ToolRunContext,
+    intent: RequestIntent = DEFAULT_REQUEST_INTENT,
+    clarificationQuestion?: string,
+  ): Promise<WorkflowView> {
+    const requestSummary = normalizeRequirement(requirement)
+    if (!requestSummary || requestSummary.length > 2_000) {
       throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
+    }
+    const capturedRequirement = this.creationGuard.lastUserMessage(exec.agent)
+    const originalRequirement = capturedRequirement ?? (this.requireHostCapturedRequirement ? undefined : requirement)
+    const normalized = originalRequirement ? normalizeRequirement(originalRequirement) : ''
+    if (!originalRequirement || !normalized || normalized.length > 2_000) {
+      throw new EvolutionError('invalid_input', 'A current Host-captured user requirement of 1 to 2000 characters is required')
+    }
+    const question = clarificationQuestion?.trim()
+    if (question && question.length > 300) {
+      throw new EvolutionError('invalid_input', 'clarification_question must contain at most 300 characters')
     }
     const sessionId = ownerSessionId(exec.agent)
     if (!sessionId) {
       throw new EvolutionError('invalid_input', 'A live Agent session identity is required to start a workflow')
     }
     const cwd = sessionCwd(exec.agent)
+    const workflowId = newWorkflowId(originalRequirement)
+    await this.supersedePendingClarifications(sessionId, cwd, this.creationGuard.currentTurnId(exec.agent), workflowId, exec)
     await this.invalidateStalePolicyWorkflows(sessionId, normalized, exec)
     const existing = await this.findReusableWorkflow(sessionId, cwd, normalized, intent)
     if (existing) {
@@ -78,6 +95,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           }
           delete latest.interrupt
           this.clearWorkflowGrant(latest)
+          this.creationGuard.setConstructionRoot(exec.agent, undefined)
           this.creationGuard.invalidateExecutionLease(exec.agent)
           await this.host.releaseManagedSource?.(latest, exec as WorkflowExec).catch(() => undefined)
           await this.issueRecoveryInterrupt(latest, exec)
@@ -94,7 +112,43 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       })
     }
 
-    return await this.startFresh(requirement, normalized, sessionId, cwd, exec, intent)
+    const startedTurnId = this.creationGuard.currentTurnId(exec.agent)
+    return await this.startFresh(originalRequirement, normalized, sessionId, cwd, exec, intent, undefined, workflowId, {
+      requestSummary,
+      ...(question ? { clarificationQuestion: question } : {}),
+      ...(startedTurnId ? { startedTurnId } : {}),
+    })
+  }
+
+  private async supersedePendingClarifications(
+    sessionId: string,
+    cwd: string,
+    currentTurnId: string | undefined,
+    supersedingWorkflowId: string,
+    exec: ToolRunContext,
+  ): Promise<void> {
+    if (!currentTurnId) return
+    const workflows = await this.store.listWorkflows()
+    const pending = workflows.filter((item) => item.policyVersion === POLICY_VERSION
+      && item.ownerSessionId === sessionId
+      && item.cwd === cwd
+      && item.status === 'interrupted'
+      && item.cursor === 'await_clarification'
+      && item.startedTurnId !== currentTurnId)
+    for (const item of pending) {
+      await this.withLock(item.id, async () => {
+        const latest = await this.store.getWorkflow(item.id)
+        if (latest.status !== 'interrupted' || latest.cursor !== 'await_clarification') return
+        delete latest.interrupt
+        this.clearWorkflowGrant(latest)
+        latest.status = 'completed'
+        latest.cursor = 'superseded'
+        latest.supersededByWorkflowId = supersedingWorkflowId
+        latest.supersededAt = new Date().toISOString()
+        await this.checkpoint(latest)
+      })
+    }
+    if (pending.length > 0) this.creationGuard.invalidateExecutionLease(exec.agent)
   }
 
   protected async startFresh(
@@ -106,21 +160,30 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     intent: RequestIntent = DEFAULT_REQUEST_INTENT,
     recoveredFromWorkflowId?: string,
     workflowId = newWorkflowId(requirement),
+    startOptions: {
+      requestSummary?: string
+      clarificationQuestion?: string
+      startedTurnId?: string
+    } = {},
   ): Promise<WorkflowView> {
     const now = new Date().toISOString()
     const workflow: WorkflowRecord = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: workflowId,
       policyVersion: POLICY_VERSION,
       createdAt: now,
       updatedAt: now,
       requirement,
       requirementNormalized: normalized,
+      requestSummary: startOptions.requestSummary ?? normalized,
+      searchRequirement: requirement,
+      ...(startOptions.clarificationQuestion ? { clarificationQuestion: startOptions.clarificationQuestion } : {}),
+      ...(startOptions.startedTurnId ? { startedTurnId: startOptions.startedTurnId } : {}),
       cwd,
       ownerSessionId: sessionId,
       bootId: this.creationGuard.bootId,
       status: 'running',
-      cursor: 'resolve_local',
+      cursor: startOptions.clarificationQuestion ? 'await_clarification' : 'resolve_local',
       generation: 1,
       consumedInterruptIds: [],
       intent,
@@ -418,6 +481,12 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
 
         if (INTERRUPT_NODES.has(workflow.cursor)) {
           this.creationGuard.setConstructionRoot(exec.agent, undefined)
+          if (workflow.cursor === 'await_clarification') {
+            this.creationGuard.invalidateExecutionLease(exec.agent)
+            await this.issueClarificationInterrupt(workflow, exec)
+            this.syncGuard(workflow, exec, guardGeneration, undefined)
+            return await this.view(workflow, undefined)
+          }
           if (!resolution && workflow.resolutionId) {
             resolution = await this.host.getResolution(workflow.resolutionId)
           }
@@ -475,6 +544,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         }
 
         if (TERMINAL_NODES.has(workflow.cursor)) {
+          this.creationGuard.setConstructionRoot(exec.agent, undefined)
           this.settleTerminalGrant(workflow, exec)
           await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec)
           if (workflow.cursor === 'recovery_required') {
@@ -536,6 +606,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           continue
         }
         workflow.cursor = result.node
+        this.creationGuard.setConstructionRoot(exec.agent, undefined)
         this.settleTerminalGrant(workflow, exec)
         await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec)
         if (workflow.cursor === 'recovery_required') {
@@ -551,6 +622,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         return await this.view(workflow, resolution)
       }
     } catch (error) {
+      this.creationGuard.setConstructionRoot(exec.agent, undefined)
       this.creationGuard.invalidateExecutionLease(exec.agent)
       await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec).catch(() => undefined)
       workflow.status = 'failed'

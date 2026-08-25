@@ -52,7 +52,7 @@ After `modify_review` or `create_authorized`, the Host prepares a Git source und
 5. Call `capability_workflow_resume` with the managed-work completion action `finish_managed_work`. Do not pass an arbitrary checkout path.
 6. The Host validates Git state, commits without hooks/signing, re-reviews the exact source, freezes an owned artifact, and returns to a fresh install decision.
 
-Never call `cordis_define(kind: "new")`, directly install/remove a package, use a same-named substitute, delegate construction, or work outside the managed source. Existing live Cordis repair outside an AutoEvo WorkOrder belongs to the official Cordis development workflow, not this skill.
+Never call Cordis live mutation, directly install/remove a package, use a same-named substitute, delegate construction, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception.
 
 ## 4. Report outcomes exactly
 

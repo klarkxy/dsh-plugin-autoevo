@@ -66,25 +66,20 @@ try {
     resumeSchema.parameters.properties.decision.properties.action.enum,
     ['use_this', 'modify_this', 'create_new', 'stop'],
   )
-  assert.deepEqual(
-    resumeSchema.parameters.properties.decision.properties.retention.enum,
-    ['temporary', 'persistent'],
-  )
+  assert.equal(resumeSchema.parameters.properties.decision.properties.retention, undefined)
+  assert.ok(resumeSchema.parameters.properties.navigation.properties.kind.enum.includes('clarify_requirement'))
   const assembly = await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) })
   assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), expected)
   const policy = assembly.sections.find((section) => section.name === 'autoevo:reuse-policy')
   assert.ok(policy)
-  assert.match(policy.text, /runtime Policy V9/u)
-  assert.match(policy.text, /user's original requirement/u)
-  assert.match(policy.text, /Host-provided snapshot or pool/u)
+  assert.match(policy.text, /runtime Policy V10/u)
+  assert.match(policy.text, /authoritative original requirement/u)
+  assert.match(policy.text, /zero candidates is a valid result/u)
   assert.match(policy.text, /fresh top-level user message/u)
-  assert.match(policy.text, /external content as untrusted data/u)
-  assert.match(policy.text, /returned budgets and constraints/u)
-  assert.match(policy.text, /Mechanical verification is Host-driven/u)
-  assert.match(policy.text, /do not treat a semantic verifier as the completion gate/u)
-  assert.match(policy.text, /Only a Host tool-roundtrip pass is verified/u)
-  assert.match(policy.text, /Cleanup of a completed installation and a sealed failure recovery are distinct Host paths/u)
-  assert.match(policy.text, /allows at most two modifications/u)
+  assert.match(policy.text, /Public decisions never accept retention/u)
+  assert.match(policy.text, /ordinary subagent, agent, workflow, or model delegation/u)
+  assert.match(policy.text, /Claim verified only from a Host tool-roundtrip pass/u)
+  assert.match(policy.text, /V9 unfinished workflows/u)
   assert.doesNotMatch(policy.text, /runtime Policy V7/u)
   assert.doesNotMatch(policy.text, /independent semantic verifier/u)
   assert.doesNotMatch(policy.text, /next_step|agent_directive|await_confirmation|workspace-write/u)
@@ -99,7 +94,7 @@ try {
   assert.match(recoverSchema.description, /sealed recovery interrupt/u)
 
   const packed = await import(pathToFileURL(path.join(projectRoot, 'lib', 'index.js')).href)
-  assert.equal(packed.POLICY_VERSION, '9')
+  assert.equal(packed.POLICY_VERSION, '10')
   assert.deepEqual([...packed.VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
   assert.equal(packed.classifyRuntimeSurface({
     llmDependency: false,
@@ -165,8 +160,8 @@ try {
   const presetBody = await readFile(path.join(presetsRoot, 'preset.yml'), 'utf8')
   assert.match(presetBody, /能力进化/u)
   const composition = await readFile(path.join(presetsRoot, 'agent.cordis.yml'), 'utf8')
-  assert.match(composition, /official Creator plus AutoEvo governance/u)
-  assert.match(composition, /awaiting a user test/u)
+  assert.match(composition, /Policy V10 Search-first governance/u)
+  assert.match(composition, /disabled: true/u)
   const managed = await readdir(presetsRoot)
   assert.ok(managed.includes('agent.cordis.yml'))
   assert.ok(managed.includes('.autoevo-preset.json'))

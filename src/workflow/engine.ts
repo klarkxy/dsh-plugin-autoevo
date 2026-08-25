@@ -4,7 +4,12 @@ import type { WorkflowHost } from './contracts.js'
 import { WorkflowEngineResume } from './engine-resume.js'
 
 export class WorkflowEngine extends WorkflowEngineResume {
-  constructor(store: StateStore, creationGuard: CreationGuard, host: WorkflowHost) {
-    super(store, creationGuard, host)
+  constructor(
+    store: StateStore,
+    creationGuard: CreationGuard,
+    host: WorkflowHost,
+    requireHostCapturedRequirement = false,
+  ) {
+    super(store, creationGuard, host, requireHostCapturedRequirement)
   }
 }

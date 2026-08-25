@@ -2,7 +2,7 @@
 
 English | [中文](user-guide.md) · [Back to README](../README.en.md)
 
-This guide is for people who discover, install, improve, or create capabilities in DSH. Capability Evolution is a superset of official Creator mode: live plugin experiments, runtime inspect, preset authoring, and delegation stay available; AutoEvo governs community reuse, review, install, and upgrade. It explains the choices you make, what AutoEvo can actually prove, and how to recover safely. See [Architecture](architecture.md) and the [Developer Guide](developer-guide.en.md) for internals and source work.
+This guide is for people who discover, install, improve, or create capabilities in DSH. **Capability Evolution** uses Policy V10 Search-first governance: temporary experiments and formal needs follow the same workflow, while ordinary model delegation and Cordis live mutation are unavailable to the parent session. It explains the choices you make, what AutoEvo can prove, and how to recover safely.
 
 ## 1. Before you start
 
@@ -36,7 +36,7 @@ Choose **Capability Evolution** in a new or blank DSH session and describe the g
 
 > I need a DSH plugin that can calculate scientific notation. Search for an existing one first.
 
-AutoEvo checks tools, skills, and bridges visible to the current Agent before searching GitHub for repositories tagged `dsh-plugin`. That search does not install a marketplace plugin and does not select a capability candidate.
+The Host stores this top-level message verbatim. A clear need starts search immediately; only a material ambiguity that changes search classification permits one clarification. Its answer affects read-only search only and grants no selection, creation, modification, or installation authority.
 
 ### 3.2 Gate 1: choose what to review
 
@@ -46,7 +46,7 @@ The Agent may refine within a bounded budget and then seals a 1–5 item shortli
 - “Go with the one you recommend.”
 - “None of these fit — keep searching.”
 
-This gate is read-only: it cannot install, modify, or create anything. If candidate identity or differences would materially change your choice, the Agent may ask one precise question first.
+This gate is read-only: it cannot install, modify, or create anything. Search may return no candidates; that state offers only continued search, creating a new capability, or stopping. Creation still needs a fresh top-level confirmation.
 
 ### 3.3 Gate 2: decide after review
 
@@ -76,7 +76,7 @@ If a local tool or skill already satisfies the need, reuse it. This is a normal 
 
 ### 4.2 Install a complete candidate
 
-Direct install is available only when the current-policy review binds an immutable source, materializable package, acceptable compatibility, full fit, and the required safety facts. Persistent install targets the real profile. Temporary trials are only available for layers the Host can verify automatically.
+Direct install is available only when the current-policy review binds an immutable source, materializable package, acceptable compatibility, full fit, and the required safety facts. Every user-adopted capability is installed persistently. Temporary installation exists only as Host-private isolated preflight and is not model-callable or retained as a user capability.
 
 ### 4.3 Improve a candidate or installed capability
 

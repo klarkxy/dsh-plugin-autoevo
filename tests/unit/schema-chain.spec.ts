@@ -47,7 +47,7 @@ describe('model JSON to Host schema chain', () => {
     })).toMatchObject({
       optionId: 'use_this',
       candidateId,
-      install: { retention: 'temporary' },
+      install: { retention: 'persistent' },
     })
     expect(parseReviewerSubmitArgs({
       verdict: 'approved',

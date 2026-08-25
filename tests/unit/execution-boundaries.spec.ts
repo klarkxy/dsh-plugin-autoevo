@@ -26,16 +26,15 @@ function exec(name: string, args: Record<string, unknown> = {}): ToolExecution {
 describe('parent execution boundaries', () => {
   const parent = new ExecutionGuard({ role: 'parent' })
 
-  it('reuses official Creator tools and only blocks AutoEvo-owned side effects', async () => {
+  it('enforces Policy V10 parent boundaries while preserving read-only inspection and ordinary workspace edits', async () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     for (const call of [
       exec('capability_workflow'),
       exec('capability_workflow_resume'),
-      exec('plugin_remove'),
       exec('read'),
       exec('read_image'),
-      exec('write'),
-      exec('edit'),
+      exec('write', { path: 'notes.txt' }),
+      exec('edit', { path: 'notes.txt' }),
       exec('glob'),
       exec('grep'),
       exec('pwsh', { command: 'Get-ChildItem' }),
@@ -46,21 +45,38 @@ describe('parent execution boundaries', () => {
       exec('exit_plan_mode'),
       exec('ask_user_question'),
       exec('cordis_inspect_self'),
-      exec('cordis_define', { plugin: { kind: 'existing' } }),
-      exec('cordis_define', { plugin: { kind: 'new' } }),
-      exec('cordis_run'),
-      exec('subagent'),
-      exec('workflow'),
-      exec('ralph'),
+      exec('cordis_stop'),
       exec('calculator'),
     ]) {
       await expect(parent.preExecute(call, next)).resolves.toEqual({ kind: 'allow' })
     }
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('plugin_remove'))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('pwsh', { command: 'dsh plugin remove dsh-xai' }))).toMatch(/plugin install\/remove/i)
-    expect(parent.guard(exec('bash', { command: 'gh pr create' }))).toBeUndefined()
-    expect(parent.guard(exec('pwsh', { command: 'gh pr create --title fix --body ready' }))).toBeUndefined()
+    for (const call of [
+      exec('cordis_define', { plugin: { kind: 'existing' } }),
+      exec('cordis_define', { plugin: { kind: 'new' } }),
+      exec('cordis_run'),
+      exec('cordis_mount'),
+      exec('cordis_undefine'),
+      exec('cordis_unmount'),
+      exec('find_dsh_plugin'),
+      exec('subagent'),
+      exec('workflow'),
+      exec('ralph'),
+      exec('skill', { name: 'cordis-plugin-development' }),
+      exec('bash', { command: 'gh pr create' }),
+      exec('pwsh', { command: 'gh pr create --title fix --body ready' }),
+    ]) expect(parent.guard(call)).toBeTruthy()
+    expect(parent.guard(exec('bridge', { tool_name: 'find_dsh_plugin' }))).toMatch(/direct or nested/i)
+    expect(parent.guard(exec('pwsh', { command: 'Get-Content (Remove-Item notes.txt -PassThru)' }))).toMatch(/read-only shell/i)
+    expect(parent.guard(exec('pwsh', { command: 'Get-Content notes.txt & whoami' }))).toMatch(/read-only shell/i)
+    expect(parent.guard(exec('bash', { command: 'rg --pre dangerous needle .' }))).toMatch(/read-only shell/i)
+    expect(parent.guard(exec('pwsh', { command: 'git diff --output=outside.patch' }))).toMatch(/read-only shell/i)
+    const protectedParent = new ExecutionGuard({ role: 'parent', cwd: 'C:/workspace', protectedRoots: ['C:/workspace/.autoevo'] })
+    expect(protectedParent.guard(exec('write', { path: 'notes.txt' }))).toBeUndefined()
+    expect(protectedParent.guard(exec('write', { path: '.autoevo/sources/plugin/index.ts' }))).toMatch(/protected|managed/i)
   })
 })
 
@@ -112,16 +128,28 @@ describe('lease matching helpers', () => {
 
 describe('constructor execution boundaries', () => {
   const root = path.join(os.tmpdir(), 'autoevo-managed-source')
-  const constructor = new ExecutionGuard({ role: 'constructor', allowedRoot: root })
+  const constructor = new ExecutionGuard({ role: 'constructor', allowedRoot: root, cwd: root })
 
   it('allows AutoEvo resume and in-root writes, and denies nested subagents and outside writes', () => {
-    expect(constructor.guard(exec('capability_workflow_resume'))).toBeUndefined()
+    expect(constructor.guard(exec('capability_workflow_resume', {
+      workflow_id: `workflow_${'a'.repeat(24)}`,
+      navigation: { kind: 'finish_managed_work' },
+    }))).toBeUndefined()
+    expect(constructor.guard(exec('capability_workflow_resume', {
+      workflow_id: `workflow_${'a'.repeat(24)}`,
+      navigation: { kind: 'search_more' },
+    }))).toMatch(/only capability_workflow_resume with finish_managed_work/i)
+    expect(constructor.guard(exec('capability_workflow'))).toMatch(/Host owns every other AutoEvo/i)
+    expect(constructor.guard(exec('plugin_remove'))).toMatch(/Host owns every other AutoEvo/i)
     expect(constructor.guard(exec('write', { path: path.join(root, 'src', 'index.ts') }))).toBeUndefined()
     expect(constructor.guard(exec('subagent'))).toMatch(/nested agent\/subagent\/workflow|denies nested/i)
     expect(constructor.guard(exec('write', { path: path.join(os.tmpdir(), 'outside.ts') }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
     expect(constructor.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
     expect(constructor.guard(exec('pwsh', { command: 'gh pr create --fill' }))).toMatch(/GitHub CLI/i)
+    expect(constructor.guard(exec('pwsh', { command: 'Set-Content ../outside.txt unsafe' }))).toMatch(/denies model-callable shell/i)
+    expect(constructor.guard(exec('pwsh', { command: 'Get-Content (Remove-Item ../outside.txt -PassThru)' }))).toMatch(/denies model-callable shell/i)
+    expect(constructor.guard(exec('pwsh', { command: 'pnpm test', cwd: root }))).toMatch(/Host runs bounded builds and tests/i)
   })
 })
 

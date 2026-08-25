@@ -13,13 +13,16 @@ import {
 import { boundedAgentText as boundedText } from './sanitize.js'
 
 export type AgentSemanticState =
+  | 'waiting_clarification'
   | 'discovering'
+  | 'no_candidates'
   | 'waiting_candidate_selection'
   | 'waiting_final_decision'
   | 'diagnosing'
   | 'managed_work'
   | 'executing'
   | 'completed'
+  | 'cancelled'
   | 'recovery_required'
 
 export interface AgentScopedAction {
@@ -91,7 +94,8 @@ const HARD_CONSTRAINTS = [
   'When explaining choices, use only each allowed action\'s user_facing_meaning and natural prose, never its action token.',
   'Claim only what returned evidence establishes; do not claim success, cleanliness, or resumability without direct facts.',
   'Only installOutcome verified plus verified=true may be claimed as functionally verified. activated means the bundle loaded; awaiting_user_test means the user must test in a real client. None of those completed states block ordinary chat.',
-  'A candidate whose review facts show verificationLayer manual_runtime can only be installed with persistent retention and ends awaiting a manual user test; explain this before the user makes the final install choice.',
+  'Every adopted capability is persistent. Public decisions never accept retention; internal isolated preflight remains Host-private.',
+  'Clarification may occur at most once, changes read-only search classification only, and never grants selection, creation, modification, installation, or execution authority.',
   'Call capability_workflow_recover in two legal modes only: sealed failure recovery with the current interrupt_id, or a new top-level user request to clean up a completed installation with interrupt_id omitted. Never pass an installation id. If this tool result is waiting or a completed presentation, do not call it again in the same turn.',
   'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
   'Authorized modify or create continues in this session on the Host-managed source path. Do not spawn sub-agents. After editing, call capability_workflow_resume with finish construction navigation and no new user decision.',
@@ -268,6 +272,10 @@ function userFacingMeaning(action: string, requirement: string, completedCleanup
       en: 'Review the selected candidates',
       zh: '审查所选候选',
     },
+    clarify_requirement: {
+      en: 'Answer the one clarification before search begins',
+      zh: '在搜寻开始前回答这一次澄清',
+    },
     search_more: {
       en: 'Keep looking for other candidates',
       zh: '继续寻找其他候选',
@@ -311,6 +319,7 @@ function channelFor(kind: string | undefined, action: WorkflowOptionId): AgentSc
     && (action === 'use_this' || action === 'modify_this' || action === 'create_new' || action === 'stop')) {
     return 'decision'
   }
+  if (kind === 'await_selection' && (action === 'create_new' || action === 'stop')) return 'decision'
   return 'navigation'
 }
 
@@ -329,14 +338,23 @@ function interruptActions(view: WorkflowView): AgentScopedAction[] {
 function semanticState(view: WorkflowView): AgentSemanticState {
   const workflow = view.workflow
   if (view.diagnosis) return 'diagnosing'
+  if (workflow.cursor === 'await_clarification') return 'waiting_clarification'
   if (workflow.cursor === 'await_discovery') return 'discovering'
-  if (workflow.cursor === 'await_selection') return 'waiting_candidate_selection'
+  if (workflow.cursor === 'await_selection') {
+    return (workflow.candidateSnapshot?.length ?? 0) === 0 ? 'no_candidates' : 'waiting_candidate_selection'
+  }
   if (workflow.cursor === 'await_confirmation') {
+    if ((workflow.candidateSnapshot?.length ?? 0) === 0
+      && (view.reviews?.length ?? 0) === 0
+      && !workflow.modificationOutcome
+      && !workflow.creatorRecords?.length
+      && !workflow.lastFailure) return 'no_candidates'
     return workflow.lastFailure ? 'recovery_required' : 'waiting_final_decision'
   }
   if (workflow.cursor === 'await_modify_work') return 'managed_work'
   if (workflow.status === 'running') return 'executing'
   if (workflow.cursor === 'recovery_required' || workflow.status === 'failed') return 'recovery_required'
+  if (workflow.cursor === 'stopped' || workflow.cursor === 'superseded') return 'cancelled'
   return 'completed'
 }
 
@@ -375,8 +393,13 @@ function discoveryFacts(view: WorkflowView): Record<string, unknown> {
 
 function factsFor(view: WorkflowView): Record<string, unknown> {
   const state = semanticState(view)
+  if (state === 'waiting_clarification') {
+    return {
+      clarification_question: view.workflow.clarificationQuestion,
+    }
+  }
   if (state === 'discovering') return discoveryFacts(view)
-  if (state === 'waiting_candidate_selection') {
+  if (state === 'waiting_candidate_selection' || state === 'no_candidates') {
     return {
       ...intentFacts(view),
       sealed_candidates: candidateEvidence(view.workflow.candidateSnapshot ?? [], view.resolution),
@@ -554,7 +577,15 @@ export function compactAgentView(view: WorkflowView): AgentWorkflowViewV2 {
       ...(view.workflow.bootId ? { boot_id: view.workflow.bootId } : {}),
     },
     ...(view.workflow.interrupt ? { control: { interrupt_id: view.workflow.interrupt.interruptId } } : {}),
-    facts: factsFor(view),
+    facts: {
+      request: {
+        original_requirement: view.workflow.requirement,
+        ...(view.workflow.requestSummary ? { search_summary: view.workflow.requestSummary } : {}),
+        ...(view.workflow.clarificationQuestion ? { clarification_question: view.workflow.clarificationQuestion } : {}),
+        ...(view.workflow.clarificationAnswer ? { clarification_answer: view.workflow.clarificationAnswer } : {}),
+      },
+      ...factsFor(view),
+    },
     ...(diagnosisBudget ? {
       budgets: {
         diagnostic_calls_remaining: Math.max(0, diagnosisBudget.maxCalls - diagnosisBudget.usedCalls),
@@ -608,6 +639,7 @@ export function retryableResumeHint(error: unknown): string | undefined {
     /option_id is not available/i,
     /Navigation candidate/i,
     /does not accept (retention|candidate_id)/i,
+    /do not accept retention/i,
     /requires candidate_id/i,
     /candidate_id is (not allowed|outside)/i,
     /use_this requires/i,

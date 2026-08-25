@@ -91,10 +91,9 @@ async function assertPackedPolicyV8(packedRoot) {
     'utf8',
   ).catch(() => '')
   const packedJs = `${packedIndex}\n${packedEvolution}\n${packedDriver}`
-  assert.match(packedEvolution, /runtime Policy V9/u)
-  assert.match(packedEvolution, /Mechanical verification is Host-driven/u)
-  assert.match(packedEvolution, /do not treat a semantic verifier as the completion gate/u)
-  assert.match(packedEvolution, /Cleanup of a completed installation and a sealed failure recovery are distinct Host paths/u)
+  assert.match(packedEvolution, /runtime Policy V10/u)
+  assert.match(packedEvolution, /Host alone performs final installation and internal verification/u)
+  assert.match(packedEvolution, /Public decisions never accept retention/u)
   assert.doesNotMatch(packedEvolution, /runtime Policy V7/u)
   assert.doesNotMatch(packedJs, /independent semantic verifier/u)
 
@@ -107,9 +106,9 @@ async function assertPackedPolicyV8(packedRoot) {
   const { AUTOEVO_AUTONOMY_CONTRACT } = await import(
     pathToFileURL(path.join(projectRoot, 'lib', 'evolution-mode.js')).href
   )
-  assert.equal(POLICY_VERSION, '9')
+  assert.equal(POLICY_VERSION, '10')
   assert.deepEqual([...VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
-  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V9/u)
+  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V10/u)
   assert.doesNotMatch(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V7/u)
 
   assert.equal(classifyRuntimeSurface(surface()), 'bundle_activation')
@@ -154,11 +153,11 @@ async function assertPackedPolicyV8(packedRoot) {
 
   const userGuide = await readFile(path.join(packedRoot, 'docs', 'user-guide.md'), 'utf8')
   assert.match(userGuide, /tool_roundtrip/u)
-  assert.match(userGuide, /临时安装只适用于 Host 能自动验证的层/u)
+  assert.match(userGuide, /临时试装只是 Host 内部隔离预检/u)
   assert.match(userGuide, /restartRequired: true/u)
 
   const developerGuide = await readFile(path.join(packedRoot, 'docs', 'developer-guide.md'), 'utf8')
-  assert.match(developerGuide, /Policy V9/u)
+  assert.match(developerGuide, /Policy V10/u)
   assert.match(developerGuide, /pnpm check:release/u)
 
   await access(path.join(packedRoot, 'README.en.md'))
@@ -190,11 +189,11 @@ async function assertPackedPolicyV8(packedRoot) {
   assert.match(skill, /finish_managed_work/u)
   assert.match(state, /completed `awaiting_user_test`/u)
   assert.match(state, /two legal modes that must not be mixed/u)
-  assert.match(state, /Policy V9 discovery/u)
+  assert.match(state, /Policy V10 workflow/u)
 
   const preset = await readFile(path.join(packedRoot, 'presets', 'evolution', 'agent.cordis.yml'), 'utf8')
-  assert.match(preset, /official Creator plus AutoEvo governance/u)
-  assert.match(preset, /awaiting a user test/u)
+  assert.match(preset, /Policy V10 Search-first governance/u)
+  assert.match(preset, /disabled: true/u)
   assert.doesNotMatch(preset, /independent semantic verifier/u)
 }
 
@@ -275,11 +274,11 @@ try {
   assert.ok(evidence.eventTypes.includes('tool/call'))
   assert.ok(evidence.eventTypes.includes('tool/result'))
   assert.ok(evidence.eventTypes.includes('turn/end'))
-  assert.equal(evidence.policyVersion, '9')
+  assert.equal(evidence.policyVersion, '10')
   assert.equal(evidence.recoverInterruptOptional, true)
 
   const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
-  assert.equal(manifest.templateVersion, '14')
+  assert.equal(manifest.templateVersion, '15')
   process.stdout.write(`${JSON.stringify({
     status: 'passed',
     installedFrom: path.basename(tarball),
