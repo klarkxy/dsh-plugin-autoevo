@@ -263,8 +263,8 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       if (ids.length !== input.candidateIds.length) {
         throw new EvolutionError('invalid_input', 'Presented candidate_ids must be unique')
       }
-      if (ids.length < 1 || ids.length > SEALED_SHORTLIST_MAX) {
-        throw new EvolutionError('invalid_input', 'Present requires one to five discovery candidate_ids')
+      if (ids.length > SEALED_SHORTLIST_MAX) {
+        throw new EvolutionError('invalid_input', 'Present accepts zero to five discovery candidate_ids')
       }
       const pool = workflow.discoveryPool ?? []
       const selected = ids.map((id) => pool.find((item) => item.id === id))

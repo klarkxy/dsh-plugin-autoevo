@@ -176,7 +176,7 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_present',
-      description: 'Seal one to five candidate IDs from the current Host discovery pool into the Gate-1 shortlist. Only a later fresh user reply may select candidates for review.',
+      description: 'Seal zero to five candidate IDs from the current Host discovery pool into the Gate-1 shortlist. Use an empty array when search found no relevant candidate; only a later fresh user reply may authorize creation or select a candidate for review.',
       parameters: {
         workflow_id: { type: 'string', required: true },
         candidate_ids: { type: 'array', items: { type: 'string' }, required: true },

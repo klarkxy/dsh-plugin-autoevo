@@ -292,16 +292,59 @@ describe('workflow engine autonomous discovery', () => {
     expect(parked.workflow.consumedInterruptIds).toEqual([])
   })
 
-  it('rejects invalid presentation sizes, duplicate ids, and candidates outside the discovery pool', async () => {
+  it('seals a zero-candidate result and accepts only a later fresh create decision', async () => {
+    const record = resolution('lunar calendar conversion')
+    const { root, guard, workflowHost, engine } = await makeEngine(record, 'present-empty')
+    workflowHost.prepareCreate = async (current, _exec, workflow) => {
+      const sourceRoot = path.join(root, 'managed-lunar-calendar')
+      workflow.pendingPath = sourceRoot
+      workflow.managedSourceId = 'managed-lunar-calendar'
+      return { resolution: current, path: sourceRoot }
+    }
+    const turn = exec('session-present-empty', root)
+    const discovery = await engine.start('lunar calendar conversion', turn)
+    expect(discovery.workflow.discoveryPool?.length).toBeGreaterThan(0)
+
+    const empty = await engine.present({
+      workflowId: discovery.workflow.id,
+      candidateIds: [],
+    }, turn)
+
+    expect(empty.workflow).toMatchObject({
+      status: 'interrupted',
+      cursor: 'await_selection',
+      candidateSnapshot: [],
+    })
+    expect(empty.workflow.interrupt?.options.map((option) => option.id)).toEqual([
+      'search_more',
+      'create_new',
+      'stop',
+    ])
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '从零创建这个能力' }] })
+    const constructing = await engine.resume({
+      workflowId: empty.workflow.id,
+      interruptId: empty.workflow.interrupt!.interruptId,
+      decision: { action: 'create_new' },
+    }, turn)
+
+    expect(constructing.workflow).toMatchObject({
+      status: 'interrupted',
+      cursor: 'await_modify_work',
+      pendingPath: path.join(root, 'managed-lunar-calendar'),
+    })
+    expect(guard.constructionRoot(turn.agent)).toBe(path.join(root, 'managed-lunar-calendar'))
+  })
+
+  it('rejects oversized presentations, duplicate ids, and candidates outside the discovery pool', async () => {
     const { store, engine } = await makeEngine(resolution(), 'present-invalid')
     const discovery = await engine.start('calculator', exec())
     const id = discovery.workflow.discoveryPool![0]!.id
 
-    await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [] }, exec())).rejects.toThrow(/one to five/i)
     await expect(engine.present({
       workflowId: discovery.workflow.id,
       candidateIds: Array.from({ length: 6 }, (_, index) => `candidate_${String(index).padStart(24, '0')}`),
-    }, exec())).rejects.toThrow(/one to five/i)
+    }, exec())).rejects.toThrow(/zero to five/i)
     await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [id, id] }, exec())).rejects.toThrow(/unique/i)
     await expect(engine.present({ workflowId: discovery.workflow.id, candidateIds: [`candidate_${'f'.repeat(24)}`] }, exec())).rejects.toThrow(/discovery pool/i)
     expect((await store.getWorkflow(discovery.workflow.id)).cursor).toBe('await_discovery')
