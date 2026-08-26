@@ -64,6 +64,34 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
   <img src="example/install/06-installed.png" alt="已安装" width="320">
 </p>
 
+完整创建与恢复演示（提出需求 → Search-first 无匹配 → 授权创建 → 托管施工 → 审查 → 首次安装失败 → 诊断修复 → 复审 → 重装激活）：
+
+1. **搜索与创建决策**：保留用户原始需求，完成两轮只读检索；确认没有相关候选后，由用户明确选择从零创建。
+
+<p align="center">
+  <img src="example/create/01-request-and-search.png" alt="提出公历与农历互转需求并开始 Search-first 检索" width="320">
+  <img src="example/create/02-no-candidate-create-choice.png" alt="没有匹配候选并展示继续搜索、从零创建或停止" width="320">
+  <img src="example/create/03-create-authorized.png" alt="用户选择从零创建并由 Host 绑定托管源码" width="320">
+</p>
+
+2. **托管施工与首次安装**：只在 Host 绑定的源码根内实现和自测，审查后再次由用户决定是否安装；首次运行时验证失败时不会伪装成成功。
+
+<p align="center">
+  <img src="example/create/04-managed-build.png" alt="在托管源码中实现农历算法、插件工具与自测" width="320">
+  <img src="example/create/05-review-install-choice.png" alt="展示审查结果并等待用户确认安装" width="320">
+  <img src="example/create/06-first-install-failed.png" alt="首次安装验证失败并读取诊断证据" width="320">
+</p>
+
+3. **受控修复与闭环激活**：用户授权修复后重新进入托管施工；Host 复审通过，再经一次用户确认完成重装和运行时检查。
+
+<p align="center">
+  <img src="example/create/07-repair-authorized.png" alt="用户选择先修复再重装并重新授权托管施工" width="320">
+  <img src="example/create/08-managed-repair.png" alt="修复补丁格式、依赖与能力描述并提交复审" width="320">
+  <img src="example/create/09-rereview-passed.png" alt="Host 复审通过并等待重新安装确认" width="320">
+  <img src="example/create/10-reinstall-runtime-check.png" alt="重装成功后检查工具与服务注册状态" width="320">
+  <img src="example/create/11-activated.png" alt="插件已安装、加载、激活并展示可用工具" width="320">
+</p>
+
 ## 怎样理解结果
 
 | 结果 | 含义 | 下一步 |

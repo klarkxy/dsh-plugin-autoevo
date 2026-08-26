@@ -64,6 +64,34 @@ Install demo (select preset → describe the need → shortlist → review → c
   <img src="example/install/06-installed.png" alt="Installed" width="320">
 </p>
 
+Complete create-and-recover demo (request → Search-first with no match → authorize creation → managed build → review → first install failure → diagnosed repair → re-review → reinstall and activate):
+
+1. **Search and creation decision**: preserve the original request, run two read-only searches, and let the user explicitly choose creation only after no relevant candidate is found.
+
+<p align="center">
+  <img src="example/create/01-request-and-search.png" alt="Request bidirectional solar and lunar calendar conversion and start Search-first discovery" width="320">
+  <img src="example/create/02-no-candidate-create-choice.png" alt="Report no matching candidate and offer search, create, or stop" width="320">
+  <img src="example/create/03-create-authorized.png" alt="The user chooses creation and the Host binds a managed source root" width="320">
+</p>
+
+2. **Managed build and first install**: implement and test only inside the Host-bound source root, review the artifact, and ask again before install. A failed runtime verification remains a failure instead of being reported as success.
+
+<p align="center">
+  <img src="example/create/04-managed-build.png" alt="Implement the calendar algorithm, plugin tools, and self-checks in managed source" width="320">
+  <img src="example/create/05-review-install-choice.png" alt="Show the review result and wait for install confirmation" width="320">
+  <img src="example/create/06-first-install-failed.png" alt="The first install verification fails and diagnostic evidence is collected" width="320">
+</p>
+
+3. **Controlled repair and activation**: re-enter managed work only after the user authorizes repair, pass Host re-review, then require another user decision before reinstall and runtime checks.
+
+<p align="center">
+  <img src="example/create/07-repair-authorized.png" alt="The user chooses repair and reinstall, authorizing managed work again" width="320">
+  <img src="example/create/08-managed-repair.png" alt="Repair the patch format, dependencies, and capability wording, then submit for re-review" width="320">
+  <img src="example/create/09-rereview-passed.png" alt="Host re-review passes and asks for reinstall confirmation" width="320">
+  <img src="example/create/10-reinstall-runtime-check.png" alt="Reinstall succeeds and tool and service registration are checked" width="320">
+  <img src="example/create/11-activated.png" alt="The plugin is installed, loaded, activated, and its tools are visible" width="320">
+</p>
+
 ## Understand the outcome
 
 | Result | Meaning | Next step |
