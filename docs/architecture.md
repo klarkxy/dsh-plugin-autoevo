@@ -4,7 +4,7 @@
 
 ## 1. 位置
 
-AutoEvo 是 DSH Agent 工作流里的 `Capability Reuse Layer`。它把本地解析、远端发现、审查凭据、批准安装、真实验证和精确清理串成闭环。包管理、GitHub 协作和代码修改继续走 DSH、pnpm、`git`、`gh` 与现有 Coding Agent。
+AutoEvo 是 DSH Agent 工作流里的轻量 `Capability Reuse Layer`：它组织本地解析、远端发现、审查证据、用户决策、结果状态与清理记录。权限、sandbox 和 approval 的强制执行属于 DSH Core；AutoEvo 不创建第二套安全边界，也不会以 warning 或 receipt 覆盖 DSH Core 决定。包管理、GitHub 协作和代码修改继续走 DSH、pnpm、`git`、`gh` 与现有 Coding Agent。
 
 ## 2. 运行结构
 
@@ -59,16 +59,16 @@ capability_workflow
 
 ## 3. DSH 接缝
 
-入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V10 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
+入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy V11 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 仍导出以保持兼容，但独立 semantic verifier 不是安装完成的可信门槛。Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。主要 required services：
 
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略。
 - `agentPresets`：可选地确认当前会话确实使用能力进化 preset，并在施工前验证父会话施工目录；不会创建子 Agent；
-- 当前会话的文件、shell 与工具调用仍受 DSH scope 和 AutoEvo `ExecutionGuard` 共同约束。
+- 当前会话的文件、shell 与工具调用由 DSH Core scope、sandbox 与 approval 强制执行；AutoEvo `ExecutionGuard` 仅维护工作流上下文与证据一致性。
 
-`tools` 同时承载最终执行门禁。Policy V10 父会话仅保留 Cordis inspect 与安全 stop，机械拒绝 live mutation、Creator 开发技能加载、直接或嵌套搜寻、普通模型委托、插件变更、非白名单 shell 与受保护根目录写入。进入托管施工阶段后，只允许托管仓库文件读写、todo、两个官方 Creator skill、三个 `cordis_inspect_*` 只读工具，以及精确的 `finish_managed_work` 回传；由于父会话 sandbox 不会重绑到更窄的托管根，模型可调用 shell 全部拒绝，构建与测试由 Host 在源码交接后执行。其它能力 fail closed。提示词不是授权边界。
+`tools` 暴露工作流步骤与证据。AutoEvo 可以将候选、review、warning、用户决定和安装结果绑定到同一工作流，但这些记录不是最终执行门禁。是否允许 live mutation、shell、文件系统、Creator skill 或安装，始终由 DSH Core 的 scope、sandbox 与 approval 决定；warning 可在 DSH Core 允许时由用户明确接受并保留在回执。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`。安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -91,24 +91,22 @@ Host 持久状态默认继续位于 `<dshHome>/autoevo/`，托管源码默认位
 ├─ resolutions/<id>.json
 ├─ reviews/<id>.json
 ├─ installations/<id>.json
-├─ trials/<installation-id>/dsh-home/
-│  └─ preflight-dsh-home/profiles/autoevo-verify/  # 一次性最小 DSH，仅 dsh-base + 候选包
 └─ verifications/<uuid>/
    ├─ observer.cordis.yml
    └─ tool-roundtrip.jsonl
 ```
 
-`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，temporary trial 会补偿清理，persistent 安装则保留恢复锚点，绝不谎报未安装。
+`StateStore` 用临时文件加原子 rename 写 JSON receipt。ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，persistent 安装保留恢复锚点，绝不谎报未安装。
 
 社区质量筛选与上报不在主线；完整实现留在 `community-quality` 分支。
 
 V2 resolution receipt 记录 `authorization` 与远端发现是否完整。interrupt 绑定 owner session、服务 boot、签发回合水位和不可变候选/审查摘要。Workflow schema V2 持久化候选快照、固定/自适应审查计划、队列、已审候选、候选到 review 的映射和失败摘要；可选的有界 Creator 执行记录保持旧 JSON 兼容。内部 receipt 记录 composition 摘要、所需目录摘要和施工会话身份；为兼容旧 JSON，`childSessionId` 字段当前存放父会话身份。Agent 只看到 `verified` / `unavailable`。只读 `navigation` 携带快照内候选 ID，但不产生授权回执。
 
-`AgentWorkflowViewV2` 是唯一模型展示协议：公开语义状态、事实与证据、剩余预算、硬约束、候选作用域动作和可用工具，不公开内部图节点或规定回答句式。Policy V9 的 resolution、review、receipt、commitment 和 lease 不跨 policy 复用；不兼容的持久状态一律 fail closed。相同无效调用指纹在同一用户回合第二次后断路，但不消费 interrupt 或授权。失败后的 `capability_workflow_diagnose` 只读取关联记录，按失败事件限制为两次调用、八个探针，并脱敏路径、URL、原始 stderr 与施工会话正文。
+`AgentWorkflowViewV2` 是唯一模型展示协议：公开语义状态、事实与证据、剩余预算、硬约束、候选作用域动作和可用工具，不公开内部图节点或规定回答句式。旧 policy 的未完成 resolution、review、receipt、commitment 和 lease 不跨 policy 复用；已完成历史记录仍可读。相同无效调用指纹在同一用户回合第二次后断路，但不消费 interrupt 或授权。失败后的 `capability_workflow_diagnose` 只读取关联记录，按失败事件限制调用，并脱敏路径、URL、原始 stderr 与施工会话正文。
 
 Policy V3 起，最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不再用关键词或正则重做语义理解。`use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`，Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供 repository、path、review id 或 install spec。Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
 
-Policy V10：新 resolution / review / workflow / receipt 使用 `POLICY_VERSION = 10`，workflow schema V3 保存 Host 原样需求、模型搜索摘要和可选一次澄清。任何旧 policy 未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease；Host 要求从当前顶层用户原文重开。已完成安装与历史 temporary receipt 仍可读取和显式删除。公开状态额外包含等待澄清、无候选、已取消和 superseded。
+Policy V11：新 resolution / review / workflow / receipt 使用 `POLICY_VERSION = 11`，workflow schema V3 保存 Host 原样需求、模型搜索摘要和可选一次澄清。任何旧 policy 未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease；Host 要求从当前顶层用户原文重开。已完成安装与历史 temporary receipt 仍可读取和显式删除。公开状态额外包含等待澄清、无候选、已取消和 superseded。
 
 MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、lease、endpoint 或用户决定。机械验证完全由 Host 驱动，不把验证任务交给普通模型，也不把独立 semantic verifier 当作完成门槛。三层结果严格区分：`tool_roundtrip` passed 才是 `verified`；`bundle_activation` passed 是 `activated`；`manual_runtime` persistent 是 `awaiting_user_test`。三者都是非失败完成态，不阻塞正常聊天，但后二者不得冒充功能已验证。第三方默认没有 Host attestation，通常进入 `manual_runtime` / persistent；包清单 safe/risk 或候选自报不得升级为 `tool_roundtrip`。`manual_runtime` 的 temporary 必须在安装与批准副作用前拒绝。`taskResultMatchedExpectation` 只是诊断字段，不是 verified 真值。
 
@@ -128,13 +126,13 @@ Review receipt 绑定策略版本、需求、来源身份、GitHub exact commit 
 - `restartRequired`：非失败完成态已成立，但当前进程的 Loader 热加载无法完整完成；仅此时要求新进程加载 bundle。
 - `removed`：临时 owned trial 已删除，或持久安装 receipt 已完成 remove。
 
-用户可见安装一律持久化，公开决策不接受 `retention`。temporary trial 仅是 Host 内部隔离预检；失败会删除 trial，并在 installation receipt 上写下 `removed: true`。
+用户可见安装一律持久化，公开决策不接受 `retention`。标准 AutoEvo 流程不创建私有预检 profile；安装、脚本与包管理器行为交给 DSH 的正常权限、sandbox 和 approval 规则。
 
 ## 6. 部分适配
 
-GitHub review 为 `modify`（partial、peer 不兼容、或可修 high）时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 和受限 cwd 交给当前能力进化会话。当前会话只在托管源内改源码和运行本地检查；`finish_managed_work` 后，Host 校验 branch/HEAD、Git config/hooks 摘要与工作树，禁用 hooks 和签名创建本地 commit，再做 local review 与固定 tgz。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。symlink、特殊文件或触及文件/字节上限的快照记为 `skip`。
+用户选择 `modify` 时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 和绑定 cwd 交给当前能力进化会话。当前会话可在托管源内使用 DSH 正常允许的编辑、shell、构建、测试、依赖和协作工具；`finish_managed_work` 后，Host 校验当前内容、重新审查并固定实际安装包。Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。无法形成有效安装描述或快照不完整时不可安装，其余风险与适配差异作为建议展示。
 
-本地快照成为 `full` 且用户 `use_this` 之后才能安装。批准后，安装器把已审查字节复制到 owned snapshot，比较完整路径/hash/size，再用 `npm pack --ignore-scripts` 生成 tgz，复核 snapshot 后交给 DSH 的是 owned `file:...tgz`。temporary artifact 随 trial 清理；persistent artifact 随 receipt 驱动的 remove 清理。同一需求的第二刀补丁必须留在这条 resolution：`base_review_id` 可以是上一刀本地 review，HEAD 可以是 lineage root 的后代提交。安装授权看该 resolution 最新一条匹配的 `use_this` 回执，不依赖当前进程里另一次 resolve。
+本地快照完成重新审查且用户 `use_this` 之后才能安装；`fit`、风险和 reviewer 意见保持建议性质。安装器把审查后的字节复制到 owned snapshot，生成固定 tgz 并把 owned `file:...tgz` 交给 DSH。生命周期脚本是否运行以及怎样审批由 DSH 与包管理器的正常规则决定，AutoEvo 不修改 profile 构建白名单。persistent artifact 随 receipt 驱动的 remove 清理。同一需求的后续修改继续留在原 resolution；最终安装始终绑定最新 review 与固定内容。
 
 对已装能力的升级复用同一条链路。安装回执（`installations/<id>.json`）经 `reviewId` 指回上游 repository 与 exact commit；Agent 在新的 resolve 里向用户指出该来源，用户选中后按 exact-commit 审查、improve-this、本地重审与固定 tgz 重装，最后按旧回执 `plugin_remove`。从零创建或静态本地插件按普通修复工作升级，不经过新建门禁。
 

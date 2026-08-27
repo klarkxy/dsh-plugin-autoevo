@@ -183,7 +183,7 @@ export function resolveDecisionTarget(
   assertOptionAllowed(interrupt, decision.action)
   const suppliedRetention = (decision as AuthorizationDecisionInput & { retention?: unknown }).retention
   if (suppliedRetention !== undefined) {
-    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V10')
+    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V11')
   }
   const option = interrupt.options.find((item) => item.id === decision.action)!
   const needsCandidate = decision.action === 'use_this' || decision.action === 'modify_this'

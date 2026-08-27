@@ -8,7 +8,7 @@
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的能力复用与安全演进插件。在 **能力进化** preset 中，所有能力需求——包括临时实验——都先走 Search-first：Host 保留用户原话，必要时只澄清一次，然后检查本地与远程真实候选。候选只差一点时，可在 Host 绑定的托管源码中修改、重审和安装；用户最终采用的能力统一持久化。
+`dsh-plugin-autoevo` 是 DeepSeek Harness（DSH）的轻量能力复用工作流与证据插件。在 **能力进化** preset 中，所有能力需求——包括临时实验——都先走 Search-first：Host 保留用户原话，必要时只澄清一次，然后检查本地与远程候选。候选只差一点时，可在 Host 绑定的托管源码中修改、重审和安装；用户最终采用的能力统一持久化并带有可检查的结果回执。
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -22,7 +22,6 @@
 | 开发者：本地环境、架构入口、测试、调试与贡献 | [开发者指南](docs/developer-guide.md) |
 | Policy、数据布局和运行时接缝 | [架构说明](docs/architecture.md) |
 | 信任边界、安装门槛和验证证据 | [安全模型](docs/security.md) |
-| 可重复用户路径及其证据等级 | [真实样例目录](docs/real-world-samples.md) |
 
 详细文档遵循单一权威原则：操作步骤以使用指南为准，开发流程以开发者指南为准，内部状态与安全不变量分别以架构和安全文档为准。
 
@@ -31,21 +30,21 @@
 安装到正在使用的 DSH profile；下面以 `web` 为例（通过 npx 运行 DSH，无需全局安装）：
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
 日常启动该 profile 用 `npx @deepseek-ai/dsh web`。注意 npm 上无 scoped 的 `dsh` 包是无关项目，命令必须带上 `@deepseek-ai/` 前缀。
 
 安装或升级后重启对应的 DSH profile，让它加载新 bundle；之后为其它能力执行安装时是否需要再次重启，见[使用指南 §5](docs/user-guide.md#5-结果状态与下一步)。
 
-安装命令使用最新发布 tag；仓库 `package.json` 中的版本号可能领先于最新发布版。Node.js 要求 `>=22.19.0 || >=24.0.0`；当前开发与验收基于 DSH `0.1.1-rc.2`、Cordis `4.0.1`。
+上面的命令在维护者发布 `v1.0.0` 后可用；创建 tag 和 Release 是独立操作。Node.js 要求 `^22.19.0 || ^24.0.0`。AutoEvo 接受 DSH `>=0.1.0-rc.6 <0.2.0`，未单独验证的 `0.1` 更新会保留警告并允许实际运行；当前可复现的开发与验收基线固定为 DSH `0.1.1-rc.2`、Cordis `4.0.1`。
 
 ## 快速体验
 
 1. 在 DSH 新建会话，选择用户 preset **能力进化**（id `evolution`）。
 2. 用自然语言说明需要的能力，例如：
 
-   > 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
+   > 我需要一个能同步项目记录的 DSH 插件。先查现成的。
 
 3. 需求有实质歧义时，先回答一次澄清；随后 AutoEvo 给出 1–5 个候选，或明确告知没有匹配候选。
 4. 有候选时，用新的正常聊天消息选择要审查的候选；无候选时，选择继续搜寻、创建新能力或停止。
@@ -53,44 +52,33 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 这两次回复是两道独立的用户确认门；完整流程与原理见[使用指南 §3](docs/user-guide.md#3-第一次完整使用)。
 
-安装演示（选择 preset → 描述需求 → 候选短名单 → 审查 → 确认 → 已安装）：
+典型闭环是：Search-first → 选择候选 → 审查事实与警告 → 用户决定 → 安装或托管施工 → 重新审查 → 用户确认最终安装 → 区分安装、加载、激活与验证结果。生产逻辑不读取示例或测试 fixture；截图只是匿名化的产品行为记录。
 
-<p align="center">
-  <img src="example/install/01-select-evolution.png" alt="选择能力进化 preset" width="320">
-  <img src="example/install/02-ask.png" alt="描述需求" width="320">
-  <img src="example/install/03-shortlist.png" alt="候选短名单" width="320">
-  <img src="example/install/04-review.png" alt="审查结果" width="320">
-  <img src="example/install/05-confirm.png" alt="确认安装" width="320">
-  <img src="example/install/06-installed.png" alt="已安装" width="320">
-</p>
+## 实际流程截图
 
-完整创建与恢复演示（提出需求 → Search-first 无匹配 → 授权创建 → 托管施工 → 审查 → 首次安装失败 → 诊断修复 → 复审 → 重装激活）：
+真实空结果后的离线公历/农历转换能力：
 
-1. **搜索与创建决策**：保留用户原始需求，完成两轮只读检索；确认没有相关候选后，由用户明确选择从零创建。
+![空结果后的创建选择](example/create/02-no-candidate-create-choice.png)
 
-<p align="center">
-  <img src="example/create/01-request-and-search.png" alt="提出公历与农历互转需求并开始 Search-first 检索" width="320">
-  <img src="example/create/02-no-candidate-create-choice.png" alt="没有匹配候选并展示继续搜索、从零创建或停止" width="320">
-  <img src="example/create/03-create-authorized.png" alt="用户选择从零创建并由 Host 绑定托管源码" width="320">
-</p>
+![当前源码复审与最终安装选择](example/create/04-review-install-choice.png)
 
-2. **托管施工与首次安装**：只在 Host 绑定的源码根内实现和自测，审查后再次由用户决定是否安装；首次运行时验证失败时不会伪装成成功。
+![安装后等待重启与用户测试](example/create/07-installed-result.png)
 
-<p align="center">
-  <img src="example/create/04-managed-build.png" alt="在托管源码中实现农历算法、插件工具与自测" width="320">
-  <img src="example/create/05-review-install-choice.png" alt="展示审查结果并等待用户确认安装" width="320">
-  <img src="example/create/06-first-install-failed.png" alt="首次安装验证失败并读取诊断证据" width="320">
-</p>
+![重启后的真实公历农历往返](example/create/08-tool-roundtrip.png)
 
-3. **受控修复与闭环激活**：用户授权修复后重新进入托管施工；Host 复审通过，再经一次用户确认完成重装和运行时检查。
+类似 Codex Auto Review 的大模型自动审查能力：先审查最接近的候选，再由用户决定创建一个只提供建议、不接管 DSH 审批的轻量工具。
 
-<p align="center">
-  <img src="example/create/07-repair-authorized.png" alt="用户选择先修复再重装并重新授权托管施工" width="320">
-  <img src="example/create/08-managed-repair.png" alt="修复补丁格式、依赖与能力描述并提交复审" width="320">
-  <img src="example/create/09-rereview-passed.png" alt="Host 复审通过并等待重新安装确认" width="320">
-  <img src="example/create/10-reinstall-runtime-check.png" alt="重装成功后检查工具与服务注册状态" width="320">
-  <img src="example/create/11-activated.png" alt="插件已安装、加载、激活并展示可用工具" width="320">
-</p>
+![Auto Review 候选审查](example/auto-review/02-candidate-review.png)
+
+![Auto Review 施工后复审与最终选择](example/auto-review/04-review-install-choice.png)
+
+![Auto Review 安装后的精确状态](example/auto-review/06-installed-result.png)
+
+![Auto Review 真实 advisory-only 工具结果](example/auto-review/07-tool-roundtrip.png)
+
+两次真实运行都继续完成了 DSH 一次性审批、安装和重启后的客户端工具调用。安装结果仍严格区分 `installed`、`loaded`、`activated` 与 `verified`；截图中的真实往返是后续客户端证据，不会倒写或夸大安装时的回执。
+
+完整逐步截图和每一步的准确状态见 [`example/README.md`](example/README.md)。
 
 ## 怎样理解结果
 
@@ -107,7 +95,8 @@ AutoEvo 还跟踪每个包的安装版本链：`capability_versions` 列出版�
 
 ## 安全边界
 
-- 发现、审查和诊断默认只读；安装、移除、修改和新建需要真实用户决定，副作用还需 DSH 一次性批准；安装的第三方代码最终以当前用户权限运行。
+- AutoEvo 负责工作流、警告和证据记录；DSH Core 负责权限、sandbox 与 approval 的实际执行。AutoEvo 不能扩大、替代或绕过这些 DSH Core 控制。
+- 发现、审查和诊断默认只读；安装、移除、修改和新建的实际副作用仍由 DSH Core 的权限与一次性 approval 决定。警告会展示并记录，但在 DSH Core 允许且用户明确接受时可以继续；安装的第三方代码最终以当前用户权限运行。
 - 完整信任边界见[安全模型](docs/security.md)；使用中的安全与隐私注意事项见[使用指南 §8](docs/user-guide.md#8-安全与隐私提示)。
 
 ## 开发

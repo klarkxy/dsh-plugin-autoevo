@@ -209,11 +209,14 @@ export function modificationWorkOrder(
     || resolution.intent?.evolveReason === 'repair'
     || /fiber was not present after loader settle/iu.test(resolution.reasons.join('\n'))
     || /loader|wrapping fiber|包装/iu.test(resolution.requirement)
+  const effectiveBlockers = repairFiber
+    ? blockers.filter((item) => item.kind !== 'missing_capability')
+    : blockers
   return createCreatorWorkOrder({
     operation: focusedCorrection ? 'correct' : 'modify',
     requirement: resolution.requirement,
     cwd,
-    blockers,
+    blockers: effectiveBlockers,
     baselineReviewId: review.id,
     acceptanceTargets: [
       focusedCorrection

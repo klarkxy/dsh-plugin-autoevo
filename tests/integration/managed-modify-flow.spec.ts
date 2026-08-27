@@ -70,11 +70,13 @@ describe('managed modify closure', () => {
     )
     const resolutionId = `resolution_${'a'.repeat(24)}`
     const workflowId = `workflow_${'b'.repeat(24)}`
-    const initial = await service.sources.initializeCreateSource({ resolutionId, workflowId, packageName: 'dsh-plugin-test' })
+    const requirement = 'orbit telemetry'
+    const initial = await service.sources.initializeCreateSource({ resolutionId, workflowId, packageName: 'dsh-plugin-orbit-telemetry' })
     const pkgPath = path.join(initial.path, 'package.json')
     const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
     pkg.peerDependencies['@deepseek-ai/dsh-tools'] = 'workspace:^'
     await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+    await writeFile(path.join(initial.path, 'README.md'), '# Orbit telemetry\n\nOrbit telemetry capability.\n')
     const incompatibleCommit = await service.sources.finalizeChildCommit({
       sourceId: initial.sourceId,
       workflowId,
@@ -89,7 +91,7 @@ describe('managed modify closure', () => {
       baseReviewId: `review_${'c'.repeat(64)}`,
       lineageRootCommit: initial.baseCommit,
       resolutionId,
-      requirement: 'dsh plugin',
+      requirement,
       runtimeVersion: '0.1.0-rc.6',
     })
     expect(baselineEvidence.record.compatibility.status).toBe('incompatible')
@@ -98,7 +100,7 @@ describe('managed modify closure', () => {
       id: resolutionId,
       policyVersion: POLICY_VERSION,
       createdAt: new Date().toISOString(),
-      requirement: 'dsh plugin',
+      requirement,
       cwd: root,
       decision: 'inspect_remote',
       localCandidates: [],

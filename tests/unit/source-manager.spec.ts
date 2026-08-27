@@ -397,6 +397,30 @@ describe('SourceManager defaults and provenance', () => {
     })
   })
 
+  it('resumes the same clean managed workflow after a Host restart', async () => {
+    const root = await tempRoot('autoevo-source-restart-', temporary)
+    const commit = 'c'.repeat(40)
+    const workflowId = `workflow_${'6'.repeat(24)}`
+    const branch = `autoevo/${workflowId}`
+    const manager = new SourceManager(config(root), scriptedGit({ head: commit, branch }))
+    const receipt = await manager.materializeReviewedGithub({ review: review(commit), workflowId })
+
+    await writeFile(manager.lockPath(receipt.sourceId), `${JSON.stringify({
+      workflowId,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      pid: 0,
+      headCommit: commit,
+      branch,
+    }, null, 2)}\n`)
+
+    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId)).resolves.toMatchObject({
+      activeWorkflowId: workflowId,
+      headCommit: commit,
+    })
+    const reclaimed = JSON.parse(await readFile(manager.lockPath(receipt.sourceId), 'utf8')) as { pid: number }
+    expect(reclaimed.pid).toBe(process.pid)
+  })
+
   it('rejects untracked dependency stores before Host git add', async () => {
     expect(sourceTesting.forbiddenUntrackedPath('?? .pnpm-store/v10/files/cache\n')).toBe('.pnpm-store/v10/files/cache')
     const root = await tempRoot('autoevo-source-cache-', temporary)

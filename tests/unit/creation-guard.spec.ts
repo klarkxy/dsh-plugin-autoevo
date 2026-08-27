@@ -252,7 +252,7 @@ describe('evolution protocol automaton', () => {
     guard.setWaiting(agent, 'await_selection', 'turn_issue')
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '看看3' }] })
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    const direct = tool('find_dsh_plugin', { query: 'dsh-xai' })
+    const direct = tool('find_dsh_plugin', { query: 'dsh-plugin-alpha' })
     const denied = await guard.preExecute(direct, next)
     expect(denied).toMatchObject({ kind: 'deny' })
     expect(String((denied as { reason: string }).reason)).toMatch(/review_candidates/i)

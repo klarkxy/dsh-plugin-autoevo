@@ -7,9 +7,6 @@ import { pathToFileURL } from 'node:url'
 import { hostDshVersion, resolveHostDsh, skipUnlessHarnessDsh } from './helpers/host-dsh.mjs'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
-const hostDsh = await resolveHostDsh()
-if (skipUnlessHarnessDsh(hostDshVersion(hostDsh.bin))) process.exit(0)
-const dshBin = hostDsh.bin
 const driver = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'packaged-preset-driver.mjs')).href
 const blankHome = await mkdtemp(path.join(os.tmpdir(), 'autoevo-packaged-blank-'))
 const dshHome = path.join(blankHome, 'dsh')
@@ -69,9 +66,11 @@ async function assertPackedDocumentationLinks(packedRoot, relativePaths) {
   for (const relativePath of relativePaths) {
     const absolutePath = path.join(packedRoot, relativePath)
     const markdown = await readFile(absolutePath, 'utf8')
-    const links = [...markdown.matchAll(/\[[^\]]*\]\((?!https?:|mailto:|#)([^)#]+)(?:#[^)]+)?\)/gu)]
-    for (const match of links) {
-      const target = match[1]?.trim()
+    const markdownTargets = [...markdown.matchAll(/\[[^\]]*\]\((?!https?:|mailto:|#)([^)#]+)(?:#[^)]+)?\)/gu)]
+      .map((match) => match[1]?.trim())
+    const htmlTargets = [...markdown.matchAll(/<(?:img|a)\b[^>]*?\b(?:src|href)=["'](?!https?:|mailto:|#)([^"'#?]+)(?:[?#][^"']*)?["'][^>]*>/giu)]
+      .map((match) => match[1]?.trim())
+    for (const target of [...markdownTargets, ...htmlTargets]) {
       if (!target) continue
       const resolved = path.resolve(path.dirname(absolutePath), target)
       const exists = await access(resolved).then(() => true).catch(() => false)
@@ -80,7 +79,48 @@ async function assertPackedDocumentationLinks(packedRoot, relativePaths) {
   }
 }
 
-async function assertPackedPolicyV8(packedRoot) {
+async function packedRelativeFiles(root, relative = '') {
+  const entries = await readdir(path.join(root, relative), { withFileTypes: true })
+  const files = []
+  for (const entry of entries) {
+    const next = relative ? `${relative}/${entry.name}` : entry.name
+    if (entry.isDirectory()) files.push(...await packedRelativeFiles(root, next))
+    else if (entry.isFile()) files.push(next)
+  }
+  return files
+}
+
+function assertPackedArtifactIsolation(relativePaths) {
+  const excluded = /^(?:tests|evals|examples|coverage|node_modules|\.dsh|\.autoevo|\.worker-leases|\.pnpm-store|\.tmp)(?:\/|$)|(?:^|\/)(?:debug|snapshots?)(?:\/|$)|\.(?:log|tmp)$/iu
+  for (const relativePath of relativePaths) {
+    assert.doesNotMatch(relativePath, excluded, `packed artifact must exclude local or test data: ${relativePath}`)
+    if (relativePath.startsWith('example/')) {
+      assert.match(
+        relativePath,
+        /^example\/(?:README\.md|(?:create|auto-review)\/(?:README\.md|[^/]+\.png))$/u,
+        `packed example contains an unexpected file: ${relativePath}`,
+      )
+    }
+  }
+}
+
+async function assertPackedUserDocsAreGeneric(packedRoot) {
+  for (const relativePath of [
+    'README.md',
+    'README.en.md',
+    'docs/user-guide.md',
+    'docs/user-guide.en.md',
+  ]) {
+    const markdown = await readFile(path.join(packedRoot, relativePath), 'utf8')
+    assert.doesNotMatch(
+      markdown,
+      /(?:tests[\\/]|fixtures[\\/]|\bheadless\b|\bworkflow_[a-f0-9]{8,}|[a-z]:[\\/]|\/(?:Users|home)\/)/iu,
+      `published user documentation must not contain test or local data: ${relativePath}`,
+    )
+  }
+}
+
+async function assertPackedCurrentPolicy(packedRoot) {
   const packedIndex = await readFile(path.join(packedRoot, 'lib', 'index.js'), 'utf8')
   const packedEvolution = [
     await readFile(path.join(packedRoot, 'lib', 'evolution-mode.js'), 'utf8'),
@@ -91,11 +131,8 @@ async function assertPackedPolicyV8(packedRoot) {
     'utf8',
   ).catch(() => '')
   const packedJs = `${packedIndex}\n${packedEvolution}\n${packedDriver}`
-  assert.match(packedEvolution, /runtime Policy V10/u)
-  assert.match(packedEvolution, /Host alone performs final installation and internal verification/u)
-  assert.match(packedEvolution, /Public decisions never accept retention/u)
-  assert.doesNotMatch(packedEvolution, /runtime Policy V7/u)
-  assert.doesNotMatch(packedJs, /independent semantic verifier/u)
+  assert.match(packedEvolution, /runtime Policy V11/u)
+  assert.doesNotMatch(packedEvolution, /runtime Policy V10/u)
 
   const {
     POLICY_VERSION,
@@ -106,10 +143,10 @@ async function assertPackedPolicyV8(packedRoot) {
   const { AUTOEVO_AUTONOMY_CONTRACT } = await import(
     pathToFileURL(path.join(projectRoot, 'lib', 'evolution-mode.js')).href
   )
-  assert.equal(POLICY_VERSION, '10')
+  assert.equal(POLICY_VERSION, '11')
   assert.deepEqual([...VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
-  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V10/u)
-  assert.doesNotMatch(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V7/u)
+  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V11/u)
+  assert.doesNotMatch(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V10/u)
 
   assert.equal(classifyRuntimeSurface(surface()), 'bundle_activation')
   assert.equal(classifyRuntimeSurface(surface({
@@ -153,11 +190,11 @@ async function assertPackedPolicyV8(packedRoot) {
 
   const userGuide = await readFile(path.join(packedRoot, 'docs', 'user-guide.md'), 'utf8')
   assert.match(userGuide, /tool_roundtrip/u)
-  assert.match(userGuide, /临时试装只是 Host 内部隔离预检/u)
+  assert.match(userGuide, /AutoEvo 不另建私有预检 profile/u)
   assert.match(userGuide, /restartRequired: true/u)
 
   const developerGuide = await readFile(path.join(packedRoot, 'docs', 'developer-guide.md'), 'utf8')
-  assert.match(developerGuide, /Policy V10/u)
+  assert.match(developerGuide, /Policy V11/u)
   assert.match(developerGuide, /pnpm check:release/u)
 
   await access(path.join(packedRoot, 'README.en.md'))
@@ -165,7 +202,6 @@ async function assertPackedPolicyV8(packedRoot) {
   await access(path.join(packedRoot, 'docs', 'developer-guide.en.md'))
   await access(path.join(packedRoot, 'docs', 'architecture.md'))
   await access(path.join(packedRoot, 'docs', 'security.md'))
-  await access(path.join(packedRoot, 'docs', 'real-world-samples.md'))
   await access(path.join(packedRoot, 'docs', 'assets', 'kanban.png'))
   await assertPackedDocumentationLinks(packedRoot, [
     'README.md',
@@ -176,7 +212,7 @@ async function assertPackedPolicyV8(packedRoot) {
     'docs/developer-guide.en.md',
     'docs/architecture.md',
     'docs/security.md',
-    'docs/real-world-samples.md',
+    'example/README.md',
   ])
 
   const skill = await readFile(path.join(packedRoot, 'skills', 'autoevo-plugin-creator', 'SKILL.md'), 'utf8')
@@ -189,11 +225,11 @@ async function assertPackedPolicyV8(packedRoot) {
   assert.match(skill, /finish_managed_work/u)
   assert.match(state, /completed `awaiting_user_test`/u)
   assert.match(state, /two legal modes that must not be mixed/u)
-  assert.match(state, /Policy V10 workflow/u)
+  assert.match(state, /Policy V11 workflow/u)
 
   const preset = await readFile(path.join(packedRoot, 'presets', 'evolution', 'agent.cordis.yml'), 'utf8')
-  assert.match(preset, /Policy V10 Search-first governance/u)
-  assert.match(preset, /disabled: true/u)
+  assert.match(preset, /Policy V11/u)
+  assert.match(preset, /tool-subagent-control/u)
   assert.doesNotMatch(preset, /independent semantic verifier/u)
 }
 
@@ -221,8 +257,28 @@ try {
     }
   }
   const packedRoot = path.join(extractDir, 'package')
-  await assertPackedPolicyV8(packedRoot)
-  const localSpec = `file:${tarball.replaceAll('\\', '/')}`
+  assertPackedArtifactIsolation(await packedRelativeFiles(packedRoot))
+  await assertPackedCurrentPolicy(packedRoot)
+  await assertPackedUserDocsAreGeneric(packedRoot)
+  let hostDsh
+  try {
+    hostDsh = await resolveHostDsh()
+  } catch (error) {
+    if (process.env.DSH_PACKAGE_ROOT) throw error
+  }
+  const hostCompatible = hostDsh
+    ? !skipUnlessHarnessDsh(hostDshVersion(hostDsh.bin))
+    : false
+  if (!hostCompatible) {
+    process.stdout.write(`${JSON.stringify({
+      status: 'static-passed',
+      installedFrom: path.basename(tarball),
+      policyVersion: '11',
+      hostRuntime: 'skipped',
+    })}\n`)
+  } else {
+    const dshBin = hostDsh.bin
+    const localSpec = `file:${tarball.replaceAll('\\', '/')}`
 
   const dshEnv = { DSH_HOME: dshHome, DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1', DSH_TOOLS_MODE: 'code' }
   await run(process.execPath, [dshBin, 'plugin', '--profile', 'headless', 'add', '--save-exact', localSpec], {
@@ -274,7 +330,7 @@ try {
   assert.ok(evidence.eventTypes.includes('tool/call'))
   assert.ok(evidence.eventTypes.includes('tool/result'))
   assert.ok(evidence.eventTypes.includes('turn/end'))
-  assert.equal(evidence.policyVersion, '10')
+  assert.equal(evidence.policyVersion, '11')
   assert.equal(evidence.recoverInterruptOptional, true)
 
   const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
@@ -291,6 +347,7 @@ try {
     recoverInterruptOptional: evidence.recoverInterruptOptional,
     taskResult: evidence.marker,
   })}\n`)
+  }
 } finally {
   await rm(blankHome, { recursive: true, force: true })
 }

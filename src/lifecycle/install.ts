@@ -137,7 +137,57 @@ function sourceMismatchEvidence(expectedTools: readonly string[]): VerificationE
   })
 }
 
-function installFailure(error: unknown): NonNullable<InstallationRecord['installFailure']> {
+type InstallFailure = NonNullable<InstallationRecord['installFailure']>
+type InstallFailureStage = NonNullable<InstallFailure['stage']>
+
+function repairHintsFor(stage: InstallFailureStage): string[] {
+  switch (stage) {
+    case 'preflight':
+      return [
+        'Inspect the DSH/pnpm diagnostic identified by diagnosticHash and repair the reviewed source or explicit profile lifecycle policy.',
+        'Resume the workflow so the repaired immutable source is reviewed again before retrying.',
+      ]
+    case 'install':
+      return [
+        'Inspect the current profile dependency and the DSH/pnpm diagnostic identified by diagnosticHash.',
+        'Repair the reviewed source or profile configuration explicitly, then resume the workflow before retrying.',
+      ]
+    case 'load':
+      return [
+        'Restart or repair the current profile before attempting another mutation.',
+        'Confirm the exact receipt source is still present before retrying activation.',
+      ]
+    case 'verify':
+      return [
+        'Inspect the verification status and expected tool or bundle evidence recorded on this receipt.',
+        'Repair and re-review the source before retrying automatic verification.',
+      ]
+    case 'persist':
+      return [
+        'Recover this installation by its installationId before starting another install.',
+        'Inspect AutoEvo state storage health, then reconcile the exact live profile source.',
+      ]
+  }
+}
+
+function lifecycleFailure(
+  stage: InstallFailureStage,
+  code: string,
+  summary: string,
+  retryable = true,
+): InstallFailure {
+  const message = summary.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
+  return {
+    stage,
+    code,
+    summary: message,
+    message,
+    retryable,
+    repairHints: repairHintsFor(stage),
+  }
+}
+
+function installFailure(error: unknown, stage: InstallFailureStage): InstallFailure {
   if (error instanceof EvolutionError) {
     const message = error.message.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
     const exitCode = typeof error.details.exitCode === 'number' || error.details.exitCode === null
@@ -148,15 +198,19 @@ function installFailure(error: unknown): NonNullable<InstallationRecord['install
       ? error.details.diagnosticHash
       : undefined
     return {
+      stage,
       code: error.code,
+      summary: message,
       message,
+      retryable: error.code === 'command_failed',
+      repairHints: repairHintsFor(stage),
       ...(exitCode !== undefined ? { exitCode } : {}),
       ...(diagnosticHash ? { diagnosticHash } : {}),
     }
   }
   const message = (error instanceof Error ? error.message : String(error))
     .normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
-  return { code: 'command_failed', message: message || 'Unknown installation failure' }
+  return lifecycleFailure(stage, 'command_failed', message || 'Unknown installation failure')
 }
 
 function failedInstallation(
@@ -457,7 +511,18 @@ export class PluginInstaller {
           `高风险（${riskFindings.join('、') || review.securityRisk}）。`,
         )
       : ''
-    const id = `installation_${hashObject({ reviewId: review.id, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
+    const id = input.installationId
+      ?? `installation_${hashObject({ reviewId: review.id, at: new Date().toISOString(), nonce: randomUUID() }).slice(0, 24)}`
+    // Validates the host-minted id before materialization, approval, or any DSH command.
+    this.store.trialRoot(id)
+    try {
+      await this.store.getInstallation(id)
+      throw new EvolutionError('invalid_input', 'The prelinked installation receipt already exists; recover it instead of reinstalling', {
+        installationId: id,
+      })
+    } catch (error) {
+      if (!(error instanceof EvolutionError) || error.code !== 'not_found') throw error
+    }
     const createdAt = new Date().toISOString()
     const trialRoot = this.store.trialRoot(id)
     const trialsRoot = path.join(this.store.root, 'trials')
@@ -571,7 +636,7 @@ export class PluginInstaller {
           { forwardCredentials: false },
         )
       } catch (error) {
-        const failure = installFailure(error)
+        const failure = installFailure(error, 'preflight')
         const preflightFailure = failedInstallation(review.manifest.expectedTools, 'failed_absent', failure)
         await this.removeOwnedDirectory(trialRoot, trialsRoot)
         const failedRecord: InstallationRecord = {
@@ -648,6 +713,15 @@ export class PluginInstaller {
         installPhase: preflightPassed ? 'preflight_passed' : 'completed',
         ...(preflightPassed ? {} : { installState: 'not_installed' as const, installOutcome: 'failed_absent' as const }),
         removed: !preflightPassed,
+        ...(preflightPassed ? {} : {
+          installFailure: lifecycleFailure(
+            'preflight',
+            preflightSourceMatched ? 'verification_failed' : 'source_mismatch',
+            preflightSourceMatched
+              ? 'Isolated preflight did not prove the frozen verification layer.'
+              : 'Isolated preflight did not activate the exact reviewed source.',
+          ),
+        }),
         preflight: {
           profile: this.preflightProfile,
           passed: preflightPassed,
@@ -681,7 +755,7 @@ export class PluginInstaller {
     try {
       await this.launcher.install(dshHome, input.targetProfile, installSpec, cwd, exec.signal)
     } catch (error) {
-      const failure = installFailure(error)
+      const failure = installFailure(error, 'install')
       const removed = input.retention === 'temporary'
       if (removed) await this.removeOwnedDirectory(trialRoot, trialsRoot)
       let installState: InstallationState = 'not_installed'
@@ -851,6 +925,33 @@ export class PluginInstaller {
         predecessorInstallationId = predecessor?.id ?? predecessorInstallationId
       }
     }
+    const outcomeFailure: InstallFailure | undefined = success
+      ? undefined
+      : runtimeRecoveryRequired
+        ? lifecycleFailure(
+            'load',
+            'load_recovery_required',
+            'Current-process Loader activation could not be rolled back cleanly.',
+            false,
+          )
+        : replacementJournal && replacementJournal.state !== 'new_present'
+          ? lifecycleFailure(
+              'install',
+              'replacement_reconciliation_failed',
+              `Replacement reconciliation ended in ${replacementJournal.state}.`,
+              replacementJournal.state !== 'unknown',
+            )
+          : !sourceMatched
+            ? lifecycleFailure(
+                'verify',
+                'source_mismatch',
+                'The target profile did not retain the exact reviewed source as an active bundle.',
+              )
+            : lifecycleFailure(
+                'verify',
+                'verification_failed',
+                'Host verification did not prove the frozen verification layer.',
+              )
     const record: InstallationRecord = {
       ...destinationJournal,
       installPhase: 'completed',
@@ -868,6 +969,7 @@ export class PluginInstaller {
       verified: verified && !runtimeRecoveryRequired,
       restartRequired: input.retention === 'persistent' && success && !hotReload?.loaded,
       ...(hotReload ? { hotReload } : {}),
+      ...(outcomeFailure ? { installFailure: outcomeFailure } : {}),
       removed: failedTemporaryTrialRemoved,
       verification: failedTemporaryTrialRemoved
         ? { ...verification, reason: `${verification.reason} Failed temporary trial was removed.` }
@@ -912,25 +1014,31 @@ export class PluginInstaller {
           rollbackFailure = error
         }
       }
-      if (input.retention === 'temporary') {
-        await this.removeOwnedDirectory(trialRoot, trialsRoot)
-        try {
-          await this.store.put('installations', {
-            ...provisional,
-            installOutcome: 'recovery_required',
-            removed: true,
-            verification: {
-              ...verification,
-              reason: `${verification.reason} Final receipt persistence failed; the owned temporary trial was removed.`,
-            },
-          })
-        } catch {
-          // The provisional receipt remains the recovery anchor.
-        }
+      const persistFailure = installFailure(cause, 'persist')
+      if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
+      try {
+        await this.store.put('installations', {
+          ...provisional,
+          installOutcome: 'recovery_required',
+          installFailure: persistFailure,
+          removed: input.retention === 'temporary',
+          verification: {
+            ...verification,
+            reason: input.retention === 'temporary'
+              ? `${verification.reason} Final receipt persistence failed; the owned temporary trial was removed.`
+              : `${verification.reason} Final receipt persistence failed; recover by installationId and reconcile the exact live source.`,
+          },
+        })
+      } catch {
+        // The earlier provisional receipt remains the recovery anchor.
       }
       throw new EvolutionError('command_failed', 'Installation completed but final receipt persistence failed; a recovery receipt was preserved', {
         installationId: id,
         recoveryRequired: true,
+        stage: persistFailure.stage,
+        retryable: persistFailure.retryable,
+        summary: persistFailure.summary,
+        repairHints: persistFailure.repairHints,
         diagnosticHash: hashObject({
           cause: cause instanceof Error ? cause.message : String(cause),
           ...(rollbackFailure ? { rollback: rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure) } : {}),

@@ -6,7 +6,13 @@ import { describe, expect, it } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { ExecutionEndpoint } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
-import { enableBuiltinMount } from '../../src/lifecycle/enable-builtin.js'
+import {
+  builtinMountPresent,
+  builtinReceiptSpec,
+  disableBuiltinMount,
+  enableBuiltinMount,
+  parseBuiltinReceiptSpec,
+} from '../../src/lifecycle/enable-builtin.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { sha256 } from '../../src/state/hashes.js'
 
@@ -196,5 +202,109 @@ describe('enableBuiltinMount', () => {
 
     expect(failure).toMatchObject({ code: 'command_failed' })
     expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+  })
+
+  it('round-trips a built-in receipt and removes only its exact owned row', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-remove-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const enabled = await enableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })
+    const encoded = builtinReceiptSpec({
+      version: enabled.version,
+      mountId: enabled.mountId,
+      wrote: enabled.wrote,
+    })
+    const spec = parseBuiltinReceiptSpec(encoded)
+    expect(spec).toEqual({ version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: true })
+
+    await disableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'composed profile without opt-in mount' }),
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      packageName: ENDPOINT.packageName,
+      spec: spec!,
+      cwd: root,
+    })
+    expect(parse(await readFile(patchPath, 'utf8'))).toEqual([])
+  })
+
+  it('preserves pre-effect ownership across a crash-style retry and removes the exact row', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-reconcile-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const owned = !await builtinMountPresent({
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      mountId: ENDPOINT.mountId,
+      packageName: ENDPOINT.packageName,
+    })
+    expect(owned).toBe(true)
+
+    const first = await enableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })
+    expect(first.wrote).toBe(true)
+
+    // Simulate restart after the profile write but before the final receipt.
+    const recovered = await enableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })
+    expect(recovered.wrote).toBe(false)
+
+    await disableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'profile without the owned row' }),
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      packageName: ENDPOINT.packageName,
+      spec: { version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: owned },
+      cwd: root,
+    })
+    expect(parse(await readFile(patchPath, 'utf8'))).toEqual([])
+  })
+
+  it('rejects an unrelated row that already uses the selected mount identity', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-id-collision-'))
+    temporary.push(root)
+    const original = '- id: time-context\n  disabled: true\n'
+    const { bundledRoot, dshHome, patchPath } = await seed(root, original)
+    await expect(enableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+    expect(await readFile(patchPath, 'utf8')).toBe(original)
+  })
+
+  it('refuses to remove a built-in row after its exact owned shape drifted', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-remove-drift-'))
+    temporary.push(root)
+    const drifted = "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n      config: {}\n"
+    const { dshHome, patchPath } = await seed(root, drifted)
+
+    await expect(disableBuiltinMount({
+      launcher: launcherWith({ exitCode: 0, stdout: '' }),
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      packageName: ENDPOINT.packageName,
+      spec: { version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: true },
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+    expect(await readFile(patchPath, 'utf8')).toBe(drifted)
   })
 })

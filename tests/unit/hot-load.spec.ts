@@ -62,16 +62,16 @@ describe('current-profile Loader hot reload', () => {
     temporary.push(dshHome)
     const profile = 'web'
     const profileRoot = path.join(dshHome, 'profiles', profile)
-    const packageRoot = path.join(profileRoot, 'node_modules', 'dsh-plugin-zhihu-search')
+    const packageRoot = path.join(profileRoot, 'node_modules', 'dsh-plugin-beta')
     await mkdir(packageRoot, { recursive: true })
     await writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
-      name: 'dsh-plugin-zhihu-search',
+      name: 'dsh-plugin-beta',
       dsh: { bundle: { patch: './dsh-plugin/cordis.patch.yml' } },
     }), 'utf8')
     await mkdir(path.join(packageRoot, 'dsh-plugin'), { recursive: true })
     await writeFile(path.join(packageRoot, 'dsh-plugin', 'cordis.patch.yml'), [
       '- insert:',
-      '    - id: zhihu-search-mcp',
+      '    - id: record-sync-tool',
       '      name: \'@deepseek-ai/dsh-mcp-client\'',
       '      config: {}',
     ].join('\n'), 'utf8')
@@ -82,7 +82,7 @@ describe('current-profile Loader hot reload', () => {
       update: vi.fn(async (entries: typeof original) => { group.data = structuredClone(entries) }),
       tree: {
         resolve: (id: string) => {
-          if (id !== 'zhihu-search-mcp') throw new Error(`unexpected id ${id}`)
+          if (id !== 'record-sync-tool') throw new Error(`unexpected id ${id}`)
           return { fiber: { await: async () => undefined } }
         },
       },
@@ -97,13 +97,13 @@ describe('current-profile Loader hot reload', () => {
       ctx,
       dshHome,
       profile,
-      packageName: 'dsh-plugin-zhihu-search',
+      packageName: 'dsh-plugin-beta',
       expectedTools: [],
     })
 
     expect(result.evidence).toMatchObject({ attempted: true, loaded: true, method: 'loader' })
     expect(group.data).toContainEqual(expect.objectContaining({
-      id: 'zhihu-search-mcp',
+      id: 'record-sync-tool',
       name: '@deepseek-ai/dsh-mcp-client',
     }))
   })

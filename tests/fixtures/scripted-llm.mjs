@@ -26,12 +26,6 @@ function resultPairs(messages) {
   return pairs
 }
 
-const E2E_TASKS = {
-  'resolve-local': 'Run a PowerShell command using an existing local capability and report the decision.',
-  'adversarial-define': 'Run a PowerShell command using an existing local capability and report the decision.',
-  'marketplace-flow': 'Bootstrap the DSH plugin marketplace and resolve an existing Grok Build capability.',
-}
-
 function viewCard(value) {
   return value?.schema_version === 2 ? value : undefined
 }
@@ -71,7 +65,7 @@ class ScriptedAdapter extends LlmAdapter {
   nextAction(pairs) {
     if (this.config.scenario === 'resolve-local') {
       if (pairs.length === 0) {
-        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
+        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
       }
       const card = viewCard(pairs.at(-1)?.result)
       if (card?.state === 'discovering' && firstCandidate(card)) {
@@ -114,7 +108,7 @@ class ScriptedAdapter extends LlmAdapter {
         || definitionText.includes('UNKNOWN_TOOL')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${definitionText}` }
       }
-      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: 'run a PowerShell command', intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
     }
 
     const card = viewCard(pairs.at(-1)?.result)
@@ -135,7 +129,7 @@ class ScriptedAdapter extends LlmAdapter {
       return {
         kind: 'tool',
         name: 'capability_workflow',
-        arguments: { requirement: '在 DSH 会话中调用 xAI Grok Build 的能力', intent: { operation: 'discover_or_reuse', required_surface: 'any' } },
+        arguments: { requirement: this.config.canaryRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } },
       }
     }
     const last = pairs.at(-1)
@@ -145,7 +139,8 @@ class ScriptedAdapter extends LlmAdapter {
     const card = viewCard(last?.result)
     if (card?.state === 'discovering') {
       const candidates = card.facts?.candidates ?? []
-      const preferred = candidates.find((candidate) => /dsh-(?:grok|xai|oauth)/iu.test(candidate.repository ?? ''))
+      const preferred = candidates.find((candidate) =>
+        (candidate.repository ?? '').toLowerCase() === this.config.canaryRepository.toLowerCase())
       if (!preferred) return { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR no relevant candidate ${JSON.stringify(card)}` }
       return {
         kind: 'tool',
@@ -155,8 +150,7 @@ class ScriptedAdapter extends LlmAdapter {
     }
     const repositories = card?.facts?.sealed_candidates?.map((candidate) => candidate.repository) ?? []
     const passed = card?.state === 'waiting_candidate_selection'
-      && repositories.some((repository) => /dsh-(?:grok|xai|oauth)/iu.test(repository))
-      && !repositories.includes('edison7009/EchoBird')
+      && repositories.some((repository) => repository.toLowerCase() === this.config.canaryRepository.toLowerCase())
     return passed
       ? { kind: 'text', text: `E2E_MARKETPLACE_FLOW_OK ${JSON.stringify({ repositories, state: card.state })}` }
       : { kind: 'text', text: `E2E_MARKETPLACE_FLOW_ERROR ${JSON.stringify(card)}` }

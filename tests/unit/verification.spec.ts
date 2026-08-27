@@ -112,12 +112,12 @@ describe('trusted verification receipt', () => {
   it('records the provider and model used by the completed verification turn', async () => {
     const receipt = await writeReceipt([JSON.stringify({
       kind: 'task/result', resultSha256: 'd'.repeat(64), matchedExpectation: true,
-      provider: 'xai-oauth', model: 'grok-4.5',
+      provider: 'provider-alpha', model: 'model-alpha-v1',
     })], 'capability-evolution-route-')
 
     await expect(_testing.readReceipt(receipt)).resolves.toMatchObject({
-      observedProvider: 'xai-oauth',
-      observedModel: 'grok-4.5',
+      observedProvider: 'provider-alpha',
+      observedModel: 'model-alpha-v1',
     })
   })
 
@@ -199,10 +199,10 @@ describe('trusted verification receipt', () => {
 
   it('passes only the expected final-answer text into the trusted child observer', () => {
     const overlay = _testing.verificationOverlay(path.resolve('receipt.jsonl'), ['calculator'], '42', {
-      provider: 'xai-oauth', model: 'grok-4.5',
+      provider: 'provider-alpha', model: 'model-alpha-v1',
     })
     expect(JSON.stringify(overlay)).toContain('"expectedText":"42"')
-    expect(JSON.stringify(overlay)).toContain('"expectedProvider":"xai-oauth"')
+    expect(JSON.stringify(overlay)).toContain('"expectedProvider":"provider-alpha"')
   })
 
   it('fails a completed child turn when its observed provider route differs', async () => {
@@ -214,20 +214,20 @@ describe('trusted verification receipt', () => {
         const overlay = JSON.parse(await readFile(request.argv[patchIndex + 1]!, 'utf8')) as Array<{ insert: Array<{ config: { receiptPath: string } }> }>
         await writeFile(overlay[0]!.insert[0]!.config.receiptPath, JSON.stringify({
           kind: 'task/result', resultSha256: 'e'.repeat(64), matchedExpectation: true,
-          provider: 'xai-oauth', model: 'grok-2',
+          provider: 'provider-alpha', model: 'model-alpha-v0',
         }), 'utf8')
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       },
     }
 
     const result = await new DshLauncher(runner, config).verify(
-      directory, 'headless', process.cwd(), 'answer with Grok', [], undefined,
-      { provider: 'xai-oauth', model: 'grok-4.5' },
+      directory, 'headless', process.cwd(), 'answer with synthetic model', [], undefined,
+      { provider: 'provider-alpha', model: 'model-alpha-v1' },
     )
     expect(result).toMatchObject({
       routeMatchedExpectation: false,
-      observedProvider: 'xai-oauth',
-      observedModel: 'grok-2',
+      observedProvider: 'provider-alpha',
+      observedModel: 'model-alpha-v0',
     })
     expect(result.reason).toMatch(/provider\/model route did not match/i)
   })

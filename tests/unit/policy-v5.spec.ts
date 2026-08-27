@@ -98,10 +98,10 @@ function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn
   }
 }
 
-describe('Policy V10 legacy invalidation', () => {
-  it('exports Policy V10 contracts and semantic hosts for consumers', () => {
-    expect(POLICY_VERSION).toBe('10')
-    expect(exportedPolicyVersion).toBe('10')
+describe('Policy V11 legacy invalidation', () => {
+  it('exports Policy V11 contracts and semantic hosts for consumers', () => {
+    expect(POLICY_VERSION).toBe('11')
+    expect(exportedPolicyVersion).toBe('11')
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')
@@ -174,7 +174,7 @@ describe('Policy V10 legacy invalidation', () => {
       declaredFixtures: { calculator: { arguments: { expression: '1+1' } } },
     }).fixtures[0]).toEqual({ tool: 'calculator', arguments: { expression: '1+1' } })
     const routed = review()
-    routed.manifest = { ...routed.manifest, expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' } }
+    routed.manifest = { ...routed.manifest, expectedRoute: { provider: 'provider-alpha', model: 'model-alpha-v1' } }
     expect(selectInstallVerificationLayer({
       review: routed,
       declaredFixtures: { calculator: { arguments: { expression: '1+1' } } },
@@ -342,7 +342,7 @@ describe('Policy V10 legacy invalidation', () => {
     },
   )
 
-  it('starts a fresh V10 workflow instead of replaying an unfinished old-policy one', async () => {
+  it('starts a fresh V11 workflow instead of replaying an unfinished old-policy one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-start-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -359,7 +359,7 @@ describe('Policy V10 legacy invalidation', () => {
     const fresh = await engine.start('calculator', turn)
     expect(fresh.workflow.id).not.toBe(legacy.id)
     expect(fresh.workflow.policyVersion).toBe(POLICY_VERSION)
-    expect(fresh.lifecycleState).toBe('awaiting_confirmation')
+    expect(fresh.lifecycleState).toBe('selected')
     const parked = await store.getWorkflow(legacy.id)
     expect(parked.status).toBe('completed')
     expect(parked.lastFailure?.code).toBe('policy_restart_required')

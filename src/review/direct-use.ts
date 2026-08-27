@@ -1,9 +1,8 @@
 import { POLICY_VERSION, type ActionCommitment, type ReviewRecord, type ReviewerVerdict, type SelectionReceipt } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { isSafePackageName } from '../package-name.js'
-import { requirementHashFor, REVIEWER_VERSION } from '../semantic-reviewer.js'
 import { hashObject } from '../state/hashes.js'
-import { HARD_SKIP_FINDING_CODES, needsSemanticReviewer } from './review.js'
+import { HARD_SKIP_FINDING_CODES } from './review.js'
 
 const DIGEST_RE = /^[a-f0-9]{64}$/u
 
@@ -62,16 +61,13 @@ function expectedGithubInstallSpec(review: ReviewRecord): string | null {
 
 /** Host hard boundaries only. Mechanical recommendation/fit/risk/regex are not boundaries. */
 export function hostDirectUseBoundary(review: ReviewRecord): DirectUseHostBoundary | undefined {
-  if (review.compatibility?.status === 'incompatible'
-    || review.mechanicalFacts?.directUseHostBoundary === 'incompatible') {
-    return 'incompatible'
-  }
   if (review.mechanicalFacts?.directUseHostBoundary === 'not_materializable') return 'not_materializable'
   if (review.mechanicalFacts?.manifest.materializable === false) return 'not_materializable'
-  if (review.mechanicalFacts?.truncated) return 'not_materializable'
+  if (review.sourceSnapshot.kind === 'local' && review.mechanicalFacts?.truncated) return 'not_materializable'
 
   const findings = review.findings ?? []
-  if (findings.some((item) => item.code === 'review_truncated' || HARD_SKIP_FINDING_CODES.has(item.code))) {
+  if (findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))
+    || (review.sourceSnapshot.kind === 'local' && findings.some((item) => item.code === 'review_truncated'))) {
     return 'not_materializable'
   }
   if (review.manifest?.kind !== 'bundle') return 'not_materializable'
@@ -88,46 +84,13 @@ export function hostDirectUseBoundary(review: ReviewRecord): DirectUseHostBounda
   return undefined
 }
 
-function requestMatchesReview(
-  review: ReviewRecord,
-  request: NonNullable<ReviewRecord['reviewerRequest']>,
-  verdict: ReviewerVerdict,
-  workflow?: ReviewCandidateContext,
-): boolean {
-  if (request.reviewId !== review.id || verdict.reviewId !== review.id) return false
-  if (verdict.requestId !== request.id) return false
-  if (review.reviewerRequestId && review.reviewerRequestId !== request.id) return false
-  if (workflow?.id && request.workflowId !== workflow.id) return false
-  if (verdict.requirementHash !== requirementHashFor(review.requirement)) return false
-  const snapshotDigest = reviewSnapshotDigest(review)
-  if (request.snapshotDigest !== snapshotDigest || verdict.snapshotDigest !== snapshotDigest) return false
-  if (request.candidateDigest !== verdict.candidateDigest) return false
-  if (workflow) {
-    const current = reviewCandidateDigest(review, workflow)
-    if (verdict.candidateDigest !== current || request.candidateDigest !== current) return false
-  }
-  if (verdict.reviewerVersion !== REVIEWER_VERSION) return false
-  if (!verdict.reviewerSessionId.trim()) return false
-  return true
-}
-
-/** True when no reviewer is required, or the current bound verdict is approved. */
-export function reviewerVerdictAllowsDirectUse(
-  review: ReviewRecord,
-  workflow?: ReviewCandidateContext,
-): boolean {
-  if (!needsSemanticReviewer(review)) return true
-  const request = review.reviewerRequest
-  const verdict = review.reviewerVerdict
-  if (!request || !verdict) return false
-  if (request.status !== 'completed' || verdict.decision !== 'approved') return false
-  return requestMatchesReview(review, request, verdict, workflow)
-}
-
-export function isDirectlyUsableReview(review: ReviewRecord, workflow?: ReviewCandidateContext): boolean {
+/**
+ * Direct use is an installability check. Fit, recommendations, and semantic
+ * review results remain advisory information for the user's explicit decision.
+ */
+export function isDirectlyUsableReview(review: ReviewRecord, _workflow?: ReviewCandidateContext): boolean {
   if (review.policyVersion !== POLICY_VERSION) return false
-  if (review.fit === 'none') return false
-  return hostDirectUseBoundary(review) === undefined && reviewerVerdictAllowsDirectUse(review, workflow)
+  return hostDirectUseBoundary(review) === undefined
 }
 
 export function reviewerBindingDigest(verdict: ReviewerVerdict): string {
@@ -154,17 +117,12 @@ export interface InstallCommitmentBinding {
   retention?: ActionCommitment['retention']
 }
 
-export function assertDirectUseAllowed(review: ReviewRecord, workflow?: ReviewCandidateContext): void {
+export function assertDirectUseAllowed(review: ReviewRecord, _workflow?: ReviewCandidateContext): void {
   if (review.policyVersion !== POLICY_VERSION) {
     throw new EvolutionError('review_rejected', 'This review predates the current policy and cannot authorize installation', {
       reviewId: review.id,
       policyVersion: review.policyVersion,
       expected: POLICY_VERSION,
-    })
-  }
-  if (review.fit === 'none') {
-    throw new EvolutionError('review_rejected', 'This review does not authorize installation', {
-      fit: review.fit,
     })
   }
   const boundary = hostDirectUseBoundary(review)
@@ -173,13 +131,6 @@ export function assertDirectUseAllowed(review: ReviewRecord, workflow?: ReviewCa
       hostBoundary: boundary,
       compatibility: review.compatibility?.status,
       manifestKind: review.manifest?.kind,
-    })
-  }
-  if (!reviewerVerdictAllowsDirectUse(review, workflow)) {
-    throw new EvolutionError('review_rejected', 'Semantic reviewer verdict does not authorize direct use', {
-      reviewId: review.id,
-      decision: review.reviewerVerdict?.decision,
-      required: needsSemanticReviewer(review),
     })
   }
 }

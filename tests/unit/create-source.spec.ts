@@ -83,6 +83,9 @@ describe('managed Git creation sources', () => {
     const pkg = await readFile(path.join(receipt.path, 'package.json'), 'utf8')
     expect(pkg).toContain('"name": "dsh-plugin-demo"')
     expect(pkg).toContain('"patch": "./cordis.patch.yml"')
+    await expect(readFile(path.join(receipt.path, 'cordis.patch.yml'), 'utf8')).resolves.toBe(
+      '- insert:\n    - id: dsh-plugin-demo\n      name: dsh-plugin-demo\n',
+    )
   })
 
   it('requires a child worktree change, creates a second unsigned Host commit, and records artifact sha256', async () => {

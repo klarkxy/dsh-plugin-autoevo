@@ -9,6 +9,11 @@ import { hostDshVersion, resolveHostDsh, skipUnlessHarnessDsh } from './helpers/
 const scenario = process.argv[2] ?? 'resolve-local'
 const supported = new Set(['resolve-local', 'adversarial-define', 'marketplace-flow'])
 if (!supported.has(scenario)) throw new Error(`unknown E2E scenario: ${scenario}`)
+const canaryRequirement = process.env.AUTOEVO_CANARY_REQUIREMENT?.trim()
+const canaryRepository = process.env.AUTOEVO_CANARY_REPOSITORY?.trim()
+if (scenario === 'marketplace-flow' && (!canaryRequirement || !/^[\w.-]+\/[\w.-]+$/u.test(canaryRepository ?? ''))) {
+  throw new Error('marketplace-flow requires AUTOEVO_CANARY_REQUIREMENT and an owner/repository AUTOEVO_CANARY_REPOSITORY')
+}
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const hostDsh = await resolveHostDsh()
@@ -17,6 +22,8 @@ const dshBin = hostDsh.bin
 const scriptedPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'scripted-llm.mjs')).href
 const approvalPlugin = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'approval-allow-once.mjs')).href
 const cordisDefineProbe = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'cordis-define-probe.mjs')).href
+const localCapabilityProbe = pathToFileURL(path.join(projectRoot, 'tests', 'fixtures', 'local-capability-probe.mjs')).href
+const localRequirement = 'normalize nebula ledger markers'
 const root = await mkdtemp(path.join(os.tmpdir(), `capability-evolution-${scenario}-`))
 const dshHome = path.join(root, 'dsh-home')
 const stateDir = path.join(dshHome, 'autoevo')
@@ -158,7 +165,7 @@ async function runScenario() {
   await mkdir(dshHome, { recursive: true })
   await installPlugin()
   const mainPatches = [
-    ...modelPatches({ scenario }),
+    ...modelPatches({ scenario, canaryRequirement, canaryRepository, localRequirement }),
     { id: 'autoevo', config: {
       dshHome,
       stateDir,
@@ -170,12 +177,15 @@ async function runScenario() {
     ...(scenario === 'adversarial-define'
       ? [{ insert: [{ id: 'capability-evolution-e2e-cordis-define-probe', name: cordisDefineProbe }] }]
       : []),
+    ...(scenario === 'resolve-local' || scenario === 'adversarial-define'
+      ? [{ insert: [{ id: 'capability-evolution-e2e-local-capability-probe', name: localCapabilityProbe }] }]
+      : []),
     { insert: [{ id: 'capability-evolution-e2e-approval', name: approvalPlugin }] },
   ]
   const mainPatch = await writePatch('main.cordis.yml', mainPatches)
   const task = scenario === 'resolve-local' || scenario === 'adversarial-define'
-    ? 'Run a PowerShell command using an existing local capability and report the decision.'
-    : 'Search GitHub for an existing Grok Build capability.'
+    ? `Use the existing local capability to ${localRequirement} and report the decision.`
+    : `Search GitHub for this capability: ${canaryRequirement}`
   const result = await runDsh(['--profile', 'headless', '--patch', mainPatch, task], 600_000)
   const expectedMarker = scenario === 'resolve-local'
     ? 'E2E_RESOLVE_LOCAL_OK'
@@ -190,24 +200,24 @@ async function runScenario() {
     assert.match(result.stdout, /E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL/u)
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"10"/u)
-    assert.doesNotMatch(result.stdout, /"policy_version":"9"/u)
+    assert.match(result.stdout, /"policy_version":"11"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     return {
       scenario,
       marker: expectedMarker,
       guard: 'allowed live cordis_define(kind:new) outside Capability Evolution mode',
       workflow: 'autonomous discovery sealed at Gate 1',
-      policyVersion: '10',
+      policyVersion: '11',
     }
   }
 
   if (scenario === 'resolve-local') {
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"10"/u)
-    assert.doesNotMatch(result.stdout, /"policy_version":"9"/u)
+    assert.match(result.stdout, /"policy_version":"11"/u)
+    assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
-    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '10' }
+    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '11' }
   }
 
   if (scenario === 'marketplace-flow') {
@@ -217,7 +227,7 @@ async function runScenario() {
     const records = await Promise.all(resolutions.map(async (file) => JSON.parse(await readFile(file, 'utf8'))))
     assert.ok(records.some((record) => record.remoteCandidateSource === 'github'
       && Array.isArray(record.remoteCandidates)
-      && record.remoteCandidates.some((item) => /dsh-(?:grok|xai|oauth)/iu.test(item.repository ?? ''))))
+      && record.remoteCandidates.some((item) => (item.repository ?? '').toLowerCase() === canaryRepository.toLowerCase())))
     return {
       scenario,
       marker: expectedMarker,

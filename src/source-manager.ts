@@ -259,7 +259,7 @@ export class SourceManager {
   async validateCompletedSnapshot(input: {
     path: string
     reviewId: string
-    repository: string
+    repository: string | null
     baseCommit: string
     workspaceCwd?: string
     signal?: AbortSignal
@@ -269,7 +269,9 @@ export class SourceManager {
       || receipt.reviewId !== input.reviewId
       || !receipt.artifactHash
       || receipt.activeWorkflowId !== null
-      || receipt.repository?.toLowerCase() !== input.repository.toLowerCase()
+      || (input.repository === null
+        ? receipt.repository !== null
+        : receipt.repository?.toLowerCase() !== input.repository.toLowerCase())
       || receipt.baseCommit.toLowerCase() !== input.baseCommit.toLowerCase()) return undefined
     const inCurrentWorkspace = await this.pathUnderSourceRoot(receipt.path, input.workspaceCwd)
     const inLegacyRoot = await canonicalPath(receipt.path)
@@ -492,7 +494,7 @@ export class SourceManager {
           '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0',
         },
       }, null, 2)}\n`,
-      'cordis.patch.yml': `- id: ${safeName.replace(/^@[^/]+\//u, '').replace(/[^\w-]+/gu, '-')}\n  name: ${safeName}\n`,
+      'cordis.patch.yml': `- insert:\n    - id: ${safeName.replace(/^@[^/]+\//u, '').replace(/[^\w-]+/gu, '-')}\n      name: ${safeName}\n`,
       'lib/index.js': 'export const name = \'autoevo-scaffold\'\nexport function apply() {}\n',
       'README.md': `# ${safeName}\n\nManaged AutoEvo scaffold. Implement only inside this repository.\n`,
     }
@@ -815,6 +817,11 @@ export class SourceManager {
     if (!receipt || receipt.activeWorkflowId !== workflowId) {
       throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
     }
+    // A normal Host restart changes the process id while the workflow and its
+    // clean managed source remain the same. Reuse the existing lightweight
+    // stale-lock revalidation so the same workflow can continue without
+    // inventing a second recovery state or asking the user to start over.
+    await this.acquireLock(sourceId, workflowId, signal)
     const lock = JSON.parse(await readFile(this.lockPath(sourceId), 'utf8')) as SourceLock
     if (lock.workflowId !== workflowId || lock.pid !== process.pid) {
       throw new EvolutionError('invalid_input', 'Managed source lock is not owned by this workflow instance')

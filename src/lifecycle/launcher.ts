@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { parse, stringify } from 'yaml'
+import { parse } from 'yaml'
 import type { RuntimeConfig } from '../config.js'
 import type {
   ActivatedFiber,
@@ -25,57 +25,6 @@ import { sha256 } from '../state/hashes.js'
 import { resolveStateRoot } from '../workspace-layout.js'
 import { activationTargetsFromPatch } from './bundle-activation.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
-
-const PNPM_GIT_PREPARE_ERROR = 'ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED'
-const PNPM_GIT_PACKAGE_PATTERN = /The git-hosted package "((?:@[^@"/]+\/)?[^@"]+?)@[^"]*" needs to execute build scripts/gu
-
-/** Package names pnpm refused to build from git because they are not allowlisted yet. */
-export function pnpmBlockedGitPackages(stderr: string): string[] {
-  if (!stderr.includes(PNPM_GIT_PREPARE_ERROR)) return []
-  const names = new Set<string>()
-  for (const match of stderr.matchAll(PNPM_GIT_PACKAGE_PATTERN)) {
-    if (match[1]) names.add(match[1])
-  }
-  return [...names]
-}
-
-/**
- * Merge package names into the profile pnpm-workspace.yaml onlyBuiltDependencies
- * allowlist — the remediation dsh itself prints for blocked git prepare scripts.
- * Returns false when the file is absent/unusable or nothing changed (no retry value).
- */
-async function allowPnpmGitPackageBuilds(
-  dshHome: string,
-  profile: string,
-  packageNames: readonly string[],
-): Promise<boolean> {
-  const workspacePath = path.join(dshHome, 'profiles', profile, 'pnpm-workspace.yaml')
-  let body: string
-  try {
-    body = await readFile(workspacePath, 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    throw error
-  }
-  let document: unknown
-  try {
-    document = parse(body)
-  } catch {
-    return false
-  }
-  if (!document || typeof document !== 'object' || Array.isArray(document)) return false
-  const record = document as Record<string, unknown>
-  const existing = record.onlyBuiltDependencies
-  const allowed = new Set(
-    Array.isArray(existing) ? existing.filter((name): name is string => typeof name === 'string') : [],
-  )
-  const sizeBefore = allowed.size
-  for (const name of packageNames) allowed.add(name)
-  if (allowed.size === sizeBefore) return false
-  record.onlyBuiltDependencies = [...allowed].sort()
-  await writeFile(workspacePath, stringify(record), 'utf8')
-  return true
-}
 
 /** Mirror the EvolutionError shape DshCommandRunner throws for a non-zero exit. */
 function commandFailure(command: string, result: CommandResult): EvolutionError {
@@ -337,19 +286,9 @@ export class DshLauncher {
       timeoutMs: Math.max(this.config.commandTimeoutMs, 120_000),
       allowFailure: true as const,
     }
-    // pnpm refuses to run the prepare script of git-hosted dependencies until
-    // they sit in the profile's onlyBuiltDependencies allowlist, which fails
-    // every git-sourced install. Allow the exact names pnpm reports and retry;
-    // transitive git dependencies can surface one level per attempt.
-    for (let attempt = 0; ; attempt += 1) {
-      const result = await this.runner.run(signal ? { ...request, signal } : request)
-      if (result.exitCode === 0) return result
-      const blocked = attempt < 2 ? pnpmBlockedGitPackages(result.stderr) : []
-      if (blocked.length > 0 && await allowPnpmGitPackageBuilds(dshHome, profile, blocked)) {
-        continue
-      }
-      throw commandFailure(this.config.dshCommand, result)
-    }
+    const result = await this.runner.run(signal ? { ...request, signal } : request)
+    if (result.exitCode !== 0) throw commandFailure(this.config.dshCommand, result)
+    return result
   }
 
   async remove(

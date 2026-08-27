@@ -1,8 +1,10 @@
 {
   "name": "dsh-plugin-autoevo",
-  "version": "0.5.3",
-  "description": "DSH capability reuse and safe evolution layer. Evolution continues.",
-  "license": "SATA",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lightweight capability discovery, review, and installation workflow for DSH.",
+  "license": "SEE LICENSE IN LICENSE",
+  "packageManager": "pnpm@10.29.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/klarkxy/dsh-plugin-autoevo.git"
@@ -45,19 +47,22 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
-    "example/install",
+    "CHANGELOG.md",
+    "SECURITY.md",
     "docs/user-guide.md",
     "docs/user-guide.en.md",
     "docs/developer-guide.md",
     "docs/developer-guide.en.md",
     "docs/architecture.md",
     "docs/security.md",
-    "docs/real-world-samples.md",
     "docs/assets/kanban.png",
+    "example/README.md",
+    "example/create",
+    "example/auto-review",
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || ^24.0.0"
   },
   "dsh": {
     "bundle": {
@@ -83,10 +88,10 @@
     "pack:dry-run": "pnpm pack --dry-run"
   },
   "dependencies": {
-    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "semver": "^7.7.2",
-    "yaml": "^2.9.0"
+    "@deepseek-ai/cordis-plugin-include": "1.0.6",
+    "@deepseek-ai/schemastery": "3.18.1",
+    "semver": "7.8.5",
+    "yaml": "2.9.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

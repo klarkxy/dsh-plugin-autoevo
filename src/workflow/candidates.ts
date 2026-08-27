@@ -17,8 +17,16 @@ export const MIXED_SNAPSHOT_MAX = 8
 export const DISCOVERY_POOL_MAX = 20
 export const SEALED_SHORTLIST_MAX = 5
 
-export function candidateId(kind: CandidateSnapshotItem['kind'], identity: string): string {
-  return `candidate_${hashObject({ kind, identity: identity.toLowerCase() }).slice(0, 24)}`
+export function candidateId(
+  kind: CandidateSnapshotItem['kind'],
+  identity: string,
+  evidenceDigest?: string,
+): string {
+  return `candidate_${hashObject({
+    kind,
+    identity: identity.toLowerCase(),
+    ...(evidenceDigest ? { evidenceDigest } : {}),
+  }).slice(0, 24)}`
 }
 
 export function excludedCandidateIds(workflow?: Pick<WorkflowRecord, 'seenCandidateIds' | 'rejectedCandidateIds'>): Set<string> {
@@ -66,21 +74,33 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
   }
 }
 
+function remoteEvidenceDigest(item: ResolutionRecord['remoteCandidates'][number]): string {
+  return hashObject({
+    repository: item.repository,
+    name: item.name,
+    description: item.description,
+    stars: item.stars,
+    updatedAt: item.updatedAt,
+    defaultBranch: item.defaultBranch,
+    topics: item.topics,
+    matchedTerms: item.matchedTerms,
+    matchReason: item.matchReason,
+  })
+}
+
+export function remoteCandidateId(item: ResolutionRecord['remoteCandidates'][number]): string {
+  return candidateId('remote', item.repository, remoteEvidenceDigest(item))
+}
+
 function remoteSnapshotItem(item: ResolutionRecord['remoteCandidates'][number]): Omit<CandidateSnapshotItem, 'index'> {
+  const digest = remoteEvidenceDigest(item)
   return {
-    id: candidateId('remote', item.repository),
+    id: candidateId('remote', item.repository, digest),
     kind: 'remote',
     name: item.name,
     identity: item.repository,
     repository: item.repository,
-    digest: hashObject({
-      repository: item.repository,
-      name: item.name,
-      description: item.description,
-      stars: item.stars,
-      updatedAt: item.updatedAt,
-      defaultBranch: item.defaultBranch,
-    }),
+    digest,
   }
 }
 

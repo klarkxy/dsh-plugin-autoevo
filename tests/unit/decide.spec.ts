@@ -11,7 +11,7 @@ import {
 import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
 
 const candidateId = `candidate_${'c'.repeat(24)}`
-const repository = 'MirDie/dsh-xai'
+const repository = 'anonymous-lab/dsh-plugin-alpha'
 
 const agent = {
   id: 'session-decide',
@@ -56,7 +56,7 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'modify_this',
       candidateId,
@@ -68,7 +68,7 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toThrow(/already consumed|replay/i)
   })
 
@@ -77,27 +77,27 @@ describe('resume validation', () => {
     const current = interrupt(['modify_this', 'stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '你来理解这个决定' }] })
     expect(() => resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'create_new' }, requirement: 'grok',
+      guard, agent, interrupt: current, decision: { action: 'create_new' }, requirement: 'synthetic-model',
     })).toThrow(/not available/i)
     expect(() => resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'modify_this' }, requirement: 'grok',
+      guard, agent, interrupt: current, decision: { action: 'modify_this' }, requirement: 'synthetic-model',
     })).toThrow(/requires candidate_id/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId: `candidate_${'f'.repeat(24)}` },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toThrow(/not allowed/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toThrow(/do not accept retention/i)
     expect(resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'grok',
+      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'synthetic-model',
     })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
   })
 
@@ -106,7 +106,7 @@ describe('resume validation', () => {
     const current = interrupt(['stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: 'x'.repeat(2_001) }] })
     expect(() => resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'grok',
+      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'synthetic-model',
     })).toThrow(/1 to 2000 characters/i)
     expect(() => guard.previewDecisionTurn(agent, current)).not.toThrow()
     expect(guard.consumeDecisionTurn(agent, current).message).toHaveLength(2_001)
@@ -121,10 +121,10 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
+      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'synthetic-model' },
     })
   })
 
@@ -137,7 +137,7 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
-      requirement: 'grok',
+      requirement: 'synthetic-model',
     })).toThrow(/do not accept retention/i)
   })
 
@@ -150,7 +150,7 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
       verificationLayer: 'manual_runtime',
     })).toMatchObject({ install: { retention: 'persistent' } })
     const nextGuard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
@@ -160,7 +160,7 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
-      requirement: 'grok',
+      requirement: 'synthetic-model',
       verificationLayer: 'manual_runtime',
     })).toThrow(/do not accept retention/i)
   })
@@ -174,11 +174,11 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'grok',
+      requirement: 'synthetic-model',
       verificationLayer: 'tool_roundtrip',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'grok' },
+      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'synthetic-model' },
     })
   })
 })
@@ -190,7 +190,7 @@ describe('install authorization receipts', () => {
     policyVersion: POLICY_VERSION,
     createdAt: '2026-08-17T00:00:00.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
-    requirement: 'grok',
+    requirement: 'synthetic-model',
     sourceSnapshot: {
       kind: 'local',
       path: 'C:/workspace/plugin',
@@ -266,16 +266,16 @@ describe('install authorization receipts', () => {
           id: candidateId,
           index: 1,
           kind: 'local',
-          name: 'dsh-xai',
-          identity: 'dsh-xai',
+          name: 'dsh-plugin-alpha',
+          identity: 'dsh-plugin-alpha',
           digest: 'e'.repeat(64),
           evolutionTarget: {
             kind: 'github_exact',
-            repository: 'MirDie/dsh-xai',
+            repository: 'anonymous-lab/dsh-plugin-alpha',
             commit,
-            packageName: 'dsh-xai',
+            packageName: 'dsh-plugin-alpha',
             profile: 'web',
-            dependencySpec: `github:MirDie/dsh-xai#${commit}`,
+            dependencySpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
             specDigest: 'f'.repeat(64),
           },
         }],
@@ -287,15 +287,15 @@ describe('install authorization receipts', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'dsh-xai',
+      requirement: 'dsh-plugin-alpha',
     })
     expect(resume.install).toMatchObject({
       targetProfile: 'web',
       retention: 'persistent',
       replacement: {
         profile: 'web',
-        packageName: 'dsh-xai',
-        oldDependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        packageName: 'dsh-plugin-alpha',
+        oldDependencySpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
       },
     })
     const again = {
@@ -308,13 +308,13 @@ describe('install authorization receipts', () => {
       agent,
       interrupt: again,
       decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
-      requirement: 'dsh-xai',
+      requirement: 'dsh-plugin-alpha',
     })).toThrow(/do not accept retention/i)
   })
 
   it('installs a reviewed or failed known source as a first persistent install, not a live-spec replacement', () => {
     const commit = 'd'.repeat(40)
-    const spec = `github:klarkxy/zhihu-search#${commit}`
+    const spec = `github:anonymous-lab/dsh-plugin-beta#${commit}`
     for (const kind of ['reviewed_snapshot', 'failed_install'] as const) {
       const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
       const current: InterruptPayload = {
@@ -331,14 +331,14 @@ describe('install authorization receipts', () => {
             id: candidateId,
             index: 1,
             kind: 'local',
-            name: 'dsh-plugin-zhihu-search',
-            identity: 'dsh-plugin-zhihu-search',
+            name: 'dsh-plugin-beta',
+            identity: 'dsh-plugin-beta',
             digest: 'e'.repeat(64),
             evolutionTarget: {
               kind,
-              repository: 'klarkxy/zhihu-search',
+              repository: 'anonymous-lab/dsh-plugin-beta',
               commit,
-              packageName: 'dsh-plugin-zhihu-search',
+              packageName: 'dsh-plugin-beta',
               profile: 'web',
               dependencySpec: spec,
               specDigest: 'f'.repeat(64),
@@ -352,7 +352,7 @@ describe('install authorization receipts', () => {
         agent,
         interrupt: current,
         decision: { action: 'use_this', candidateId },
-        requirement: 'zhihu-search',
+        requirement: 'record-sync',
       })
       expect(resume.install).toMatchObject({
         targetProfile: 'web',

@@ -7,7 +7,6 @@ import type {
   ReviewRecord,
 } from './contracts.js'
 import { POLICY_VERSION } from './contracts.js'
-import { FIND_PLUGIN_REPOSITORY } from './discovery/remote.js'
 import { EvolutionError } from './errors.js'
 import { validateGithubRepository } from './github/index.js'
 import { prefersChinese } from './i18n.js'
@@ -25,13 +24,6 @@ export function addExplicitCandidate(
   repositoryInput: string,
 ): { resolution: ResolutionRecord, candidate: RemotePluginCandidate } {
   const repository = validateGithubRepository(repositoryInput)
-  if (repository.toLowerCase() === FIND_PLUGIN_REPOSITORY.toLowerCase()) {
-    throw new EvolutionError(
-      'invalid_input',
-      'dsh-find-plugin is marketplace infrastructure, not a capability candidate',
-      { repository },
-    )
-  }
   const existing = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
   if (existing) return { resolution, candidate: existing }
 

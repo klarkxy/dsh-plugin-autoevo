@@ -32,6 +32,7 @@ import {
 import { hashObject } from './state/hashes.js'
 import type {
   ModificationAttemptEvidence,
+  ModificationBlocker,
   ModificationOutcome,
   WorkflowExec,
   WorkflowRecord,
@@ -329,11 +330,11 @@ export async function finishManagedWork(
       await deps.store.put('workflows', workflow)
       return { ...finalized, path: source.path }
     }
-    const baselineBlockers = modificationBlockers(
-      workflow.modificationOutcome
-        ? await deps.store.getReview(workflow.modificationOutcome.baselineReviewId)
-        : baselineReview,
-    )
+    // A focused work order is the user's authorized repair boundary. Recomputing
+    // every semantic suggestion here can turn a small mechanical repair into
+    // unrelated feature work, so acceptance follows the blockers shown to the
+    // managed child for this attempt.
+    const baselineBlockers = workOrder.blockers as readonly ModificationBlocker[]
     const outcomeBaseline = workflow.modificationOutcome
       ? await deps.store.getReview(workflow.modificationOutcome.baselineReviewId)
       : baselineReview

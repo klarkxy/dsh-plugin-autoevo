@@ -105,16 +105,40 @@ export async function attachSemanticReview(input: {
   timeoutMs: number
 }): Promise<ReviewRecord> {
   if (!needsSemanticReviewer(input.review)) return input.review
-  if (!input.exec.agent) {
-    throw new EvolutionError('invalid_input', 'A live top-level Agent is required to attach a semantic reviewer')
-  }
-  if ((input.exec.agent.session?.header?.delegationDepth ?? 0) !== 0) {
-    throw new EvolutionError('invalid_input', 'Semantic review requires a top-level parent Agent')
-  }
   const snapshotDigest = reviewSnapshotDigest(input.review)
   const candidateDigest = reviewCandidateDigest(input.review, input.workflow)
   const workflowId = input.workflow?.id
     ?? `workflow_${hashObject({ resolutionId: input.review.resolutionId, reviewId: input.review.id }).slice(0, 24)}`
+  if (!input.exec.agent) {
+    const minted = hostMintedUncertain(
+      input.review,
+      workflowId,
+      snapshotDigest,
+      candidateDigest,
+      'Semantic reviewer unavailable: no live top-level Agent',
+    )
+    return {
+      ...input.review,
+      reviewerRequestId: minted.request.id,
+      reviewerRequest: minted.request,
+      reviewerVerdict: minted.verdict,
+    }
+  }
+  if ((input.exec.agent.session?.header?.delegationDepth ?? 0) !== 0) {
+    const minted = hostMintedUncertain(
+      input.review,
+      workflowId,
+      snapshotDigest,
+      candidateDigest,
+      'Semantic reviewer unavailable: parent Agent is not top-level',
+    )
+    return {
+      ...input.review,
+      reviewerRequestId: minted.request.id,
+      reviewerRequest: minted.request,
+      reviewerVerdict: minted.verdict,
+    }
+  }
   try {
     const result = await input.host.run({
       parent: input.exec.agent,

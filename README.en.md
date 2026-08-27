@@ -8,7 +8,7 @@ English | [中文](README.md)
   <img src="docs/assets/kanban.png" alt="AutoEvo" width="420">
 </p>
 
-`dsh-plugin-autoevo` is the capability-reuse and safe-evolution layer for DeepSeek Harness (DSH). In the **Capability Evolution** preset, every capability request—including a temporary experiment—is Search-first. The Host preserves the user's original wording, allows at most one clarification, and then checks real local and remote candidates. A close candidate can be changed in a Host-bound managed source, re-reviewed, and installed; every user-adopted capability is persisted.
+`dsh-plugin-autoevo` is a lightweight capability-reuse workflow and evidence plugin for DeepSeek Harness (DSH). In the **Capability Evolution** preset, every capability request—including a temporary experiment—is Search-first. The Host preserves the user's original wording, allows at most one clarification, and then checks local and remote candidates. A close candidate can be changed in a Host-bound managed source, re-reviewed, and installed; every user-adopted capability is persisted with inspectable outcome evidence.
 
 `Resolve → Search → Review → Deploy → Verify → Upgrade`
 
@@ -22,7 +22,6 @@ English | [中文](README.md)
 | Developers: local setup, runtime entry points, tests, debugging, and contribution | [Developer Guide](docs/developer-guide.en.md) |
 | Policy, data layout, and runtime seams | [Architecture](docs/architecture.md) (Chinese) |
 | Trust boundaries, install gates, and verification evidence | [Security Model](docs/security.md) (Chinese) |
-| Reproducible scenarios and evidence levels | [Real-world Samples](docs/real-world-samples.md) (Chinese) |
 
 Each topic has one canonical home: operating procedures live in the User Guide, development workflows in the Developer Guide, and internal state/security invariants in the architecture and security references.
 
@@ -31,21 +30,21 @@ Each topic has one canonical home: operating procedures live in the User Guide, 
 Install into the DSH profile you actually use. This example targets `web` (run DSH through npx; no global install needed):
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
 Start the profile day to day with `npx @deepseek-ai/dsh web`. Note the unscoped `dsh` package on npm is an unrelated project — the command must carry the `@deepseek-ai/` prefix.
 
 Restart the target DSH profile after installing or upgrading AutoEvo so it loads the new bundle; whether later capability installs need another restart is covered in [User Guide §5](docs/user-guide.en.md#5-outcomes-and-next-steps).
 
-The install command uses the latest release tag; the `package.json` version may be ahead of the latest published release. Node.js must satisfy `>=22.19.0 || >=24.0.0`; current development and acceptance use DSH `0.1.1-rc.2` and Cordis `4.0.1`.
+The command above becomes available after the maintainer publishes `v1.0.0`; creating the tag and Release is a separate action. Node.js must satisfy `^22.19.0 || ^24.0.0`. AutoEvo accepts DSH `>=0.1.0-rc.6 <0.2.0`; unverified `0.1` updates remain warning-level and may be tried in the active Host. The reproducible development and acceptance baseline stays pinned to DSH `0.1.1-rc.2` and Cordis `4.0.1`.
 
 ## Quick start
 
 1. Start a new DSH session and select the **Capability Evolution** user preset (id `evolution`).
 2. Describe the needed capability in ordinary language, for example:
 
-   > I need a DSH plugin that can calculate scientific notation. Search for an existing one first.
+   > I need a DSH plugin that can synchronize project records. Search for an existing one first.
 
 3. If material ambiguity blocks useful search, answer the single clarification. AutoEvo then presents 1–5 candidates or explicitly reports no match.
 4. With candidates, use a fresh chat message to choose one for review. With no candidates, choose continued search, creating a new capability, or stopping.
@@ -53,44 +52,33 @@ The install command uses the latest release tag; the `package.json` version may 
 
 Those replies are two separate confirmation gates; the full flow and rationale are in [User Guide §3](docs/user-guide.en.md#3-your-first-complete-workflow).
 
-Install demo (select preset → describe the need → shortlist → review → confirm → installed):
+A typical loop is Search-first → candidate selection → factual review and warnings → user decision → installation or managed construction → re-review → user confirmation for the final install → distinct installed, loaded, activated, and verified outcomes. Production logic never reads examples or test fixtures; the screenshots are anonymized product-behavior records only.
 
-<p align="center">
-  <img src="example/install/01-select-evolution.png" alt="Select the Capability Evolution preset" width="320">
-  <img src="example/install/02-ask.png" alt="Describe the need" width="320">
-  <img src="example/install/03-shortlist.png" alt="Candidate shortlist" width="320">
-  <img src="example/install/04-review.png" alt="Review result" width="320">
-  <img src="example/install/05-confirm.png" alt="Confirm install" width="320">
-  <img src="example/install/06-installed.png" alt="Installed" width="320">
-</p>
+## Workflow screenshots
 
-Complete create-and-recover demo (request → Search-first with no match → authorize creation → managed build → review → first install failure → diagnosed repair → re-review → reinstall and activate):
+An offline Gregorian/lunar calendar capability after a genuine no-match result:
 
-1. **Search and creation decision**: preserve the original request, run two read-only searches, and let the user explicitly choose creation only after no relevant candidate is found.
+![Create choice after no match](example/create/02-no-candidate-create-choice.png)
 
-<p align="center">
-  <img src="example/create/01-request-and-search.png" alt="Request bidirectional solar and lunar calendar conversion and start Search-first discovery" width="320">
-  <img src="example/create/02-no-candidate-create-choice.png" alt="Report no matching candidate and offer search, create, or stop" width="320">
-  <img src="example/create/03-create-authorized.png" alt="The user chooses creation and the Host binds a managed source root" width="320">
-</p>
+![Current source review and final install choice](example/create/04-review-install-choice.png)
 
-2. **Managed build and first install**: implement and test only inside the Host-bound source root, review the artifact, and ask again before install. A failed runtime verification remains a failure instead of being reported as success.
+![Installed outcome awaiting restart and user testing](example/create/07-installed-result.png)
 
-<p align="center">
-  <img src="example/create/04-managed-build.png" alt="Implement the calendar algorithm, plugin tools, and self-checks in managed source" width="320">
-  <img src="example/create/05-review-install-choice.png" alt="Show the review result and wait for install confirmation" width="320">
-  <img src="example/create/06-first-install-failed.png" alt="The first install verification fails and diagnostic evidence is collected" width="320">
-</p>
+![Real Gregorian-lunar round trip after restart](example/create/08-tool-roundtrip.png)
 
-3. **Controlled repair and activation**: re-enter managed work only after the user authorizes repair, pass Host re-review, then require another user decision before reinstall and runtime checks.
+An LLM Auto Review capability similar in shape to Codex Auto Review: review the closest candidate first, then let the user choose a lightweight advisory-only tool that does not take over DSH approval.
 
-<p align="center">
-  <img src="example/create/07-repair-authorized.png" alt="The user chooses repair and reinstall, authorizing managed work again" width="320">
-  <img src="example/create/08-managed-repair.png" alt="Repair the patch format, dependencies, and capability wording, then submit for re-review" width="320">
-  <img src="example/create/09-rereview-passed.png" alt="Host re-review passes and asks for reinstall confirmation" width="320">
-  <img src="example/create/10-reinstall-runtime-check.png" alt="Reinstall succeeds and tool and service registration are checked" width="320">
-  <img src="example/create/11-activated.png" alt="The plugin is installed, loaded, activated, and its tools are visible" width="320">
-</p>
+![Auto Review candidate review](example/auto-review/02-candidate-review.png)
+
+![Auto Review post-construction review and final choice](example/auto-review/04-review-install-choice.png)
+
+![Precise Auto Review state after installation](example/auto-review/06-installed-result.png)
+
+![Real advisory-only Auto Review tool result](example/auto-review/07-tool-roundtrip.png)
+
+Both real runs continue through one-time DSH approval, installation, restart, and a real client tool call. The installation outcome still distinguishes `installed`, `loaded`, `activated`, and `verified`; the later client call is separate evidence and does not rewrite or overstate the installation receipt.
+
+See [`example/README.md`](example/README.md) for the complete sequence and precise state at each step.
 
 ## Understand the outcome
 
@@ -107,7 +95,8 @@ AutoEvo also tracks an installation version chain per package: `capability_versi
 
 ## Safety boundary
 
-- Discovery, review, and diagnosis are read-only by default. Install, removal, modify, and create require a real user decision and one-time DSH approval; installed third-party code ultimately runs with the current user's authority.
+- AutoEvo owns workflow, warnings, and evidence records. DSH Core owns enforcement of permissions, sandboxes, and approvals; AutoEvo cannot expand, replace, or bypass those DSH Core controls.
+- Discovery, review, and diagnosis are read-only by default. Actual install, removal, modify, and create side effects remain subject to DSH Core permissions and one-time approval. Warnings are shown and recorded, but may be accepted when DSH Core permits it and the user explicitly chooses to continue; installed third-party code ultimately runs with the current user's authority.
 - See the [Security Model](docs/security.md) for the full trust boundary, and [User Guide §8](docs/user-guide.en.md#8-safety-and-privacy) for safety and privacy notes in daily use.
 
 ## Develop

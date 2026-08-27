@@ -415,6 +415,8 @@ export interface WorkflowRecord {
   consumedInterruptIds?: string[]
   lineageTipReviewId?: string
   lastReviewId?: string
+  /** Host-minted installation receipt linked before the external install command starts. */
+  pendingInstallationId?: string
   lastInstallationId?: string
   forceRemoteDiscovery?: boolean
   /** Host-verified candidates available for model curation before Gate 1. */
@@ -587,11 +589,13 @@ export interface WorkflowHost {
   /** Active Host profile an enable_builtin commitment targets, when determinable. */
   enableTargetProfile?(): Promise<string | undefined>
   /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
-  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>
+  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord | void>
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>
   getResolution(id: string): Promise<ResolutionRecord>
   getReview(id: string): Promise<ReviewRecord>
   getInstallation(id: string): Promise<InstallationRecord>
+  /** Finds one workflow-owned receipt when a crash happened before lastInstallationId was projected. */
+  findInstallationForWorkflow?(workflowId: string): Promise<InstallationRecord | undefined>
   listInstallProfiles?(): Promise<string[]>
   /** Whether managed child construction (modify/create) is available for this exec. */
   managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>
@@ -792,7 +796,9 @@ export function optionsFor(
     .filter((item) => !(workflow?.reviewedCandidateIds ?? []).includes(item.id))
     .map((item) => item.id)
   const reusableLocalIds = snapshot
-    .filter((item) => item.kind === 'local' && (item.reuseEligible ?? item.fit === 'full'))
+    .filter((item) => item.kind === 'local'
+      && ['available', 'available_via_tool_search', 'installed_in_profile'].includes(item.availability ?? '')
+      && (item.reuseEligible ?? item.fit === 'full'))
     .map((item) => item.id)
   const evolvableLocalIds = snapshot
     .filter((item) => item.kind === 'local' && item.evolutionTarget)

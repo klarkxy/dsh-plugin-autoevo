@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -11,6 +11,7 @@ import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
+import { builtinReceiptSpec } from '../../src/lifecycle/enable-builtin.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
 import { StateStore } from '../../src/state/store.js'
@@ -131,19 +132,25 @@ describe('lifecycle validation', () => {
     await expect(launcher.profileSourceMatches(path.join(root, 'home'), 'trial', 'dsh-tool-calculator', `${spec}-other`)).resolves.toBe(false)
   })
 
-  it('rejects a none-fit candidate for direct install', async () => {
-    const { root, store, ctx } = await installHarness(review({
+  it('treats fit and recommendation as advisory once mechanical install boundaries pass', async () => {
+    const { root, store, ctx } = await installHarness(attestedReview({
       fit: 'none', recommendation: 'modify', missingCapabilities: ['scientific notation'],
     }))
-    const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
+    let reachedInstall = false
+    const launcher = { install: async () => {
+      reachedInstall = true
+      throw new Error('stop after lifecycle gate')
+    } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
 
-    await expect(installer.install({
+    const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'trial',
       retention: 'temporary',
       verificationTask: 'test calculator',
-    }, execution())).rejects.toMatchObject({ code: 'review_rejected' })
+    }, execution())
+    expect(reachedInstall).toBe(true)
+    expect(result).toMatchObject({ installOutcome: 'failed_absent', installFailure: { stage: 'install' } })
   })
 
   it('makes no installation change when one-time approval is denied', async () => {
@@ -243,6 +250,41 @@ describe('lifecycle validation', () => {
     })
     expect(result.verification.reason).toContain(`Diagnostic sha256: ${'b'.repeat(64)}`)
     await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('persists the host-prelinked receipt before the external install command starts', async () => {
+    const { root, store, ctx } = await installHarness(attestedReview())
+    const installationId = `installation_${'9'.repeat(24)}`
+    let observedPhase: string | undefined
+    const launcher = {
+      install: async () => {
+        observedPhase = (await store.getInstallation(installationId)).installPhase
+        throw new EvolutionError('command_failed', 'dsh install failed', {
+          exitCode: 1,
+          diagnosticHash: '8'.repeat(64),
+        })
+      },
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+
+    const result = await installer.install({
+      installationId,
+      reviewId: `review_${'a'.repeat(64)}`,
+      targetProfile: 'trial',
+      retention: 'temporary',
+    }, execution())
+
+    expect(observedPhase).toBe('prepared')
+    expect(result).toMatchObject({
+      id: installationId,
+      installFailure: {
+        stage: 'install',
+        code: 'command_failed',
+        retryable: true,
+        summary: 'dsh install failed',
+        repairHints: expect.arrayContaining([expect.stringMatching(/resume the workflow/i)]),
+      },
+    })
   })
 
   it('removes a temporary trial that degrades from Host-attested automatic verification to manual_runtime', async () => {
@@ -417,7 +459,7 @@ describe('lifecycle validation', () => {
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
-      dshHome: path.join(root, 'dsh-home'),
+      dshHome: config(root).dshHome,
       packageName: 'dsh-tool-calculator',
       installSpec: `file:${path.join(artifactRoot, 'plugin.tgz').replaceAll('\\', '/')}`,
       ownedArtifactRoot: artifactRoot,
@@ -443,6 +485,7 @@ describe('lifecycle validation', () => {
     const launcher = {
       remove: async () => { removalCalled = true; return { exitCode: 1, signal: null, stdout: '', stderr: 'not installed' } },
       hasProfileDependency: async () => false,
+      profileDependencySpec: async () => undefined,
     } as unknown as DshLauncher
     const remover = new PluginRemover(ctx, config(root), store, launcher)
 
@@ -464,7 +507,7 @@ describe('lifecycle validation', () => {
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
-      dshHome: path.join(root, 'dsh-home'),
+      dshHome: config(root).dshHome,
       packageName: 'calculator&whoami',
       installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
       installed: false,
@@ -509,7 +552,7 @@ describe('lifecycle validation', () => {
       workflowId: `workflow_${'d'.repeat(24)}`,
       targetProfile: 'persistent',
       retention: 'persistent',
-      dshHome: path.join(root, 'dsh-home'),
+      dshHome: config(root).dshHome,
       packageName: 'dsh-tool-calculator',
       installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
       installed: true,
@@ -533,12 +576,105 @@ describe('lifecycle validation', () => {
     const launcher = {
       remove: async () => { removalCalled = true; return { exitCode: 0, signal: null, stdout: '', stderr: '' } },
       hasProfileDependency: async () => true,
+      profileDependencySpec: async () => `github:acme/calculator#${'c'.repeat(40)}`,
     } as unknown as DshLauncher
     const remover = new PluginRemover(ctx, config(root), store, launcher)
 
     await expect(remover.remove({ installationId }, execution())).rejects.toMatchObject({ code: 'approval_required' })
     expect(removalCalled).toBe(false)
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false, id: installationId })
+  })
+
+  it('refuses a stale persistent receipt when the exact live dependency spec changed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-stale-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'7'.repeat(24)}`
+    const oldSpec = `github:acme/calculator#${'a'.repeat(40)}`
+    const newSpec = `github:acme/calculator#${'b'.repeat(40)}`
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      dshHome: config(root).dshHome,
+      packageName: 'dsh-tool-calculator',
+      installSpec: oldSpec,
+      installed: true,
+      loaded: true,
+      verified: true,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: ['calculator'],
+        calledTools: ['calculator'],
+        resultTools: ['calculator'],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: true,
+        reason: 'verified',
+      },
+    })
+    let approvalRequested = false
+    let removalCalled = false
+    const ctx = { get: () => ({ request: async () => { approvalRequested = true; return 'allowed-once' } }) } as unknown as Context
+    const launcher = {
+      profileDependencySpec: async () => newSpec,
+      remove: async () => { removalCalled = true; return { exitCode: 0, signal: null, stdout: '', stderr: '' } },
+    } as unknown as DshLauncher
+
+    await expect(new PluginRemover(ctx, config(root), store, launcher)
+      .remove({ installationId }, execution())).rejects.toMatchObject({ code: 'review_expired' })
+    expect(approvalRequested).toBe(false)
+    expect(removalCalled).toBe(false)
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false, installSpec: oldSpec })
+  })
+
+  it('removes an exact AutoEvo-owned built-in mount from its receipt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-builtin-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'6'.repeat(24)}`
+    const patchRoot = path.join(config(root).dshHome, 'profiles', 'persistent')
+    await mkdir(patchRoot, { recursive: true })
+    const patchPath = path.join(patchRoot, 'cordis.patch.yml')
+    await writeFile(patchPath, "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n")
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      dshHome: config(root).dshHome,
+      packageName: '@deepseek-ai/dsh-time-context',
+      installSpec: builtinReceiptSpec({ version: '0.1.1-rc.2', mountId: 'time-context', wrote: true }),
+      installed: true,
+      loaded: false,
+      verified: false,
+      restartRequired: true,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'built-in composition validated',
+      },
+    })
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      dumpConfig: async () => ({ exitCode: 0, signal: null, stdout: 'profile without opt-in mount', stderr: '' }),
+    } as unknown as DshLauncher
+
+    await expect(new PluginRemover(ctx, config(root), store, launcher)
+      .remove({ installationId }, execution())).resolves.toMatchObject({ removed: true, restartRequired: true })
+    expect(await readFile(patchPath, 'utf8')).not.toContain('time-context')
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
   })
 
   it('calls Host tool_roundtrip once and keeps the receipt free of args, output, env, and paths', async () => {

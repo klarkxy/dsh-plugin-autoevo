@@ -1,5 +1,5 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '10'
+export const POLICY_VERSION = '11'
 
 export const TOOL_NAMES = [
   'capability_workflow',
@@ -61,7 +61,7 @@ export const DEFAULT_REQUEST_INTENT: RequestIntent = {
   requiredSurface: 'any',
 }
 
-export type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot'
+export type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot' | 'managed_local'
 
 export interface EvolutionTarget {
   kind: EvolutionTargetKind
@@ -577,8 +577,16 @@ export interface InstallationRecord {
   verificationVerdict?: VerificationVerdict
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
+    /** User/LLM-facing lifecycle stage. Never contains a command line or path. */
+    stage?: 'preflight' | 'install' | 'load' | 'verify' | 'persist'
     code: string
+    /** Stable human summary. `message` remains readable for legacy callers. */
+    summary?: string
     message: string
+    /** Whether retrying after an LLM/user repair can be meaningful. */
+    retryable?: boolean
+    /** Bounded, non-secret next-step suggestions for the operating LLM. */
+    repairHints?: string[]
     exitCode?: number | null
     diagnosticHash?: string
   }
@@ -592,6 +600,8 @@ export interface InstallationRecord {
 }
 
 export interface InstallInput {
+  /** Host-minted before any external side effect; never accepted from model tool arguments. */
+  installationId?: string
   reviewId: string
   targetProfile: string
   retention: InstallationRetention

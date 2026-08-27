@@ -27,6 +27,7 @@ export const HARD_SKIP_FINDING_CODES = new Set([
   'bundle_patch_path',
   'bundle_patch_missing',
   'bundle_patch_invalid',
+  'bundle_patch_no_activation',
   'unsafe_package_name',
 ])
 
@@ -445,6 +446,15 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
       } else {
         const problem = loaderPatchProblem(patchFile)
         if (problem) findings.push(finding('bundle_patch_invalid', 'block', manifest.bundlePatch, problem, sha256(patchFile.content)))
+        if (!problem && manifest.expectedTools.length > 0 && !manifest.activatedFibers?.length) {
+          findings.push(finding(
+            'bundle_patch_no_activation',
+            'block',
+            manifest.bundlePatch,
+            'the declared tool bundle patch does not insert any runtime module, so its tools cannot be loaded after installation',
+            sha256(patchFile.content),
+          ))
+        }
       }
     }
   }
@@ -487,8 +497,17 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
     const extension = path.posix.extname(file.path).toLowerCase()
     const executableSource = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx']).has(extension)
     const testOnly = /(^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:spec|test)\.[cm]?[jt]sx?$/i.test(file.path)
-    const text = Buffer.from(file.content).toString('utf8')
     const fileHash = sha256(file.content)
+    // Review prose and source as text, but do not reinterpret arbitrary binary
+    // assets as UTF-8. Binary NUL bytes and image payloads are ordinary package
+    // content, not evidence of hidden model instructions.
+    if (file.content.includes(0)) continue
+    let text: string
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(file.content)
+    } catch {
+      continue
+    }
     // Text-surface rules scan every file: documentation and skill files are a
     // classic carrier for hidden instructions and exfiltration lures.
     if (INVISIBLE_UNICODE.test(text)) {
@@ -499,8 +518,6 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
       findings.push(finding('hidden_instructions', 'block', file.path, 'hides instruction-like text inside an HTML comment', fileHash))
     } else if (EMBEDDED_DATA_URI.test(text) || (LONG_BASE64_BLOB.test(text) && !executableSource)) {
       findings.push(finding('hidden_instructions', 'block', file.path, 'embeds an opaque encoded payload in text', fileHash))
-    } else if (text.includes('\0')) {
-      findings.push(finding('hidden_instructions', 'block', file.path, 'contains NUL bytes in text', fileHash))
     }
     if (PROMPT_INJECTION.test(text)) {
       findings.push(finding('prompt_injection', 'block', file.path, 'contains prompt-injection-like instruction text', fileHash))
@@ -595,6 +612,7 @@ function evaluateFit(requirement: string, manifest: ManifestFacts, files: readon
 }
 
 function recommendReview(input: {
+  sourceKind: ReviewRecord['sourceSnapshot']['kind']
   truncated?: boolean
   kind: ManifestFacts['kind']
   fit: ReviewRecord['fit']
@@ -603,7 +621,9 @@ function recommendReview(input: {
   findings: readonly ReviewFinding[]
   materializable: boolean
 }): ReviewRecord['recommendation'] {
-  if (input.truncated || input.kind !== 'bundle' || input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))) {
+  if ((input.sourceKind === 'local' && input.truncated)
+    || input.kind !== 'bundle'
+    || input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))) {
     return 'skip'
   }
   if (!input.materializable) return 'skip'
@@ -629,12 +649,13 @@ export function needsSemanticReviewer(
 }
 
 function mechanicalMaterializable(input: {
+  sourceKind: ReviewRecord['sourceSnapshot']['kind']
   truncated?: boolean
   kind: ManifestFacts['kind']
   packageName?: string
   findings: readonly ReviewFinding[]
 }): boolean {
-  return !input.truncated
+  return !(input.sourceKind === 'local' && input.truncated)
     && input.kind === 'bundle'
     && Boolean(input.packageName)
     && !input.findings.some((item) => HARD_SKIP_FINDING_CODES.has(item.code))
@@ -646,7 +667,7 @@ function mintInstallSpec(input: {
   sourceSnapshot: ReviewRecord['sourceSnapshot']
   packageName?: string
 }): string | null {
-  if (!input.materializable || input.truncated || !input.packageName) return null
+  if (!input.materializable || !input.packageName) return null
   if (input.sourceSnapshot.kind !== 'github') return null
   return `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
 }
@@ -687,11 +708,7 @@ function mechanicalFactsFrom(input: {
     })),
     evidenceHashes,
     semanticContextRequired,
-    ...(!input.materializable
-      ? { directUseHostBoundary: 'not_materializable' as const }
-      : input.compatibility.status === 'incompatible'
-        ? { directUseHostBoundary: 'incompatible' as const }
-        : {}),
+    ...(!input.materializable ? { directUseHostBoundary: 'not_materializable' as const } : {}),
   }
 }
 
@@ -724,6 +741,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
   const maintained = input.maintained ?? false
   const sortedFindings = findings.sort((left, right) => left.code.localeCompare(right.code) || left.source.localeCompare(right.source))
   const materializable = mechanicalMaterializable({
+    sourceKind: input.sourceSnapshot.kind,
     ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
     kind: manifest.kind,
     ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
@@ -736,6 +754,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
   })
   const recommendation = recommendReview({
+    sourceKind: input.sourceSnapshot.kind,
     ...(input.truncated !== undefined ? { truncated: input.truncated } : {}),
     kind: manifest.kind,
     fit,

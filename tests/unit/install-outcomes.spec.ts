@@ -645,11 +645,11 @@ describe('fail-closed install outcomes', () => {
     const routed = review({
       manifest: {
         ...review().manifest,
-        expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+        expectedRoute: { provider: 'provider-alpha', model: 'model-alpha-v1' },
       },
       runtimeSurface: {
         ...attestedSurface(),
-        expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+        expectedRoute: { provider: 'provider-alpha', model: 'model-alpha-v1' },
         llmRegistered: true,
         verificationLayer: 'manual_runtime',
       },
@@ -667,7 +667,7 @@ describe('fail-closed install outcomes', () => {
       reviewId: routed.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'answer with Grok',
+      verificationTask: 'invoke nebula relay',
       verificationExpectedText: '42',
     }, execution())
     expect(verifyHost).not.toHaveBeenCalled()
@@ -1264,27 +1264,29 @@ describe('install authorization uses verdict and hard boundaries', () => {
     expect(result.installOutcome).toBe('failed_absent')
   })
 
-  it('rejects missing or rejected verdicts even when prompt-regex and high risk are the only findings', async () => {
+  it('keeps missing or rejected semantic verdicts advisory when mechanical boundaries pass', async () => {
     const missing = riskyReview()
     const { root, store, ctx } = await setup(missing)
     const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, async () => undefined)
-    await expect(installer.install({
+    const missingResult = await installer.install({
       reviewId: missing.id,
       targetProfile: 'web',
       retention: 'temporary',
       verificationTask: 'test calculator',
-    }, execution())).rejects.toThrow(/verdict does not authorize direct use/i)
+    }, execution())
+    expect(missingResult).toMatchObject({ installOutcome: 'failed_absent', installFailure: { stage: 'install' } })
 
     const rejected = withApprovedVerdict(riskyReview())
     rejected.reviewerVerdict = { ...rejected.reviewerVerdict!, decision: 'rejected' }
     await store.put('reviews', rejected)
-    await expect(installer.install({
+    const rejectedResult = await installer.install({
       reviewId: rejected.id,
       targetProfile: 'web',
       retention: 'temporary',
       verificationTask: 'test calculator',
-    }, execution())).rejects.toThrow(/verdict does not authorize direct use/i)
+    }, execution())
+    expect(rejectedResult).toMatchObject({ installOutcome: 'failed_absent', installFailure: { stage: 'install' } })
   })
 
   it('records contribution eligibility only for verified full-fit local installs and exposes it on the compact view', async () => {
@@ -1360,7 +1362,7 @@ describe('install authorization uses verdict and hard boundaries', () => {
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-23T00:00:00.000Z',
       updatedAt: '2026-08-23T00:00:00.000Z',
-      requirement: 'zhihu-search',
+      requirement: 'orbit-search',
       status: 'completed',
       cursor: 'installed',
       generation: 1,

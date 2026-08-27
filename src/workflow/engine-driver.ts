@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   DEFAULT_REQUEST_INTENT,
@@ -5,6 +6,7 @@ import {
   type RequestIntent,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { hashObject } from '../state/hashes.js'
 import {
   newInterruptId,
   normalizeRequirement,
@@ -303,8 +305,9 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
         : undefined
       const reviews = await this.reviewsForWorkflow(workflow)
-      const installation = workflow.lastInstallationId
-        ? await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+      const installationId = this.installationReceiptId(workflow)
+      const installation = installationId
+        ? await this.host.getInstallation(installationId).catch(() => undefined)
         : undefined
       const diagnosticAvailable = Boolean(
         workflow.lastFailure
@@ -508,6 +511,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             ? await this.host.listInstallProfiles?.() ?? []
             : []
           const managedActionsAvailable = workflow.cursor === 'await_confirmation'
+            || workflow.cursor === 'await_selection'
             ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
             : true
           const base = interruptPayload(workflow.cursor, resolution, reviews, {
@@ -561,6 +565,18 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         }
 
         workflow.status = 'running'
+        if ((workflow.cursor === 'install_verify' || workflow.cursor === 'enable_builtin')
+          && !workflow.pendingInstallationId) {
+          workflow.pendingInstallationId = `installation_${hashObject({
+            workflowId: workflow.id,
+            actionCommitmentId: workflow.actionCommitment?.id,
+            at: new Date().toISOString(),
+            nonce: randomUUID(),
+          }).slice(0, 24)}`
+          // Persist the workflow backlink before the installer can perform any
+          // profile mutation. A restart can now reconcile the one exact receipt.
+          await this.checkpoint(workflow)
+        }
         const result = await executeNode(workflow.cursor, {
           host: this.host,
           workflow,
@@ -600,7 +616,10 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             message: failure.message,
           }))
         }
-        if (result.installation) workflow.lastInstallationId = result.installation.id
+        if (result.installation) {
+          workflow.lastInstallationId = result.installation.id
+          if (workflow.pendingInstallationId === result.installation.id) delete workflow.pendingInstallationId
+        }
         if (result.kind === 'next') {
           workflow.cursor = result.node
           continue

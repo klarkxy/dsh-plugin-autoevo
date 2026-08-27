@@ -7,7 +7,7 @@ description: Runtime reference for AutoEvo Capability Evolution discovery and Ho
 
 # AutoEvo Capability Evolution
 
-This packaged skill is compatibility guidance for the Capability Evolution preset. The Host workflow and execution guards are authoritative. A prompt or this file never grants permission to install, modify, create, remove, delegate, or publish.
+This packaged skill is compatibility guidance for the Capability Evolution preset. The Host workflow and execution guards are authoritative. A prompt or this file never grants permission to install, modify, create, remove, or publish. After an explicit create/modify decision, ordinary DSH-permitted construction and collaboration remain available inside the bound source.
 
 ## 1. Start with discovery
 
@@ -47,12 +47,12 @@ After `modify_review` or `create_authorized`, the Host prepares a Git source und
 
 1. Confirm the returned managed path, workflow identity, scope, and acceptance commands.
 2. Inspect only the files and contracts required by the WorkOrder.
-3. Edit only inside the managed source. Keep the change minimal and preserve package identity unless the WorkOrder says otherwise.
-4. Run the WorkOrder's checks. Record the actual command and result; do not claim an unobserved test.
+3. Edit only inside the managed source. Preserve package identity unless the WorkOrder says otherwise, but make every change needed for a complete result.
+4. Use DSH-permitted shell, build, test, dependency, skill, and collaboration tools as needed. Record actual checks and results; do not claim an unobserved test.
 5. Call `capability_workflow_resume` with the managed-work completion action `finish_managed_work`. Do not pass an arbitrary checkout path.
 6. The Host validates Git state, commits without hooks/signing, re-reviews the exact source, freezes an owned artifact, and returns to a fresh install decision.
 
-Never call Cordis live mutation, directly install/remove a package, use a same-named substitute, delegate construction, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception.
+Never call Cordis live mutation, directly install/remove a package, silently switch to a same-named substitute, publish/release/deploy, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception.
 
 ## 4. Report outcomes exactly
 

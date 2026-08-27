@@ -28,14 +28,14 @@ describe('installed evolve replacement on an isolated profile', () => {
     temporary.push(root)
     const dshHome = path.join(root, 'dsh-home')
     const profileRoot = path.join(dshHome, 'profiles', 'web')
-    await mkdir(path.join(profileRoot, 'node_modules', 'dsh-xai'), { recursive: true })
+    await mkdir(path.join(profileRoot, 'node_modules', 'dsh-plugin-alpha'), { recursive: true })
     const oldCommit = 'a'.repeat(40)
     const newCommit = 'b'.repeat(40)
-    const oldSpec = `github:MirDie/dsh-xai#${oldCommit}`
-    const newSpec = `github:MirDie/dsh-xai#${newCommit}`
+    const oldSpec = `github:anonymous-lab/dsh-plugin-alpha#${oldCommit}`
+    const newSpec = `github:anonymous-lab/dsh-plugin-alpha#${newCommit}`
     await writeFile(path.join(profileRoot, 'package.json'), `${JSON.stringify({
-      dependencies: { 'dsh-xai': oldSpec },
-      dsh: { profile: { bundles: ['dsh-xai'] } },
+      dependencies: { 'dsh-plugin-alpha': oldSpec },
+      dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
     }, null, 2)}\n`)
     const store = new StateStore(path.join(root, 'state'))
     const reviewId = `review_${'a'.repeat(64)}`
@@ -45,10 +45,10 @@ describe('installed evolve replacement on an isolated profile', () => {
       policyVersion: POLICY_VERSION,
       createdAt: new Date().toISOString(),
       resolutionId: `resolution_${'b'.repeat(24)}`,
-      requirement: 'evolve dsh-xai',
+      requirement: 'evolve dsh-plugin-alpha',
       sourceSnapshot: {
         kind: 'github',
-        repository: 'MirDie/dsh-xai',
+        repository: 'anonymous-lab/dsh-plugin-alpha',
         requestedRef: newCommit,
         commit: newCommit,
         defaultBranch: 'main',
@@ -56,7 +56,7 @@ describe('installed evolve replacement on an isolated profile', () => {
       inspectedFiles: [],
       manifest: {
         kind: 'bundle',
-        packageName: 'dsh-xai',
+        packageName: 'dsh-plugin-alpha',
         scripts: [],
         dependencies: [],
         peerDependencies: {},
@@ -97,7 +97,7 @@ describe('installed evolve replacement on an isolated profile', () => {
       targetProfile: 'web',
       retention: 'persistent',
       dshHome,
-      packageName: 'dsh-xai',
+      packageName: 'dsh-plugin-alpha',
       installSpec: oldSpec,
       installState: 'installed',
       installOutcome: 'awaiting_user_test',
@@ -130,8 +130,8 @@ describe('installed evolve replacement on an isolated profile', () => {
           const dest = path.join(request.env?.DSH_HOME ?? dshHome, 'profiles', profile, 'package.json')
           await mkdir(path.dirname(dest), { recursive: true })
           await writeFile(dest, `${JSON.stringify({
-            dependencies: { 'dsh-xai': spec },
-            dsh: { profile: { bundles: ['dsh-xai'] } },
+            dependencies: { 'dsh-plugin-alpha': spec },
+            dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
           }, null, 2)}\n`)
           return { exitCode: 0, signal: null, stdout: '', stderr: '' }
         }
@@ -183,7 +183,7 @@ describe('installed evolve replacement on an isolated profile', () => {
       retention: 'persistent',
       replacement: {
         profile: 'web',
-        packageName: 'dsh-xai',
+        packageName: 'dsh-plugin-alpha',
         oldSpecDigest: dependencySpecDigest(oldSpec),
         oldDependencySpec: oldSpec,
         predecessorInstallationId: predecessorId,
@@ -191,7 +191,7 @@ describe('installed evolve replacement on an isolated profile', () => {
     }, exec)
     expect(removeCalls).toEqual([])
     expect(result.replacement?.state).toBe('new_present')
-    expect(await launcher.profileDependencySpec(dshHome, 'web', 'dsh-xai')).toBe(newSpec)
+    expect(await launcher.profileDependencySpec(dshHome, 'web', 'dsh-plugin-alpha')).toBe(newSpec)
     expect((await store.getInstallation(predecessorId)).supersededByInstallationId).toBe(result.id)
     expect(result.restartRequired).toBe(true)
   })

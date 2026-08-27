@@ -52,8 +52,10 @@ const OFFICIAL_CHILD_SKILLS = new Set<string>(OFFICIAL_CREATOR_SKILLS)
 const GIT_COMMAND_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const SAFE_GIT_READ_RE = /(?:^|[\s&])["']?git(?:\.exe)?["']?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b/iu
 const GH_COMMAND_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
-const DSH_PLUGIN_MUTATION_RE = /(?:^|[\\/\s;&|("'`])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|remove|rm|uninstall)\b/iu
+const DSH_PLUGIN_MUTATION_RE = /(?:^|[\\/\s;&|("'`])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|install|remove|rm|uninstall)\b/iu
 const PACKAGE_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
+const GIT_PUBLICATION_OR_DESTRUCTIVE_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?:\s+-[^\s]+(?:\s+[^\s]+)?)*\s+(?:push|tag|reset\s+--hard|clean\s+-[^\s]*f)\b/iu
+const GH_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?\s+(?:(?:pr|release|repo|gist)\s+(?:create|delete)|workflow\s+run)\b/iu
 const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
 const RELEASE_DEPLOY_INSTALL_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:release|deploy)\b|dsh(?:\.cmd)?\s+(?:release|deploy|publish|install)\b)/iu
 const SHELL_CONTROL_RE = /(?:&&|\|\||[;&|<>`$(){}@^]|\r|\n)/u
@@ -222,21 +224,21 @@ export class ExecutionGuard {
     if (matchesSet(name, PARENT_DENIED_CORDIS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PARENT_DENIED_CORDIS_TOOLS))
       || isNewCordisDefinition(exec)) {
-      return 'Capability Evolution Policy V10 denies Cordis live mutation in the parent session; use the Search-first workflow.'
+      return 'Capability Evolution Policy V11 denies Cordis live mutation in the parent session; use the Search-first workflow.'
     }
     if (matchesSet(name, SEARCH_BYPASS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, SEARCH_BYPASS_TOOLS))) {
-      return 'Capability Evolution Policy V10 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
+      return 'Capability Evolution Policy V11 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
     }
     if (matchesSet(name, SKILL_TOOLS)) {
       const target = skillTargetFromArguments(exec.arguments)
       if (!target || target === 'cordis-plugin-development') {
-        return 'Capability Evolution Policy V10 denies loading cordis-plugin-development in the parent session.'
+        return 'Capability Evolution Policy V11 denies loading cordis-plugin-development in the parent session.'
       }
     }
     if (matchesSet(name, DELEGATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, DELEGATION_TOOLS))) {
-      return 'Capability Evolution Policy V10 denies ordinary model, subagent, agent, and workflow delegation in the parent session.'
+      return 'Capability Evolution Policy V11 denies ordinary model, subagent, agent, and workflow delegation before a managed construction grant.'
     }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PLUGIN_MUTATION_TOOLS))) {
@@ -259,7 +261,7 @@ export class ExecutionGuard {
         return 'AutoEvo parent session denies direct DSH plugin install/remove; use capability_workflow_resume / plugin_remove.'
       }
       if (!isSafeShellCommand(command, SAFE_PARENT_SHELL_RE)) {
-        return 'Capability Evolution Policy V10 permits only allowlisted read-only shell inspection commands in the parent session.'
+        return 'Capability Evolution Policy V11 permits only allowlisted read-only shell inspection commands before managed construction.'
       }
     }
     return undefined
@@ -274,14 +276,6 @@ export class ExecutionGuard {
     if (matchesSet(name, CORDIS_MUTATION_TOOLS) || isNewCordisDefinition(exec)) {
       return 'Managed construction denies Cordis mutation/definition; edit repository files in the Host-managed source instead.'
     }
-    if (matchesSet(name, SKILL_TOOLS)) {
-      const target = skillTargetFromArguments(exec.arguments)
-      if (!target || OFFICIAL_CHILD_SKILLS.has(target)) return undefined
-      return 'Managed construction permits only the official Creator skills cordis-plugin-development and editing-cordis-compositions.'
-    }
-    if (matchesSet(name, DELEGATION_TOOLS)) {
-      return 'Managed construction denies nested agent/subagent/workflow delegation; keep edits visible in this session.'
-    }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)) {
       return 'Managed construction denies direct plugin install/remove.'
     }
@@ -290,19 +284,12 @@ export class ExecutionGuard {
       if (DSH_PLUGIN_MUTATION_RE.test(command)) {
         return 'Managed construction denies direct DSH plugin install/remove.'
       }
-      if (GH_COMMAND_RE.test(command)) {
-        return 'Managed construction denies every GitHub CLI command; publication stays with Host-governed parent tools after review.'
-      }
       if (PACKAGE_PUBLICATION_RE.test(command) || RELEASE_DEPLOY_INSTALL_RE.test(command)) {
         return 'Managed construction denies package publication, version, release, deploy, and install commands.'
       }
-      if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
-        return 'Managed construction denies dependency installation or mutation; use only the reviewed repository inputs already present.'
+      if (GIT_PUBLICATION_OR_DESTRUCTIVE_RE.test(command) || GH_PUBLICATION_RE.test(command)) {
+        return 'Managed construction requires a fresh user decision before publication or destructive repository operations.'
       }
-      if (hasUnsafeGitCommand(command)) {
-        return 'Managed construction permits only read-only git status/diff/show/log/rev-parse; the Host owns commits and publication.'
-      }
-      return 'Managed construction denies model-callable shell execution because the parent session sandbox is not rebound to the managed root; Host runs bounded builds and tests after the source handoff.'
     }
     if (matchesSet(name, FS_WRITE_TOOLS)) {
       const allowedRoot = this.options.allowedRoot
@@ -313,13 +300,16 @@ export class ExecutionGuard {
       if (!target) {
         return 'Managed construction denies filesystem writes that do not name a path inside the managed source.'
       }
-      if (!isPathInsideRoot(target, allowedRoot)) {
+      const resolved = path.resolve(this.options.cwd ?? allowedRoot, target)
+      if (!isPathInsideRoot(resolved, allowedRoot)) {
         return 'Managed construction denies filesystem writes outside the Host-managed source repository.'
       }
       return undefined
     }
-    if (matchesSet(name, FS_READ_TOOLS) || matchesSet(name, CHILD_SUPPORT_TOOLS)) return undefined
-    return `Managed construction denies unrecognized tool ${JSON.stringify(name)}; only in-repo filesystem, shell testing, official Creator skill loads, Cordis inspect, AutoEvo resume, and todo tools are allowed.`
+    // Once CreationGuard has bound a managed root, DSH remains authoritative for
+    // normal tools, workspace sandboxing, approvals, and collaboration. This
+    // guard only owns AutoEvo's decision and final-action boundaries above.
+    return undefined
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from './config.js'
@@ -33,7 +35,7 @@ import {
 } from './lifecycle/decide.js'
 import { sessionCwd } from './host-identity.js'
 import { prefersChinese } from './i18n.js'
-import { ISOLATED_VERIFICATION_PROFILE, PluginInstaller } from './lifecycle/install.js'
+import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { ManagedChildHost } from './managed-child.js'
@@ -48,7 +50,7 @@ import {
 } from './resolver/lineage.js'
 import { resolveLocalCapabilities } from './resolver/local.js'
 import { resolveBundledDshRoot } from './resolver/host-bundled.js'
-import { enableBuiltinMount } from './lifecycle/enable-builtin.js'
+import { builtinMountPresent, builtinReceiptSpec, enableBuiltinMount, parseBuiltinReceiptSpec } from './lifecycle/enable-builtin.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
@@ -144,6 +146,24 @@ function asToolExec(exec: WorkflowExec): ToolRunContext {
   return exec as ToolRunContext
 }
 
+const profileMutationTails = new Map<string, Promise<void>>()
+
+async function serializeProfileMutation<T>(dshHome: string, profile: string, operation: () => Promise<T>): Promise<T> {
+  const key = `${path.resolve(dshHome).toLowerCase()}\u0000${profile.toLowerCase()}`
+  const predecessor = profileMutationTails.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const turn = new Promise<void>((resolve) => { release = resolve })
+  const tail = predecessor.catch(() => undefined).then(() => turn)
+  profileMutationTails.set(key, tail)
+  await predecessor.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (profileMutationTails.get(key) === tail) profileMutationTails.delete(key)
+  }
+}
+
 export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
@@ -178,10 +198,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
       },
       undefined,
       undefined,
-      ISOLATED_VERIFICATION_PROFILE,
+      undefined,
       () => this.currentProfileOwner(),
     )
-    this.remover = new PluginRemover(ctx, config, store, this.launcher)
+    this.remover = new PluginRemover(ctx, config, store, this.launcher, () => this.currentProfileOwner())
     this.engine = new WorkflowEngine(store, creationGuard, this, true)
   }
 
@@ -229,24 +249,33 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return this.withWorkspace(exec, () => this.engine.recover(input, exec))
   }
 
-  remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
-    return this.withWorkspace(exec, () => this.remover.remove(input, exec))
+  async remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult> {
+    return this.withWorkspace(exec, async () => {
+      const record = await this.store.getInstallation(input.installationId)
+      return serializeProfileMutation(record.dshHome, record.targetProfile, () => this.remover.remove(input, exec))
+    })
   }
 
   listVersions(input: VersionsInput): Promise<CapabilityVersionList> {
     return listCapabilityVersions(this.versionTrackingDeps(), input)
   }
 
-  rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord> {
-    return this.withWorkspace(exec, () => rollbackInstallation(this.versionTrackingDeps(), input, exec))
+  async rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord> {
+    return this.withWorkspace(exec, async () => {
+      const record = await this.store.getInstallation(input.installationId)
+      return serializeProfileMutation(record.dshHome, record.targetProfile, () =>
+        rollbackInstallation(this.versionTrackingDeps(), input, exec))
+    })
   }
 
   scanOrphans(): Promise<OrphanScan> {
     return scanOrphanedInstallations(this.adoptDeps())
   }
 
-  adopt(input: AdoptInput): Promise<InstallationRecord> {
-    return adoptInstallation(this.adoptDeps(), input)
+  async adopt(input: AdoptInput): Promise<InstallationRecord> {
+    const profile = await this.currentProfileOwner()
+    return serializeProfileMutation(this.config.dshHome, profile, () =>
+      adoptInstallation({ ...this.adoptDeps(), currentProfile: async () => profile }, input))
   }
 
   checkUpdates(exec: ToolRunContext): Promise<CapabilityUpdateReport> {
@@ -283,14 +312,18 @@ export class CapabilityEvolutionService implements WorkflowHost {
         undefined,
         undefined,
         undefined,
-        ISOLATED_VERIFICATION_PROFILE,
+        undefined,
         () => this.currentProfileOwner(),
       ),
     }
   }
 
-  cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult> {
-    return this.withWorkspace(exec, () => this.remover.remove({ installationId }, asToolExec(exec)))
+  async cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult> {
+    return this.withWorkspace(exec, async () => {
+      const record = await this.store.getInstallation(installationId)
+      return serializeProfileMutation(record.dshHome, record.targetProfile, () =>
+        this.remover.remove({ installationId }, asToolExec(exec)))
+    })
   }
 
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<ResolutionRecord> {
@@ -317,12 +350,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
     for (const review of reviews) {
       if (review.sourceSnapshot.kind !== 'local' || !review.installSpec) continue
       const root = managedSnapshotRootReview(review, reviewById)
-      if (!root || root.sourceSnapshot.kind !== 'github') continue
       const completed = await this.sources.validateCompletedSnapshot({
         path: review.sourceSnapshot.path,
         reviewId: review.id,
-        repository: root.sourceSnapshot.repository,
-        baseCommit: root.sourceSnapshot.commit,
+        repository: root?.sourceSnapshot.kind === 'github' ? root.sourceSnapshot.repository : null,
+        baseCommit: root?.sourceSnapshot.kind === 'github'
+          ? root.sourceSnapshot.commit
+          : review.sourceSnapshot.baseCommit,
         workspaceCwd: local.cwd,
         ...(exec.signal ? { signal: exec.signal } : {}),
       }).catch(() => undefined)
@@ -522,6 +556,47 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ?.evolutionTarget
     if (!expected || hashObject(expected) !== hashObject(target)) {
       throw new EvolutionError('invalid_input', 'Installed-source review must use the frozen Host evolution target')
+    }
+    if (target.kind === 'managed_local') {
+      const priorReview = target.reviewId
+        ? await this.store.getReview(target.reviewId).catch(() => undefined)
+        : undefined
+      if (!workflow || priorReview?.sourceSnapshot.kind !== 'local' || !target.sourceId) {
+        throw new EvolutionError('review_rejected', 'Managed local review is missing its completed Host source')
+      }
+      const receipt = await this.sources.validateCompletedSnapshot({
+        path: priorReview.sourceSnapshot.path,
+        reviewId: priorReview.id,
+        repository: null,
+        baseCommit: target.commit,
+        workspaceCwd: resolution.cwd,
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      if (!receipt
+        || receipt.sourceId !== target.sourceId
+        || priorReview.sourceSnapshot.baseCommit.toLowerCase() !== target.commit.toLowerCase()
+        || priorReview.installSpec !== target.dependencySpec
+        || priorReview.manifest.packageName !== target.packageName) {
+        throw new EvolutionError('review_rejected', 'Managed local capability failed frozen provenance validation')
+      }
+      await this.sources.claimCompletedSourceForWorkflow(target.sourceId, workflow.id, exec.signal)
+      workflow.managedSourceId = target.sourceId
+      workflow.updatedAt = new Date().toISOString()
+      await this.store.put('workflows', workflow)
+      try {
+        return await reviewAndFreezeManagedSource(this.managedWorkDeps(), {
+          resolution,
+          sourceId: target.sourceId,
+          path: receipt.path,
+          baseReviewId: priorReview.id,
+          lineageRootCommit: target.commit,
+          workflowId: workflow.id,
+          exec,
+        })
+      } catch (error) {
+        await this.sources.completeWorkflow(target.sourceId, workflow.id, exec.signal).catch(() => undefined)
+        throw error
+      }
     }
     validateGithubRepository(target.repository)
     if (target.kind === 'reviewed_snapshot' || target.kind === 'failed_install') {
@@ -753,20 +828,25 @@ export class CapabilityEvolutionService implements WorkflowHost {
       && (!provenance || provenance.reviewId !== review.id || !provenance.artifactHash)) {
       throw new EvolutionError('review_rejected', 'Managed local review is missing matching frozen artifact provenance')
     }
-    const record = await this.installer.install({
-      reviewId: review.id,
-      targetProfile: input.targetProfile,
-      retention: input.retention,
-      ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
-      ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
-      ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
-      ...(input.replacement ? { replacement: input.replacement } : {}),
-    }, asToolExec(exec), {
-      ...(workflow ? { workflow } : {}),
-      ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
-      ...(workflow?.selectionReceipt ? { receipt: workflow.selectionReceipt } : {}),
-      ...(input.retention ? { retention: input.retention } : {}),
-    })
+    const record = await serializeProfileMutation(
+      input.retention === 'persistent' ? this.config.dshHome : this.store.root,
+      input.targetProfile,
+      () => this.installer.install({
+        ...(workflow?.pendingInstallationId ? { installationId: workflow.pendingInstallationId } : {}),
+        reviewId: review.id,
+        targetProfile: input.targetProfile,
+        retention: input.retention,
+        ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
+        ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
+        ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
+        ...(input.replacement ? { replacement: input.replacement } : {}),
+      }, asToolExec(exec), {
+        ...(workflow ? { workflow } : {}),
+        ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
+        ...(workflow?.selectionReceipt ? { receipt: workflow.selectionReceipt } : {}),
+        ...(input.retention ? { retention: input.retention } : {}),
+      }),
+    )
     return record
   }
 
@@ -926,6 +1006,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return this.store.getInstallation(id)
   }
 
+  async findInstallationForWorkflow(workflowId: string): Promise<InstallationRecord | undefined> {
+    return this.store.findInstallationForWorkflow(workflowId)
+  }
+
   listInstallProfiles(): Promise<string[]> {
     return this.currentProfileOwner().then((profile) => [profile])
   }
@@ -938,7 +1022,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return this.currentProfileOwner().catch(() => undefined)
   }
 
-  async enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void> {
+  async enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord> {
     const commitment = workflow.actionCommitment
     const endpoint = commitment?.endpoint
     if (!commitment || commitment.requestedAction !== 'enable_builtin' || endpoint?.kind !== 'host_bundled_enable') {
@@ -955,13 +1039,98 @@ export class CapabilityEvolutionService implements WorkflowHost {
         command: this.config.dshCommand,
       })
     }
-    await enableBuiltinMount({
-      launcher: this.launcher,
-      dshHome: this.config.dshHome,
-      bundledRoot,
-      endpoint,
-      cwd: workflow.cwd ?? process.cwd(),
-      ...(exec.signal ? { signal: exec.signal } : {}),
+    return await serializeProfileMutation(this.config.dshHome, endpoint.targetProfile, async () => {
+      const createdAt = new Date().toISOString()
+      const installationId = workflow.pendingInstallationId
+        ?? `installation_${hashObject({ workflowId: workflow.id, endpoint, createdAt, nonce: randomUUID() }).slice(0, 24)}`
+      let provisional = await this.store.getInstallation(installationId).catch((error: unknown) => {
+        if (error instanceof EvolutionError && error.code === 'not_found') return undefined
+        throw error
+      })
+      if (provisional) {
+        const spec = parseBuiltinReceiptSpec(provisional.installSpec)
+        if (provisional.workflowId !== workflow.id
+          || provisional.packageName !== endpoint.packageName
+          || provisional.targetProfile !== endpoint.targetProfile
+          || !spec
+          || spec.version !== endpoint.version
+          || spec.mountId !== endpoint.mountId) {
+          throw new EvolutionError('review_expired', 'The provisional built-in receipt no longer matches the selected target')
+        }
+        if (provisional.installPhase === 'completed' && provisional.installed) return provisional
+      } else {
+        const presentBefore = await builtinMountPresent({
+          dshHome: this.config.dshHome,
+          targetProfile: endpoint.targetProfile,
+          mountId: endpoint.mountId,
+          packageName: endpoint.packageName,
+        })
+        provisional = {
+          schemaVersion: 1,
+          id: installationId,
+          createdAt,
+          workflowId: workflow.id,
+          targetProfile: endpoint.targetProfile,
+          retention: 'persistent',
+          dshHome: this.config.dshHome,
+          packageName: endpoint.packageName,
+          installSpec: builtinReceiptSpec({ version: endpoint.version, mountId: endpoint.mountId, wrote: !presentBefore }),
+          installPhase: 'prepared',
+          installState: 'unknown',
+          installOutcome: 'pending',
+          installed: false,
+          loaded: false,
+          verified: false,
+          restartRequired: false,
+          removed: false,
+          verification: {
+            attempted: false,
+            expectedTools: [],
+            calledTools: [],
+            resultTools: [],
+            failedTools: [],
+            sessionFiles: [],
+            taskResultObserved: false,
+            reason: 'Built-in enablement is prepared and linked to this workflow.',
+          },
+        }
+        await this.store.put('installations', provisional)
+      }
+      await enableBuiltinMount({
+        launcher: this.launcher,
+        dshHome: this.config.dshHome,
+        bundledRoot,
+        endpoint,
+        cwd: workflow.cwd ?? process.cwd(),
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      const ownership = parseBuiltinReceiptSpec(provisional.installSpec)!.wrote
+      const record: InstallationRecord = {
+        ...provisional,
+        installSpec: builtinReceiptSpec({ version: endpoint.version, mountId: endpoint.mountId, wrote: ownership }),
+        installPhase: 'completed',
+        installState: 'installed',
+        installOutcome: 'pending',
+        installed: true,
+        loaded: false,
+        verified: false,
+        restartRequired: ownership,
+        removed: false,
+        verification: {
+          attempted: false,
+          expectedTools: [],
+          calledTools: [],
+          resultTools: [],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: false,
+          reason: ownership
+            ? 'The built-in mount was added and the composed profile was validated; restart is required for the serving process.'
+            : 'The exact built-in mount already existed; no profile file was changed.',
+        },
+      }
+      await this.store.put('installations', record)
+      return record
     })
   }
 
@@ -1014,4 +1183,5 @@ export const _testing = {
   boundedReviewerFiles,
   reviewCandidateDigest,
   reviewSnapshotDigest,
+  serializeProfileMutation,
 }

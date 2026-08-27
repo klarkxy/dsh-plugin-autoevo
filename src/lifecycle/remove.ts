@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, realpath, rm } from 'node:fs/promises'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -10,6 +10,22 @@ import { assertSafePackageName } from '../package-name.js'
 import { sha256 } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
+import { disableBuiltinMount, parseBuiltinReceiptSpec } from './enable-builtin.js'
+
+async function canonicalPath(candidate: string): Promise<string> {
+  const resolved = path.resolve(candidate)
+  const canonical = await realpath(resolved).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolved
+    throw error
+  })
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical
+}
+
+function validateProfile(profile: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/u.test(profile)) {
+    throw new EvolutionError('invalid_input', 'Installation receipt contains an unsafe target profile')
+  }
+}
 
 export function removalApprovalReason(requirement: string, record: InstallationRecord): string {
   return copy(
@@ -70,7 +86,21 @@ export class PluginRemover {
     private readonly config: RuntimeConfig,
     private readonly store: StateStore,
     private readonly launcher: DshLauncher,
+    private readonly resolveDestinationProfile?: () => Promise<string>,
   ) {}
+
+  private async assertPersistentOwner(record: InstallationRecord): Promise<void> {
+    validateProfile(record.targetProfile)
+    if (await canonicalPath(record.dshHome) !== await canonicalPath(this.config.dshHome)) {
+      throw new EvolutionError('review_expired', 'Installation receipt no longer targets the configured DSH home; refusing removal')
+    }
+    if (this.resolveDestinationProfile) {
+      const currentProfile = await this.resolveDestinationProfile()
+      if (currentProfile !== record.targetProfile) {
+        throw new EvolutionError('review_expired', 'Installation receipt no longer targets the live DSH profile; refusing removal')
+      }
+    }
+  }
 
   /**
    * Uninstalls exactly one installation receipt.
@@ -90,18 +120,58 @@ export class PluginRemover {
     const packageName = record.retention === 'persistent'
       ? assertSafePackageName(record.packageName)
       : undefined
+    const builtin = record.retention === 'persistent' ? parseBuiltinReceiptSpec(record.installSpec) : undefined
+    if (record.retention === 'persistent') {
+      await this.assertPersistentOwner(record)
+      if (!builtin) {
+        if (!this.launcher.profileDependencySpec) {
+          throw new EvolutionError('invalid_input', 'This remover host cannot read the exact live profile dependency spec')
+        }
+        const liveSpec = await this.launcher.profileDependencySpec(
+          record.dshHome,
+          record.targetProfile,
+          packageName!,
+        )
+        if (liveSpec !== undefined && liveSpec !== record.installSpec) {
+          throw new EvolutionError('review_expired', 'Live profile dependency spec changed after this receipt; refusing removal')
+        }
+      }
+    }
     await requestRemovalApproval(this.ctx, this.store, exec, record)
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
     if (record.retention === 'persistent') {
-      const dependencyPresent = await this.launcher.hasProfileDependency(record.dshHome, record.targetProfile, packageName!)
-      if (dependencyPresent) {
-        const result = await this.launcher.remove(record.dshHome, record.targetProfile, packageName!, cwd, exec.signal)
-        if (result.exitCode !== 0
-          && await this.launcher.hasProfileDependency(record.dshHome, record.targetProfile, packageName!)) {
-          throw new EvolutionError('command_failed', 'DSH could not remove the persistent plugin dependency', {
-            exitCode: result.exitCode,
-            diagnosticHash: sha256(result.stderr),
-          })
+      if (builtin) {
+        await disableBuiltinMount({
+          launcher: this.launcher,
+          dshHome: record.dshHome,
+          targetProfile: record.targetProfile,
+          packageName: packageName!,
+          spec: builtin,
+          cwd,
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+      } else {
+        const liveSpec = await this.launcher.profileDependencySpec!(
+          record.dshHome,
+          record.targetProfile,
+          packageName!,
+        )
+        if (liveSpec !== undefined && liveSpec !== record.installSpec) {
+          throw new EvolutionError('review_expired', 'Live profile dependency spec changed after approval; refusing removal')
+        }
+        if (liveSpec !== undefined) {
+          const result = await this.launcher.remove(record.dshHome, record.targetProfile, packageName!, cwd, exec.signal)
+          const remainingSpec = await this.launcher.profileDependencySpec!(
+            record.dshHome,
+            record.targetProfile,
+            packageName!,
+          )
+          if (remainingSpec !== undefined) {
+            throw new EvolutionError('command_failed', 'DSH could not remove the persistent plugin dependency', {
+              exitCode: result.exitCode,
+              diagnosticHash: sha256(result.stderr),
+            })
+          }
         }
       }
       if (record.ownedArtifactRoot) {

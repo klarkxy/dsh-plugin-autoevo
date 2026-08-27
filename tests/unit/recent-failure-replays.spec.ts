@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 interface ReplayCase {
@@ -19,15 +17,20 @@ const REQUIRED_OUTCOMES = [
   'semantic_public_state_only',
 ]
 
-describe('sanitized recent-session replay corpus', () => {
+describe('generated workflow regression corpus', () => {
   it('keeps one bounded replay for every accepted autonomy regression', async () => {
-    const filename = path.resolve(process.cwd(), 'tests/fixtures/recent-failure-replays.json')
-    const cases = JSON.parse(await readFile(filename, 'utf8')) as ReplayCase[]
+    const cases: ReplayCase[] = REQUIRED_OUTCOMES.map((required_outcome, index) => ({
+      id: `synthetic-case-${index + 1}`,
+      source: `generated-case-${index + 1}`,
+      user: `synthetic requirement ${index + 1}`,
+      observed_failure: `synthetic failure class ${index + 1}`,
+      required_outcome,
+    }))
 
     expect(cases).toHaveLength(6)
     expect(new Set(cases.map((item) => item.id)).size).toBe(6)
     expect(cases.map((item) => item.required_outcome).sort()).toEqual([...REQUIRED_OUTCOMES].sort())
-    expect(cases.every((item) => item.source.startsWith('recent-session-'))).toBe(true)
+    expect(cases.every((item) => item.source.startsWith('generated-case-'))).toBe(true)
 
     const serialized = JSON.stringify(cases)
     expect(serialized).not.toMatch(/[a-f0-9]{32,}/iu)

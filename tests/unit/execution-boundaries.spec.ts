@@ -26,7 +26,7 @@ function exec(name: string, args: Record<string, unknown> = {}): ToolExecution {
 describe('parent execution boundaries', () => {
   const parent = new ExecutionGuard({ role: 'parent' })
 
-  it('enforces Policy V10 parent boundaries while preserving read-only inspection and ordinary workspace edits', async () => {
+  it('enforces the current parent boundaries while preserving read-only inspection and ordinary workspace edits', async () => {
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     for (const call of [
       exec('capability_workflow'),
@@ -52,8 +52,8 @@ describe('parent execution boundaries', () => {
     }
     expect(parent.guard(exec('plugin_install'))).toMatch(/plugin install\/remove/i)
     expect(parent.guard(exec('plugin_remove'))).toMatch(/plugin install\/remove/i)
-    expect(parent.guard(exec('pwsh', { command: 'dsh plugin add dsh-xai' }))).toMatch(/plugin install\/remove/i)
-    expect(parent.guard(exec('pwsh', { command: 'dsh plugin remove dsh-xai' }))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('pwsh', { command: 'dsh plugin add anonymous-capability' }))).toMatch(/plugin install\/remove/i)
+    expect(parent.guard(exec('pwsh', { command: 'dsh plugin remove anonymous-capability' }))).toMatch(/plugin install\/remove/i)
     for (const call of [
       exec('cordis_define', { plugin: { kind: 'existing' } }),
       exec('cordis_define', { plugin: { kind: 'new' } }),
@@ -72,6 +72,7 @@ describe('parent execution boundaries', () => {
     expect(parent.guard(exec('bridge', { tool_name: 'find_dsh_plugin' }))).toMatch(/direct or nested/i)
     expect(parent.guard(exec('pwsh', { command: 'Get-Content (Remove-Item notes.txt -PassThru)' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('pwsh', { command: 'Get-Content notes.txt & whoami' }))).toMatch(/read-only shell/i)
+    expect(parent.guard(exec('pwsh', { command: 'pnpm test' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('bash', { command: 'rg --pre dangerous needle .' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('pwsh', { command: 'git diff --output=outside.patch' }))).toMatch(/read-only shell/i)
     const protectedParent = new ExecutionGuard({ role: 'parent', cwd: 'C:/workspace', protectedRoots: ['C:/workspace/.autoevo'] })
@@ -130,7 +131,7 @@ describe('constructor execution boundaries', () => {
   const root = path.join(os.tmpdir(), 'autoevo-managed-source')
   const constructor = new ExecutionGuard({ role: 'constructor', allowedRoot: root, cwd: root })
 
-  it('allows AutoEvo resume and in-root writes, and denies nested subagents and outside writes', () => {
+  it('allows ordinary DSH construction tools after a managed root is bound, while retaining AutoEvo boundaries', () => {
     expect(constructor.guard(exec('capability_workflow_resume', {
       workflow_id: `workflow_${'a'.repeat(24)}`,
       navigation: { kind: 'finish_managed_work' },
@@ -142,14 +143,26 @@ describe('constructor execution boundaries', () => {
     expect(constructor.guard(exec('capability_workflow'))).toMatch(/Host owns every other AutoEvo/i)
     expect(constructor.guard(exec('plugin_remove'))).toMatch(/Host owns every other AutoEvo/i)
     expect(constructor.guard(exec('write', { path: path.join(root, 'src', 'index.ts') }))).toBeUndefined()
-    expect(constructor.guard(exec('subagent'))).toMatch(/nested agent\/subagent\/workflow|denies nested/i)
+    expect(constructor.guard(exec('write', { path: 'src/index.ts' }))).toBeUndefined()
+    expect(constructor.guard(exec('write', { path: './src/index.ts' }))).toBeUndefined()
+    expect(constructor.guard(exec('write', { path: '../outside.ts' }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('write', { path: path.join(os.tmpdir(), 'outside.ts') }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
-    expect(constructor.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
-    expect(constructor.guard(exec('pwsh', { command: 'gh pr create --fill' }))).toMatch(/GitHub CLI/i)
-    expect(constructor.guard(exec('pwsh', { command: 'Set-Content ../outside.txt unsafe' }))).toMatch(/denies model-callable shell/i)
-    expect(constructor.guard(exec('pwsh', { command: 'Get-Content (Remove-Item ../outside.txt -PassThru)' }))).toMatch(/denies model-callable shell/i)
-    expect(constructor.guard(exec('pwsh', { command: 'pnpm test', cwd: root }))).toMatch(/Host runs bounded builds and tests/i)
+    expect(constructor.guard(exec('pwsh', { command: 'dsh plugin add unreviewed' }))).toMatch(/plugin install\/remove/i)
+    expect(constructor.guard(exec('pwsh', { command: 'dsh plugin install unreviewed' }))).toMatch(/plugin install\/remove/i)
+    expect(constructor.guard(exec('pwsh', { command: 'pnpm publish' }))).toMatch(/publication|version|release|deploy|install/i)
+    expect(constructor.guard(exec('pwsh', { command: 'git push origin HEAD' }))).toMatch(/fresh user decision/i)
+    expect(constructor.guard(exec('bash', { command: 'gh pr create --title update' }))).toMatch(/fresh user decision/i)
+    expect(constructor.guard(exec('pwsh', { command: 'git reset --hard HEAD~1' }))).toMatch(/fresh user decision/i)
+
+    for (const call of [
+      exec('pwsh', { command: 'pnpm test', cwd: root }),
+      exec('bash', { command: 'pnpm add example-package' }),
+      exec('pwsh', { command: 'git commit -am checkpoint' }),
+      exec('subagent'),
+      exec('skill', { name: 'some-dsh-permitted-skill' }),
+      exec('run_code'),
+    ]) expect(constructor.guard(call)).toBeUndefined()
   })
 })
 

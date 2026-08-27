@@ -4,6 +4,7 @@ import { EvolutionError } from '../../src/errors.js'
 import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import { executeNode, interruptPayload, type NodeExecutionResult, transition } from '../../src/workflow/graph.js'
+import { candidateSnapshotFor } from '../../src/workflow/candidates.js'
 import type { WorkflowExec, WorkflowHost, WorkflowNodeId, WorkflowRecord } from '../../src/workflow/contracts.js'
 
 function resolution(): ResolutionRecord {
@@ -272,6 +273,83 @@ describe('workflow graph nodes', () => {
     } as unknown as WorkflowHost
     const result = await runNode('discover_remote', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'next', node: 'await_discovery', resolution: current })
+  })
+
+  it('auto-seals a completed empty discovery into the existing selection gate', async () => {
+    const current = resolution()
+    current.remoteCandidates = []
+    const host = {
+      async discoverRemote() {
+        return current
+      },
+    } as unknown as WorkflowHost
+    const result = await runNode('discover_remote', { host, resolution: current })
+    expect(result).toMatchObject({ kind: 'next', node: 'await_selection', resolution: current })
+  })
+
+  it('keeps incomplete discovery retryable and excludes creation from its selection gate', async () => {
+    const current = resolution()
+    current.remoteCandidates = []
+    current.remoteDiscoveryComplete = false
+    const record = workflow('await_selection')
+    record.candidateSnapshot = []
+    const selection = interruptPayload('await_selection', current, [], { workflow: record })
+    expect(selection.options.map((item) => item.id)).toEqual(['search_more', 'stop'])
+  })
+
+  it('turns a discovery error into a diagnosable retry checkpoint', async () => {
+    const current = resolution()
+    current.remoteCandidates = []
+    current.remoteDiscoveryComplete = false
+    const record = workflow('discover_remote')
+    const host = {
+      async discoverRemote() {
+        throw new EvolutionError('github_unavailable', 'temporary discovery failure')
+      },
+    } as unknown as WorkflowHost
+    const result = await runNode('discover_remote', { host, resolution: current, workflow: record })
+    expect(result).toMatchObject({ kind: 'next', node: 'await_selection' })
+    expect(record.lastFailure).toMatchObject({
+      stage: 'discovery',
+      code: 'github_unavailable',
+      retryable: true,
+    })
+  })
+
+  it('clears a prior discovery failure after a successful retry', async () => {
+    const current = resolution()
+    current.remoteCandidates = []
+    current.remoteDiscoveryComplete = false
+    const record = workflow('discover_remote')
+    record.lastFailure = {
+      stage: 'discovery',
+      code: 'github_unavailable',
+      message: 'synthetic discovery outage',
+      retryable: true,
+    }
+    const host = {
+      async discoverRemote() {
+        return { ...current, remoteDiscoveryComplete: true }
+      },
+    } as unknown as WorkflowHost
+    const result = await runNode('discover_remote', { host, resolution: current, workflow: record })
+    expect(result).toMatchObject({ kind: 'next', node: 'await_selection' })
+    expect(record.lastFailure).toBeUndefined()
+  })
+
+  it('allows updated remote evidence to reappear after the earlier snapshot was rejected', () => {
+    const first = resolution()
+    const rejectedId = candidateSnapshotFor(first)[0]!.id
+    const updated = {
+      ...first,
+      remoteCandidates: [{
+        ...first.remoteCandidates[0]!,
+        updatedAt: '2026-08-26T00:00:00.000Z',
+      }],
+    }
+    const refreshed = candidateSnapshotFor(updated, new Set([rejectedId]))
+    expect(refreshed).toHaveLength(1)
+    expect(refreshed[0]?.id).not.toBe(rejectedId)
   })
 
   it('reviews the selected GitHub repository then parks on confirmation', async () => {

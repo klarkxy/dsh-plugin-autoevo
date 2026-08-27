@@ -16,9 +16,7 @@ import { assertUseThisReceipt } from './lifecycle/decide.js'
 import {
   assertDirectUseAllowed,
   frozenManifestDigest,
-  needsSemanticReviewer,
   reviewCandidateDigest,
-  reviewerBindingDigest,
   reviewSnapshotDigest,
   type InstallCommitmentBinding,
 } from './review/index.js'
@@ -499,15 +497,6 @@ export class CreationGuard {
         actual: binding.retention,
       })
     }
-    if (needsSemanticReviewer(review)) {
-      if (!review.reviewerRequestId || commitment.reviewerRequestId !== review.reviewerRequestId) {
-        throw new EvolutionError('review_rejected', 'Install commitment is not bound to the current reviewer request')
-      }
-      if (!review.reviewerVerdict
-        || commitment.reviewerVerdictDigest !== reviewerBindingDigest(review.reviewerVerdict)) {
-        throw new EvolutionError('review_rejected', 'Install commitment is not bound to the current reviewer verdict')
-      }
-    }
     assertDirectUseAllowed(review, binding?.workflow)
     assertUseThisReceipt(review, resolution)
   }
@@ -603,7 +592,7 @@ export class CreationGuard {
   }
 
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
-    // The outer Policy V10 execution guard denies every parent live definition.
+    // The outer current-policy execution guard denies every parent live definition.
     // This inner guard remains responsible for managed-construction protocol state.
   }
 

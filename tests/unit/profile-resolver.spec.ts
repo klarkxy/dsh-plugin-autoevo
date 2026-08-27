@@ -147,27 +147,27 @@ describe('profile capability resolver', () => {
     const dshHome = await profileHome()
     const profileRoot = path.join(dshHome, 'profiles', 'web')
     await writeFile(path.join(profileRoot, 'package.json'), JSON.stringify({
-      dependencies: { 'dsh-xai': `github:MirDie/dsh-xai#${'a'.repeat(40)}` },
-      dsh: { profile: { bundles: ['dsh-xai'] } },
+      dependencies: { 'dsh-plugin-alpha': `github:anonymous-lab/dsh-plugin-alpha#${'a'.repeat(40)}` },
+      dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
     }))
     const result = await resolveLocalCapabilities(
       emptyContext(),
-      '修改当前已安装的 dsh-xai',
+      '修改当前已安装的 dsh-plugin-alpha',
       { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
       {
         dshHome,
         activeProfile: 'web',
-        intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', targetName: 'dsh-xai' },
+        intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', targetName: 'dsh-plugin-alpha' },
       },
     )
     expect(result.shouldDiscoverRemote).toBe(true)
     expect(result.candidates).toEqual([expect.objectContaining({
-      name: 'dsh-xai',
+      name: 'dsh-plugin-alpha',
       fit: 'partial',
       reuseEligible: true,
       evolutionTarget: expect.objectContaining({
         kind: 'github_exact',
-        repository: 'MirDie/dsh-xai',
+        repository: 'anonymous-lab/dsh-plugin-alpha',
       }),
     })])
   })

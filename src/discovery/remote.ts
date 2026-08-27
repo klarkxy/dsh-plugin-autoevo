@@ -6,7 +6,9 @@ import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries, marketplaceSearchQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
 
-export const FIND_PLUGIN_REPOSITORY = 'awesome-dsh-plugin/dsh-find-plugin'
+const REMOTE_OPERATION_ALIASES = [
+  ['search', 'find', 'discover', 'browse', '搜索', '查找', '检索', '发现', '浏览'],
+] as const
 
 export interface RemoteDiscoveryResult {
   candidates: RemotePluginCandidate[]
@@ -47,13 +49,20 @@ function relevantRemoteCandidates(
   requirement: string,
   candidates: readonly RemotePluginCandidate[],
 ): RemotePluginCandidate[] {
+  const normalizedRequirement = requirement.normalize('NFKC').toLocaleLowerCase('en-US')
   return candidates
     .map((candidate) => ({
       candidate,
-      confidence: matchConfidence(
-        requirement,
-        `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
-        `${candidate.description} ${candidate.topics.join(' ')}`,
+      confidence: Math.max(
+        matchConfidence(
+          requirement,
+          `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
+          `${candidate.description} ${candidate.topics.join(' ')}`,
+        ),
+        remoteOperationEvidence(
+          normalizedRequirement,
+          `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''} ${candidate.description} ${candidate.topics.join(' ')}`,
+        ),
       ),
     }))
     .filter(({ confidence }) => confidence >= 0.3)
@@ -62,6 +71,14 @@ function relevantRemoteCandidates(
       || right.candidate.stars - left.candidate.stars
       || left.candidate.repository.localeCompare(right.candidate.repository))
     .map(({ candidate }) => annotateRemoteCandidate(requirement, candidate))
+}
+
+function remoteOperationEvidence(normalizedRequirement: string, candidateText: string): number {
+  const normalizedCandidate = candidateText.normalize('NFKC').toLocaleLowerCase('en-US')
+  const requested = REMOTE_OPERATION_ALIASES.filter((aliases) => aliases.some((alias) => normalizedRequirement.includes(alias)))
+  if (requested.length === 0) return 0
+  const matched = requested.filter((aliases) => aliases.some((alias) => normalizedCandidate.includes(alias))).length
+  return matched === requested.length ? 0.42 : 0
 }
 
 export function githubSearchPhrases(requirement: string, extra?: readonly string[]): string[] {
@@ -115,7 +132,6 @@ export async function discoverRemoteCandidates(options: {
       queries.push(phrase)
       reasons.push(`GitHub topic search ${JSON.stringify(phrase)} returned ${batch.length} summaries.`)
       for (const candidate of batch) {
-        if (candidate.repository.toLowerCase() === FIND_PLUGIN_REPOSITORY.toLowerCase()) continue
         const key = candidate.repository.toLowerCase()
         const prior = merged.get(key)
         if (!prior || candidate.stars > prior.stars || (candidate.updatedAt ?? '') > (prior.updatedAt ?? '')) {
@@ -151,6 +167,7 @@ export const _testing = {
   annotateRemoteCandidate,
   boundedText,
   githubSearchPhrases,
+  remoteOperationEvidence,
   relevantRemoteCandidates,
   validateGithubRepository,
 }

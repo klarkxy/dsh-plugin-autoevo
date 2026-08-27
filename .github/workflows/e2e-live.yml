@@ -18,6 +18,8 @@ jobs:
     env:
       CI: 'true'
       GH_TOKEN: ${{ github.token }}
+      AUTOEVO_CANARY_REQUIREMENT: ${{ vars.AUTOEVO_CANARY_REQUIREMENT }}
+      AUTOEVO_CANARY_REPOSITORY: ${{ vars.AUTOEVO_CANARY_REPOSITORY }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/action-setup@v6.0.10
@@ -29,7 +31,12 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm add -D @deepseek-ai/dsh@0.1.1-rc.2
-      - run: git checkout -- package.json pnpm-lock.yaml
+      - name: Validate anonymous canary configuration
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AUTOEVO_CANARY_REQUIREMENT)) { throw 'AUTOEVO_CANARY_REQUIREMENT repository variable is required' }
+          if ($env:AUTOEVO_CANARY_REPOSITORY -notmatch '^[\w.-]+/[\w.-]+$') { throw 'AUTOEVO_CANARY_REPOSITORY must be owner/repository' }
+      - run: npm install --prefix "$env:RUNNER_TEMP\\autoevo-dsh-harness" --no-save --ignore-scripts @deepseek-ai/dsh@0.1.1-rc.2
+      - run: '"DSH_PACKAGE_ROOT=$env:RUNNER_TEMP\\autoevo-dsh-harness\\node_modules\\@deepseek-ai\\dsh" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
       - run: pnpm build
       - run: pnpm test:e2e:live

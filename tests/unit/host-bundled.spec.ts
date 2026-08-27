@@ -19,7 +19,7 @@ import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const temporary = trackTempDirs()
 
-const TIME_REQUIREMENT = '我需要一个能在每一次对话的时候把当前时间带着发送出去的插件，用来给dsh知道时间和耗时。'
+const BUNDLED_REQUIREMENT = 'provide orbit clock elapsed time context'
 
 async function seedBundledRoot(root: string): Promise<void> {
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.2' }))
@@ -28,15 +28,15 @@ async function seedBundledRoot(root: string): Promise<void> {
     await mkdir(path.join(scopeDir, dir), { recursive: true })
     await writeFile(path.join(scopeDir, dir, 'package.json'), JSON.stringify(manifest))
   }
-  await seed('dsh-time-context', {
-    name: '@deepseek-ai/dsh-time-context',
+  await seed('dsh-orbit-context', {
+    name: '@deepseek-ai/dsh-orbit-context',
     version: '0.1.1-rc.2',
-    description: 'Opt-in durable per-step context with the current time and elapsed time',
+    description: 'Opt-in orbit clock elapsed time context',
   })
-  await seed('dsh-tmux-context', {
-    name: '@deepseek-ai/dsh-tmux-context',
+  await seed('dsh-pane-context', {
+    name: '@deepseek-ai/dsh-pane-context',
     version: '0.1.1-rc.2',
-    description: "Opt-in durable per-step context with this agent's tmux pane and window location",
+    description: 'Opt-in pane location context',
   })
   await seed('dsh-agent-loop', {
     name: '@deepseek-ai/dsh-agent-loop',
@@ -67,11 +67,11 @@ function emptyContext(): Context {
 const exec = { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>
 
 describe('host-bundled opt-in capabilities', () => {
-  it('matches the motivating Chinese time requirement against the bundled package', () => {
+  it('matches a synthetic requirement against a bundled package by capability text', () => {
     const confidence = matchConfidence(
-      TIME_REQUIREMENT,
-      '@deepseek-ai/dsh-time-context',
-      'Opt-in durable per-step context with the current time and elapsed time',
+      BUNDLED_REQUIREMENT,
+      '@deepseek-ai/dsh-orbit-context',
+      'Opt-in orbit clock elapsed time context',
     )
     expect(confidence).toBeGreaterThanOrEqual(0.62)
   })
@@ -84,10 +84,10 @@ describe('host-bundled opt-in capabilities', () => {
     const packages = await listBundledOptInPackages(root)
 
     expect(packages.map((entry) => entry.packageName)).toEqual([
-      '@deepseek-ai/dsh-time-context',
-      '@deepseek-ai/dsh-tmux-context',
+      '@deepseek-ai/dsh-orbit-context',
+      '@deepseek-ai/dsh-pane-context',
     ])
-    expect(packages[0]).toMatchObject({ mountId: 'time-context', version: '0.1.1-rc.2' })
+    expect(packages[0]).toMatchObject({ mountId: 'orbit-context', version: '0.1.1-rc.2' })
   })
 
   it('locates the dsh package root through the healed profile fallback link', async () => {
@@ -128,25 +128,25 @@ describe('host-bundled opt-in capabilities', () => {
       dshPackageRoot: bundledRoot,
       dshHome,
       activeProfile: 'web',
-      requirement: TIME_REQUIREMENT,
+      requirement: BUNDLED_REQUIREMENT,
       match: matchConfidence,
     })
     expect(candidates).toHaveLength(1)
     expect(candidates[0]).toMatchObject({
       kind: 'plugin',
-      name: '@deepseek-ai/dsh-time-context',
+      name: '@deepseek-ai/dsh-orbit-context',
       availability: 'host_bundled',
-      hostBundled: { packageName: '@deepseek-ai/dsh-time-context', version: '0.1.1-rc.2', mountId: 'time-context' },
+      hostBundled: { packageName: '@deepseek-ai/dsh-orbit-context', version: '0.1.1-rc.2', mountId: 'orbit-context' },
     })
 
     const profileRoot = path.join(dshHome, 'profiles', 'web')
     await mkdir(profileRoot, { recursive: true })
-    await writeFile(path.join(profileRoot, 'cordis.patch.yml'), "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n")
+    await writeFile(path.join(profileRoot, 'cordis.patch.yml'), "- insert:\n    - id: orbit-context\n      name: '@deepseek-ai/dsh-orbit-context'\n")
     const mounted = await resolveHostBundledCapabilities({
       dshPackageRoot: bundledRoot,
       dshHome,
       activeProfile: 'web',
-      requirement: TIME_REQUIREMENT,
+      requirement: BUNDLED_REQUIREMENT,
       match: matchConfidence,
     })
     expect(mounted).toEqual([])
@@ -161,7 +161,7 @@ describe('host-bundled opt-in capabilities', () => {
     await seedBundledRoot(bundledRoot)
     await mkdir(path.join(dshHome, 'profiles', 'web'), { recursive: true })
 
-    const result = await resolveLocalCapabilities(emptyContext(), TIME_REQUIREMENT, exec, {
+    const result = await resolveLocalCapabilities(emptyContext(), BUNDLED_REQUIREMENT, exec, {
       dshHome,
       activeProfile: 'web',
       dshPackageRoot: bundledRoot,
@@ -179,18 +179,18 @@ describe('host-bundled opt-in capabilities', () => {
       id,
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-25T00:00:00.000Z',
-      requirement: TIME_REQUIREMENT,
+      requirement: BUNDLED_REQUIREMENT,
       cwd: 'C:/workspace',
       decision: 'use_local',
       localCandidates: [{
         kind: 'plugin',
-        name: '@deepseek-ai/dsh-time-context',
-        description: 'Opt-in durable per-step context with the current time and elapsed time',
+        name: '@deepseek-ai/dsh-orbit-context',
+        description: 'Opt-in orbit clock elapsed time context',
         availability: 'host_bundled',
         confidence: 0.92,
         fit: 'full',
         reuseEligible: false,
-        hostBundled: { packageName: '@deepseek-ai/dsh-time-context', version: '0.1.1-rc.2', mountId: 'time-context' },
+        hostBundled: { packageName: '@deepseek-ai/dsh-orbit-context', version: '0.1.1-rc.2', mountId: 'orbit-context' },
       }],
       remoteCandidates: [],
       remoteDiscoveryComplete: true,
@@ -199,14 +199,48 @@ describe('host-bundled opt-in capabilities', () => {
     }
     const snapshot = candidateSnapshotFor(resolution)
     expect(snapshot[0]?.hostBundled).toEqual({
-      packageName: '@deepseek-ai/dsh-time-context',
+      packageName: '@deepseek-ai/dsh-orbit-context',
       version: '0.1.1-rc.2',
-      mountId: 'time-context',
+      mountId: 'orbit-context',
     })
 
     const options = optionsFor('await_selection', resolution, [], { candidateSnapshot: snapshot } as WorkflowRecord)
     const enable = options.find((option) => option.id === 'enable_builtin')
     expect(enable?.candidateIds).toEqual([snapshot[0]!.id])
+    expect(options.find((option) => option.id === 'reuse_local')).toBeUndefined()
+  })
+
+  it('does not offer reuse when a local candidate has no executable endpoint', () => {
+    const id = `resolution_${'d'.repeat(24)}`
+    const resolution = {
+      schemaVersion: 2,
+      id,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-25T00:00:00.000Z',
+      requirement: 'format structured records',
+      cwd: 'C:/workspace',
+      decision: 'use_local',
+      localCandidates: [],
+      remoteCandidates: [],
+      remoteDiscoveryComplete: true,
+      queries: [],
+      reasons: [],
+    } satisfies ResolutionRecord
+    const workflow = {
+      candidateSnapshot: [{
+        id: `candidate_${'e'.repeat(24)}`,
+        index: 1,
+        kind: 'local',
+        name: 'managed-source',
+        identity: 'managed-source',
+        digest: 'f'.repeat(64),
+        localKind: 'plugin',
+        fit: 'full',
+        reuseEligible: true,
+      }],
+    } as WorkflowRecord
+
+    const options = optionsFor('await_selection', resolution, [], workflow)
     expect(options.find((option) => option.id === 'reuse_local')).toBeUndefined()
   })
 })

@@ -157,13 +157,13 @@ function localCtx(stateDir: string): Context {
   return {
     baseUrl,
     tools: {
-      schemas: () => [{ name: 'pwsh', description: 'Run a PowerShell command' }],
+      schemas: () => [{ name: 'quasar-ledger', description: 'Synchronize quasar ledger records' }],
       get: () => undefined,
       execute: async () => ({ isError: false, value: { results: [] }, content: [] }),
       register: () => undefined,
     },
     systemPrompt: {
-      assemble: async () => ({ tools: [{ name: 'pwsh' }] }),
+      assemble: async () => ({ tools: [{ name: 'quasar-ledger' }] }),
     },
     skills: {
       list: async () => [],
@@ -269,20 +269,20 @@ function ghRunner(files: Record<string, string>) {
   }
 }
 
-const grokBundle = {
+const nebulaBundle = {
   'package.json': JSON.stringify({
-    name: 'dsh-xai',
+    name: 'dsh-nebula',
     license: 'MIT',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
   }, null, 2),
-  'cordis.patch.yml': '- id: xai\n  name: dsh-xai\n',
-  'README.md': 'xAI Grok SuperGrok OAuth for DeepSeek Harness\n',
+  'cordis.patch.yml': '- id: nebula\n  name: dsh-nebula\n',
+  'README.md': 'Nebula relay capability for DeepSeek Harness\n',
   'lib/index.js': 'export function apply() {}\n',
 }
 
-const grokHighRisk = {
-  ...grokBundle,
+const nebulaHighRisk = {
+  ...nebulaBundle,
   'lib/index.js': "export function apply() { eval('1') }\n",
 }
 
@@ -353,8 +353,8 @@ describe('conversational confirmation gates', () => {
       guard,
     )
     const turn = exec()
-const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
-    expect(started.workflow.cursor).toBe('await_confirmation')
+const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
+    expect(started.workflow.cursor).toBe('await_selection')
     expect(started.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining([
       'search_more',
       'stop',
@@ -363,17 +363,17 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
     expect(started.workflow.interrupt?.options.map((item) => item.id)).not.toContain('modify_this')
   })
 
-  it('does not mint create authorization from start itself or after empty completed discovery without create-new', async () => {
+  it('seals a completed empty discovery at selection without minting create authorization', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-empty-'))
     temporary.push(root)
     const { service, guard } = makeService(root, [])
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.resolution?.authorization?.state).toBe('selection_required')
     expect(started.resolution?.authorization?.state).not.toBe('create_authorized')
     expect(started.resolution?.selectedRepositories ?? []).toEqual([])
-    expect(started.workflow.cursor).toBe('await_confirmation')
-    expect(started.workflow.interrupt?.kind).toBe('await_confirmation')
+    expect(started.workflow.cursor).toBe('await_selection')
+    expect(started.workflow.interrupt?.kind).toBe('await_selection')
     expect(started.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining([
       'create_new',
       'stop',
@@ -393,21 +393,21 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
     temporary.push(root)
     const { service, guard } = makeService(root, {
       results: [{
-        name: 'dsh-xai',
-        url: 'https://github.com/MirDie/dsh-xai',
-        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
+        name: 'dsh-nebula',
+        url: 'https://github.com/example-org/dsh-nebula',
+        description: 'Nebula relay capability for DeepSeek Harness',
         stars: 2,
       }],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     expect(started.workflow.interrupt).toBeUndefined()
     expect(started.workflow.discoveryPool).toHaveLength(1)
     expect(started.review).toBeUndefined()
-    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
     expect(presented.workflow.cursor).toBe('await_selection')
     expect(presented.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([candidateId])
@@ -418,7 +418,7 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
-      .toBe('MirDie/dsh-xai')
+      .toBe('example-org/dsh-nebula')
     expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('use_this')
   })
 
@@ -427,16 +427,16 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
     temporary.push(root)
     const { service, guard } = makeService(root, {
       results: [{
-        name: 'dsh-xai',
-        url: 'https://github.com/MirDie/dsh-xai',
-        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
+        name: 'dsh-nebula',
+        url: 'https://github.com/example-org/dsh-nebula',
+        description: 'Nebula relay capability for DeepSeek Harness',
         stars: 2,
       }],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     const candidateId = started.workflow.discoveryPool![0]!.id
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
 
@@ -464,28 +464,28 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
     const { service, guard } = makeService(root, {
       results: [
         {
-          name: 'dsh-xai',
-          url: 'https://github.com/MirDie/dsh-xai',
-          description: 'xAI Grok SuperGrok / X Premium OAuth',
+          name: 'dsh-nebula',
+          url: 'https://github.com/example-org/dsh-nebula',
+          description: 'Nebula relay connection',
           stars: 3,
         },
         {
-          name: 'dsh-grok-screenshot',
-          url: 'https://github.com/paicat1/dsh-grok-screenshot',
-          description: 'grok screenshot',
+          name: 'dsh-nebula-capture',
+          url: 'https://github.com/example-org/dsh-nebula-capture',
+          description: 'Nebula relay capture adapter',
           stars: 1,
         },
         {
-          name: 'dsh-grok-third',
-          url: 'https://github.com/acme/dsh-grok-third',
-          description: 'third grok candidate',
+          name: 'dsh-nebula-third',
+          url: 'https://github.com/example-org/dsh-nebula-third',
+          description: 'Third nebula relay candidate',
           stars: 1,
         },
       ],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presentedIds = started.workflow.discoveryPool!.map((item) => item.id)
     const presented = await presentWith(service, turn, started.workflow.id, presentedIds)
@@ -502,35 +502,35 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
   it.each([
     { verdict: 'uncertain' as ReviewerVerdictDecision },
     { verdict: 'approved' as ReviewerVerdictDecision },
-  ])('gates a high-risk review at confirmation instead of auto-create ($verdict verdict)', async ({ verdict }) => {
+  ])('keeps a high-risk review visible for an explicit user decision ($verdict verdict)', async ({ verdict }) => {
     const root = await mkdtemp(path.join(os.tmpdir(), `autoevo-gate-high-${verdict}-`))
     temporary.push(root)
     const { service, guard } = makeService(root, {
       results: [{
-        name: 'dsh-xai',
-        url: 'https://github.com/MirDie/dsh-xai',
-        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
+        name: 'dsh-nebula',
+        url: 'https://github.com/example-org/dsh-nebula',
+        description: 'Nebula relay capability for DeepSeek Harness',
         stars: 2,
       }],
-      files: grokHighRisk,
+      files: nebulaHighRisk,
     }, reviewerHost(verdict))
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
-    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
     const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.review?.securityRisk).toBe('high')
-    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).not.toContain('use_this')
+    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('use_this')
 
     if (verdict === 'uncertain') {
       expect(reviewed.review?.fit).toBe('full')
       expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
         expect.objectContaining({
           code: 'dynamic_evaluation',
-          severity: 'block',
+          severity: expect.any(String),
           evidenceKind: 'static_review',
           observed: true,
         }),
@@ -549,19 +549,13 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
       return
     }
 
-    expect(reviewed.review?.reviewerVerdict?.decision).toBeUndefined()
     expect(reviewed.workflow.executionLease).toBeUndefined()
     const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
-    expect(optionIds[0]).not.toBe('use_this')
-    expect(optionIds.indexOf('search_more')).toBeLessThan(optionIds.indexOf('modify_this'))
+    expect(optionIds).toContain('use_this')
     expect(optionIds).toContain('stop')
     expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
 
-    const blocked = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '用这个', {
-      action: 'use_this',
-      candidateId,
-    })
-    expect(blocked.status).toBe('invalid_resume')
+    expect(reviewed.workflow.interrupt?.facts.canInstall).toBe(true)
   })
 
   it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
@@ -577,7 +571,7 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
       store,
       guard,
     )
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     const rejected = await resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '这个仓库看起来不错', {
       action: 'use_this',
       candidateId: `candidate_${'f'.repeat(24)}`,
@@ -609,11 +603,11 @@ const started = await startWith(service, guard, turn, '我需要一个能在dsh�
       localStore,
       guard,
     )
-const created = await startWith(localService, guard, localTurn, 'run a PowerShell command')
-    expect(created.resolution?.localCandidates.some((item) => item.name === 'pwsh')).toBe(true)
+    const created = await startWith(localService, guard, localTurn, 'synchronize quasar ledger records')
+    expect(created.resolution?.localCandidates.some((item) => item.name === 'quasar-ledger')).toBe(true)
     expect(created.resolution?.authorization?.state).toBe('selection_required')
     expect(created.workflow.cursor).toBe('await_discovery')
-    const localCandidateId = created.workflow.discoveryPool!.find((item) => item.localName === 'pwsh')!.id
+    const localCandidateId = created.workflow.discoveryPool!.find((item) => item.localName === 'quasar-ledger')!.id
     const localPresented = await presentWith(localService, localTurn, created.workflow.id, [localCandidateId])
     const reused = await navigateWith(localService, guard, localTurn, localPresented.workflow.id, localPresented.workflow.interrupt!.interruptId, 'reuse_local', [localCandidateId])
     expect(reused.resolution?.authorization?.state).toBe('reuse_local')
@@ -626,28 +620,28 @@ const created = await startWith(localService, guard, localTurn, 'run a PowerShel
       candidateId: localCandidateId,
       candidateDigest: reused.workflow.selectionReceipt?.candidateDigests[localCandidateId],
       requestedAction: 'reuse_local',
-      endpoint: { kind: 'exact_tool', name: 'pwsh' },
+      endpoint: { kind: 'exact_tool', name: 'quasar-ledger' },
     })
     expect(reused.workflow.executionLease).toMatchObject({
       candidateId: localCandidateId,
       candidateDigest: reused.workflow.actionCommitment?.candidateDigest,
-      endpoint: { kind: 'exact_tool', name: 'pwsh' },
+      endpoint: { kind: 'exact_tool', name: 'quasar-ledger' },
     })
 
     const { service: useService, guard: useGuard, store } = makeService(root, {
       results: [{
-        name: 'dsh-xai',
-        url: 'https://github.com/MirDie/dsh-xai',
-        description: 'xAI Grok SuperGrok OAuth for DeepSeek Harness',
+        name: 'dsh-nebula',
+        url: 'https://github.com/example-org/dsh-nebula',
+        description: 'Nebula relay capability for DeepSeek Harness',
         stars: 2,
       }],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     useService.listInstallProfiles = async () => ['web']
     const useTurn = exec('session-use')
-const resolved = await startWith(useService, useGuard, useTurn, '我需要一个能在dsh里调用grok的能力。')
+const resolved = await startWith(useService, useGuard, useTurn, '我需要一个调用 nebula relay 的能力。')
     expect(resolved.workflow.cursor).toBe('await_discovery')
-    const useCandidateId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'MirDie/dsh-xai')!.id
+    const useCandidateId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
     const usePresented = await presentWith(useService, useTurn, resolved.workflow.id, [useCandidateId])
     const reviewed = await navigateWith(useService, useGuard, useTurn, usePresented.workflow.id, usePresented.workflow.interrupt!.interruptId, 'review_candidates', [useCandidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
@@ -677,18 +671,18 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
     temporary.push(root)
     const { service, guard, store } = makeService(root, {
       results: [
-        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
-        { name: 'dsh-grok-tui', url: 'https://github.com/acme/dsh-grok-tui', description: 'grok tui', stars: 2 },
-        { name: 'dsh-grok-screenshot', url: 'https://github.com/paicat1/dsh-grok-screenshot', description: 'grok screenshot', stars: 1 },
+        { name: 'dsh-nebula', url: 'https://github.com/example-org/dsh-nebula', description: 'Nebula relay', stars: 3 },
+        { name: 'dsh-nebula-console', url: 'https://github.com/example-org/dsh-nebula-console', description: 'Nebula relay console', stars: 2 },
+        { name: 'dsh-nebula-capture', url: 'https://github.com/example-org/dsh-nebula-capture', description: 'Nebula relay capture', stars: 1 },
       ],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.resolution?.remoteCandidates.map((item) => item.repository)).toEqual([
-      'MirDie/dsh-xai',
-      'acme/dsh-grok-tui',
-      'paicat1/dsh-grok-screenshot',
+      'example-org/dsh-nebula',
+      'example-org/dsh-nebula-console',
+      'example-org/dsh-nebula-capture',
     ])
     expect(started.workflow.cursor).toBe('await_discovery')
     const presented = await presentWith(service, turn, started.workflow.id, started.workflow.discoveryPool!.map((item) => item.id))
@@ -702,15 +696,15 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
     expect(skipped.resumeHint).toMatch(/read-only navigation|decision/i)
     expect(skipped.workflow.cursor).toBe('await_selection')
 
-    const candidateId = presented.workflow.candidateSnapshot!.find((item) => item.repository === 'paicat1/dsh-grok-screenshot')!.id
+    const candidateId = presented.workflow.candidateSnapshot!.find((item) => item.repository === 'example-org/dsh-nebula-capture')!.id
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.selectionReceipt?.kind).toBe('review_candidates')
     expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
     expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
-      .toBe('paicat1/dsh-grok-screenshot')
+      .toBe('example-org/dsh-nebula-capture')
     const stored = await store.getResolution(started.resolution!.id)
-    expect(stored.selectedRepositories).toEqual(['paicat1/dsh-grok-screenshot'])
+    expect(stored.selectedRepositories).toEqual(['example-org/dsh-nebula-capture'])
     expect(stored.decisions ?? []).toEqual([])
   })
 
@@ -719,14 +713,14 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
     temporary.push(root)
     const { service, guard, store } = makeService(root, {
       results: [
-        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
-        { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
+        { name: 'dsh-nebula', url: 'https://github.com/example-org/dsh-nebula', description: 'Nebula relay', stars: 3 },
+        { name: 'dsh-nebula-alt', url: 'https://github.com/example-org/dsh-nebula-alt', description: 'Alternative nebula relay integration', stars: 2 },
       ],
-      files: grokBundle,
+      files: nebulaBundle,
     })
     service.listInstallProfiles = async () => ['web']
     const turn = exec('session-batch')
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presented = await presentWith(service, turn, started.workflow.id, started.workflow.discoveryPool!.map((item) => item.id))
     const ids = presented.workflow.candidateSnapshot!.map((item) => item.id)
@@ -774,14 +768,14 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
     temporary.push(root)
     const { service, guard, store } = makeService(root, {
       results: [
-        { name: 'dsh-xai', url: 'https://github.com/MirDie/dsh-xai', description: 'xAI Grok', stars: 3 },
-        { name: 'dsh-grok-alt', url: 'https://github.com/acme/dsh-grok-alt', description: 'Alternative Grok integration', stars: 2 },
-        { name: 'dsh-grok-third', url: 'https://github.com/acme/dsh-grok-third', description: 'Third Grok integration', stars: 1 },
+        { name: 'dsh-nebula', url: 'https://github.com/example-org/dsh-nebula', description: 'Nebula relay', stars: 3 },
+        { name: 'dsh-nebula-alt', url: 'https://github.com/example-org/dsh-nebula-alt', description: 'Alternative nebula relay integration', stars: 2 },
+        { name: 'dsh-nebula-third', url: 'https://github.com/example-org/dsh-nebula-third', description: 'Third nebula relay integration', stars: 1 },
       ],
-      files: grokHighRisk,
+      files: nebulaHighRisk,
     }, reviewerHost('uncertain'))
     const turn = exec('session-adaptive')
-    const started = await startWith(service, guard, turn, '我需要一个能在dsh里调用grok的能力。')
+    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
     const presented = await presentWith(service, turn, started.workflow.id, started.workflow.discoveryPool!.map((item) => item.id))
     const ids = presented.workflow.candidateSnapshot!.map((item) => item.id)

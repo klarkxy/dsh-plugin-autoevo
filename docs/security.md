@@ -4,7 +4,7 @@
 
 ## 1. 信任边界
 
-可信输入是插件自身固定策略、DSH services、用户在当前任务中的明确批准，以及插件自己写入并重新读取的 receipt。
+可信输入是插件自身固定策略、DSH services、用户在当前任务中的明确批准，以及插件自己写入并重新读取的 receipt。AutoEvo 产出工作流证据与风险 warning；它不拥有也不替代 DSH Core 的权限、sandbox 或 approval 强制执行。
 
 GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据分类。系统提示只含本插件固定策略。审查输出是来源路径、派生风险代码、短事实说明、blob/content hash、fit 和兼容性结论。
 
@@ -12,19 +12,21 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 按数据
 
 ## 2. 安装门槛
 
-同时满足以下条件才进入安装：
+下列是 AutoEvo 的工作流和证据条件，不是独立安全边界。DSH Core 决定一个操作是否可执行；若 DSH Core 允许，用户可以明确接受 warning，AutoEvo 会把该 warning 和选择保留在 receipt 中。
 
-1. 候选来自同一当前 Policy V10 resolution 的持久 review receipt；任何 policy 不匹配的 review 都不得授权；
-2. Host hard boundaries：完整/非截断、可物化 snapshot，可识别的安全 package identity，不可变且安全的 installSpec/manifest bundle，可安装来源，没有 path/symlink/special-file/patch/sandbox/resource 逃逸，兼容性不是 explicitly incompatible；
-3. 当 `needsSemanticReviewer` 为真时（`dynamic_evaluation` / `prompt_injection` / `hidden_instructions` / `data_exfiltration` / `credential_access`），必须有绑定当前 ReviewerRequest/review/requirementHash/snapshotDigest/candidateDigest/session/version 的 `approved` 裁决；缺失、过期、伪造、rejected、uncertain 一律 fail closed。`process_execution`、`fetch`/`fs`/`process.env`、普通 lifecycle、`fit !== full`、兼容 `unknown` 不启动 reviewer，也不单独取消 `use_this`。MechanicalFacts、recommendation、keyword fit、star count 只用于展示/召回/路由；
+同时满足以下条件才进入安装流程：
+
+1. 候选来自同一当前 Policy V11 resolution 的持久 review receipt；任何 policy 不匹配的 review 都不得授权；
+2. Host 只阻断无法正确安装目标的机械问题：来源或包身份不明确、snapshot 不完整或不可物化、installSpec 与审查来源不一致、bundle manifest 无效或明显路径越界；
+3. `needsSemanticReviewer` 只表示值得请求第二意见。reviewer 缺失、超时、`rejected` 或 `uncertain` 会作为 warning 展示，不会自行取消安装入口，也不能授予执行权。生命周期脚本、进程/网络/文件访问、兼容性未知、fit 与 recommendation 同样是给人类和 LLM 的事实与建议；
 4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment（必要时 ExecutionLease）；reviewer/verifier 不能铸造授权，也不能把安装完成态升级为 `verified`；
 5. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
 6. 安装前重新审查，材料一致；live Host `selectionReceipt` 与 `actionCommitment` 必须存在且结构哈希匹配；
 7. live DSH approval 返回一次性的 `allowed-once`，只批准副作用，不代替用户决定。
 
-symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。非 bundle 或 Host 判定不可物化仍不可直接安装。可修的 high 或 peer 不兼容仍可走 `modify_this`。
+symlink、特殊文件或截断的本地快照停在审查阶段。材料变化记为 `review_expired`。非 bundle 或 Host 判定不可物化仍不可直接安装。风险高、脚本存在、兼容性未知或明确不兼容、reviewer 无法判断时，用户仍可在看到摘要后选择使用、修改或跳过。
 
-本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；`npm pack --ignore-scripts` 生成 tgz 后再复核 snapshot，最终安装该 tgz。Windows 上 DSH rc.6 会经 shell 转发 pnpm 参数，owned artifact path 和卸载用 package name 都经过 shell 安全校验；移除前再校验一次 receipt 中的 package name。
+本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；冻结 tgz 后再复核 snapshot，最终安装该 tgz。生命周期与构建脚本按 DSH 和包管理器的正常规则执行，AutoEvo 只在事前展示并在失败时返回结构化阶段、摘要、可重试性与修复建议。AutoEvo 不静默修改 profile 的构建白名单。
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
 
@@ -32,12 +34,12 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 ## 2.1 父会话边界与托管源创建
 
-- 父会话边界：真正的能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。Policy V10 机械拒绝 Cordis define/run/mount/undefine/unmount、Creator 开发技能加载、直接与嵌套 `find_dsh_plugin`、插件变更、普通模型委托、非白名单 shell 和受保护根目录写入；仅保留 Cordis inspect、安全 stop 与普通工作区编辑。Gate 2 后的 `create_new` / `modify_this` 在绑定 workflow、user turn、boot identity 和唯一托管根后进行；施工阶段只允许根内文件读写、官方 Creator skill 与精确的 `finish_managed_work` 回传。父会话 sandbox 不会重绑到更窄托管根，因此模型 shell 全部拒绝；Host 在源码交接后执行构建、测试、安装与验证。
+- 父会话边界：能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。AutoEvo 将 `create_new` / `modify_this` 与 workflow、user turn、boot identity 和托管根绑定，并记录 `finish_managed_work` 回传；这些是工作流和证据约束，不会重绑或替代 DSH Core sandbox。文件、shell、技能、插件变更和安装是否允许，始终以 DSH Core 的 scope、sandbox 与 approval 为准。
 - 发现预算：能力发现用用户原话进入 `capability_workflow`；模型在 Host 限定的两轮补查、五个补充查询和二十候选预算内自主收敛，只能用 `capability_workflow_present` 密封发现池中的 1–5 个候选，空池不能生成候选。
-- Gate 1/2 不可由 DSH approval 替代：Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定；`allowed-once` 只批准副作用，不代替用户决定。澄清回答只影响只读搜寻，不是 Gate 2。审查与安装仍要求当前 Policy V10 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合与防重放。
-- 调用与修改上限：相同无效参数在同一回合重复时断路，且不消费 interrupt、commitment 或 lease。诊断工具仅在关联失败或搜索不完整后可用，每个失败事件最多两次调用、八个探针；不启动子进程、不重试、不清理，并屏蔽凭据、完整路径、URL、原始 stderr 和施工会话正文。同一 review / source / layer / fixture 不得重复安装或验证；modify 最多两次。
+- Gate 1/2 不可由 DSH approval 替代：Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定；`allowed-once` 只批准副作用，不代替用户决定。澄清回答只影响只读搜寻，不是 Gate 2。审查与安装仍要求当前 Policy V11 review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合与防重放。
+- 施工边界：相同无效参数在同一回合重复时断路，且不消费 interrupt 或 commitment。诊断输出屏蔽凭据、完整路径与原始 stderr。创建或修改获批后，LLM 可在绑定的 managed source 内使用 DSH 允许的编辑、shell、构建、测试、依赖和协作工具修复普通失败；更换目标、最终安装、发布和明显破坏性操作仍需新的用户决定。
 
-父回合取消后没有子 Agent 需要 dispose。清理 Git 使用独立的 bounded timeout，不继承已取消 signal；有界编辑先 checkpoint，再以 `recovery_required` 收口并释放 workflow lock；取消、超时与真实 executable 缺失分别报告。completed 安装的清理重开与 sealed `recovery_required` 是两条互不混同的路径。模型展示只包含版本化语义状态、定长事实、预算、硬约束、候选作用域动作和可用工具；市场描述与仓库内容始终标记为不可信数据，选择阶段误提交的 `use_this` 会安全归一化为只读审查。完整流程见[架构说明](architecture.md) §2 与 §4。
+取消、超时与真实 executable 缺失分别报告。普通构建或安装失败保持可诊断、可修复；只有安装对象无法唯一对账时才进入 `recovery_required`。completed 安装的清理重开与 sealed failure 恢复是两条互不混同的路径。模型展示只包含版本化语义状态、定长事实、候选作用域动作和可用工具；市场描述与仓库内容始终标记为不可信数据，选择阶段误提交的 `use_this` 会安全归一化为只读审查。完整流程见[架构说明](architecture.md) §2 与 §4。
 
 这意味着语义正确性明确依赖当前 LLM：弱模型可能把真实用户意图解释成另一个同样合法的 action 或候选。Host 保证授权完整性和作用域约束，不保证模型的语言理解正确；因此能力进化模式不得搭配低智力、上下文保持差或结构化工具调用不可靠的模型。
 
@@ -66,20 +68,20 @@ symlink、特殊文件或截断的本地快照停在审查阶段。材料变化�
 
 临时目录由 `installationId` 唯一拥有。删除前对 trial root 与候选路径做 `realpath`，确认候选是 trials root 的严格子目录。删除使用 Node `rm`，对象是已经验证的精确路径。
 
-外部安装前先持久化 `installState: unknown`、`installOutcome: pending` 的 provisional receipt。安装命令异常时，persistent Profile 只有在 dependency 与可见 package target 都不存在时才记 `failed_absent`；存在、未知或不可核实时记 `recovery_required`。安装命令成功后，还必须证明 Profile dependency 等于精确审查 spec 且 bundle 已启用，才执行 Loader/runtime 验证。最终 receipt 写入失败时，temporary trial 立即补偿删除；persistent Profile 保留 fail-closed recovery anchor。
+外部安装前先持久化 `installState: unknown`、`installOutcome: pending` 的 provisional receipt。安装命令异常时，persistent Profile 只有在 dependency 与可见 package target 都不存在时才记 `failed_absent`；存在、未知或不可核实时记 `recovery_required`。安装命令成功后，还必须证明 Profile dependency 等于精确审查 spec 且 bundle 已启用，才执行 Loader/runtime 验证。最终 receipt 写入失败时，persistent Profile 保留恢复锚点，并向 LLM 提供可理解的恢复诊断。
 
 ## 6. Prompt Injection 与静态 detector
 
-审查器把 prompt-injection-like 文本记成 `prompt_injection:block` 派生事实，并把风险升为 `high`。Agent 看到的是分类结果和 hash。
+审查器把 prompt-injection-like 文本记成派生事实并提高风险。Agent 看到的是分类结果和 hash；这是 warning，不是 DSH 权限结论。
 
 文本类规则（`hidden_instructions`、`prompt_injection`、`data_exfiltration`）覆盖全部 UTF-8 文件，包括 README、SKILL.md 与其它 markdown——文本文件是隐藏指令的经典载体；代码类规则只扫可执行源。finding detail 保持短语级，review receipt 不含源码文本。
 
-既有代码：`child_process`、`process_execution`、`dynamic_evaluation`、`environment_access`、`filesystem_access`、`network_access`、`prompt_injection`、`lifecycle_script`、`non_registry_dependency`。Policy V9 新增：`hidden_instructions`（零宽/bidi/Unicode Tag 字符、注释藏指令、文本中的 data: URI 与超长 base64、NUL）、`data_exfiltration`（已知 webhook/隧道收集端点、外发对话或凭据的指令）、`credential_access`（凭据库路径、环境收割）、`obfuscated_code`（超长编码 blob 与同文件动态求值、混淆标识符）、`remote_code_execution`（下载即执行）、`tls_verification_disabled`、`destructive_operation`、`persistence_mechanism`、`cloud_metadata_access`。语义审查门禁代码为 `prompt_injection`、`hidden_instructions`、`data_exfiltration`、`credential_access` 与 `dynamic_evaluation`。新增检测的思路部分受 NVIDIA SkillSpector（Apache 2.0）启发；规则与正则均为 AutoEvo 独立重实现。
+检测项包括 `child_process`、`process_execution`、`dynamic_evaluation`、`environment_access`、`filesystem_access`、`network_access`、`prompt_injection`、`lifecycle_script`、`non_registry_dependency`、隐藏指令、数据外发、凭据访问、混淆代码、下载执行、关闭 TLS 校验、破坏性操作、持久化机制与云元数据访问。部分高歧义信号会请求 semantic reviewer 给出第二意见；它们不会把 reviewer 变成门禁。新增检测的思路部分受 NVIDIA SkillSpector（Apache 2.0）启发；规则与正则均为 AutoEvo 独立重实现。
 
 ## 7. 运行假设
 
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值、prompt injection、隐藏指令、数据外发、凭据访问、混淆代码与云元数据信号，供安装决策使用。
-- MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；直接安装由 Host hard boundaries、绑定的 reviewer 裁决和新鲜用户 `use_this` 决定。可修 high 仍可走 `modify_this`。安装完成后的功能是否已验证只看 Host 三层结果，不看 reviewer/verifier。
+- MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；它们是 warning 和决策证据，不会自行控制 DSH Core 权限。可修 high 仍可走 `modify_this`，且 DSH Core 允许时用户可明确接受 warning。安装完成后的功能是否已验证只看 Host 三层结果，不看 reviewer/verifier。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
 - 内部托管源 commit 由 Host 在禁用 hooks/签名后本地完成；任何 fork、push、tag、release 或上游 PR 都属于后续发布动作，仍需另行明确批准。

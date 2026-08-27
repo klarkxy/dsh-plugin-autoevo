@@ -52,7 +52,7 @@ describe('evolution preset template', () => {
 
     expect(composition).toMatch(/^\s*customSkillDirs\s*:/mu)
     expect(composition).toMatch(/skills\/cordis-plugin-development|skills\/'/u)
-    expect(composition).toMatch(/- id: delegation\s+[\s\S]*?disabled: true/u)
+    expect(composition).toMatch(/- id: delegation\s+[\s\S]*?workflowEngine: true/u)
     expect(composition).toContain('id: tool-subagent')
     expect(composition).toContain('id: tool-workflow')
     expect(composition).toContain('id: tool-ralph')
@@ -64,10 +64,9 @@ describe('evolution preset template', () => {
     expect(composition).toContain('communicate naturally')
     expect(composition).toContain('Every capability request, including a temporary experiment')
     expect(composition).toContain('Two planes decide where an edit belongs')
-    expect(composition).toContain('Host performs bounded builds, tests, installation, and verification after source handoff')
+    expect(composition).toContain('you may use the normal tools, shell, builds, tests, dependency changes, skills, and collaborators')
     expect(composition).not.toContain('AutoEvo autonomy contract:')
     expect(composition).not.toMatch(/workflow_id|interrupt_id|candidate_id|next_step|agent_directive/u)
-    expect(composition).not.toMatch(/navigation|use_this|search_more|create_authorized|managed git source/u)
   })
 
   it('trusts only the exact current clean-slate template', () => {

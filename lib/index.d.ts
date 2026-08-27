@@ -1,9 +1,9 @@
 import { t as EVOLUTION_PRESET_ID } from "./evolution-contracts.js";
 import { LoadHookContext } from "node:module";
 import Schema from "@deepseek-ai/schemastery";
+import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
 import { Session } from "@deepseek-ai/dsh-session";
-import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import "@deepseek-ai/cordis-plugin-include";
 import { Context, Fiber, Inject, Service } from "@deepseek-ai/cordis";
 import { Agent } from "@deepseek-ai/dsh-agent";
@@ -52,7 +52,7 @@ declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
-declare const POLICY_VERSION = "10";
+declare const POLICY_VERSION = "11";
 declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
@@ -74,7 +74,7 @@ interface RequestIntent {
   targetName?: string;
   evolveReason?: EvolveReason;
 }
-type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot';
+type EvolutionTargetKind = 'github_exact' | 'owned_chain' | 'failed_install' | 'reviewed_snapshot' | 'managed_local';
 interface EvolutionTarget {
   kind: EvolutionTargetKind;
   repository: string;
@@ -516,8 +516,16 @@ interface InstallationRecord {
   verificationVerdict?: VerificationVerdict;
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
+    /** User/LLM-facing lifecycle stage. Never contains a command line or path. */
+    stage?: 'preflight' | 'install' | 'load' | 'verify' | 'persist';
     code: string;
+    /** Stable human summary. `message` remains readable for legacy callers. */
+    summary?: string;
     message: string;
+    /** Whether retrying after an LLM/user repair can be meaningful. */
+    retryable?: boolean;
+    /** Bounded, non-secret next-step suggestions for the operating LLM. */
+    repairHints?: string[];
     exitCode?: number | null;
     diagnosticHash?: string;
   };
@@ -530,6 +538,8 @@ interface InstallationRecord {
   replacement?: ReplacementJournal;
 }
 interface InstallInput {
+  /** Host-minted before any external side effect; never accepted from model tool arguments. */
+  installationId?: string;
   reviewId: string;
   targetProfile: string;
   retention: InstallationRetention;
@@ -987,6 +997,8 @@ interface WorkflowRecord {
   consumedInterruptIds?: string[];
   lineageTipReviewId?: string;
   lastReviewId?: string;
+  /** Host-minted installation receipt linked before the external install command starts. */
+  pendingInstallationId?: string;
   lastInstallationId?: string;
   forceRemoteDiscovery?: boolean;
   /** Host-verified candidates available for model curation before Gate 1. */
@@ -1130,11 +1142,13 @@ interface WorkflowHost {
   /** Active Host profile an enable_builtin commitment targets, when determinable. */
   enableTargetProfile?(): Promise<string | undefined>;
   /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
-  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
+  enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord | void>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
+  /** Finds one workflow-owned receipt when a crash happened before lastInstallationId was projected. */
+  findInstallationForWorkflow?(workflowId: string): Promise<InstallationRecord | undefined>;
   listInstallProfiles?(): Promise<string[]>;
   /** Whether managed child construction (modify/create) is available for this exec. */
   managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>;
@@ -1373,21 +1387,34 @@ declare class DshSemanticVerifierHost implements SemanticVerifierHost {
 //#region src/state/store.d.ts
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
 type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord;
+interface StateRecordDiagnostic {
+  kind: RecordKind;
+  recordId?: string;
+  fileName: string;
+  code: 'invalid_json' | 'invalid_record';
+  summary: string;
+  diagnosticHash: string;
+}
 declare class StateStore {
   private readonly resolveRoot;
+  private readonly diagnostics;
   constructor(root: string | (() => string));
   get root(): string;
   trialRoot(installationId: string): string;
   put(kind: RecordKind, record: StoredRecord): Promise<void>;
+  stateDiagnostics(): StateRecordDiagnostic[];
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   getWorkflow(id: string): Promise<WorkflowRecord>;
   listWorkflows(): Promise<WorkflowRecord[]>;
   listInstallations(): Promise<InstallationRecord[]>;
+  findInstallationForWorkflow(workflowId: string): Promise<InstallationRecord | undefined>;
   listAllReviews(): Promise<ReviewRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private readReviews;
+  private recordDiagnostic;
+  private list;
   private get;
 }
 //#endregion
@@ -1779,7 +1806,9 @@ declare class PluginRemover {
   private readonly config;
   private readonly store;
   private readonly launcher;
-  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher);
+  private readonly resolveDestinationProfile?;
+  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, resolveDestinationProfile?: (() => Promise<string>) | undefined);
+  private assertPersistentOwner;
   /**
    * Uninstalls exactly one installation receipt.
    * Never deletes a managed source repository under the workspace sources dir.
@@ -1878,7 +1907,7 @@ declare class SourceManager {
   validateCompletedSnapshot(input: {
     path: string;
     reviewId: string;
-    repository: string;
+    repository: string | null;
     baseCommit: string;
     workspaceCwd?: string;
     signal?: AbortSignal;
@@ -2133,10 +2162,11 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
+  findInstallationForWorkflow(workflowId: string): Promise<InstallationRecord | undefined>;
   listInstallProfiles(): Promise<string[]>;
   managedWorkAvailable(exec: WorkflowExec): boolean;
   enableTargetProfile(): Promise<string | undefined>;
-  enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<void>;
+  enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord>;
   private currentProfileOwner;
   private persistReviewed;
   releaseManagedSource(workflow: WorkflowRecord, _exec: WorkflowExec): Promise<void>;

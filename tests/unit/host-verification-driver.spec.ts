@@ -128,7 +128,7 @@ describe('Host fixture validator', () => {
       review: review({
         runtimeSurface: {
           ...current.runtimeSurface!,
-          expectedRoute: { provider: 'xai-oauth', model: 'grok-4.5' },
+          expectedRoute: { provider: 'provider-alpha', model: 'model-alpha-v1' },
           llmRegistered: true,
           verificationLayer: 'manual_runtime',
         },
@@ -260,10 +260,10 @@ describe('Host verification driver', () => {
       receiptPath: path.resolve('receipt.jsonl'),
       expectedTools: [],
       layer: 'bundle_activation',
-      packageName: 'dsh-plugin-zhihu-search',
+      packageName: 'dsh-plugin-beta',
       fixtureDigest: fixtureDigestFor([]),
       activatedFibersJson: JSON.stringify([{
-        id: 'zhihu-search-mcp',
+        id: 'record-sync-tool',
         name: '@deepseek-ai/dsh-mcp-client',
       }]),
     })
@@ -425,14 +425,14 @@ describe('Host verification driver', () => {
     const env = verificationChildEnv('/isolated-dsh-home', {
       PATH: '/bin',
       OPENAI_API_KEY: 'secret',
-      XAI_API_KEY: 'secret',
+      SYNTHETIC_API_KEY: 'secret',
       GH_TOKEN: 'secret',
       DSH_HOME: '/parent',
     })
     expect(env.DSH_HOME).toBe('/isolated-dsh-home')
     expect(env.PATH).toBe('/bin')
     expect(env.OPENAI_API_KEY).toBeUndefined()
-    expect(env.XAI_API_KEY).toBeUndefined()
+    expect(env.SYNTHETIC_API_KEY).toBeUndefined()
     expect(env.GH_TOKEN).toBeUndefined()
     expect(JSON.stringify(env)).not.toContain('secret')
   })

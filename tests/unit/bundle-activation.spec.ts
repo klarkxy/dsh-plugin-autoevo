@@ -6,9 +6,9 @@ import {
   parseActivatedFibersJson,
 } from '../../src/lifecycle/bundle-activation.js'
 
-const zhihuPatch = [{
+const recordSyncPatch = [{
   insert: [{
-    id: 'zhihu-search-mcp',
+    id: 'record-sync-tool',
     name: '@deepseek-ai/dsh-mcp-client',
     config: { command: 'uvx' },
   }],
@@ -16,8 +16,8 @@ const zhihuPatch = [{
 
 describe('bundle activation identity', () => {
   it('collects carrier insert id and name, not the npm package', () => {
-    expect(activationTargetsFromPatch(zhihuPatch)).toEqual([{
-      id: 'zhihu-search-mcp',
+    expect(activationTargetsFromPatch(recordSyncPatch)).toEqual([{
+      id: 'record-sync-tool',
       name: '@deepseek-ai/dsh-mcp-client',
     }])
   })
@@ -43,11 +43,11 @@ describe('bundle activation identity', () => {
   it('matches a carrier Fiber by insert id and name', () => {
     const entries = [
       { id: 'include:other-mcp', options: { id: 'other-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
-      { id: 'include:zhihu-search-mcp', options: { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
+      { id: 'include:record-sync-tool', options: { id: 'record-sync-tool', name: '@deepseek-ai/dsh-mcp-client' } },
     ]
-    const targets = activationTargetsFromPatch(zhihuPatch)
+    const targets = activationTargetsFromPatch(recordSyncPatch)
     expect(matchActivatedEntries(entries, {
-      packageName: 'dsh-plugin-zhihu-search',
+      packageName: 'dsh-plugin-beta',
       targets,
     })).toEqual([entries[1]])
   })
@@ -57,8 +57,8 @@ describe('bundle activation identity', () => {
       { id: 'other-mcp', options: { id: 'other-mcp', name: '@deepseek-ai/dsh-mcp-client' } },
     ]
     expect(matchActivatedEntries(entries, {
-      packageName: 'dsh-plugin-zhihu-search',
-      targets: activationTargetsFromPatch(zhihuPatch),
+      packageName: 'dsh-plugin-beta',
+      targets: activationTargetsFromPatch(recordSyncPatch),
     })).toEqual([])
   })
 
@@ -76,29 +76,29 @@ describe('bundle activation identity', () => {
   it('rejects invalid overlay JSON without throwing', () => {
     expect(parseActivatedFibersJson(undefined)).toEqual([])
     expect(parseActivatedFibersJson('{')).toEqual([])
-    expect(parseActivatedFibersJson(JSON.stringify({ id: 'zhihu-search-mcp' }))).toEqual([])
+    expect(parseActivatedFibersJson(JSON.stringify({ id: 'record-sync-tool' }))).toEqual([])
     expect(parseActivatedFibersJson(JSON.stringify([{
-      id: 'zhihu-search-mcp',
+      id: 'record-sync-tool',
       name: '@deepseek-ai/dsh-mcp-client',
     }]))).toEqual([{
-      id: 'zhihu-search-mcp',
+      id: 'record-sync-tool',
       name: '@deepseek-ai/dsh-mcp-client',
     }])
   })
 
   it('flattens nested Loader option trees for hot-load matching', () => {
     expect(flattenLoaderOptions([
-      { id: 'root', name: 'dsh-plugin-zhihu-search' },
+      { id: 'root', name: 'dsh-plugin-beta' },
       {
         id: 'group',
         name: 'cordis:group',
         group: true,
-        config: [{ id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' }],
+        config: [{ id: 'record-sync-tool', name: '@deepseek-ai/dsh-mcp-client' }],
       },
     ]).map((entry) => entry.options)).toEqual([
-      { id: 'root', name: 'dsh-plugin-zhihu-search' },
+      { id: 'root', name: 'dsh-plugin-beta' },
       { id: 'group', name: 'cordis:group' },
-      { id: 'zhihu-search-mcp', name: '@deepseek-ai/dsh-mcp-client' },
+      { id: 'record-sync-tool', name: '@deepseek-ai/dsh-mcp-client' },
     ])
   })
 })

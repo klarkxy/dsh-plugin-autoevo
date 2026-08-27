@@ -9,16 +9,16 @@ importers:
   .:
     dependencies:
       '@deepseek-ai/cordis-plugin-include':
-        specifier: ^1.0.6
+        specifier: 1.0.6
         version: 1.0.6(@deepseek-ai/cordis-plugin-loader@1.0.2)(@deepseek-ai/cordis@4.0.1)
       '@deepseek-ai/schemastery':
-        specifier: ^3.18.1
+        specifier: 3.18.1
         version: 3.18.1
       semver:
-        specifier: ^7.7.2
+        specifier: 7.8.5
         version: 7.8.5
       yaml:
-        specifier: ^2.9.0
+        specifier: 2.9.0
         version: 2.9.0
     devDependencies:
       '@deepseek-ai/cordis':
@@ -117,12 +117,6 @@ importers:
       vitest:
         specifier: 3.2.4
         version: 3.2.4(@types/debug@4.1.13)(@types/node@24.3.0)(jiti@2.7.0)(tsx@4.23.12)(yaml@2.9.0)
-
-  tests/dsh-harness:
-    dependencies:
-      '@deepseek-ai/dsh':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(5e3fd1314cb425abc0c368c5a562aa96)
 
 packages:
 

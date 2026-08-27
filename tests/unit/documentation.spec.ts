@@ -13,7 +13,6 @@ const documentationFiles = [
   'docs/developer-guide.en.md',
   'docs/architecture.md',
   'docs/security.md',
-  'docs/real-world-samples.md',
 ] as const
 
 function read(relativePath: string): string {

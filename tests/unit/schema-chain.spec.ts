@@ -86,20 +86,20 @@ describe('model JSON to Host schema chain', () => {
       verificationVerdict: { decision: 'verified' },
     })).toThrow(/Host-owned or authorization fields/i)
     expect(() => parseRequestIntent({ operation: 'evolve_existing', required_surface: 'native_dsh_plugin', evolutionTarget: {} })).toThrow(/unknown fields/i)
-    expect(parseRequestIntent({ operation: 'evolve_existing', required_surface: 'native_dsh_plugin', target_name: 'dsh-xai' })).toEqual({
+    expect(parseRequestIntent({ operation: 'evolve_existing', required_surface: 'native_dsh_plugin', target_name: 'dsh-plugin-alpha' })).toEqual({
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'dsh-xai',
+      targetName: 'dsh-plugin-alpha',
     })
     expect(parseRequestIntent({
       operation: 'evolve_existing',
       required_surface: 'native_dsh_plugin',
-      target_name: 'zhihu-search',
+      target_name: 'record-sync',
       evolve_reason: 'repair',
     })).toEqual({
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'zhihu-search',
+      targetName: 'record-sync',
       evolveReason: 'repair',
     })
     expect(() => parseRequestIntent({

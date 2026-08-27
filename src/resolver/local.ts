@@ -16,8 +16,8 @@ function anchorStrength(anchor: ReturnType<typeof capabilityAnchors>[number], no
   let strength = 0
   const descriptionSignals = new Set(anchor.aliases
     .filter((alias) => normalizedDescription.includes(alias))
-    // "grok build" and "grok" are the same semantic signal. Collapse
-    // overlapping product aliases so a laundry-list mention does not become
+    // A multi-word identifier and its contained token are the same semantic
+    // signal. Collapse overlapping aliases so a laundry-list mention does not become
     // corroboration merely because one phrase contains another.
     .map((alias) => alias.includes(anchor.key) ? anchor.key : alias))
   const hasCorroboratingDescriptionSignals = descriptionSignals.size >= 2
@@ -142,13 +142,26 @@ export async function resolveLocalCapabilities(
     ? { scope, signal: exec.signal }
     : { signal: exec.signal })
   const assembledNames = new Set(assembly.tools.map((tool) => tool.name))
+  // DSH releases may scope the registry view more narrowly than the already
+  // assembled model prompt. A directly assembled tool is authoritative proof
+  // of reachability, so merge it back into discovery instead of treating an
+  // empty scoped registry as "no local capability".
+  const reachableTools = new Map(registryTools.map((tool) => [tool.name, tool]))
+  for (const tool of assembly.tools) {
+    const registered = reachableTools.get(tool.name)
+    reachableTools.set(tool.name, {
+      ...registered,
+      ...tool,
+      description: tool.description || registered?.description || '',
+    })
+  }
   // Registration is not reachability: the model can use the bridge only when
   // all three bridge tools are present in this Agent scope's assembled prompt.
   const hasBridge = [...BRIDGE_TOOLS].every((toolName) => assembledNames.has(toolName))
   const ownTools = new Set<string>(TOOL_NAMES)
   const candidates: LocalCapabilityCandidate[] = []
 
-  for (const tool of registryTools) {
+  for (const tool of reachableTools.values()) {
     if (ownTools.has(tool.name) || BRIDGE_TOOLS.has(tool.name)) continue
     const confidence = matchConfidence(requirement, tool.name, tool.description)
     if (confidence < 0.3) continue

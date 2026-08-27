@@ -10,14 +10,13 @@ import type { CommandRequest, CommandRunner } from '../../src/process/runner.js'
 import { fixtureDigestFor } from '../../src/host-verification-driver.js'
 import { EvolutionError } from '../../src/errors.js'
 import { sha256 } from '../../src/state/hashes.js'
-import { parse } from 'yaml'
 
 const temporary = trackTempDirs()
 
 function config(root: string): RuntimeConfig {
   return testRuntimeConfig(root, {
     dshHome: root,
-    forwardedCredentialEnv: ['OPENAI_API_KEY', 'XAI_API_KEY'],
+    forwardedCredentialEnv: ['OPENAI_API_KEY', 'SYNTHETIC_API_KEY'],
     evolutionPreset: true,
   })
 }
@@ -27,9 +26,9 @@ describe('Host-owned launcher verification', () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-install-'))
     temporary.push(directory)
     const previousOpenAi = process.env.OPENAI_API_KEY
-    const previousXai = process.env.XAI_API_KEY
+    const previousXai = process.env.SYNTHETIC_API_KEY
     process.env.OPENAI_API_KEY = 'secret-openai'
-    process.env.XAI_API_KEY = 'secret-xai'
+    process.env.SYNTHETIC_API_KEY = 'synthetic-secret'
     const requests: CommandRequest[] = []
     try {
       const runner: CommandRunner = {
@@ -45,14 +44,14 @@ describe('Host-owned launcher verification', () => {
       await launcher.install(directory, 'web', 'github:acme/tool#commit', process.cwd())
 
       expect(requests[0]?.env?.OPENAI_API_KEY).toBeUndefined()
-      expect(requests[0]?.env?.XAI_API_KEY).toBeUndefined()
+      expect(requests[0]?.env?.SYNTHETIC_API_KEY).toBeUndefined()
       expect(requests[1]?.env?.OPENAI_API_KEY).toBe('secret-openai')
-      expect(requests[1]?.env?.XAI_API_KEY).toBe('secret-xai')
+      expect(requests[1]?.env?.SYNTHETIC_API_KEY).toBe('synthetic-secret')
     } finally {
       if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = previousOpenAi
-      if (previousXai === undefined) delete process.env.XAI_API_KEY
-      else process.env.XAI_API_KEY = previousXai
+      if (previousXai === undefined) delete process.env.SYNTHETIC_API_KEY
+      else process.env.SYNTHETIC_API_KEY = previousXai
     }
   })
 
@@ -60,9 +59,9 @@ describe('Host-owned launcher verification', () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-host-'))
     temporary.push(directory)
     const previousOpenAi = process.env.OPENAI_API_KEY
-    const previousXai = process.env.XAI_API_KEY
+    const previousXai = process.env.SYNTHETIC_API_KEY
     process.env.OPENAI_API_KEY = 'secret-openai'
-    process.env.XAI_API_KEY = 'secret-xai'
+    process.env.SYNTHETIC_API_KEY = 'synthetic-secret'
     let captured: CommandRequest | undefined
     try {
       const runner: CommandRunner = {
@@ -109,7 +108,7 @@ describe('Host-owned launcher verification', () => {
       expect(captured?.argv.some((item) => item.includes('test calculator'))).toBe(false)
       expect(JSON.stringify(captured?.argv)).not.toContain('expectedRoute')
       expect(captured?.env?.OPENAI_API_KEY).toBeUndefined()
-      expect(captured?.env?.XAI_API_KEY).toBeUndefined()
+      expect(captured?.env?.SYNTHETIC_API_KEY).toBeUndefined()
       expect(captured?.env?.DSH_HOME).toBe(directory)
       expect(JSON.stringify(captured?.env)).not.toContain('secret')
       expect(result).toMatchObject({
@@ -125,23 +124,23 @@ describe('Host-owned launcher verification', () => {
     } finally {
       if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = previousOpenAi
-      if (previousXai === undefined) delete process.env.XAI_API_KEY
-      else process.env.XAI_API_KEY = previousXai
+      if (previousXai === undefined) delete process.env.SYNTHETIC_API_KEY
+      else process.env.SYNTHETIC_API_KEY = previousXai
     }
   })
 
   it('puts installed carrier insert Fibers on the Host overlay when review freeze is absent', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-carrier-'))
     temporary.push(directory)
-    const packageRoot = path.join(directory, 'profiles', 'headless', 'node_modules', 'dsh-plugin-zhihu-search')
+    const packageRoot = path.join(directory, 'profiles', 'headless', 'node_modules', 'dsh-plugin-beta')
     await mkdir(path.join(packageRoot, 'dsh-plugin'), { recursive: true })
     await writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
-      name: 'dsh-plugin-zhihu-search',
+      name: 'dsh-plugin-beta',
       dsh: { bundle: { patch: './dsh-plugin/cordis.patch.yml' } },
     }), 'utf8')
     await writeFile(path.join(packageRoot, 'dsh-plugin', 'cordis.patch.yml'), [
       '- insert:',
-      '    - id: zhihu-search-mcp',
+      '    - id: record-sync-tool',
       '      name: \'@deepseek-ai/dsh-mcp-client\'',
     ].join('\n'), 'utf8')
     const runner: CommandRunner = {
@@ -152,7 +151,7 @@ describe('Host-owned launcher verification', () => {
         }>
         const observer = overlay.find((entry) => entry.insert)?.insert?.[0]
         expect(JSON.parse(observer!.config.activatedFibersJson ?? '[]')).toEqual([{
-          id: 'zhihu-search-mcp',
+          id: 'record-sync-tool',
           name: '@deepseek-ai/dsh-mcp-client',
         }])
         await writeFile(observer!.config.receiptPath, `${JSON.stringify({
@@ -175,7 +174,7 @@ describe('Host-owned launcher verification', () => {
       profile: 'headless',
       cwd: process.cwd(),
       layer: 'bundle_activation',
-      packageName: 'dsh-plugin-zhihu-search',
+      packageName: 'dsh-plugin-beta',
       expectedTools: [],
       fixtures: [],
       fixtureDigest: fixtureDigestFor([]),
@@ -191,7 +190,7 @@ describe('Host-owned launcher verification', () => {
         const overlayPath = request.argv[patchIndex + 1]!
         const overlayText = await readFile(overlayPath, 'utf8')
         expect(overlayText).not.toContain('expectedProvider')
-        expect(overlayText).not.toContain('xai-oauth')
+        expect(overlayText).not.toContain('provider-alpha')
         expect(overlayText).not.toContain('verificationTask')
         const overlay = JSON.parse(overlayText) as Array<{ insert?: Array<{ config: { receiptPath: string } }> }>
         const observer = overlay.find((entry) => entry.insert)?.insert?.[0]
@@ -236,31 +235,31 @@ describe('Host-owned launcher verification', () => {
     temporary.push(directory)
     const profileRoot = path.join(directory, 'profiles', 'web')
     await mkdir(profileRoot, { recursive: true })
-    const oldSpec = `github:MirDie/dsh-xai#${'a'.repeat(40)}`
-    const newSpec = `github:MirDie/dsh-xai#${'b'.repeat(40)}`
+    const oldSpec = `github:anonymous-lab/dsh-plugin-alpha#${'a'.repeat(40)}`
+    const newSpec = `github:anonymous-lab/dsh-plugin-alpha#${'b'.repeat(40)}`
     await writeFile(path.join(profileRoot, 'package.json'), JSON.stringify({
-      dependencies: { 'dsh-xai': oldSpec },
-      dsh: { profile: { bundles: ['dsh-xai'] } },
+      dependencies: { 'dsh-plugin-alpha': oldSpec },
+      dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
     }))
     const launcher = new DshLauncher({
       async run() {
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       },
     }, config(directory))
-    expect(await launcher.profileDependencySpec(directory, 'web', 'dsh-xai')).toBe(oldSpec)
-    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-xai', oldSpec)).toBe(true)
-    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-xai', newSpec)).toBe(false)
-    expect(await launcher.profileTargetAbsent(directory, 'web', 'dsh-xai')).toBe(false)
+    expect(await launcher.profileDependencySpec(directory, 'web', 'dsh-plugin-alpha')).toBe(oldSpec)
+    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-plugin-alpha', oldSpec)).toBe(true)
+    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-plugin-alpha', newSpec)).toBe(false)
+    expect(await launcher.profileTargetAbsent(directory, 'web', 'dsh-plugin-alpha')).toBe(false)
     await writeFile(path.join(profileRoot, 'package.json'), JSON.stringify({
-      dependencies: { 'dsh-xai': newSpec },
-      dsh: { profile: { bundles: ['dsh-xai'] } },
+      dependencies: { 'dsh-plugin-alpha': newSpec },
+      dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
     }))
-    expect(await launcher.profileDependencySpec(directory, 'web', 'dsh-xai')).toBe(newSpec)
-    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-xai', newSpec)).toBe(true)
+    expect(await launcher.profileDependencySpec(directory, 'web', 'dsh-plugin-alpha')).toBe(newSpec)
+    expect(await launcher.profileSourceMatches(directory, 'web', 'dsh-plugin-alpha', newSpec)).toBe(true)
   })
 })
 
-describe('git-hosted install build-script allowlisting', () => {
+describe('git-hosted install lifecycle ownership', () => {
   function pnpmGitPrepareError(...versionedNames: string[]): string {
     const details = versionedNames
       .map((name) => `The git-hosted package "${name}" needs to execute build scripts but is not in the "onlyBuiltDependencies" allowlist.`)
@@ -295,77 +294,26 @@ describe('git-hosted install build-script allowlisting', () => {
     }
   }
 
-  it('allowlists the reported package and retries a blocked git prepare', async () => {
+  it('reports a blocked prepare without mutating the profile workspace or retrying', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-prepare-'))
     temporary.push(directory)
     const workspacePath = await seedProfileWorkspace(directory)
     const stderr = pnpmGitPrepareError('acme-tool@0.1.1')
     const { runner, requests } = scriptedRunner({ exitCode: 1, stderr }, { exitCode: 0 })
 
-    const result = await new DshLauncher(runner, config(directory))
-      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
-
-    expect(result.exitCode).toBe(0)
-    expect(requests).toHaveLength(2)
-    expect(parse(await readFile(workspacePath, 'utf8'))).toMatchObject({
-      packages: ['.'],
-      nodeLinker: 'hoisted',
-      autoInstallPeers: false,
-      onlyBuiltDependencies: ['acme-tool'],
-    })
-  })
-
-  it('parses scoped package names and merges with an existing allowlist', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-scoped-'))
-    temporary.push(directory)
-    const workspacePath = await seedProfileWorkspace(directory, 'onlyBuiltDependencies:\n  - existing-pkg\n')
-    const stderr = pnpmGitPrepareError('@acme/tool@2.0.0')
-    const { runner } = scriptedRunner({ exitCode: 1, stderr }, { exitCode: 0 })
-
-    await new DshLauncher(runner, config(directory))
-      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
-
-    expect(parse(await readFile(workspacePath, 'utf8')).onlyBuiltDependencies)
-      .toEqual(['@acme/tool', 'existing-pkg'])
-  })
-
-  it('allowlists newly reported transitive git dependencies on each attempt', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-transitive-'))
-    temporary.push(directory)
-    const workspacePath = await seedProfileWorkspace(directory)
-    const { runner, requests } = scriptedRunner(
-      { exitCode: 1, stderr: pnpmGitPrepareError('pkg-a@1.0.0') },
-      { exitCode: 1, stderr: pnpmGitPrepareError('pkg-b@2.0.0') },
-      { exitCode: 0 },
-    )
-
-    const result = await new DshLauncher(runner, config(directory))
-      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
-
-    expect(result.exitCode).toBe(0)
-    expect(requests).toHaveLength(3)
-    expect(parse(await readFile(workspacePath, 'utf8')).onlyBuiltDependencies)
-      .toEqual(['pkg-a', 'pkg-b'])
-  })
-
-  it('throws the runner-shaped command_failed error when the retry still fails', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-git-fail-'))
-    temporary.push(directory)
-    await seedProfileWorkspace(directory)
-    const stderr = pnpmGitPrepareError('acme-tool@0.1.1')
-    const { runner, requests } = scriptedRunner({ exitCode: 1, stderr })
-
+    const before = await readFile(workspacePath, 'utf8')
     const failure = await new DshLauncher(runner, config(directory))
       .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
       .then(() => undefined, (error: unknown) => error)
 
-    expect(requests).toHaveLength(2)
+    expect(requests).toHaveLength(1)
     expect(failure).toBeInstanceOf(EvolutionError)
     expect(failure).toMatchObject({
       code: 'command_failed',
       message: 'dsh exited with code 1',
       details: { command: 'dsh', exitCode: 1, diagnosticHash: sha256(stderr) },
     })
+    expect(await readFile(workspacePath, 'utf8')).toBe(before)
   })
 
   it('does not retry or touch the workspace file for unrelated install failures', async () => {

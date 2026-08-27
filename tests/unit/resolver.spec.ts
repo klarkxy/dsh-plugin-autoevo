@@ -5,131 +5,49 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { capabilityQueries, capabilityTerms, marketplaceSearchQueries, isNameDropMention } from '../../src/resolver/keywords.js'
+import { capabilityAnchors, capabilityQueries, capabilityTerms, marketplaceSearchQueries, isNameDropMention } from '../../src/resolver/keywords.js'
 import { resolveLocalCapabilities, _testing } from '../../src/resolver/local.js'
 
 describe('capability query generation', () => {
-  it('expands bilingual browser requirements without copying only the user phrase', () => {
-    expect(capabilityQueries('让 Agent 操作网页并截图')).toEqual([
-      'screenshot',
-      'screen capture',
-      'browser automation',
-      'playwright',
-      'web testing',
-    ])
+  it('derives ordered adjacent phrases from arbitrary identifiers', () => {
+    const queries = marketplaceSearchQueries('enable quasar ledger replay archive')
+    expect(queries).toContain('quasar ledger replay')
+    expect(queries).toContain('ledger replay archive')
+    expect(queries).not.toContain('enable')
+    expect(queries).toHaveLength(5)
   })
 
-  it('keeps scientific notation as a reviewable capability term', () => {
-    expect(capabilityTerms('计算器需要支持科学计数法')).toContain('scientific notation')
+  it('keeps an unfamiliar CJK capability property intact', () => {
+    const queries = marketplaceSearchQueries('我需要把星历表同步到离线仓库的能力')
+    expect(queries).toContain('星历表同步到离线仓库')
+    expect(queries.every((query) => query.length >= 2)).toBe(true)
   })
 
-  it('sends marketplace phrases in requirement order instead of a single guessed token', () => {
-    expect(marketplaceSearchQueries('我需要一个能在dsh里调用codex的能力。')).toEqual(['codex'])
-    expect(marketplaceSearchQueries('在 DSH 会话中调用 xAI Grok Build 的能力')).toEqual([
-      'xai grok build',
-      'xai grok',
-      'grok build',
-    ])
-    expect(marketplaceSearchQueries('通过 xAI API 调用 Grok chat completions，发送消息并返回回复')).toEqual([
-      'xai grok',
-    ])
+  it('derives terms and anchors without a capability-name catalogue', () => {
+    const terms = capabilityTerms('synchronize quasar ledger records')
+    expect(terms).toEqual(expect.arrayContaining(['quasar', 'ledger', 'records']))
+    expect(capabilityAnchors('synchronize quasar ledger records').map((anchor) => anchor.key))
+      .toEqual(expect.arrayContaining(['synchronize', 'quasar', 'ledger', 'records']))
+    expect(capabilityQueries('synchronize quasar ledger records with a plugin')).not.toContain('plugin')
   })
 
-  it('keeps screenshot queries when DOM/PNG tokens crowd the marketplace slots', () => {
-    // Real requirement from resolution_1ca8f345649e81f66c9a3a46: the ad-hoc
-    // English tokens previously evicted "screenshot" and the shortlist
-    // degraded to external-browser drivers.
-    const requirement = '把当前 DSH 浏览器页面的"对话消息列表 DOM 节点"原样截成单张拼接长图 PNG 并下载到本地;触发方式是 DSH 内一个按钮;不依赖外部浏览器接管,不重排版,保留原 DSH 气泡样式。能力形态最好是动态 Cordis 插件,其次是 DSH 内 npm 包 / Skill。'
-    expect(marketplaceSearchQueries(requirement)).toEqual([
-      'screenshot',
-      'browser automation',
-      'dom png cordis npm',
-      'dom png',
-      'png cordis',
-    ])
-  })
-
-  it('keeps the conversation subject attached to PNG/JPG screenshot searches', () => {
-    // Real requirement from resolution_409cec426df715be5d4d7cfc.
-    expect(marketplaceSearchQueries('把当前 DSH 对话记录(用户与助手的多轮消息)截图为图片文件(PNG/JPG),可以保存到本地工作区或下载到浏览器')).toEqual([
-      'conversation long png',
-      'chat to image',
-      'screenshot',
-      'conversation export',
-      'browser automation',
-    ])
-  })
-
-  it('uses composite queries instead of a truncated CJK fallback', () => {
-    // Real requirement from resolution_19e41a12877ab2e4c9bd35d7, which used
-    // to emit the truncated garbage query "我需要一个能把整".
-    expect(marketplaceSearchQueries('我需要一个能把整个对话记录做成截图的能力')).toEqual([
-      'conversation long png',
-      'chat to image',
-      'screenshot',
-      'conversation export',
-      'chat transcript export',
-    ])
-  })
-
-  it('preserves all facets of a conversation export to long screenshot request', () => {
-    expect(marketplaceSearchQueries('我需要一个能把当前 DSH 聊天记录导出成长截图的插件。')).toEqual([
-      'conversation export',
-      'chat transcript export',
-      'conversation long png',
-      'chat to image',
-      'screenshot',
-    ])
-  })
-
-  it('keeps product intent focused instead of treating ordinary messages as Telegram', () => {
-    const requirement = '通过 xAI API 调用 Grok chat completions，发送消息并返回回复'
-    expect(_testing.matchConfidence(
-      requirement,
-      'THEWOLFWALKER/dsh-notifier',
-      'Telegram and messaging notifications for DSH',
-    )).toBeLessThan(0.3)
-    expect(_testing.matchConfidence(
-      requirement,
-      'toolazytoname/dsh-plugin-grok',
-      'Drive the local Grok Build CLI from DSH',
-    )).toBeGreaterThanOrEqual(0.3)
-    expect(_testing.matchConfidence(
-      requirement,
-      'hahaha-taotao/dsh-oauth-api',
-      'OAuth plugin for Grok/xAI, Codex, and Claude Code',
-    )).toBeGreaterThanOrEqual(0.3)
-    expect(_testing.matchConfidence(
-      requirement,
-      'edison7009/EchoBird',
-      'Claude Code, Codex CLI, Grok Build, xAI, DeepSeek Harness, Kimi Code, Qwen Code, Aider, OpenCode',
-    )).toBeLessThan(0.3)
-  })
-
-  it('accepts screenshot repos for 截成/长图 wording and filters search-only browser tools', () => {
-    const requirement = '把当前 DSH 浏览器页面的对话消息列表 DOM 节点原样截成单张拼接长图 PNG 并下载到本地'
-    expect(_testing.matchConfidence(
-      requirement,
-      'paicat1/dsh-screenshot dsh-screenshot',
-      'Standalone screen capture for DeepSeek Harness (dsh): browser hotkeys plus an agent-facing capture+read tool.',
-    )).toBeGreaterThanOrEqual(0.3)
-    expect(_testing.matchConfidence(
-      requirement,
-      'anweat/dsh-web-search-pro dsh-web-search-pro',
-      '增强型、可持久化的网页搜索:多引擎路由、SQLite+LRU 缓存、userscript 风格抽取、Playwright 渲染。',
-    )).toBeLessThan(0.3)
+  it('retains low-weight platform context without crowding out specific phrases', () => {
+    const queries = marketplaceSearchQueries('search DSH plugins for quasar ledger replay')
+    expect(queries).toContain('dsh')
+    expect(queries).toContain('quasar ledger replay')
+    expect(queries.indexOf('quasar ledger replay')).toBeLessThan(queries.indexOf('dsh'))
   })
 })
 
 describe('local matching', () => {
-  it('recognizes an active client-only conversation exporter from Loader metadata', async () => {
+  it('recognizes an active client-only plugin from matching Loader metadata', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'autoevo-client-plugin-'))
     try {
       const entryPath = path.join(root, 'lib', 'index.js')
       await writeFile(path.join(root, 'package.json'), JSON.stringify({
-        name: '@dsh-external/dsh-conv-export',
-        description: 'Export the current DSH conversation as Markdown, PDF, or a long PNG image.',
-        keywords: ['conversation', 'export', 'long-png'],
+        name: '@dsh-external/dsh-quasar-archive',
+        description: 'Synchronize quasar ledger records into an archive.',
+        keywords: ['quasar', 'ledger', 'archive'],
         dsh: { client: './dist' },
       }))
       const ctx = {
@@ -138,7 +56,7 @@ describe('local matching', () => {
             yield {
               disabled: false,
               fiber: {},
-              options: { id: 'conversation-export', name: pathToFileURL(entryPath).href },
+              options: { id: 'quasar-archive', name: pathToFileURL(entryPath).href },
               ctx: { baseUrl: pathToFileURL(entryPath).href },
             }
           },
@@ -150,62 +68,60 @@ describe('local matching', () => {
 
       const result = await resolveLocalCapabilities(
         ctx,
-        '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+        'synchronize quasar ledger records into an archive',
         { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
       )
 
       expect(result.candidates).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: 'plugin', name: '@dsh-external/dsh-conv-export', availability: 'available' }),
+        expect.objectContaining({ kind: 'plugin', name: '@dsh-external/dsh-quasar-archive', availability: 'available' }),
       ]))
-      expect(result.shouldDiscoverRemote).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
   })
 
-  it('does not treat screenshot OCR as a full conversation export match', () => {
+  it('does not treat a generic archive catalogue as a full specific match', () => {
     expect(_testing.matchConfidence(
-      '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
-      'Anionex/dsh-vision-toolkit',
-      'Long screenshot OCR and UI restoration toolkit',
+      'synchronize quasar ledger records into an archive',
+      'generic-archive-catalogue',
+      'Archives many unrelated record formats',
     )).toBeLessThan(0.3)
   })
 
-  it('requires every material facet before a non-product local match is full', () => {
-    const requirement = 'Export the conversation transcript as a screenshot'
-    const name = 'conversation-export'
-    const description = 'Export conversation transcripts to Markdown and PDF'
-    expect(_testing.matchConfidence(requirement, name, description)).toBeGreaterThan(0.62)
+  it('keeps a relevant but incomplete local match partial', () => {
+    const requirement = 'synchronize quasar ledger records with checksum'
+    const name = 'quasar-ledger-sync'
+    const description = 'Synchronize quasar ledger records'
+    const confidence = _testing.matchConfidence(requirement, name, description)
+    expect(confidence).toBeGreaterThan(_testing.matchConfidence(requirement, 'unrelated-signal', 'Dispatch an event'))
+    expect(confidence).toBeGreaterThanOrEqual(0.3)
     expect(_testing.isStrictLocalMatch(requirement, name, description)).toBe(false)
     expect(_testing.localFit(requirement, {
       name,
       description,
-      confidence: _testing.matchConfidence(requirement, name, description),
-    })).toMatchObject({ fit: 'partial', missingFacets: expect.arrayContaining(['screenshot']) })
+      confidence,
+    })).toMatchObject({ fit: 'partial', missingFacets: expect.arrayContaining(['checksum']) })
   })
 
-  it('ignores laundry-list Codex name-drops and keeps a focused Codex plugin', () => {
-    const requirement = '我需要一个能在dsh里调用codex的能力。'
+  it('downweights list-shaped mentions without a product catalogue', () => {
+    const requirement = 'invoke nebula relay'
     const nameDrop = [
-      'Best DeepSeek Harness Design Plugin. Claude Code / Codex / Cursor / DeepSeek Harness / OpenCode & 20+ CLIs via BYOK.',
-      'claude-code-for-design',
-      'codex-design',
-      'cursor-design',
-      'dsh-plugin',
+      'nebula relay / comet drive / orbit queue / archive node',
+      'multiple unrelated adapters via a registry',
     ].join(' ')
-    expect(isNameDropMention(nameDrop, 'codex')).toBe(true)
-    expect(_testing.matchConfidence(requirement, 'open-design', nameDrop)).toBeLessThan(0.3)
+    expect(isNameDropMention(nameDrop, 'nebula relay')).toBe(true)
+    expect(_testing.matchConfidence(requirement, 'generic-adapter', nameDrop)).toBeLessThan(0.3)
     expect(_testing.matchConfidence(
       requirement,
-      'acme/dsh-codex-cli dsh-codex-cli',
-      'Call Codex CLI from the current DSH session and return the result',
+      'nebula-relay',
+      'Invoke the nebula relay and return its result',
     )).toBeGreaterThanOrEqual(0.3)
   })
 
-  it('keeps remote discovery open for a product-name-only Codex match', async () => {
-    const requirement = 'codex auto_review'
-    const imageTool = { name: 'gpt-image2-codex', description: 'Generate images with GPT Image 2' }
-    const reviewTool = { name: 'codex-auto-review', description: 'Run automated Codex reviews' }
+  it('requires every generic requirement facet before local reuse', async () => {
+    const requirement = 'nebula relay audit'
+    const partialTool = { name: 'nebula-relay', description: 'Invoke a nebula relay' }
+    const fullTool = { name: 'nebula-relay-audit', description: 'Invoke a nebula relay and audit its result' }
     const exec = { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>
     const contextFor = (schemas: Array<{ name: string, description: string }>) => ({
       tools: { schemas: () => schemas },
@@ -213,43 +129,22 @@ describe('local matching', () => {
       skills: { list: async () => [] },
     } as unknown as Context)
 
-    expect(_testing.isStrictLocalMatch('codex', imageTool.name, imageTool.description)).toBe(false)
-    expect(_testing.matchConfidence(requirement, imageTool.name, imageTool.description)).toBeGreaterThanOrEqual(0.3)
-    expect(_testing.isStrictLocalMatch(requirement, imageTool.name, imageTool.description)).toBe(false)
-    expect((await resolveLocalCapabilities(contextFor([imageTool]), requirement, exec)).shouldDiscoverRemote).toBe(true)
-
-    expect((await resolveLocalCapabilities(contextFor([imageTool, reviewTool]), requirement, exec)).shouldDiscoverRemote).toBe(false)
+    expect(_testing.isStrictLocalMatch(requirement, partialTool.name, partialTool.description)).toBe(false)
+    expect((await resolveLocalCapabilities(contextFor([partialTool]), requirement, exec)).shouldDiscoverRemote).toBe(true)
+    expect((await resolveLocalCapabilities(contextFor([partialTool, fullTool]), requirement, exec)).shouldDiscoverRemote).toBe(false)
   })
 
   it('strongly matches a concrete tool and ignores unrelated names', () => {
-    expect(_testing.matchConfidence('take a browser screenshot', 'browser_screenshot', 'Capture a page')).toBeGreaterThan(0.62)
-    expect(_testing.matchConfidence('run a PowerShell command', 'pwsh', 'Execute a PowerShell command')).toBeGreaterThan(0.62)
-    expect(_testing.matchConfidence('take a browser screenshot', 'telegram_send', 'Send a chat message')).toBeLessThan(0.3)
+    expect(_testing.matchConfidence('synchronize quasar ledger', 'quasar_ledger_sync', 'Synchronize quasar ledger')).toBeGreaterThan(0.62)
+    expect(_testing.matchConfidence('audit orbit queue', 'orbit_queue_audit', 'Audit an orbit queue')).toBeGreaterThan(0.62)
+    expect(_testing.matchConfidence('synchronize quasar ledger', 'signal_dispatch', 'Dispatch an event')).toBeLessThan(0.3)
   })
 
-  it('uses unique weighted anchors for Zhihu search instead of saturating on generic descriptions', () => {
-    const requirement = '在知乎搜索截图相关内容'
-    for (const zhihuRequirement of [
-      requirement,
-      'Zhihu search screenshots',
-      '我想要做一个用知乎开放平台搜索的知乎内容的插件',
-    ]) {
-      expect(_testing.matchConfidence(zhihuRequirement, 'zhihu-search', 'Search Zhihu for posts and answers')).toBeGreaterThan(0.62)
-    }
-    for (const name of ['mmx-cli', 'pwsh', 'subagent', 'workflow', 'web_search']) {
-      expect(_testing.matchConfidence(requirement, name, 'Search content with this plugin tool API platform')).toBeLessThan(0.62)
-    }
-    expect(_testing.matchConfidence('search plugin tool api content build create platform', 'web_search', 'Search content with this plugin tool API platform')).toBeLessThan(0.3)
-  })
-
-  it('resolves the screenshot request to zhihu-search alone above the reuse threshold', async () => {
+  it('selects only a synthetic tool matching an unfamiliar identifier', async () => {
     const schemas = [
-      { name: 'zhihu-search', description: 'Search Zhihu posts, answers, and people' },
-      { name: 'mmx-cli', description: 'Create media content with a plugin tool API' },
-      { name: 'pwsh', description: 'Execute PowerShell commands and build projects' },
-      { name: 'subagent', description: 'Create a subagent workflow' },
-      { name: 'workflow', description: 'Build and run a tool workflow' },
-      { name: 'web_search', description: 'Search public web content through an API' },
+      { name: 'quasar-ledger', description: 'Synchronize quasar ledger records' },
+      { name: 'archive-node', description: 'Archive generic records' },
+      { name: 'signal-dispatch', description: 'Dispatch signals' },
     ]
     const ctx = {
       tools: { schemas: () => schemas },
@@ -259,36 +154,59 @@ describe('local matching', () => {
 
     const result = await resolveLocalCapabilities(
       ctx,
-      '我想要做一个用知乎开放平台搜索的知乎内容的插件',
+      'synchronize quasar ledger records',
       { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
     )
 
     expect(result.candidates.filter((candidate) => candidate.confidence >= 0.62)).toEqual([
-      expect.objectContaining({ name: 'zhihu-search', availability: 'available' }),
+      expect.objectContaining({ name: 'quasar-ledger', availability: 'available' }),
     ])
     expect(result.shouldDiscoverRemote).toBe(false)
   })
 
-  it('does not let a same-name Zhihu skill suppress native plugin discovery', async () => {
+  it('recognizes a directly assembled tool when the scoped registry is narrower', async () => {
+    const assembledTool = {
+      name: 'nebula-ledger-sync',
+      description: 'Synchronize nebula ledger records',
+    }
+    const ctx = {
+      tools: { schemas: () => [] },
+      systemPrompt: { assemble: async () => ({ tools: [assembledTool] }) },
+      skills: { list: async () => [] },
+    } as unknown as Context
+
+    const result = await resolveLocalCapabilities(
+      ctx,
+      'synchronize nebula ledger records',
+      { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
+    )
+
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ name: assembledTool.name, availability: 'available', fit: 'full' }),
+    ])
+    expect(result.shouldDiscoverRemote).toBe(false)
+  })
+
+  it('does not let a same-name skill suppress native plugin discovery', async () => {
     const ctx = {
       tools: { schemas: () => [] },
       systemPrompt: { assemble: async () => ({ tools: [] }) },
       skills: { list: async () => [{
-        name: 'zhihu-search',
-        description: 'Use zhihu-search proactively for Chinese web research',
-        whenToUse: 'When the user asks to search Zhihu',
+        name: 'quasar-ledger',
+        description: 'Synchronize quasar ledger records',
+        whenToUse: 'When the user asks to synchronize a ledger',
         invocation: { modelInvocable: true },
       }] },
     } as unknown as Context
     const result = await resolveLocalCapabilities(
       ctx,
-      '安装官方 zhihu-search DeepSeek Harness 插件',
+      'install the quasar-ledger native plugin',
       { agent: undefined, signal: undefined } as unknown as Pick<ToolRunContext, 'agent' | 'signal'>,
       { intent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' } },
     )
     expect(result.candidates).toEqual([expect.objectContaining({
       kind: 'skill',
-      name: 'zhihu-search',
+      name: 'quasar-ledger',
       surfaceMatch: false,
       reuseEligible: false,
     })])

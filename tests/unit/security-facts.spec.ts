@@ -42,7 +42,7 @@ describe('security finding presentation', () => {
       recommendation: 'modify',
       missingCapabilities: [],
       findings: duplicateProcessFindings,
-      sourceSnapshot: { kind: 'github', repository: 'MirDie/dsh-xai', requestedRef: 'HEAD', commit: 'a'.repeat(40), defaultBranch: 'main' },
+      sourceSnapshot: { kind: 'github', repository: 'anonymous-lab/dsh-plugin-alpha', requestedRef: 'HEAD', commit: 'a'.repeat(40), defaultBranch: 'main' },
       compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
       installSpec: null,
       license: 'Apache-2.0',
@@ -50,7 +50,7 @@ describe('security finding presentation', () => {
     const facts = confirmationFacts({
       localCandidates: [],
       remoteCandidates: [],
-      selectedRepositories: ['MirDie/dsh-xai'],
+      selectedRepositories: ['anonymous-lab/dsh-plugin-alpha'],
     } as unknown as ResolutionRecord, [review])
     expect(facts.findings).toEqual(securityFindingFacts(duplicateProcessFindings).slice(0, 1))
     expect(facts.findingDetails).toEqual(securityFindingFacts(duplicateProcessFindings))
@@ -99,7 +99,7 @@ describe('security finding presentation', () => {
     })).toBe(false)
   })
 
-  it('marks incompatible materializable facts as reviewer-needed with a direct-use Host boundary', () => {
+  it('keeps incompatible materializable facts advisory', () => {
     const record = evaluatePluginContent({
       resolutionId: 'resolution_0123456789abcdef',
       runtimeVersion: '0.1.0-rc.7',
@@ -123,7 +123,7 @@ describe('security finding presentation', () => {
     })
     expect(record.compatibility.status).toBe('incompatible')
     expect(record.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
-    expect(record.mechanicalFacts?.directUseHostBoundary).toBe('incompatible')
+    expect(record.mechanicalFacts?.directUseHostBoundary).toBeUndefined()
     expect(needsSemanticReviewer(record)).toBe(false)
   })
 })

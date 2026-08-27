@@ -2,8 +2,10 @@ import { access } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { satisfies, valid } from 'semver'
 
 export const HARNESS_DSH_VERSION = '0.1.1-rc.2'
+export const SUPPORTED_DSH_RANGE = '>=0.1.0-rc.6 <0.2.0'
 
 async function exists(target) {
   return await access(target).then(() => true).catch(() => false)
@@ -65,10 +67,11 @@ export function hostDshVersion(bin) {
 }
 
 export function skipUnlessHarnessDsh(version) {
-  if (/^0\.1\.1(?:-|$)/u.test(version.trim())) return false
+  const runtime = valid(version.trim())
+  if (runtime && satisfies(runtime, SUPPORTED_DSH_RANGE, { includePrerelease: true })) return false
   if (process.env.CI) {
-    throw new Error(`Host DSH ${version || '(unknown)'} is not 0.1.1.x (CI injects ${HARNESS_DSH_VERSION}).`)
+    throw new Error(`Host DSH ${version || '(unknown)'} is outside ${SUPPORTED_DSH_RANGE} (CI injects ${HARNESS_DSH_VERSION}).`)
   }
-  process.stderr.write(`skip: Host DSH ${version || '(unknown)'} is not 0.1.1.x\n`)
+  process.stderr.write(`skip: Host DSH ${version || '(unknown)'} is outside ${SUPPORTED_DSH_RANGE}\n`)
   return true
 }

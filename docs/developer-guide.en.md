@@ -6,11 +6,11 @@ This guide is for maintainers who change AutoEvo Host seams, workflow behavior, 
 
 ## 1. Local environment
 
-- Node.js `>=22.19.0 || >=24.0.0`; CI uses Node 24.
+- Node.js `^22.19.0 || ^24.0.0`; CI covers both supported major lines.
 - pnpm; CI currently uses `10.29.2`.
 - Git; live GitHub discovery and review also require GitHub CLI.
-- Host DSH CLI for packaged acceptance and E2E must not be a repo-root dependency — `npx @deepseek-ai/dsh` would then shadow the real CLI. CI injects the current `@deepseek-ai/dsh@0.1.1-rc.2`; locally use an installed 0.1.1.x or set `DSH_PACKAGE_ROOT`.
-- Windows/PowerShell is the primary exercised environment. Core execution uses argv runners and must not depend on interactive shell state.
+- Host DSH CLI for packaged acceptance and E2E must not be a repo-root dependency — `npx @deepseek-ai/dsh` would then shadow the real CLI. CI installs the exact acceptance baseline `@deepseek-ai/dsh@0.1.1-rc.2` in runner-temp and points `DSH_PACKAGE_ROOT` there; it never rewrites the repository `package.json` or `pnpm-lock.yaml`. Locally, any DSH in `>=0.1.0-rc.6 <0.2.0` may be exercised, but release evidence must record the actual version.
+- Windows/PowerShell is fully supported and the primary exercised environment. Linux/macOS promise build/import smoke only, not the complete DSH workflow, profile, or E2E path. Core execution uses argv runners and must not depend on interactive shell state.
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -39,9 +39,8 @@ Live E2E uses external marketplace/GitHub state. Do not report it as offline suc
 | This guide | Local development, code map, tests, debugging, contribution | Scripts, layout, development/release flow change |
 | [Architecture](architecture.md) | Policy, state machine, data layout, runtime seams | Contract, graph, storage, or injection change |
 | [Security Model](security.md) | Trust, install, verification, and cleanup invariants | Permission/review/verification/removal boundary change |
-| [Real-world Samples](real-world-samples.md) | Fixtures, evidence levels, cleanup ownership | Scenario or authoritative evidence change |
 
-Keep one canonical procedure. Other files should summarize and link. Never turn `real-live-passed`, `implemented`, or `planned` into a broader product guarantee.
+Keep one canonical procedure. Other files should summarize and link.
 
 ## 3. Repository layout
 
@@ -49,7 +48,7 @@ Keep one canonical procedure. Other files should summarize and link. Never turn 
 src/
 ├─ index.ts                    # Cordis/DSH entry and service composition
 ├─ config.ts                   # Public config schema/defaults
-├─ contracts.ts                # Policy V10 contracts and receipts
+├─ contracts.ts                # Policy V11 contracts and receipts
 ├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
 ├─ service-resolution.ts       # Resolution, candidate pool, authorization flow
 ├─ service-review.ts           # Review orchestration and revalidation
@@ -97,11 +96,11 @@ The package is ESM:
 4. Installing the fixed reuse policy and tool-execution hooks;
 5. Registering `capability_workflow*`, `capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates`, and `plugin_remove`.
 
-Prompts and presets are guidance, not authorization. Enforcement comes from persisted receipts, fresh-turn guards, execution guards, ActionCommitment/ExecutionLease, and one-time DSH approval.
+Prompts and presets are guidance, not authorization. AutoEvo receipts, fresh-turn bindings, and execution guards provide workflow consistency and evidence; DSH Core actually enforces permissions, sandboxes, and `allowed-once` approval. Never treat an AutoEvo warning, receipt, or status as DSH authorization, or a warning as an unacceptably hard block.
 
 ## 5. Workflow and two gates
 
-Policy is V9. The state machine, both confirmation gates, and the lifecycle mapping are canonical in [Architecture](architecture.md#4-数据与状态) §4; this section only lists the boundaries developers most often trip over:
+Policy is V11. The state machine, both confirmation gates, and the lifecycle mapping are canonical in [Architecture](architecture.md#4-数据与状态) §4; this section only lists the boundaries developers most often trip over:
 
 - Internal graph cursors are not public lifecycle states. The model only sees the versioned `AgentWorkflowViewV2`; never accept model-supplied repositories, review IDs, paths, or install specs — `use_this` / `modify_this` bind only candidate IDs from the sealed snapshot.
 - Repeating resume within the same turn grants no new authorization; replay-protection failures do not consume the current valid interrupt.
@@ -169,7 +168,7 @@ Review receipts bind policy, requirement, exact source, inspected hashes, manife
 Install order in brief (full implementation in `src/lifecycle/install.ts`):
 
 1. Validate the latest review, selection receipt, commitment/lease, and target profile; materialize the owned snapshot/tgz and recheck path, size, and hash;
-2. Obtain one-time DSH approval, write a provisional receipt, preflight persistent installs in an isolated minimal DSH (`autoevo-verify`, `dsh-base` only), then mutate the profile and reconcile the exact dependency against the visible package target;
+2. Obtain one-time DSH approval, write a provisional receipt, mutate the target profile through the normal DSH install path, and reconcile the exact dependency against the visible package target;
 3. Run Host verification and destination-process hot-load, then write the final receipt; failures land in `failed_absent` / `recovery_required`.
 
 | Layer | Outcome | Valid claim |
@@ -178,7 +177,7 @@ Install order in brief (full implementation in `src/lifecycle/install.ts`):
 | `bundle_activation` | `activated` | Reviewed Loader/Fiber settled |
 | persistent `manual_runtime` | `awaiting_user_test` | Installed; a real client/profile test is pending |
 
-`loaded` means destination-process bundle load. Isolated preflight is recorded separately. Semantic verification and `taskResultMatchedExpectation` cannot mint `verified`.
+`loaded` means destination-process bundle load. AutoEvo does not substitute a private preflight for live-profile evidence. Semantic verification and `taskResultMatchedExpectation` cannot mint `verified`.
 
 ## 10. Test matrix
 
@@ -191,7 +190,7 @@ Install order in brief (full implementation in `src/lifecycle/install.ts`):
 | Host verification layers | `host-verification-driver.spec.ts`, `workflow-lifecycle.spec.ts` |
 | Managed create/modify/evolve | `tests/integration/managed-*.spec.ts` |
 | Cordis load | `tests/loader-smoke.mjs` |
-| Packed runtime | `tests/packaged-acceptance.mjs` |
+| Packed runtime and isolation | `tests/packaged-acceptance.mjs` (validates docs/runtime resources and rejects test, snapshot, debug, and local-state residue) |
 | Local/adversarial/marketplace E2E | `tests/e2e-runner.mjs` |
 | Documentation contracts | `tests/unit/documentation.spec.ts` |
 
@@ -237,14 +236,13 @@ Before committing:
 7. At release time, sync the published tag in the install command across README.md, README.en.md, user-guide.md, and user-guide.en.md (`documentation.spec.ts` enforces consistency);
 8. For a release candidate, run `pnpm check:release` and inspect pack contents.
 
-CI verifies gates but does not publish a release. Commit, push, tag, publish, and upstream PR are separate maintainer-authorized actions. `contributionAdvice.eligible` means a contribution can be suggested, not publication authority.
+CI verifies gates but does not publish a release. Distribution is GitHub-only: commit, push, tag, GitHub release, and upstream PR are separate maintainer-authorized actions, and CI never publishes to npm. `contributionAdvice.eligible` means a contribution can be suggested, not publication authority.
 
 ## References
 
 - [Architecture](architecture.md) (Chinese)
 - [Security Model](security.md) (Chinese)
 - [User Guide](user-guide.en.md)
-- [Real-world Samples](real-world-samples.md) (Chinese)
 - `src/index.ts`
 - `src/contracts.ts`
 - `src/workflow/engine-core.ts` plus `engine-driver.ts` / `engine-recovery.ts` / `engine-resume.ts` (`engine.ts` is a thin façade)

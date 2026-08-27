@@ -10,6 +10,7 @@ import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type ReviewerVerdict } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { evaluatePluginContent } from '../../src/review/review.js'
+import { isDirectlyUsableReview } from '../../src/review/direct-use.js'
 import {
   attachSemanticReview,
   CapabilityEvolutionService,
@@ -229,6 +230,21 @@ describe('attachSemanticReview', () => {
     expect(attached.reviewerVerdict?.decision).not.toBe('approved')
     expect(reviewCandidateDigest(record)).toMatch(/^[a-f0-9]{64}$/u)
   })
+
+  it('records an unavailable semantic reviewer as advisory without making an installable review unusable', async () => {
+    const { record, files } = highRiskReview()
+    const attached = await attachSemanticReview({
+      host: fakeHost('approved'),
+      review: record,
+      files,
+      exec: {},
+      timeoutMs: 1_000,
+    })
+    expect(attached.reviewerRequest?.status).toBe('completed')
+    expect(attached.reviewerVerdict?.decision).toBe('uncertain')
+    expect(attached.reviewerVerdict?.evidence.join(' ')).toMatch(/unavailable/i)
+    expect(isDirectlyUsableReview(attached)).toBe(true)
+  })
 })
 
 function config(root: string): RuntimeConfig {
@@ -273,15 +289,15 @@ function ghRunner(files: Record<string, string>) {
   }
 }
 
-const grokFiles = {
+const syntheticModelFiles = {
   'package.json': JSON.stringify({
-    name: 'dsh-xai',
+    name: 'dsh-plugin-alpha',
     license: 'MIT',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
   }, null, 2),
-  'cordis.patch.yml': '- id: xai\n  name: dsh-xai\n',
-  'README.md': 'xAI Grok SuperGrok OAuth for DeepSeek Harness\n',
+  'cordis.patch.yml': '- id: provider-alpha\n  name: dsh-plugin-alpha\n',
+  'README.md': 'Synthetic provider adapter for DeepSeek Harness\n',
   'lib/index.js': "export function apply() { eval('1') }\n",
 }
 
@@ -329,17 +345,17 @@ describe('service selected review attachment', () => {
       id: `resolution_${'b'.repeat(24)}`,
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-19T00:00:00.000Z',
-      requirement: 'grok',
+      requirement: 'synthetic-model',
       cwd: root,
       decision: 'inspect_remote' as const,
       localCandidates: [],
       remoteCandidates: [
-        { repository: 'MirDie/dsh-xai', name: 'dsh-xai', description: 'xAI Grok', stars: 3, updatedAt: null, topics: [] },
+        { repository: 'anonymous-lab/dsh-plugin-alpha', name: 'dsh-plugin-alpha', description: 'synthetic provider synthetic model', stars: 3, updatedAt: null, topics: [] },
         { repository: 'acme/other', name: 'other', description: 'other', stars: 1, updatedAt: null, topics: [] },
       ],
       remoteDiscoveryComplete: true,
       authorization: { state: 'selection_required' as const, resolutionId: `resolution_${'b'.repeat(24)}`, reason: 'wait' },
-      selectedRepositories: ['MirDie/dsh-xai'],
+      selectedRepositories: ['anonymous-lab/dsh-plugin-alpha'],
       queries: [],
       reasons: [],
     }
@@ -348,7 +364,7 @@ describe('service selected review attachment', () => {
     const serviceWithStore = new CapabilityEvolutionService(
       { get: () => undefined } as unknown as Context,
       config(root),
-      ghRunner(grokFiles),
+      ghRunner(syntheticModelFiles),
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       undefined,
@@ -356,12 +372,12 @@ describe('service selected review attachment', () => {
     )
     const result = await serviceWithStore.reviewGithubBatch(
       resolution,
-      ['MirDie/dsh-xai'],
+      ['anonymous-lab/dsh-plugin-alpha'],
       'fixed',
       exec(),
     )
     expect(result.reviews).toHaveLength(1)
-    expect(result.reviews[0]?.sourceSnapshot).toMatchObject({ repository: 'MirDie/dsh-xai' })
+    expect(result.reviews[0]?.sourceSnapshot).toMatchObject({ repository: 'anonymous-lab/dsh-plugin-alpha' })
     expect(result.reviews[0]?.reviewerVerdict?.decision).toBeUndefined()
     expect(seenRepos).toEqual([])
     await expect(serviceWithStore.reviewGithubBatch(

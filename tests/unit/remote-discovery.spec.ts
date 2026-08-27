@@ -61,21 +61,21 @@ function runnerFor(handler: (query: string) => unknown) {
 
 describe('scoped GitHub discovery', () => {
   it('forces every query onto topic:dsh-plugin', () => {
-    expect(scopedGithubQuery('codex')).toBe('codex topic:dsh-plugin')
-    expect(scopedGithubQuery('codex topic:dsh-plugin')).toBe('codex topic:dsh-plugin')
+    expect(scopedGithubQuery('quasar relay')).toBe('quasar relay topic:dsh-plugin')
+    expect(scopedGithubQuery('quasar relay topic:dsh-plugin')).toBe('quasar relay topic:dsh-plugin')
     expect(scopedGithubQuery('')).toBe('topic:dsh-plugin')
   })
 
   it('searches GitHub with scoped queries and keeps updated metadata', async () => {
     const runner = runnerFor((query) => {
       expect(query).toContain('topic:dsh-plugin')
-      if (query.includes('scientific') || query.includes('科学')) {
+      if (query.includes('quasar ledger')) {
         return { items: [searchItem({
-          full_name: 'acme/scientific-calculator',
-          description: 'Scientific notation support',
+          full_name: 'example-org/dsh-quasar-ledger',
+          description: 'Quasar ledger replay archive',
           stars: 42,
           updated_at: '2026-07-01T00:00:00Z',
-          topics: ['dsh-plugin', 'calculator'],
+          topics: ['dsh-plugin', 'quasar-ledger'],
         })] }
       }
       return { items: [] }
@@ -85,7 +85,7 @@ describe('scoped GitHub discovery', () => {
       runner,
       config,
       cwd: 'C:/workspace',
-      requirement: '科学计数法计算器',
+      requirement: 'quasar ledger replay archive',
     })
 
     expect(runner.run.mock.calls.length).toBeGreaterThan(1)
@@ -93,10 +93,10 @@ describe('scoped GitHub discovery', () => {
     expect(result.source).toBe('github')
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([expect.objectContaining({
-      repository: 'acme/scientific-calculator',
+      repository: 'example-org/dsh-quasar-ledger',
       stars: 42,
       updatedAt: '2026-07-01T00:00:00Z',
-      topics: expect.arrayContaining(['dsh-plugin', 'calculator']),
+      topics: expect.arrayContaining(['dsh-plugin', 'quasar-ledger']),
     })])
   })
 
@@ -106,7 +106,7 @@ describe('scoped GitHub discovery', () => {
       runner,
       config,
       cwd: 'C:/workspace',
-      requirement: '我需要一个能在dsh里调用codex的能力。',
+      requirement: '在 DSH 会话中调用 quasar relay',
     })
     const queries = runner.run.mock.calls.map((call) => {
       const arg = call[0].argv.find((part) => part.startsWith('q='))
@@ -114,7 +114,7 @@ describe('scoped GitHub discovery', () => {
     })
     expect(queries.length).toBeGreaterThan(0)
     expect(queries.every((query) => query.includes('topic:dsh-plugin'))).toBe(true)
-    expect(queries.some((query) => query === 'codex dsh' || query.endsWith(' dsh'))).toBe(false)
+    expect(queries.some((query) => query === 'quasar relay dsh' || query.endsWith(' dsh'))).toBe(false)
     expect(result.complete).toBe(true)
     expect(result.candidates).toEqual([])
   })
@@ -146,19 +146,19 @@ describe('scoped GitHub discovery', () => {
     expect(result.candidates).toEqual([])
   })
 
-  it('drops archived, forked, disabled, and finder infrastructure hits', async () => {
+  it('drops archived, forked, and disabled hits without repository-name exceptions', async () => {
     const result = await discoverRemoteCandidates({
       runner: runnerFor(() => ({ items: [
         searchItem({ full_name: 'acme/old', description: 'calculator', archived: true }),
         searchItem({ full_name: 'acme/forked', description: 'calculator', fork: true }),
-        searchItem({ full_name: 'awesome-dsh-plugin/dsh-find-plugin', description: 'calculator' }),
+        searchItem({ full_name: 'acme/search-helper', description: 'calculator search helper', stars: 2 }),
         searchItem({ full_name: 'acme/calc', description: 'scientific calculator', stars: 3 }),
       ] })),
       config,
       cwd: 'C:/workspace',
       requirement: 'calculator',
     })
-    expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calc'])
+    expect(result.candidates.map((item) => item.repository)).toEqual(['acme/calc', 'acme/search-helper'])
   })
 
   it('keeps candidates with requirement evidence in topics or package name', () => {
@@ -180,44 +180,67 @@ describe('scoped GitHub discovery', () => {
     ])
   })
 
-  it('prefers a low-star exact conversation exporter over popular screenshot OCR', () => {
+  it('uses bilingual operation evidence for a remote shortlist without naming exceptions', () => {
+    const candidates = [
+      {
+        repository: 'acme/extension-index',
+        name: 'extension-index',
+        description: 'Search and browse extensions from a session',
+        stars: 2,
+        updatedAt: null,
+        topics: ['dsh-plugin'],
+      },
+      {
+        repository: 'acme/theme-pack',
+        name: 'theme-pack',
+        description: 'A visual theme for a session',
+        stars: 4,
+        updatedAt: null,
+        topics: ['dsh-plugin'],
+      },
+    ]
+    expect(_testing.relevantRemoteCandidates('在 DSH 会话里搜索扩展', candidates))
+      .toEqual([expect.objectContaining({ repository: 'acme/extension-index' })])
+  })
+
+  it('prefers a low-star specific match over a popular generic catalogue', () => {
     const exact = {
-      repository: 'acme/dsh-conv-export',
-      name: 'dsh-conv-export',
-      description: 'Export the current DSH conversation as a long PNG image.',
+      repository: 'example-org/dsh-quasar-ledger',
+      name: 'dsh-quasar-ledger',
+      description: 'Synchronize quasar ledger records and verify checksums.',
       stars: 2,
       updatedAt: '2026-08-02T00:00:00Z',
-      topics: ['dsh-plugin', 'conversation-export'],
+      topics: ['dsh-plugin', 'quasar-ledger'],
     }
     const popularButWrong = {
-      repository: 'acme/dsh-vision-toolkit',
-      name: 'dsh-vision-toolkit',
-      description: 'Long screenshot OCR and UI restoration toolkit.',
+      repository: 'example-org/dsh-adapter-catalogue',
+      name: 'dsh-adapter-catalogue',
+      description: 'A large catalogue of unrelated record adapters.',
       stars: 680,
       updatedAt: '2026-08-03T00:00:00Z',
-      topics: ['screenshot', 'ocr'],
+      topics: ['dsh-plugin', 'catalogue'],
     }
 
     expect(_testing.relevantRemoteCandidates(
-      '我需要一个能把当前 DSH 聊天记录导出成长截图的插件。',
+      'synchronize quasar ledger records and verify checksums',
       [popularButWrong, exact],
     )).toEqual([
-      expect.objectContaining({ repository: 'acme/dsh-conv-export', stars: 2 }),
+      expect.objectContaining({ repository: 'example-org/dsh-quasar-ledger', stars: 2 }),
     ])
   })
 
-  it('runs every phrase and keeps GitHub hits that match the requirement', async () => {
+  it('runs every phrase and keeps an anonymous exact-match hit over a generic catalogue entry', async () => {
     const runner = runnerFor((query) => {
-      if (query.includes('grok build')) {
+      if (query.includes('quasar relay')) {
         return { items: [searchItem({
-          full_name: 'toolazytoname/dsh-plugin-grok',
-          description: 'Call the local Grok Build CLI from DSH',
+          full_name: 'example-org/dsh-quasar-relay',
+          description: 'Call the quasar relay from DSH',
           stars: 4,
         })] }
       }
       return { items: [searchItem({
-        full_name: 'edison7009/EchoBird',
-        description: 'Claude Code, Codex CLI, Grok Build, DeepSeek Harness, Kimi Code',
+        full_name: 'example-org/adapter-catalogue',
+        description: 'Comet drive, orbit queue, quasar relay, and many unrelated adapters',
         stars: 3041,
       })] }
     })
@@ -226,13 +249,13 @@ describe('scoped GitHub discovery', () => {
       runner,
       config,
       cwd: 'C:/workspace',
-      requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
+      requirement: '在 DSH 会话中调用 quasar relay',
     })
 
     expect(runner.run.mock.calls.length).toBeGreaterThan(1)
     expect(result.source).toBe('github')
     expect(result.candidates).toEqual([expect.objectContaining({
-      repository: 'toolazytoname/dsh-plugin-grok',
+      repository: 'example-org/dsh-quasar-relay',
     })])
   })
 
@@ -250,7 +273,7 @@ describe('scoped GitHub discovery', () => {
       },
       config,
       cwd: 'C:/workspace',
-      requirement: '在 DSH 会话中调用 xAI Grok Build 的能力',
+      requirement: '在 DSH 会话中调用 quasar relay',
     })
 
     expect(calls).toBeGreaterThan(1)

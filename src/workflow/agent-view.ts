@@ -1,6 +1,6 @@
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type WorkflowOptionId } from '../contracts.js'
 import { prefersChinese, rememberRequirementLanguage } from '../i18n.js'
-import { isDirectlyUsableReview } from '../review/direct-use.js'
+import { hostDirectUseBoundary, isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import { creatorAgentFacts } from '../creator-foundation.js'
 import {
@@ -16,6 +16,7 @@ export type AgentSemanticState =
   | 'waiting_clarification'
   | 'discovering'
   | 'no_candidates'
+  | 'search_incomplete'
   | 'waiting_candidate_selection'
   | 'waiting_final_decision'
   | 'diagnosing'
@@ -98,7 +99,7 @@ const HARD_CONSTRAINTS = [
   'Clarification may occur at most once, changes read-only search classification only, and never grants selection, creation, modification, installation, or execution authority.',
   'Call capability_workflow_recover in two legal modes only: sealed failure recovery with the current interrupt_id, or a new top-level user request to clean up a completed installation with interrupt_id omitted. Never pass an installation id. If this tool result is waiting or a completed presentation, do not call it again in the same turn.',
   'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
-  'Authorized modify or create continues in this session on the Host-managed source path. Do not spawn sub-agents. After editing, call capability_workflow_resume with finish construction navigation and no new user decision.',
+  'Authorized modify or create continues on the Host-managed source path. Inside that source, use normal DSH-permitted editing, shell, build, test, dependency, skill, and collaboration tools as needed. After construction, call capability_workflow_resume with finish construction navigation and no new user decision.',
   'After a completed local install, only Host installation.contribution.eligible may prompt asking whether to contribute upstream. Ask in natural language; do not fork, push, or run GitHub CLI until a separate explicit approval. Never invent eligibility.',
 ]
 
@@ -213,9 +214,47 @@ function reviewEvidence(view: WorkflowView): Record<string, unknown>[] {
     semantic_assessment: needsSemanticReviewer(review)
       ? review.reviewerVerdict?.decision ?? 'missing'
       : 'not_required',
+    can_install: isDirectlyUsableReview(review, view.workflow),
+    blocking_issues: reviewBlockingIssues(review),
+    warnings: securityFindingFacts(review.findings)
+      .slice(0, 8)
+      .map((finding) => ({
+        code: boundedText(finding.code, 100),
+        severity: finding.severity,
+        detail: boundedText(finding.detail, 300),
+      })),
+    repair_hints: reviewRepairHints(review),
+    recommendation: review.recommendation,
     host_recommendation: review.recommendation,
     can_use_directly: isDirectlyUsableReview(review, view.workflow),
   }))
+}
+
+function reviewRepairHints(review: ReviewRecord): string[] {
+  const hints: string[] = []
+  const boundary = hostDirectUseBoundary(review)
+  if (review.compatibility.status === 'incompatible') {
+    hints.push('Consider adjusting the declared runtime compatibility or letting DSH report the concrete install failure.')
+  }
+  if (boundary === 'not_materializable') hints.push('Choose a materializable bundle with a Host-verifiable install source.')
+  if (review.findings.some((finding) => finding.severity === 'block')) {
+    hints.push('Review the high-severity observations and decide whether to modify, use, or skip this source.')
+  }
+  if (review.missingCapabilities.length > 0) {
+    hints.push('Address the missing requested capabilities before direct use.')
+  }
+  return hints.slice(0, 4)
+}
+
+function reviewBlockingIssues(review: ReviewRecord): Array<{ code: string; detail: string }> {
+  const boundary = hostDirectUseBoundary(review)
+  if (boundary === 'not_materializable') {
+    return [{
+      code: 'not_materializable',
+      detail: 'The reviewed source cannot be identified as an installable DSH bundle with an exact install source.',
+    }]
+  }
+  return []
 }
 
 function modificationEvidence(view: WorkflowView): Record<string, unknown> | undefined {
@@ -341,7 +380,11 @@ function semanticState(view: WorkflowView): AgentSemanticState {
   if (workflow.cursor === 'await_clarification') return 'waiting_clarification'
   if (workflow.cursor === 'await_discovery') return 'discovering'
   if (workflow.cursor === 'await_selection') {
-    return (workflow.candidateSnapshot?.length ?? 0) === 0 ? 'no_candidates' : 'waiting_candidate_selection'
+    if ((workflow.candidateSnapshot?.length ?? 0) !== 0) return 'waiting_candidate_selection'
+    if (workflow.lastFailure?.stage === 'discovery' || view.resolution?.remoteDiscoveryComplete === false) {
+      return 'search_incomplete'
+    }
+    return 'no_candidates'
   }
   if (workflow.cursor === 'await_confirmation') {
     if ((workflow.candidateSnapshot?.length ?? 0) === 0
@@ -399,6 +442,20 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
     }
   }
   if (state === 'discovering') return discoveryFacts(view)
+  if (state === 'search_incomplete') {
+    const failure = view.workflow.lastFailure
+    return {
+      ...discoveryFacts(view),
+      sealed_candidates: candidateEvidence(view.workflow.candidateSnapshot ?? [], view.resolution),
+      ...(failure ? { failure: {
+        stage: failure.stage,
+        code: boundedText(failure.code, 100),
+        summary: boundedText(failure.message, 300),
+        retryable: failure.retryable,
+        ...(failure.diagnosticHash ? { evidence_hash: failure.diagnosticHash } : {}),
+      } } : {}),
+    }
+  }
   if (state === 'waiting_candidate_selection' || state === 'no_candidates') {
     return {
       ...intentFacts(view),
@@ -433,6 +490,21 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
         removed: view.installation.removed,
         target_profile: boundedText(view.installation.targetProfile, 100),
         retention: view.installation.retention,
+        ...(view.installation.installFailure ? { failure: {
+          stage: view.installation.installFailure.stage ?? 'install',
+          code: boundedText(view.installation.installFailure.code, 100),
+          summary: boundedText(
+            view.installation.installFailure.summary ?? view.installation.installFailure.message,
+            300,
+          ),
+          retryable: view.installation.installFailure.retryable ?? false,
+          repair_hints: (view.installation.installFailure.repairHints ?? [])
+            .slice(0, 4)
+            .map((hint) => boundedText(hint, 300)),
+          ...(view.installation.installFailure.diagnosticHash
+            ? { evidence_hash: view.installation.installFailure.diagnosticHash }
+            : {}),
+        } } : {}),
         verification: {
           reason: boundedText(view.installation.verification.reason, 300),
           process_outcome: view.installation.verification.launchEvidence?.processOutcome ?? 'unknown',

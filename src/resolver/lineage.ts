@@ -110,18 +110,20 @@ function managedSnapshotCandidate(input: {
     if (review.sourceSnapshot.kind !== 'local' || !review.installSpec) continue
     if (!input.managedReviewIds.has(review.id)) continue
     const root = managedSnapshotRootReview(review, byId)
-    if (!root || root.sourceSnapshot.kind !== 'github') continue
-    if (review.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) continue
+    const githubRoot = root?.sourceSnapshot.kind === 'github' ? root : undefined
+    const githubSource = githubRoot?.sourceSnapshot.kind === 'github' ? githubRoot.sourceSnapshot : undefined
+    if (githubSource && review.sourceSnapshot.baseCommit.toLowerCase() !== githubSource.commit.toLowerCase()) continue
     const packageName = review.manifest.packageName
-      ?? root.manifest.packageName
-      ?? root.sourceSnapshot.repository.split('/')[1]
-      ?? root.sourceSnapshot.repository
-    if (root.manifest.packageName && review.manifest.packageName
-      && root.manifest.packageName !== review.manifest.packageName) continue
+      ?? githubRoot?.manifest.packageName
+      ?? githubSource?.repository.split('/')[1]
+    if (!packageName) continue
+    if (githubRoot?.manifest.packageName && review.manifest.packageName
+      && githubRoot.manifest.packageName !== review.manifest.packageName) continue
+    const repository = githubSource?.repository ?? `autoevo-local/${packageName}`
     if (!knownSourceMatchesRequest(
       input.requirement,
       input.intent,
-      root.sourceSnapshot.repository,
+      repository,
       packageName,
     )) continue
 
@@ -137,10 +139,10 @@ function managedSnapshotCandidate(input: {
     const sourceId = sourceIdFromLocalPath(review.sourceSnapshot.path)
     if (!sourceId) continue
     const failed = relatedInstall?.installOutcome === 'failed_absent'
-    return knownSourceCandidate(packageName, root.sourceSnapshot.repository, {
-      kind: failed ? 'failed_install' : 'reviewed_snapshot',
-      repository: root.sourceSnapshot.repository,
-      commit: root.sourceSnapshot.commit,
+    return knownSourceCandidate(packageName, repository, {
+      kind: githubRoot ? (failed ? 'failed_install' : 'reviewed_snapshot') : 'managed_local',
+      repository,
+      commit: githubSource?.commit ?? review.sourceSnapshot.baseCommit,
       packageName,
       profile: input.profile,
       dependencySpec: review.installSpec,
@@ -148,7 +150,7 @@ function managedSnapshotCandidate(input: {
       reviewId: review.id,
       sourceId,
       ...(relatedInstall?.id ? { installationId: relatedInstall.id } : {}),
-    }, Boolean(failed), true)
+    }, Boolean(failed), true, !githubRoot)
   }
   return undefined
 }
@@ -251,6 +253,7 @@ function knownSourceCandidate(
   target: NonNullable<LocalCapabilityCandidate['evolutionTarget']>,
   failed: boolean,
   managedSnapshot = false,
+  managedLocal = false,
 ): LocalCapabilityCandidate {
   return {
     kind: 'plugin',
@@ -259,7 +262,9 @@ function knownSourceCandidate(
       ? managedSnapshot
         ? `A Host-managed repair of ${repository} exists, but its latest installation failed; Host can re-review the frozen repaired source`
         : `Previously reviewed ${repository} failed to activate; Host can review that frozen source again`
-      : managedSnapshot
+      : managedLocal
+        ? `Completed Host-managed local capability ${packageName}; Host can re-review and continue editing it`
+        : managedSnapshot
         ? `Completed Host-managed repair of ${repository}; Host can re-review and freeze it for this workflow`
         : `Previously reviewed ${repository} exact commit`,
     availability: 'known_source',

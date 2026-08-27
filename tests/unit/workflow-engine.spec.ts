@@ -336,6 +336,23 @@ describe('workflow engine autonomous discovery', () => {
     expect(guard.constructionRoot(turn.agent)).toBe(path.join(root, 'managed-lunar-calendar'))
   })
 
+  it('automatically seals a completed empty discovery without requiring a presentation call', async () => {
+    const record = resolution('unfamiliar capability')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = true
+    const { engine } = await makeEngine(record, 'auto-empty')
+    const view = await engine.start(record.requirement, exec())
+
+    expect(view.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_selection', candidateSnapshot: [] })
+    expect(view.workflow.interrupt?.options.map((option) => option.id)).toEqual([
+      'search_more',
+      'create_new',
+      'stop',
+    ])
+  })
+
   it('rejects oversized presentations, duplicate ids, and candidates outside the discovery pool', async () => {
     const { store, engine } = await makeEngine(resolution(), 'present-invalid')
     const discovery = await engine.start('calculator', exec())
@@ -627,6 +644,102 @@ describe('workflow engine autonomous discovery', () => {
       status: 'failed',
       code: 'command_failed',
     })])
+  })
+
+  it('keeps managed construction open when sealing rejects the current source state', async () => {
+    const record = resolution('new capability')
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = true
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'repair-seal')
+    const sourceRoot = path.join(root, 'managed-source')
+    const staleReview: ReviewRecord = {
+      schemaVersion: 1,
+      id: `review_${'f'.repeat(64)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      resolutionId: record.id,
+      requirement: record.requirement,
+      sourceSnapshot: {
+        kind: 'local',
+        path: sourceRoot,
+        baseReviewId: `review_${'a'.repeat(64)}`,
+        baseCommit: 'b'.repeat(40),
+        statusHash: 'c'.repeat(64),
+      },
+      inspectedFiles: [],
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-plugin-generated',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+      },
+      fit: 'full',
+      confidence: 0.9,
+      securityRisk: 'low',
+      maintained: true,
+      license: 'MIT',
+      compatibility: { status: 'compatible', reason: 'local review', runtimeVersion: '0.1.0' },
+      missingCapabilities: [],
+      findings: [],
+      recommendation: 'use',
+      installSpec: `file:${path.join(root, 'stale.tgz')}`,
+    }
+    workflowHost.prepareCreate = async (current, _exec, workflow) => {
+      workflow.pendingPath = sourceRoot
+      workflow.managedSourceId = 'managed-generated'
+      return { resolution: current, path: sourceRoot }
+    }
+    let finishAttempts = 0
+    workflowHost.finishManagedWork = async (current, _exec, workflow) => {
+      finishAttempts += 1
+      await store.put('reviews', staleReview)
+      workflow.lastReviewId = staleReview.id
+      workflow.lineageTipReviewId = staleReview.id
+      if (finishAttempts === 1) {
+        throw new EvolutionError('review_rejected', 'Managed child changed Git branch or HEAD instead of only editing the working tree')
+      }
+      return { resolution: current, path: sourceRoot, review: staleReview }
+    }
+
+    const turn = exec('session-repair-seal', root)
+    const discovery = await engine.start(record.requirement, turn)
+    const started = await engine.present({ workflowId: discovery.workflow.id, candidateIds: [] }, turn)
+    expect(started.workflow).toMatchObject({ cursor: 'await_selection', status: 'interrupted' })
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '新建' }] })
+    const constructing = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      decision: { action: 'create_new' },
+    }, turn)
+    expect(constructing.workflow.cursor).toBe('await_modify_work')
+
+    const repairable = await engine.resume({
+      workflowId: constructing.workflow.id,
+      navigation: { kind: 'finish_managed_work' },
+    }, turn)
+
+    expect(repairable.workflow).toMatchObject({
+      cursor: 'await_modify_work',
+      status: 'interrupted',
+      lastFailure: {
+        stage: 'managed_child',
+        code: 'review_rejected',
+        retryable: true,
+      },
+    })
+    expect(repairable.workflow.interrupt).toBeUndefined()
+    expect(guard.constructionRoot(turn.agent)).toBe(sourceRoot)
+
+    const repaired = await engine.resume({
+      workflowId: constructing.workflow.id,
+      navigation: { kind: 'finish_managed_work' },
+    }, turn)
+    expect(repaired.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
+    expect(repaired.workflow.lastFailure).toBeUndefined()
+    expect(guard.constructionRoot(turn.agent)).toBeUndefined()
   })
 
   it.each([
@@ -1142,7 +1255,7 @@ describe('workflow engine autonomous discovery', () => {
     const first = await engine.start('calculator', turn, {
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'dsh-xai',
+      targetName: 'dsh-plugin-alpha',
     })
     const second = await engine.start('calculator', turn, {
       operation: 'discover_or_reuse',
@@ -1152,18 +1265,18 @@ describe('workflow engine autonomous discovery', () => {
     const same = await engine.start('calculator', turn, {
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'dsh-xai',
+      targetName: 'dsh-plugin-alpha',
     })
     expect(same.workflow.id).toBe(first.workflow.id)
   })
 
   it('offers review_existing for an installed GitHub SHA without treating Gate-1 use_this as review', async () => {
     const commit = '5'.repeat(40)
-    const record = resolution('dsh-xai')
-    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const record = resolution('dsh-plugin-alpha')
+    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-alpha', 'anonymous-lab/dsh-plugin-alpha', commit, { description: 'synthetic provider synthetic model OAuth' })
     const { guard, engine } = await makeEngine(record, 'review-existing')
     const turn = exec()
-    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
+    const { selection } = await startAndPresent(engine, 'dsh-plugin-alpha', turn)
     const optionIds = selection.workflow.interrupt?.options.map((item) => item.id) ?? []
     expect(optionIds).toEqual(expect.arrayContaining(['review_existing', 'reuse_local', 'search_more', 'stop']))
     expect(optionIds).not.toContain('modify_this')
@@ -1181,14 +1294,14 @@ describe('workflow engine autonomous discovery', () => {
 
   it('hides search_more at Gate 1 when evolving a failed known source', async () => {
     const commit = 'd'.repeat(40)
-    const record = resolution('zhihu-search')
+    const record = resolution('record-sync')
     record.intent = {
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'zhihu-search',
+      targetName: 'record-sync',
       evolveReason: 'repair',
     }
-    record.localCandidates = [installedPluginCandidate('dsh-plugin-zhihu-search', 'klarkxy/zhihu-search', commit, {
+    record.localCandidates = [installedPluginCandidate('dsh-plugin-beta', 'anonymous-lab/dsh-plugin-beta', commit, {
       kind: 'failed_install',
       description: 'failed activation',
       availability: 'known_source',
@@ -1198,7 +1311,7 @@ describe('workflow engine autonomous discovery', () => {
     })]
     const { engine } = await makeEngine(record, 'failed-lineage')
     const turn = exec()
-    const started = await engine.start('zhihu-search', turn, record.intent)
+    const started = await engine.start('record-sync', turn, record.intent)
     expect(started.workflow.cursor).toBe('await_discovery')
     const candidateIds = started.workflow.discoveryPool!.map((item) => item.id)
     const selection = await engine.present({ workflowId: started.workflow.id, candidateIds }, turn)
@@ -1210,15 +1323,15 @@ describe('workflow engine autonomous discovery', () => {
 
   it('replays a failed known-source review through install without a live replacement binding', async () => {
     const commit = 'd'.repeat(40)
-    const oldSpec = `github:klarkxy/zhihu-search#${commit}`
-    const record = resolution('zhihu-search')
+    const oldSpec = `github:anonymous-lab/dsh-plugin-beta#${commit}`
+    const record = resolution('record-sync')
     record.intent = {
       operation: 'evolve_existing',
       requiredSurface: 'native_dsh_plugin',
-      targetName: 'zhihu-search',
+      targetName: 'record-sync',
       evolveReason: 'repair',
     }
-    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-zhihu-search', 'klarkxy/zhihu-search', commit, {
+    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-beta', 'anonymous-lab/dsh-plugin-beta', commit, {
       kind: 'failed_install',
       description: 'failed activation',
       availability: 'known_source',
@@ -1244,7 +1357,7 @@ describe('workflow engine autonomous discovery', () => {
       inspectedFiles: [],
       manifest: {
         kind: 'bundle',
-        packageName: 'dsh-plugin-zhihu-search',
+        packageName: 'dsh-plugin-beta',
         scripts: [],
         dependencies: [],
         peerDependencies: {},
@@ -1259,7 +1372,7 @@ describe('workflow engine autonomous discovery', () => {
       missingCapabilities: [],
       findings: [],
       recommendation: 'use',
-      installSpec: `file:${path.join(root, 'dsh-plugin-zhihu-search-fixed.tgz')}`,
+      installSpec: `file:${path.join(root, 'dsh-plugin-beta-fixed.tgz')}`,
     }
     const installs: Array<{ retention: string; replacement?: unknown }> = []
     workflowHost.listInstallProfiles = async () => ['web']
@@ -1293,7 +1406,7 @@ describe('workflow engine autonomous discovery', () => {
         targetProfile: input.targetProfile,
         retention: input.retention,
         dshHome: root,
-        packageName: 'dsh-plugin-zhihu-search',
+        packageName: 'dsh-plugin-beta',
         installSpec: fixedReview.installSpec ?? '',
         installState: 'installed',
         installOutcome: 'activated',
@@ -1336,8 +1449,8 @@ describe('workflow engine autonomous discovery', () => {
 
   it('reviews an installed exact SHA into confirmation with modify_this and without search_more', async () => {
     const commit = '5'.repeat(40)
-    const record = resolution('dsh-xai')
-    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const record = resolution('dsh-plugin-alpha')
+    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-alpha', 'anonymous-lab/dsh-plugin-alpha', commit, { description: 'synthetic provider synthetic model OAuth' })
     const { store, guard, workflowHost, engine } = await makeEngine(record, 'installed-review')
     const review: ReviewRecord = {
       schemaVersion: 1,
@@ -1345,10 +1458,10 @@ describe('workflow engine autonomous discovery', () => {
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-22T00:00:00.000Z',
       resolutionId: record.id,
-      requirement: 'dsh-xai',
+      requirement: 'dsh-plugin-alpha',
       sourceSnapshot: {
         kind: 'github',
-        repository: 'MirDie/dsh-xai',
+        repository: 'anonymous-lab/dsh-plugin-alpha',
         requestedRef: commit,
         commit,
         defaultBranch: 'main',
@@ -1356,7 +1469,7 @@ describe('workflow engine autonomous discovery', () => {
       inspectedFiles: [],
       manifest: {
         kind: 'bundle',
-        packageName: 'dsh-xai',
+        packageName: 'dsh-plugin-alpha',
         scripts: [],
         dependencies: [],
         peerDependencies: {},
@@ -1371,7 +1484,7 @@ describe('workflow engine autonomous discovery', () => {
       missingCapabilities: [],
       findings: [],
       recommendation: 'modify',
-      installSpec: `github:MirDie/dsh-xai#${commit}`,
+      installSpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
     }
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.reviewExisting = async (resolution, target) => {
@@ -1391,7 +1504,7 @@ describe('workflow engine autonomous discovery', () => {
       return { resolution: next, review }
     }
     const turn = exec()
-    const { selection } = await startAndPresent(engine, 'dsh-xai', turn)
+    const { selection } = await startAndPresent(engine, 'dsh-plugin-alpha', turn)
     const candidateId = selection.workflow.candidateSnapshot![0]!.id
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审这个已装来源' }] })
     const reviewed = await engine.resume({
@@ -1410,8 +1523,8 @@ describe('workflow engine autonomous discovery', () => {
 
   it('keeps the installed candidate through modify and sends replacement on use_this', async () => {
     const commit = '5'.repeat(40)
-    const record = resolution('dsh-xai')
-    record.localCandidates[0] = installedPluginCandidate('dsh-xai', 'MirDie/dsh-xai', commit, { description: 'xAI Grok OAuth' })
+    const record = resolution('dsh-plugin-alpha')
+    record.localCandidates[0] = installedPluginCandidate('dsh-plugin-alpha', 'anonymous-lab/dsh-plugin-alpha', commit, { description: 'synthetic provider synthetic model OAuth' })
     const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'installed-replace')
     const githubReview: ReviewRecord = {
       schemaVersion: 1,
@@ -1419,10 +1532,10 @@ describe('workflow engine autonomous discovery', () => {
       policyVersion: POLICY_VERSION,
       createdAt: '2026-08-22T00:00:00.000Z',
       resolutionId: record.id,
-      requirement: 'dsh-xai',
+      requirement: 'dsh-plugin-alpha',
       sourceSnapshot: {
         kind: 'github',
-        repository: 'MirDie/dsh-xai',
+        repository: 'anonymous-lab/dsh-plugin-alpha',
         requestedRef: commit,
         commit,
         defaultBranch: 'main',
@@ -1430,7 +1543,7 @@ describe('workflow engine autonomous discovery', () => {
       inspectedFiles: [],
       manifest: {
         kind: 'bundle',
-        packageName: 'dsh-xai',
+        packageName: 'dsh-plugin-alpha',
         scripts: [],
         dependencies: [],
         peerDependencies: {},
@@ -1445,7 +1558,7 @@ describe('workflow engine autonomous discovery', () => {
       missingCapabilities: [],
       findings: [],
       recommendation: 'modify',
-      installSpec: `github:MirDie/dsh-xai#${commit}`,
+      installSpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
     }
     const localReview: ReviewRecord = {
       ...githubReview,
@@ -1457,7 +1570,7 @@ describe('workflow engine autonomous discovery', () => {
         baseCommit: commit,
         statusHash: 'c'.repeat(64),
       },
-      installSpec: `file:${path.join(root, 'dsh-xai.tgz')}`,
+      installSpec: `file:${path.join(root, 'dsh-plugin-alpha.tgz')}`,
       recommendation: 'use',
     }
     let latest: ReviewRecord = githubReview
@@ -1465,7 +1578,7 @@ describe('workflow engine autonomous discovery', () => {
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.latestReview = async () => latest
     workflowHost.reviewExisting = async (resolution, target) => {
-      expect(target.repository).toBe('MirDie/dsh-xai')
+      expect(target.repository).toBe('anonymous-lab/dsh-plugin-alpha')
       await store.put('reviews', githubReview)
       const next = {
         ...resolution,
@@ -1483,7 +1596,7 @@ describe('workflow engine autonomous discovery', () => {
     workflowHost.prepareModify = async (resolution, review, _exec, workflow) => {
       expect(review.id).toBe(githubReview.id)
       workflow.pendingPath = path.join(root, 'src')
-      workflow.managedSourceId = 'mirdie_dsh-xai'
+      workflow.managedSourceId = 'anonymous-lab_dsh-plugin-alpha'
       return { resolution, path: workflow.pendingPath }
     }
     workflowHost.finishManagedWork = async (resolution, _exec, workflow) => {
@@ -1503,7 +1616,7 @@ describe('workflow engine autonomous discovery', () => {
         targetProfile: 'web',
         retention: 'persistent',
         dshHome: root,
-        packageName: 'dsh-xai',
+        packageName: 'dsh-plugin-alpha',
         installSpec: localReview.installSpec ?? '',
         installState: 'installed',
         installOutcome: 'activated',
@@ -1536,7 +1649,7 @@ describe('workflow engine autonomous discovery', () => {
       return installation
     }
     const turn = exec()
-    const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, 'dsh-xai', '审已装来源')
+    const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, 'dsh-plugin-alpha', '审已装来源')
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '在这个上改' }] })
     const modifying = await engine.resume({
       workflowId: reviewed.workflow.id,
@@ -1562,8 +1675,8 @@ describe('workflow engine autonomous discovery', () => {
       retention: 'persistent',
       replacement: expect.objectContaining({
         profile: 'web',
-        packageName: 'dsh-xai',
-        oldDependencySpec: `github:MirDie/dsh-xai#${commit}`,
+        packageName: 'dsh-plugin-alpha',
+        oldDependencySpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
       }),
     })])
     expect(installed.workflow.cursor).toBe('restart_required')

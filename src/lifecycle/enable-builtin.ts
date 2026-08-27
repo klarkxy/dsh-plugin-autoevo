@@ -22,8 +22,13 @@ function patchRows(body: string): Array<Record<string, unknown>> {
 }
 
 function alreadyMounted(rows: readonly Record<string, unknown>[], mountId: string, packageName: string): boolean {
+  return rows.some((entry) => exactBuiltinRow(entry, mountId, packageName))
+}
+
+function hasConflictingMountIdentity(rows: readonly Record<string, unknown>[], mountId: string, packageName: string): boolean {
   return rows.some((entry) => {
-    if (entry.id === mountId) return true
+    if (exactBuiltinRow(entry, mountId, packageName)) return false
+    if (entry.id === mountId || entry.name === packageName) return true
     if (!Array.isArray(entry.insert)) return false
     return entry.insert.some((row) => Boolean(row) && typeof row === 'object' && !Array.isArray(row)
       && ((row as { id?: unknown }).id === mountId || (row as { name?: unknown }).name === packageName))
@@ -37,6 +42,82 @@ export interface BuiltinEnableResult {
   targetProfile: string
   /** False when the row already existed; the composition check still ran. */
   wrote: boolean
+}
+
+export interface BuiltinReceiptSpec {
+  version: string
+  mountId: string
+  wrote: boolean
+}
+
+export function builtinReceiptSpec(input: BuiltinReceiptSpec): string {
+  return `builtin:${encodeURIComponent(input.version)}:${encodeURIComponent(input.mountId)}:${input.wrote ? '1' : '0'}`
+}
+
+export function parseBuiltinReceiptSpec(value: string): BuiltinReceiptSpec | undefined {
+  const match = /^builtin:([^:]+):([^:]+):([01])$/u.exec(value)
+  if (!match) return undefined
+  try {
+    const version = decodeURIComponent(match[1]!)
+    const mountId = decodeURIComponent(match[2]!)
+    if (!version || !MOUNT_ID_PATTERN.test(mountId)) return undefined
+    return { version, mountId, wrote: match[3] === '1' }
+  } catch {
+    return undefined
+  }
+}
+
+function exactBuiltinRow(entry: Record<string, unknown>, mountId: string, packageName: string): boolean {
+  if (Object.keys(entry).length !== 1 || !Array.isArray(entry.insert) || entry.insert.length !== 1) return false
+  const row = entry.insert[0]
+  return Boolean(row) && typeof row === 'object' && !Array.isArray(row)
+    && Object.keys(row).length === 2
+    && (row as { id?: unknown }).id === mountId
+    && (row as { name?: unknown }).name === packageName
+}
+
+/** Inspect the exact row shape AutoEvo owns without changing the profile. */
+export async function builtinMountPresent(input: {
+  dshHome: string
+  targetProfile: string
+  mountId: string
+  packageName: string
+}): Promise<boolean> {
+  const patchPath = path.join(input.dshHome, 'profiles', input.targetProfile, 'cordis.patch.yml')
+  const rows = patchRows(await readFile(patchPath, 'utf8'))
+  return alreadyMounted(rows, input.mountId, input.packageName)
+}
+
+/** Remove only the exact row written by AutoEvo for a built-in receipt. */
+export async function disableBuiltinMount(input: {
+  launcher: DshLauncher
+  dshHome: string
+  targetProfile: string
+  packageName: string
+  spec: BuiltinReceiptSpec
+  cwd: string
+  signal?: AbortSignal
+}): Promise<{ wrote: boolean }> {
+  if (!input.spec.wrote) return { wrote: false }
+  const patchPath = path.join(input.dshHome, 'profiles', input.targetProfile, 'cordis.patch.yml')
+  const original = await readFile(patchPath, 'utf8')
+  const rows = patchRows(original)
+  const matches = rows.filter((row) => exactBuiltinRow(row, input.spec.mountId, input.packageName))
+  if (matches.length !== 1) {
+    throw new EvolutionError('review_expired', 'The exact built-in mount row changed after enablement; refusing removal')
+  }
+  const next = rows.filter((row) => !exactBuiltinRow(row, input.spec.mountId, input.packageName))
+  await writeFile(patchPath, stringify(next), 'utf8')
+  const dump = await input.launcher.dumpConfig(input.dshHome, input.targetProfile, input.cwd, input.signal)
+  if (dump.exitCode !== 0 || dump.stdout.includes(input.spec.mountId)) {
+    await writeFile(patchPath, original, 'utf8')
+    throw new EvolutionError('command_failed', 'Built-in removal composition check failed', {
+      command: 'dsh',
+      exitCode: dump.exitCode,
+      diagnosticHash: sha256(dump.stderr),
+    })
+  }
+  return { wrote: true }
 }
 
 /**
@@ -88,6 +169,9 @@ export async function enableBuiltinMount(input: {
     throw error
   }
   const rows = patchRows(original)
+  if (hasConflictingMountIdentity(rows, mountId, packageName)) {
+    throw new EvolutionError('review_expired', 'The built-in mount identity is already used by a different profile row')
+  }
   const wrote = !alreadyMounted(rows, mountId, packageName)
   if (wrote) {
     rows.push({ insert: [{ id: mountId, name: packageName }] })

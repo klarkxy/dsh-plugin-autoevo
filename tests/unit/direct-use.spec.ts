@@ -140,34 +140,33 @@ describe('direct use eligibility', () => {
     ])
   })
 
-  it('exposes use_this for partial, unknown, and high-risk reviews only with an exact approved verdict', () => {
-    const workflowBase = workflowFor(githubReview())
-    const partial = bindVerdict(githubReview({
+  it('keeps fit, compatibility uncertainty, and high-risk findings advisory for a mechanically installable review', () => {
+    const partial = githubReview({
       fit: 'partial',
       recommendation: 'modify',
       missingCapabilities: ['scientific notation'],
-    }), 'approved', workflowBase)
-    const unknown = bindVerdict(githubReview({
+    })
+    const unknown = githubReview({
       compatibility: { status: 'unknown', reason: 'no runtime', runtimeVersion: null },
       recommendation: 'modify',
-    }), 'approved', workflowBase)
-    const high = bindVerdict(githubReview({
+    })
+    const high = githubReview({
       securityRisk: 'high',
       recommendation: 'modify',
       findings: [{ code: 'process_execution', severity: 'block', source: 'src/run.ts', detail: 'spawn' }],
-    }), 'approved', workflowBase)
+    })
+    const noFit = githubReview({ fit: 'none', recommendation: 'skip' })
 
-    for (const review of [partial, unknown, high]) {
+    for (const review of [partial, unknown, high, noFit]) {
       const workflow = workflowFor(review)
-      const bound = bindVerdict(review, 'approved', workflow)
-      expect(hostDirectUseBoundary(bound)).toBeUndefined()
-      expect(isDirectlyUsableReview(bound, workflow)).toBe(true)
-      expect(confirmationIds(bound, workflow)).toContain('use_this')
-      expect(() => assertDirectUseAllowed(bound, workflow)).not.toThrow()
+      expect(hostDirectUseBoundary(review)).toBeUndefined()
+      expect(isDirectlyUsableReview(review, workflow)).toBe(true)
+      expect(confirmationIds(review, workflow)).toContain('use_this')
+      expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
     }
   })
 
-  it('fail-closes use/install for missing, rejected, uncertain, stale, or wrong-bound verdicts', () => {
+  it('preserves missing, rejected, uncertain, stale, and wrong-bound semantic verdicts without turning them into Host blocks', () => {
     const base = githubReview({
       securityRisk: 'high',
       recommendation: 'modify',
@@ -186,24 +185,46 @@ describe('direct use eligibility', () => {
     const wrongSession = bindVerdict(base, 'approved', workflow, { reviewerSessionId: '' })
 
     for (const review of [missing, rejected, uncertain, stale, wrongBound, wrongRequest, wrongRequirement, wrongCandidate, wrongVersion, wrongSession]) {
-      expect(isDirectlyUsableReview(review, workflow)).toBe(false)
-      expect(confirmationIds(review, workflow)).not.toContain('use_this')
-      expect(confirmationIds(review, workflow)).toEqual(expect.arrayContaining(['modify_this', 'search_more', 'stop']))
-      expect(() => assertDirectUseAllowed(review, workflow)).toThrow(/verdict does not authorize direct use/i)
+      expect(isDirectlyUsableReview(review, workflow)).toBe(true)
+      expect(confirmationIds(review, workflow)).toContain('use_this')
+      expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
     }
   })
 
-  it('never offers use_this for explicit incompatible, but still offers modify_this', () => {
+  it('keeps explicit incompatibility advisory and offers both use and modify', () => {
     const review = bindVerdict(githubReview({
       compatibility: { status: 'incompatible', reason: 'peer excludes runtime', runtimeVersion: '0.1.0-rc.7' },
       recommendation: 'modify',
     }), 'approved', workflowFor(githubReview()))
     const workflow = workflowFor(review)
     const bound = bindVerdict(review, 'approved', workflow)
-    expect(hostDirectUseBoundary(bound)).toBe('incompatible')
-    expect(isDirectlyUsableReview(bound, workflow)).toBe(false)
-    expect(confirmationIds(bound, workflow)).toEqual(['search_more', 'modify_this', 'create_new', 'stop'])
-    expect(() => assertDirectUseAllowed(bound, workflow)).toThrow(/does not authorize installation/i)
+    expect(hostDirectUseBoundary(bound)).toBeUndefined()
+    expect(isDirectlyUsableReview(bound, workflow)).toBe(true)
+    expect(confirmationIds(bound, workflow)).toEqual(expect.arrayContaining(['use_this', 'modify_this', 'stop']))
+    expect(() => assertDirectUseAllowed(bound, workflow)).not.toThrow()
+  })
+
+  it('continues to reject mechanical policy, install-spec, and materialization failures', () => {
+    const wrongPolicy = githubReview({ policyVersion: `stale-${POLICY_VERSION}` })
+    const wrongInstallSpec = githubReview({ installSpec: 'github:example/tool#different' })
+    const notMaterializable = githubReview({
+      mechanicalFacts: {
+        fit: 'full',
+        missingCapabilities: [],
+        staticRisk: 'low',
+        compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: null },
+        manifest: { kind: 'unknown', materializable: false, installSpec: null },
+        truncated: false,
+        findings: [],
+        evidenceHashes: [],
+        semanticContextRequired: false,
+      },
+    })
+
+    for (const review of [wrongPolicy, wrongInstallSpec, notMaterializable]) {
+      expect(isDirectlyUsableReview(review, workflowFor(review))).toBe(false)
+      expect(() => assertDirectUseAllowed(review, workflowFor(review))).toThrow(/cannot authorize installation|does not authorize installation/i)
+    }
   })
 
   it('does not treat prompt-injection regex or static high risk as mechanical install blockers', () => {

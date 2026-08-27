@@ -2,24 +2,24 @@
 
 [English](user-guide.en.md) | 中文 · [返回 README](../README.md)
 
-本指南面向在 DSH 中发现、安装、修改或创建能力的使用者。**能力进化** 使用 Policy V10 Search-first 治理：临时实验与正式需求走同一流程，普通模型委托与 Cordis live mutation 不对父会话开放。它解释你需要做的选择、AutoEvo 能证明什么，以及失败后怎样安全恢复。
+本指南面向在 DSH 中发现、安装、修改或创建能力的使用者。**能力进化** 使用 Search-first 工作流：临时实验与正式需求走同一流程。AutoEvo 负责流程、警告与证据回执；DSH Core 负责权限、sandbox 和 approval 的实际执行。它解释你需要做的选择、AutoEvo 能证明什么，以及失败后怎样恢复。
 
 ## 1. 使用前准备
 
-- 可安装发布版 AutoEvo `v0.5.1`；仓库中的 `0.5.3` 尚未发布。
-- Node.js `>=22.19.0 || >=24.0.0`。
+- 目标稳定版 AutoEvo `v1.0.0`；tag 和 Release 由维护者在验收后另行发布。
+- Node.js `^22.19.0 || ^24.0.0`。
 - 一个可正常运行的 DSH profile；本文以 `web` 为例。
 - 需要查找或审查 GitHub 插件时，建议安装 GitHub CLI，并确保 `gh auth status` 正常。
 - 使用具备可靠指令遵循、上下文保持和结构化工具调用能力的模型。
 
-先确认要把插件装进哪个 profile。安装命令中的 `--profile web` 必须与实际使用的 profile 一致；不要为了照抄示例把测试 profile 误当成日常 profile。
+先确认要把插件装进哪个 profile。安装命令中的 `--profile web` 必须与实际使用的 profile 一致；不要为了照抄示例把另一个 profile 误当成日常 profile。
 
 ## 2. 安装、升级与首次加载
 
 安装 [§1](#1-使用前准备) 所列的发布版本（通过 npx 运行 DSH，无需全局安装；注意命令必须带 `@deepseek-ai/` 前缀，npm 上无 scoped 的 `dsh` 是无关项目）：
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
 安装或升级 AutoEvo 后，重启该 DSH profile，让新 bundle 生效。结果字段 `restartRequired` 的含义见[结果状态与下一步](#5-结果状态与下一步)。
@@ -34,7 +34,7 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 在新的或空白 DSH 会话中选择 **能力进化**，然后直接描述目标：
 
-> 我需要一个能做科学计数法计算的 DSH 插件。先查现成的。
+> 我需要一个能同步项目记录的 DSH 插件。先查现成的。
 
 Host 原样保存这条顶层消息。需求足够明确时直接搜寻；只有实质歧义会改变搜寻分类时，Agent 才能先澄清一次。澄清回答只影响只读搜寻，不授予选择、创建、修改或安装权限。
 
@@ -59,7 +59,7 @@ Host 审查候选的精确来源、manifest、必要源码、兼容性和安全�
 - 继续搜索；
 - 停止。
 
-自然语言即可，它就是正式决定，不需要输入内部 action 名称。Host 会验证这条回复来自当前真实回合，并绑定当前候选与审查。涉及副作用时，还会再请求一次 DSH 一次性 approval。
+自然语言即可，它表达你的工作流决定，不需要输入内部 action 名称。Host 将回复绑定到当前回合、候选与审查；实际副作用仍由 DSH Core 的权限与一次性 approval 执行，AutoEvo 不把流程回执当作权限授权。
 
 ```text
 需求
@@ -81,9 +81,9 @@ Host 验证与结果回执
 
 如果本地工具或技能已经满足需求，可以直接选择复用。这是正常终态：不会审查远端仓库，也不会产生安装物。
 
-### 4.2 安装完整候选
+### 4.2 安装已审查候选
 
-只有绑定当前 Policy、来源不可变、兼容性可接受、审查 fit 完整且安全门槛通过的候选，才会提供直接安装。用户采用的能力一律持久安装到目标 profile；临时试装只是 Host 内部隔离预检，模型不能调用或保留它。
+只要当前 Policy 的 review 能明确识别来源、目标包和有效安装描述，就可以把安装入口交给用户决定。fit、兼容性（包括明确不兼容）、生命周期脚本、代码风险和 reviewer 意见会作为 warning 与建议展示，不会自行隐藏安装入口；无法物化的来源才需要先修复。用户采用的能力一律持久安装到目标 profile。生命周期脚本与包管理器行为由 DSH 的正常权限、sandbox 和 approval 规则处理，AutoEvo 不另建私有预检 profile。
 
 ### 4.3 修改候选或已安装能力
 
@@ -129,7 +129,7 @@ AutoEvo 为每个包保留安装回执链。四个配套工具：
 | `failed_absent` | 安装命令失败，且 profile 与可见 package target 都不存在 | 先诊断原因，再决定是否重试 |
 | `recovery_required` | 安装、替换或清理的真实状态不能安全确定 | 走恢复流程，不要盲目重装或手删 |
 
-隔离最小 DSH 预检只证明已审查字节能在一次性 `dsh-base` 沙箱的 Loader 中收口。它不等于目标 profile 已加载，也不等于真实客户端工具调用成功。该沙箱不使用、也不改写官方 `headless` profile。
+AutoEvo 在目标 profile 的真实安装结果上分别记录 installed、loaded、activated 与 verified；不会用私有预检结果代替目标 profile 或真实工具往返证据。
 
 ### 人工功能验证
 
@@ -177,6 +177,7 @@ AutoEvo 对重复诊断、重复验证和修改次数设有限制。重复失败
 ## 8. 安全与隐私提示
 
 - 信任边界与审查证据的完整模型见[安全模型](security.md)：GitHub README、源码、manifest 和市场摘要都按不可信数据处理，审查结论以 Host 派生事实和内容 hash 为准。
+- AutoEvo 的 finding 与建议是工作流证据，不是 sandbox 或权限控制。DSH Core 决定是否允许操作；若允许，用户可以明确接受带 warning 的候选，warning 会保留在回执中。
 - 安装第三方插件最终会让其以当前用户权限运行。隔离 profile 不是恶意代码沙箱。
 - `forwardedCredentialEnv` 是 AutoEvo 的配置项，只列出允许转发给被装能力的环境变量名，不包含取值。不要把密钥写进 prompt、文档、fixture 或仓库。
 - 修改/创建源码可能包含本机路径、账号或专有逻辑。贡献上游前应重新检查 diff，并单独取得 fork、push 或 PR 授权。
@@ -199,13 +200,8 @@ AutoEvo 对重复诊断、重复验证和修改次数设有限制。重复失败
 
 不会。持久安装使用 AutoEvo 自己管理的不可变 artifact，不依赖工作区托管源码。
 
-### 在哪里看可复现路径？
-
-见[真实样例目录](real-world-samples.md)。请保留其中 `real-live-passed`、`implemented`、`planned` 的证据等级，不要把计划样例写成已经线上验证。
-
 ## 延伸阅读
 
 - [开发者指南](developer-guide.md)
 - [架构说明](architecture.md)
 - [安全模型](security.md)
-- [真实样例目录](real-world-samples.md)

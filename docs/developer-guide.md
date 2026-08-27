@@ -8,11 +8,11 @@
 
 要求：
 
-- Node.js `>=22.19.0 || >=24.0.0`；CI 使用 Node 24。
+- Node.js `^22.19.0 || ^24.0.0`；CI 覆盖两个受支持的主版本。
 - pnpm；CI 当前使用 `10.29.2`。
 - Git；远端审查和 live GitHub discovery E2E 还需要可用的 GitHub CLI。
-- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 会临时注入最新 `@deepseek-ai/dsh@0.1.1-rc.2`；本地使用已安装的 0.1.1.x，或设置 `DSH_PACKAGE_ROOT`。
-- Windows / PowerShell 是主要实测环境，但核心流程使用 argv runner，不能依赖交互式 shell 副作用。
+- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 在 runner 临时目录安装精确的验收基线 `@deepseek-ai/dsh@0.1.1-rc.2` 并通过 `DSH_PACKAGE_ROOT` 指向它，不改写仓库的 `package.json` 或 `pnpm-lock.yaml`；本地可以使用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据仍须注明实际版本。
+- Windows / PowerShell 是完整支持与主要实测环境。Linux/macOS 只承诺 build/import smoke，不宣称完整 DSH workflow、profile 或 E2E 支持；核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
 初始化并运行日常验收：
 
@@ -45,9 +45,8 @@ live E2E 会访问外部市场或 GitHub，不应在缺少网络/认证时冒充
 | 本指南 | 本地开发、代码入口、测试、调试、贡献 | 脚本、目录、开发/发布流程变化 |
 | [架构说明](architecture.md) | Policy、状态机、数据布局、运行时接缝 | 合同、图、存储或注入关系变化 |
 | [安全模型](security.md) | 信任边界、安装门槛、验证与删除不变量 | 权限、审查、验证、清理边界变化 |
-| [真实样例](real-world-samples.md) | 夹具、证据等级与清理责任 | 样例或权威证据变化 |
 
-不要复制完整流程到多个文件。其它文档只保留一句摘要和链接；样例的 `real-live-passed` / `implemented` / `planned` 标签不得改写成一般产品保证。
+不要复制完整流程到多个文件。其它文档只保留一句摘要和链接。
 
 ## 3. 仓库结构
 
@@ -55,7 +54,7 @@ live E2E 会访问外部市场或 GitHub，不应在缺少网络/认证时冒充
 src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
-├─ contracts.ts                # Policy V10 公共合同、review/install receipts
+├─ contracts.ts                # Policy V11 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
 ├─ service-review.ts           # 审查编排与重验证
@@ -103,7 +102,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 4. 注入固定复用策略和工具执行 hooks；
 5. 注册 `capability_workflow*`、`capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates` 与 `plugin_remove`。
 
-提示词与 preset 是行为指导，不是权限边界。真实授权由 workflow receipts、fresh-turn guard、execution guard、ActionCommitment、ExecutionLease 和 DSH `allowed-once` approval 共同约束。
+提示词与 preset 是行为指导，不是权限边界。AutoEvo 的 receipts、fresh-turn 绑定与 execution guard 只负责工作流一致性和证据；DSH Core 才实际执行权限、sandbox 和 `allowed-once` approval。不要把 AutoEvo warning、receipt 或 status 当作 DSH 授权，也不要把 warning 当成不可接受的硬阻断。
 
 ## 5. 工作流与两道确认门
 
@@ -179,7 +178,7 @@ Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构
 安装器的关键顺序（完整实现见 `src/lifecycle/install.ts`）：
 
 1. 验证最新 review、selection receipt、commitment/lease 与 target profile；物化 owned snapshot/tgz 并复核路径、size、hash；
-2. 取得 DSH `allowed-once` approval 后写 provisional receipt，对 persistent 安装执行隔离最小 DSH（`autoevo-verify` / 仅 `dsh-base`）预检，再修改 profile 并对账 exact dependency 与可见 package target；
+2. 取得 DSH `allowed-once` approval 后写 provisional receipt，通过 DSH 的正常安装路径修改目标 profile，并对账 exact dependency 与可见 package target；
 3. 执行 Host 验证与目标进程热加载，写最终 receipt；失败进入 `failed_absent` / `recovery_required`。
 
 三层验证不能互换：
@@ -190,7 +189,7 @@ Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构
 | `bundle_activation` | `activated` | 审查 bundle 的 Loader/Fiber 已收口 |
 | persistent `manual_runtime` | `awaiting_user_test` | 已安装，等待真实客户端测试 |
 
-`loaded` 只表示目标进程 bundle 已加载；隔离最小 DSH 预检单独记录，不能证明 live profile。semantic verifier 与 `taskResultMatchedExpectation` 都不能把结果升级为 `verified`。
+`loaded` 只表示目标进程 bundle 已加载。AutoEvo 不用私有预检代替 live profile 证据；semantic verifier 与 `taskResultMatchedExpectation` 都不能把结果升级为 `verified`。
 
 ## 10. 测试矩阵
 
@@ -203,7 +202,7 @@ Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构
 | 三层 Host 验证 | `host-verification-driver.spec.ts`、`workflow-lifecycle.spec.ts` |
 | 托管创建/修改/升级 | `tests/integration/managed-*.spec.ts` |
 | Cordis 加载 | `tests/loader-smoke.mjs` |
-| 发布包真实入口 | `tests/packaged-acceptance.mjs` |
+| 发布包真实入口与隔离 | `tests/packaged-acceptance.mjs`（验证文档/运行资源，并拒绝测试、snapshot、debug 与本地状态残留） |
 | 本地/对抗/市场 E2E | `tests/e2e-runner.mjs` |
 | 文档导航与关键语义 | `tests/unit/documentation.spec.ts` |
 
@@ -249,14 +248,13 @@ HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载
 7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的发布 tag（`documentation.spec.ts` 会校验一致性）；
 8. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
 
-仓库 CI 负责验收，不自动创建 release。commit、push、tag、发布或上游 PR 都是独立动作，需要维护者明确授权。AutoEvo installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
+仓库 CI 负责验收，不自动创建 release。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。AutoEvo installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
 
 ## 参考入口
 
 - [架构说明](architecture.md)
 - [安全模型](security.md)
 - [使用指南](user-guide.md)
-- [真实样例目录](real-world-samples.md)
 - `src/index.ts`
 - `src/contracts.ts`
 - `src/workflow/engine-core.ts` 及 `engine-driver.ts` / `engine-recovery.ts` / `engine-resume.ts`（`engine.ts` 为薄 façade）

@@ -184,7 +184,7 @@ export abstract class WorkflowEngineCore {
     workflow.lastFailure = {
       stage: 'workflow',
       code: 'policy_restart_required',
-      message: 'This workflow predates Policy V10. Call capability_workflow again from the current user requirement. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
+      message: 'This workflow predates the current policy. Call capability_workflow again from the current user requirement. Previous interrupts, decisions, receipts, verdicts, commitments, and leases are not executable.',
       retryable: false,
     }
     await this.checkpoint(workflow)
@@ -210,6 +210,7 @@ export abstract class WorkflowEngineCore {
       ? await this.host.listInstallProfiles?.() ?? []
       : []
     const managedActionsAvailable = workflow.cursor === 'await_confirmation'
+      || workflow.cursor === 'await_selection'
       ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
       : true
     const base = interruptPayload(workflow.cursor, resolution, reviews, {
@@ -312,9 +313,14 @@ export abstract class WorkflowEngineCore {
       workflowId: workflow.id,
       policyVersion: workflow.policyVersion,
       generation: workflow.generation,
-      lastInstallationId: workflow.lastInstallationId ?? null,
+      installationId: this.installationReceiptId(workflow) ?? null,
       lastFailure: workflow.lastFailure ?? null,
     })
+  }
+
+  /** The pending id is persisted before the external install starts. */
+  protected installationReceiptId(workflow: WorkflowRecord): string | undefined {
+    return workflow.lastInstallationId ?? workflow.pendingInstallationId
   }
 
   protected markInstallCompletion(workflow: WorkflowRecord, exec: ToolRunContext): void {
@@ -381,8 +387,9 @@ export abstract class WorkflowEngineCore {
       ? await this.host.getReview(workflow.lastReviewId).catch(() => undefined)
       : undefined
     const reviews = await this.reviewsForWorkflow(workflow)
-    const installation = workflow.lastInstallationId
-      ? await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+    const installationId = this.installationReceiptId(workflow)
+    const installation = installationId
+      ? await this.host.getInstallation(installationId).catch(() => undefined)
       : undefined
     const lifecycleState = lifecycleStateFor(workflow, {
       ...(reviews.length > 0 ? { reviews } : {}),

@@ -37,6 +37,29 @@ describe('review revalidation identity', () => {
   })
 })
 
+describe('profile mutation serialization', () => {
+  it('runs same-profile mutations one at a time inside the process', async () => {
+    const order: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const first = _testing.serializeProfileMutation('C:/dsh-home', 'web', async () => {
+      order.push('first:start')
+      await firstGate
+      order.push('first:end')
+    })
+    await Promise.resolve()
+    const second = _testing.serializeProfileMutation('C:/dsh-home', 'web', async () => {
+      order.push('second:start')
+      order.push('second:end')
+    })
+    await Promise.resolve()
+    expect(order).toEqual(['first:start'])
+    releaseFirst()
+    await Promise.all([first, second])
+    expect(order).toEqual(['first:start', 'first:end', 'second:start', 'second:end'])
+  })
+})
+
 describe('managed modification instruction', () => {
   it('relays the authenticated Host user turn instead of only the original requirement', () => {
     const record = resolution()
@@ -84,7 +107,14 @@ describe('managed modification instruction', () => {
     const record = resolution()
     record.intent = { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', evolveReason: 'repair' }
     record.requirement = '补上能被 Loader 认到的包装 Fiber'
-    const selected = candidateReview('klarkxy/zhihu-search', 'use', '1')
+    const selected = candidateReview('example-org/dsh-orbit-search', 'use', '1')
+    selected.missingCapabilities = ['an unrelated capability inferred from repair prose']
+    selected.findings = [{
+      code: 'bundle_patch_no_activation',
+      severity: 'block',
+      source: 'cordis.patch.yml',
+      detail: 'The bundle patch does not insert a Loader Fiber.',
+    }]
     const order = _testing.modificationWorkOrder(
       record,
       selected,
@@ -95,6 +125,23 @@ describe('managed modification instruction', () => {
     )
     expect(order.acceptanceTargets.join(' ')).toMatch(/Loader-visible wrapping Fiber/i)
     expect(order.acceptanceTargets.join(' ')).toMatch(/do not reinstall the failed specification/i)
+    expect(order.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'security_finding', summary: expect.stringContaining('bundle_patch_no_activation') }),
+      expect.objectContaining({ kind: 'host_boundary' }),
+    ]))
+    expect(order.blockers).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'missing_capability' }),
+    ]))
+  })
+
+  it('keeps semantic capability blockers for ordinary modification work', () => {
+    const record = resolution()
+    const selected = candidateReview('example-org/dsh-neutral-tool', 'modify', '1')
+    selected.missingCapabilities = ['a user-requested output mode']
+    const order = _testing.modificationWorkOrder(record, selected, 'C:/managed/plugin')
+    expect(order.blockers).toEqual([
+      expect.objectContaining({ kind: 'missing_capability', summary: 'a user-requested output mode' }),
+    ])
   })
 
   it('compares stable baseline blockers and separates resolved, unresolved, and introduced targets', () => {
@@ -346,11 +393,16 @@ describe('resolution authorization state', () => {
       resolutionId: record.id,
       reason: 'no candidates',
     }
-    const added = _testing.addExplicitCandidate(record, 'toolazytoname/dsh-plugin-grok')
-    expect(added.candidate.repository).toBe('toolazytoname/dsh-plugin-grok')
-    expect(added.resolution.remoteCandidates.map((item) => item.repository)).toEqual(['toolazytoname/dsh-plugin-grok'])
+    const added = _testing.addExplicitCandidate(record, 'example-org/dsh-nebula-relay')
+    expect(added.candidate.repository).toBe('example-org/dsh-nebula-relay')
+    expect(added.resolution.remoteCandidates.map((item) => item.repository)).toEqual(['example-org/dsh-nebula-relay'])
     expect(added.resolution.authorization?.state).toBe('selection_required')
-    expect(() => _testing.addExplicitCandidate(record, 'awesome-dsh-plugin/dsh-find-plugin')).toThrow(/marketplace infrastructure/)
+    const second = _testing.addExplicitCandidate(added.resolution, 'example-org/dsh-orbit-index')
+    expect(second.candidate.repository).toBe('example-org/dsh-orbit-index')
+    expect(second.resolution.remoteCandidates.map((item) => item.repository)).toEqual([
+      'example-org/dsh-nebula-relay',
+      'example-org/dsh-orbit-index',
+    ])
   })
 
   it('mints action grants only from a recorded human decision', () => {
@@ -396,12 +448,12 @@ describe('resolution authorization state', () => {
 })
 
 describe('adaptive review budget', () => {
-  it('reviews a third candidate only when the first two have no directly usable result', () => {
+  it('does not expand the adaptive budget based only on advisory recommendations', () => {
     const usable = candidateReview('acme/one', 'use', '1')
     const repairable = candidateReview('acme/two', 'modify', '2')
     const skipped = candidateReview('acme/three', 'skip', '3')
     expect(_testing.shouldReviewAdaptiveThird('adaptive', [usable, repairable])).toBe(false)
-    expect(_testing.shouldReviewAdaptiveThird('adaptive', [skipped, candidateReview('acme/four', 'skip', '4')])).toBe(true)
+    expect(_testing.shouldReviewAdaptiveThird('adaptive', [skipped, candidateReview('acme/four', 'skip', '4')])).toBe(false)
     expect(_testing.shouldReviewAdaptiveThird('fixed', [usable])).toBe(true)
   })
 })

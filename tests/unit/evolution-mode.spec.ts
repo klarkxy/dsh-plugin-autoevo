@@ -50,14 +50,14 @@ describe('evolution-mode entry', () => {
     expect(register).not.toHaveBeenCalled()
 
     expect(section).not.toHaveBeenCalled()
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V10')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V11')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('supposedly temporary capability')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host captures the latest top-level user message verbatim')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one clarification_question')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('zero candidates is a valid result')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Public decisions never accept retention')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('ordinary subagent, agent, workflow, or model delegation')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('V9 unfinished workflows')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('normal DSH-permitted tools, shell commands, builds, tests, dependency adjustment, skills, and collaboration')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V11 unfinished workflows')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

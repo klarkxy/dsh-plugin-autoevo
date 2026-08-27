@@ -9,7 +9,7 @@ import {
 } from '../../src/resolver/lineage.js'
 
 const COMMIT = 'df098f16752eb0a53d52d0d931c64ab7236bf1d9'
-const SPEC = `github:klarkxy/zhihu-search#${COMMIT}`
+const SPEC = `github:anonymous-lab/dsh-plugin-record-sync#${COMMIT}`
 
 function review(): ReviewRecord {
   return {
@@ -18,10 +18,10 @@ function review(): ReviewRecord {
     policyVersion: POLICY_VERSION,
     createdAt: '2026-08-23T04:21:32.000Z',
     resolutionId: `resolution_${'b'.repeat(24)}`,
-    requirement: '检查 zhihu-search 相关功能为什么不能用',
+    requirement: '检查 record-sync 相关功能为什么不能用',
     sourceSnapshot: {
       kind: 'github',
-      repository: 'klarkxy/zhihu-search',
+      repository: 'anonymous-lab/dsh-plugin-record-sync',
       requestedRef: 'HEAD',
       commit: COMMIT,
       defaultBranch: 'main',
@@ -33,7 +33,7 @@ function review(): ReviewRecord {
       dependencies: [],
       peerDependencies: {},
       expectedTools: [],
-      packageName: 'dsh-plugin-zhihu-search',
+      packageName: 'dsh-plugin-record-sync',
     },
     fit: 'full',
     confidence: 0.8,
@@ -58,7 +58,7 @@ function installation(): InstallationRecord {
     targetProfile: 'web',
     retention: 'persistent',
     dshHome: 'C:/Users/27837/.dsh',
-    packageName: 'dsh-plugin-zhihu-search',
+    packageName: 'dsh-plugin-record-sync',
     installSpec: SPEC,
     installState: 'not_installed',
     installOutcome: 'failed_absent',
@@ -89,7 +89,7 @@ function managedRepairReview(): ReviewRecord {
     createdAt: '2026-08-23T05:30:00.000Z',
     sourceSnapshot: {
       kind: 'local',
-      path: 'C:/Users/test/.dsh/autoevo/sources/klarkxy_zhihu-search',
+      path: 'C:/Users/test/.dsh/autoevo/sources/anonymous-lab_dsh-plugin-record-sync',
       baseReviewId: review().id,
       baseCommit: COMMIT,
       statusHash: 'e'.repeat(64),
@@ -100,18 +100,18 @@ function managedRepairReview(): ReviewRecord {
 
 describe('known-source lineage', () => {
   it('extracts github owner/repo mentions from a requirement', () => {
-    expect(githubRepositoriesInText('改进 klarkxy/zhihu-search 这份已审查的 DSH 插件')).toEqual([
-      'klarkxy/zhihu-search',
+    expect(githubRepositoriesInText('改进 anonymous-lab/dsh-plugin-record-sync 这份已审查的 DSH 插件')).toEqual([
+      'anonymous-lab/dsh-plugin-record-sync',
     ])
   })
 
   it('rebuilds a failed_absent GitHub install as a known_source candidate', () => {
     const candidate = lineageCandidateFromRecords({
-      requirement: '改进 klarkxy/zhihu-search 这份已审查的 DSH 插件：补上能被 Loader 认到的包装 Fiber。不要原样重装上次失败的那份。',
+      requirement: '改进 anonymous-lab/dsh-plugin-record-sync 这份已审查的 DSH 插件：补上能被 Loader 认到的包装 Fiber。不要原样重装上次失败的那份。',
       intent: {
         operation: 'evolve_existing',
         requiredSurface: 'native_dsh_plugin',
-        targetName: 'zhihu-search',
+        targetName: 'record-sync',
         evolveReason: 'repair',
       },
       reviews: [review()],
@@ -120,13 +120,13 @@ describe('known-source lineage', () => {
     })
     expect(candidate).toEqual(expect.objectContaining({
       kind: 'plugin',
-      name: 'dsh-plugin-zhihu-search',
+      name: 'dsh-plugin-record-sync',
       availability: 'known_source',
       reuseEligible: false,
       fit: 'partial',
       evolutionTarget: expect.objectContaining({
         kind: 'failed_install',
-        repository: 'klarkxy/zhihu-search',
+        repository: 'anonymous-lab/dsh-plugin-record-sync',
         commit: COMMIT,
         dependencySpec: SPEC,
       }),
@@ -141,11 +141,11 @@ describe('known-source lineage', () => {
       createdAt: '2026-08-23T05:00:00.000Z',
     }
     const candidate = lineageCandidateFromRecords({
-      requirement: '修复 zhihu-search 上次未激活的插件',
+      requirement: '修复 record-sync 上次未激活的插件',
       intent: {
         operation: 'evolve_existing',
         requiredSurface: 'native_dsh_plugin',
-        targetName: 'zhihu-search',
+        targetName: 'record-sync',
         evolveReason: 'repair',
       },
       reviews: [newerReview],
@@ -167,11 +167,11 @@ describe('known-source lineage', () => {
       createdAt: '2026-08-24T05:00:00.000Z',
     }
     const candidate = lineageCandidateFromRecords({
-      requirement: '继续修复上次安装失败的 zhihu-search，沿用已经完成的托管修改',
+      requirement: '继续修复上次安装失败的 record-sync，沿用已经完成的托管修改',
       intent: {
         operation: 'evolve_existing',
         requiredSurface: 'native_dsh_plugin',
-        targetName: 'zhihu-search',
+        targetName: 'record-sync',
         evolveReason: 'repair',
       },
       reviews: [review(), repaired, laterReadOnlyReview],
@@ -181,11 +181,11 @@ describe('known-source lineage', () => {
     })
     expect(candidate?.evolutionTarget).toMatchObject({
       kind: 'reviewed_snapshot',
-      repository: 'klarkxy/zhihu-search',
+      repository: 'anonymous-lab/dsh-plugin-record-sync',
       commit: COMMIT,
       dependencySpec: repaired.installSpec,
       reviewId: repaired.id,
-      sourceId: 'klarkxy_zhihu-search',
+      sourceId: 'anonymous-lab_dsh-plugin-record-sync',
     })
     expect(candidate?.description).toMatch(/Host-managed repair/i)
   })
@@ -201,13 +201,60 @@ describe('known-source lineage', () => {
       },
     }
     const candidate = lineageCandidateFromRecords({
-      requirement: '修复 zhihu-search',
+      requirement: '修复 record-sync',
       intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
       reviews: [unrooted],
       installations: [],
       profile: 'web',
     })
     expect(candidate).toBeUndefined()
+  })
+
+  it('reclaims a Host-validated capability created locally by AutoEvo', () => {
+    const created: ReviewRecord = {
+      ...managedRepairReview(),
+      id: `review_${'2'.repeat(64)}`,
+      sourceSnapshot: {
+        kind: 'local',
+        path: 'C:/workspace/.autoevo/sources/create_localcapability',
+        baseReviewId: `review_${'3'.repeat(64)}`,
+        baseCommit: COMMIT,
+        statusHash: '4'.repeat(64),
+      },
+      manifest: {
+        ...managedRepairReview().manifest,
+        packageName: 'dsh-plugin-record-sync',
+      },
+      installSpec: 'file:C:/state/review-artifacts/record-sync.tgz',
+    }
+    const installed: InstallationRecord = {
+      ...installation(),
+      id: `installation_${'5'.repeat(24)}`,
+      reviewId: created.id,
+      installSpec: created.installSpec!,
+      installState: 'installed',
+      installOutcome: 'awaiting_user_test',
+      installed: true,
+      removed: false,
+    }
+    const candidate = lineageCandidateFromRecords({
+      requirement: '修复当前 dsh-plugin-record-sync 的加载配置',
+      intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin', targetName: 'dsh-plugin-record-sync', evolveReason: 'repair' },
+      reviews: [created],
+      installations: [installed],
+      profile: 'web',
+      managedReviewIds: [created.id],
+    })
+    expect(candidate).toEqual(expect.objectContaining({
+      availability: 'known_source',
+      reuseEligible: false,
+      evolutionTarget: expect.objectContaining({
+        kind: 'managed_local',
+        packageName: 'dsh-plugin-record-sync',
+        reviewId: created.id,
+        sourceId: 'create_localcapability',
+      }),
+    }))
   })
 
   it('keeps a repaired snapshot failed when its own later installation failed', () => {
@@ -220,7 +267,7 @@ describe('known-source lineage', () => {
       createdAt: '2026-08-23T06:00:00.000Z',
     }
     const candidate = lineageCandidateFromRecords({
-      requirement: '修复 zhihu-search',
+      requirement: '修复 record-sync',
       intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
       reviews: [review(), repaired],
       installations: [installation(), failedRepair],
@@ -253,11 +300,11 @@ describe('known-source lineage', () => {
       },
     }
     const candidate = lineageCandidateFromRecords({
-      requirement: '重新安装 zhihu-search 插件',
+      requirement: '重新安装 record-sync 插件',
       intent: {
         operation: 'evolve_existing',
         requiredSurface: 'native_dsh_plugin',
-        targetName: 'zhihu-search',
+        targetName: 'record-sync',
         evolveReason: 'upgrade',
       },
       reviews: [review()],
@@ -271,9 +318,9 @@ describe('known-source lineage', () => {
     expect(isFailedSameSpecification(candidate?.evolutionTarget, SPEC)).toBe(false)
   })
 
-  it('matches a zhihu-search diagnosis request to the failed plugin, not a same-named skill', () => {
+  it('matches a record-sync diagnosis request to the failed plugin, not a same-named skill', () => {
     const candidate = lineageCandidateFromRecords({
-      requirement: '检查 zhihu-search 相关功能为什么不能用，是否需要重新安装成插件形式',
+      requirement: '检查 record-sync 相关功能为什么不能用，是否需要重新安装成插件形式',
       intent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
       reviews: [review()],
       installations: [installation()],
@@ -282,8 +329,8 @@ describe('known-source lineage', () => {
     expect(candidate?.evolutionTarget?.kind).toBe('failed_install')
     const merged = mergeLineageCandidate([{
       kind: 'skill',
-      name: 'zhihu-search',
-      description: 'Zhihu skill',
+      name: 'record-sync',
+      description: 'Record Sync skill',
       availability: 'available',
       confidence: 0.99,
       fit: 'none',
@@ -300,8 +347,8 @@ describe('known-source lineage', () => {
   it('does not skip marketplace search when no Host lineage exists', () => {
     expect(shouldSkipRemoteDiscovery([{
       kind: 'skill',
-      name: 'zhihu-search',
-      description: 'Zhihu skill',
+      name: 'record-sync',
+      description: 'Record Sync skill',
       availability: 'available',
       confidence: 0.99,
       fit: 'none',
@@ -313,23 +360,23 @@ describe('known-source lineage', () => {
   it('prefers a live installed evolution target over a failed receipt for the same package', () => {
     const live = {
       kind: 'plugin' as const,
-      name: 'dsh-plugin-zhihu-search',
+      name: 'dsh-plugin-record-sync',
       description: 'live',
       availability: 'installed_in_profile' as const,
       confidence: 0.99,
       fit: 'partial' as const,
       evolutionTarget: {
         kind: 'github_exact' as const,
-        repository: 'klarkxy/zhihu-search',
+        repository: 'anonymous-lab/dsh-plugin-record-sync',
         commit: COMMIT,
-        packageName: 'dsh-plugin-zhihu-search',
+        packageName: 'dsh-plugin-record-sync',
         profile: 'web',
         dependencySpec: SPEC,
         specDigest: 'f'.repeat(64),
       },
     }
     const failed = lineageCandidateFromRecords({
-      requirement: 'zhihu-search',
+      requirement: 'record-sync',
       intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
       reviews: [review()],
       installations: [installation()],

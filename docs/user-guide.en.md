@@ -2,12 +2,12 @@
 
 English | [中文](user-guide.md) · [Back to README](../README.en.md)
 
-This guide is for people who discover, install, improve, or create capabilities in DSH. **Capability Evolution** uses Policy V10 Search-first governance: temporary experiments and formal needs follow the same workflow, while ordinary model delegation and Cordis live mutation are unavailable to the parent session. It explains the choices you make, what AutoEvo can prove, and how to recover safely.
+This guide is for people who discover, install, improve, or create capabilities in DSH. **Capability Evolution** uses a Search-first workflow: temporary experiments and formal needs follow the same path. AutoEvo owns workflow, warnings, and evidence receipts; DSH Core enforces permissions, sandboxes, and approvals. It explains the choices you make, what AutoEvo can prove, and how to recover.
 
 ## 1. Before you start
 
-- Installable AutoEvo release `v0.5.1`; repository version `0.5.3` is not released yet.
-- Node.js `>=22.19.0 || >=24.0.0`.
+- Target stable release `v1.0.0`; its tag and Release are published separately by a maintainer after acceptance.
+- Node.js `^22.19.0 || ^24.0.0`.
 - A working DSH profile; examples below use `web`.
 - For GitHub discovery/review, install GitHub CLI and make sure `gh auth status` works.
 - Use a model with reliable instruction following, context retention, and structured tool use.
@@ -19,7 +19,7 @@ The `--profile web` argument must name the profile you actually use. Do not copy
 Install the release listed in [§1](#1-before-you-start) (run DSH through npx; no global install needed — keep the `@deepseek-ai/` prefix, the unscoped `dsh` package on npm is an unrelated project):
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v0.5.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
 Restart that DSH profile after installing or upgrading AutoEvo so the new bundle takes effect. The meaning of the `restartRequired` result field is explained under [Outcomes and next steps](#5-outcomes-and-next-steps).
@@ -34,7 +34,7 @@ Setting `evolutionPreset: false` stops future materialization or upgrades. It ne
 
 Choose **Capability Evolution** in a new or blank DSH session and describe the goal:
 
-> I need a DSH plugin that can calculate scientific notation. Search for an existing one first.
+> I need a DSH plugin that can synchronize project records. Search for an existing one first.
 
 The Host stores this top-level message verbatim. A clear need starts search immediately; only a material ambiguity that changes search classification permits one clarification. Its answer affects read-only search only and grants no selection, creation, modification, or installation authority.
 
@@ -52,7 +52,7 @@ This gate is read-only: it cannot install, modify, or create anything. Search ma
 
 The Host reviews exact source identity, manifest, required code, compatibility, and security facts. Use another fresh reply to decide whether to reuse, install, improve, create from scratch, search again, or stop.
 
-Natural language is enough — it is the formal decision, and no internal action names are required. The Host binds your reply to the current turn, candidate, and review; side effects then request one-time DSH approval.
+Natural language is enough to express your workflow decision; no internal action names are required. The Host binds your reply to the current turn, candidate, and review. Actual side effects remain enforced by DSH Core permissions and one-time approval; AutoEvo never treats a workflow receipt as permission.
 
 ```text
 Requirement
@@ -74,9 +74,9 @@ Host verification and receipt
 
 If a local tool or skill already satisfies the need, reuse it. This is a normal terminal result with no remote review or installation.
 
-### 4.2 Install a complete candidate
+### 4.2 Install a reviewed candidate
 
-Direct install is available only when the current-policy review binds an immutable source, materializable package, acceptable compatibility, full fit, and the required safety facts. Every user-adopted capability is installed persistently. Temporary installation exists only as Host-private isolated preflight and is not model-callable or retained as a user capability.
+The user can choose direct install when the current-policy review identifies an exact source, target package, and valid install description. Fit, compatibility (including explicit incompatibility), lifecycle scripts, code risk, and reviewer opinions remain warnings and recommendations; they do not hide the install action by themselves. Only a non-materializable source must be repaired first. Every user-adopted capability is installed persistently. Lifecycle scripts and package-manager behavior follow normal DSH permission, sandbox, and approval rules; AutoEvo does not create a private preflight profile.
 
 ### 4.3 Improve a candidate or installed capability
 
@@ -120,7 +120,7 @@ AutoEvo keeps an installation receipt chain per package. Four companion tools:
 | `failed_absent` | The install command failed, and neither the profile nor the visible package target exists | Diagnose before retrying |
 | `recovery_required` | Install, replacement, or cleanup state cannot be determined safely | Recover; do not reinstall or delete blindly |
 
-An isolated minimal-DSH preflight proves that reviewed bytes settle in a throwaway `dsh-base` Loader. It does not prove destination loading or a real-client tool round trip. That sandbox does not use or modify the official `headless` profile.
+AutoEvo records installed, loaded, activated, and verified against the real target-profile result. It does not substitute a private preflight result for destination-profile or real tool-roundtrip evidence.
 
 For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile. Record the actual tool call and its result; a model saying “looks successful” is not a Host `verified` receipt.
 
@@ -166,6 +166,7 @@ This differs from AutoEvo's `plugin_remove`, which removes a receipt-owned third
 ## 8. Safety and privacy
 
 - The full trust-boundary and review-evidence model lives in the [Security Model](security.md) (Chinese): GitHub READMEs, source code, manifests, and marketplace summaries are treated as untrusted data, and review conclusions rest on Host-derived facts and content hashes.
+- AutoEvo findings and recommendations are workflow evidence, not sandbox or permission controls. DSH Core decides whether an operation is allowed; when it is, a user may explicitly accept a warning, which remains in the receipt.
 - An installed third-party plugin ultimately runs with the current user's authority. An isolated profile is not a malware sandbox.
 - `forwardedCredentialEnv` is an AutoEvo config key that lists the names of environment variables allowed to be forwarded — names only, never values. Never put secrets in prompts, documentation, fixtures, or repositories.
 - Before contributing a managed change upstream, inspect the diff for local paths, accounts, private endpoints, secrets, and proprietary logic, then obtain separate fork/push/PR approval.
@@ -180,11 +181,8 @@ This differs from AutoEvo's `plugin_remove`, which removes a receipt-owned third
 
 **Does deleting workspace source break an installed plugin?** No. Persistent install uses an AutoEvo-owned immutable artifact.
 
-**Where are reproducible scenarios?** See [Real-world Samples](real-world-samples.md) (Chinese) and preserve its `real-live-passed`, `implemented`, and `planned` evidence labels — never describe a `planned` sample as live-verified.
-
 ## Further reading
 
 - [Developer Guide](developer-guide.en.md)
 - [Architecture](architecture.md) (Chinese)
 - [Security Model](security.md) (Chinese)
-- [Real-world Samples](real-world-samples.md) (Chinese)
