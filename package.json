@@ -83,8 +83,9 @@
     "test:e2e:offline": "pnpm test:e2e:local && pnpm test:e2e:adversarial",
     "test:e2e:live": "pnpm test:e2e:marketplace",
     "test:e2e": "pnpm test:e2e:offline && pnpm test:e2e:live",
-    "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:loader && pnpm test:packaged",
-    "check": "pnpm check:fast && pnpm test:e2e:offline",
+    "test:acceptance": "pnpm test:loader && pnpm test:packaged && pnpm test:e2e:offline",
+    "check:fast": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm check:fast && pnpm test:acceptance",
     "check:release": "pnpm check && pnpm test:e2e:live && pnpm pack:dry-run",
     "pack:dry-run": "pnpm pack --dry-run"
   },

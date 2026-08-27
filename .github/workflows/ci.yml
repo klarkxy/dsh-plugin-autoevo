@@ -2,24 +2,27 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  platform-matrix:
-    name: ${{ matrix.os }} / Node ${{ matrix.node }}
-    runs-on: ${{ matrix.os }}
-    # The frozen Windows DSH fixture has a large dependency closure and can
-    # take more than 20 minutes to install on a cold hosted runner.
-    timeout-minutes: 40
+  fast-checks:
+    name: Ubuntu / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        node: [22.19.0, 24]
+        node: ['22.19.0', '24']
     env:
       CI: 'true'
     steps:
@@ -33,16 +36,48 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Run the full fast check
+        if: matrix.node == '24'
+        run: pnpm check:fast
+      - name: Verify the oldest supported Node release
+        if: matrix.node != '24'
+        run: pnpm test
+      - name: Verify the package contents
+        if: matrix.node == '24'
+        run: pnpm pack:dry-run
+
+  windows-acceptance:
+    name: Windows / DSH acceptance
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Restore the frozen DSH runtime fixture
+        id: dsh-runtime-cache
+        uses: actions/cache@v4.2.4
+        with:
+          path: ${{ runner.temp }}/autoevo-dsh-harness
+          key: dsh-runtime-${{ runner.os }}-node-24-0.1.1-rc.2-v1
       - name: Install the frozen DSH runtime fixture
-        if: runner.os == 'Windows'
+        if: steps.dsh-runtime-cache.outputs.cache-hit != 'true'
         shell: pwsh
-        run: npm install --prefix "$env:RUNNER_TEMP\autoevo-dsh-harness" --no-save --ignore-scripts @deepseek-ai/dsh@0.1.1-rc.2
+        run: npm install --prefix "$env:RUNNER_TEMP\autoevo-dsh-harness" --no-save --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.1.1-rc.2
       - name: Bind the DSH runtime fixture
-        if: runner.os == 'Windows'
         shell: pwsh
         run: '"DSH_PACKAGE_ROOT=$env:RUNNER_TEMP\autoevo-dsh-harness\node_modules\@deepseek-ai\dsh" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
-      - run: pnpm check:fast
-      - run: pnpm pack:dry-run
-      - name: Run the complete offline DSH flow
-        if: runner.os == 'Windows'
-        run: pnpm test:e2e:offline
+      - name: Run Windows tests
+        run: pnpm test
+      - run: pnpm build
+      - name: Run the complete offline DSH acceptance flow
+        run: pnpm test:acceptance

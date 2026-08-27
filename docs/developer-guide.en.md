@@ -27,8 +27,9 @@ Common gates:
 | `pnpm typecheck` | `tsc --noEmit` | Public types or contracts change |
 | `pnpm test` | All Vitest unit and integration tests | Logic change |
 | `pnpm build` | Rebuild `lib/` with tsdown | Source or exports change |
-| `pnpm check:fast` | lint, typecheck, Vitest, build, Loader smoke, packaged acceptance | Fast complete gate before commit |
-| `pnpm check` | `check:fast` plus local / adversarial offline E2E | Daily integration gate |
+| `pnpm check:fast` | lint, typecheck, Vitest, build | Fast feedback gate before commit |
+| `pnpm test:acceptance` | Loader smoke, packaged acceptance, local / adversarial offline E2E | Consolidated DSH runtime acceptance |
+| `pnpm check` | `check:fast` plus `test:acceptance` | Complete daily integration gate |
 | `pnpm check:release` | `check` plus live marketplace E2E and pack dry-run | Release candidate |
 | `pnpm pack:dry-run` | Inspect release package contents | Docs, exports, or files change |
 

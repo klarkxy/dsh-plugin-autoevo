@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: live-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   live-e2e:
     runs-on: windows-latest
@@ -36,7 +40,15 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:AUTOEVO_CANARY_REQUIREMENT)) { throw 'AUTOEVO_CANARY_REQUIREMENT repository variable is required' }
           if ($env:AUTOEVO_CANARY_REPOSITORY -notmatch '^[\w.-]+/[\w.-]+$') { throw 'AUTOEVO_CANARY_REPOSITORY must be owner/repository' }
-      - run: npm install --prefix "$env:RUNNER_TEMP\\autoevo-dsh-harness" --no-save --ignore-scripts @deepseek-ai/dsh@0.1.1-rc.2
+      - name: Restore the frozen DSH runtime fixture
+        id: dsh-runtime-cache
+        uses: actions/cache@v4.2.4
+        with:
+          path: ${{ runner.temp }}/autoevo-dsh-harness
+          key: dsh-runtime-${{ runner.os }}-node-24-0.1.1-rc.2-v1
+      - name: Install the frozen DSH runtime fixture
+        if: steps.dsh-runtime-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$env:RUNNER_TEMP\\autoevo-dsh-harness" --no-save --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.1.1-rc.2
       - run: '"DSH_PACKAGE_ROOT=$env:RUNNER_TEMP\\autoevo-dsh-harness\\node_modules\\@deepseek-ai\\dsh" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
       - run: pnpm build
       - run: pnpm test:e2e:live

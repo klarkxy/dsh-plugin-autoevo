@@ -27,8 +27,9 @@ pnpm check
 | `pnpm typecheck` | `tsc --noEmit` | 公共类型或合同变化 |
 | `pnpm test` | 全部 Vitest 单元与集成测试 | 逻辑变更 |
 | `pnpm build` | 用 tsdown 重建 `lib/` | 源码或导出变化 |
-| `pnpm check:fast` | lint、typecheck、Vitest、build、Loader smoke、打包验收 | 提交前快速完整门 |
-| `pnpm check` | `check:fast` 加 local/adversarial offline E2E | 日常合入门 |
+| `pnpm check:fast` | lint、typecheck、Vitest、build | 提交前快速反馈门 |
+| `pnpm test:acceptance` | Loader smoke、打包验收、local/adversarial offline E2E | 集中的 DSH 运行时验收 |
+| `pnpm check` | `check:fast` 加 `test:acceptance` | 日常完整合入门 |
 | `pnpm check:release` | `check` 加 live marketplace E2E 和 pack dry-run | 发布候选 |
 | `pnpm pack:dry-run` | 检查发布包内容 | 文档、exports 或 files 变化 |
 
