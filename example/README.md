@@ -1,6 +1,6 @@
 # AutoEvo workflow examples
 
-These galleries are fresh runs captured from the `1.0.0` release. They show the lightweight boundary honestly: AutoEvo organizes Search-first discovery, review, user decisions, installation receipts, and managed construction; DSH and the active LLM perform normal tool work. Both runs continue through one-time DSH approval, installation, restart, and a real client tool call.
+These galleries are fresh runs captured from the `1.0.0` release. AutoEvo organizes Search-first discovery, review, user decisions, installation receipts, and managed construction; DSH and the active LLM perform normal tool work. Both runs continue through one-time DSH approval, installation, restart, and a real client tool call.
 
 ## Offline calendar conversion after a genuine no-match
 

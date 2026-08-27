@@ -88,7 +88,7 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 ## 7. 运行假设
 
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
-- 启发式扫描覆盖常见 lifecycle、registry 之外的依赖、进程/网络/文件系统/环境访问、动态求值、prompt injection、隐藏指令、数据外发、凭据访问、混淆代码与云元数据信号，供安装决策使用。
+- 启发式扫描的检测项见 §6；结果供安装决策使用，不构成权限结论。
 - MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；它们是警告和决策证据，不会自行控制 DSH Core 权限。可修 high 仍可走 `modify_this`，且 DSH Core 允许时用户可明确接受警告。安装完成后的功能是否已验证只看 Host 三层结果，不看 reviewer/verifier。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
 - 内部托管源 commit 由 Host 在禁用 hooks/签名后本地完成；任何 fork、push、tag、release 或上游 PR 都属于后续发布动作，仍需另行明确批准。

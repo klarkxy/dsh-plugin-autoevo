@@ -2,36 +2,30 @@
 
 [English](user-guide.en.md) | 中文 · [返回 README](../README.md)
 
-本指南面向在 DSH 中发现、安装、修改或创建能力的使用者。**能力进化** preset 使用 Search-first 工作流：临时实验与正式需求走同一流程。AutoEvo 负责流程、警告与证据回执；DSH Core 负责权限、sandbox 和 approval 的实际执行。
+本指南面向在 DSH 中发现、安装、修改或创建能力的使用者。**能力进化** preset 使用 Search-first 工作流：临时实验与正式需求走同一流程。AutoEvo 负责流程、警告与证据回执；权限、sandbox 和 approval 的强制执行属于 DSH Core。
 
 ## 1. 使用前准备
 
 - Node.js `^22.19.0 || ^24.0.0`。
-- 一个可正常运行的 DSH profile；本文以 `web` 为例。
-- 需要查找或审查 GitHub 插件时，建议安装 GitHub CLI，并确认 `gh auth status` 正常。
+- 一个可正常运行的 DSH profile；本文以 `web` 为例，命令中的 `--profile web` 要换成你实际使用的 profile。
+- 查找或审查 GitHub 插件需要 GitHub CLI，先确认 `gh auth status` 正常。
 - 使用指令遵循、上下文保持和结构化工具调用可靠的模型。
 
-安装命令中的 `--profile web` 必须与实际使用的 profile 一致，不要为了照抄示例把另一个 profile 误当成日常 profile。
-
 ## 2. 安装、升级与首次加载
-
-安装发布版本（通过 npx 运行 DSH，无需全局安装；命令必须带 `@deepseek-ai/` 前缀，npm 上无 scoped 的 `dsh` 是无关项目）：
 
 ```powershell
 npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
-安装或升级 AutoEvo 后，重启该 DSH profile 让新 bundle 生效。`restartRequired` 字段的含义见[结果状态与下一步](#5-结果状态与下一步)。
+通过 npx 运行 DSH，无需全局安装；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。安装或升级后重启该 profile，让新 bundle 生效。
 
-安装成功后，在 DSH 的用户 preset 列表中应能看到 **能力进化**（id `evolution`）。AutoEvo 只升级自己管理且未被修改的 preset；同名外来目录或用户改过的内容会被保留并提示诊断。
-
-如果不希望 AutoEvo 安装或升级 preset，把配置项 `evolutionPreset` 设为 `false` 即可；这只会停止后续安装，不会删除已有的 preset。
+安装成功后，用户 preset 列表中应出现 **能力进化**（id `evolution`）。AutoEvo 只升级自己管理且未被修改的 preset；同名外来目录或用户改过的内容会被保留并提示诊断。把配置项 `evolutionPreset` 设为 `false` 可以停止安装或升级 preset，但不会删除已有的 preset。
 
 ## 3. 第一次完整使用
 
 ### 3.1 发起需求
 
-在新的 DSH 会话中选择 **能力进化**，然后直接描述目标：
+在新的 DSH 会话中选择 **能力进化**，直接描述目标：
 
 > 我需要一个能同步项目记录的 DSH 插件。先查现成的。
 
@@ -39,44 +33,21 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 ### 3.2 第一道确认门：选候选去审查
 
-Agent 会在有界预算内补充查询，然后密封 1–5 个候选。此时只需选择想进一步审查的候选，例如：
+Agent 会在有界预算内补充查询，然后密封 1–5 个候选。用一条新消息选择想审查的候选，例如：
 
 - “先看第二个。”
 - “按你推荐的那个审查。”
 - “这几个都不合适，继续找。”
 
-这一步是只读选择，不会安装、修改或新建。搜寻结果可以为空，此时只提供继续搜寻、创建新能力或停止三个选项；选择“创建”仍需后续消息确认。
+这一步是只读选择，不会安装、修改或新建。搜寻结果可以为空，此时只能继续搜寻、创建新能力或停止；选择“创建”仍需后续消息确认。
 
 ### 3.3 第二道确认门：审查后决定结果
 
-Host 会审查候选的精确来源、manifest、必要源码、兼容性和安全事实。审查完成后，用一条新的聊天消息明确决定：
-
-- 原样复用本地已有能力；
-- 安装已审查候选；
-- 在候选或已安装来源上修改；
-- 没有合适候选时从零创建；
-- 继续搜索；
-- 停止。
-
-用自然语言表达即可，不需要输入内部 action 名称。实际副作用仍由 DSH Core 的权限与一次性 approval 执行。
-
-```text
-需求
-  ↓
-发现池与补查
-  ↓
-密封 1–5 个候选
-  ↓  第一道门：选择要审查的候选
-只读审查
-  ↓  第二道门：使用 / 修改 / 创建 / 继续搜索 / 停止
-安装或托管源码施工
-  ↓
-Host 验证与结果回执
-```
-
-交互版流程图（点击查看 HTML 原图）：
+Host 会审查候选的精确来源、manifest、必要源码、兼容性和安全事实。审查完成后，用一条新的聊天消息明确决定：原样复用、安装、修改、从零创建、继续搜索或停止。用自然语言表达即可；实际副作用仍由 DSH Core 的权限与一次性 approval 执行。
 
 [![AutoEvo 主工作流](assets/flowcharts/autoevo-main-workflow.svg)](assets/flowcharts/autoevo-main-workflow.html)
+
+（点击图片打开交互版流程图。）
 
 ## 4. 常见任务
 
@@ -121,11 +92,9 @@ AutoEvo 为每个包保留安装回执链，配套四个工具：
 
 ## 5. 结果状态与下一步
 
-交互版状态机（点击查看 HTML 原图）：
-
 [![AutoEvo 安装结果状态机](assets/flowcharts/autoevo-install-outcomes.svg)](assets/flowcharts/autoevo-install-outcomes.html)
 
-### 安装回执字段
+（点击图片打开交互版状态机。）
 
 | 字段 / 结果 | 准确含义 | 你应该做什么 |
 | --- | --- | --- |
@@ -140,33 +109,23 @@ AutoEvo 为每个包保留安装回执链，配套四个工具：
 
 AutoEvo 在目标 profile 的真实安装结果上分别记录 installed、loaded、activated 与 verified，不会用私有预检结果代替真实证据。
 
-### 人工功能验证
-
 遇到 `activated` 或 `awaiting_user_test` 时，在安装目标 profile 中发起一个最小、可核验、无副作用的真实请求，并记录实际工具调用和结果。模型说“看起来成功”不等于 Host 的 `verified` 回执。
 
 ## 6. 诊断与恢复
 
-### 只想知道哪里失败
-
-直接说：
+只想知道哪里失败时，直接说：
 
 > 检查这次失败的原因，先不要重试、安装或清理。
 
 诊断是只读、有预算且脱敏的：不会自动重试，也不会把完整 stderr、凭据、私密路径或会话正文交给模型。
 
-### 故障中的 `recovery_required`
-
 故障恢复绑定当前 sealed interrupt。根据 Agent 提供的合法选项，用新消息确认对账、清理或重试；不要手工拼接旧 workflow、review 或 installation ID。
 
-### 已完成安装后清理并重新开始
-
-这是另一条流程，需要一条新的顶层消息：
+已完成安装后想清理并重新开始是另一条流程，需要一条新的顶层消息：
 
 > 清理这次已完成的安装，然后从头重新发现。
 
 Host 会按该工作流拥有的 installation receipt 精确移除并重新开始，不会删除托管源码仓库。不要把已完成清理与故障恢复混用。
-
-### 重复失败
 
 AutoEvo 对重复诊断、重复验证和修改次数设有限制。重复失败时会保留现有回执、比较新证据，由人决定下一步，不会原样循环同一安装或修复。
 

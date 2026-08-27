@@ -16,30 +16,24 @@
 
 ## 文档
 
-| 读者 / 主题 | 入口 |
+| 主题 | 入口 |
 | --- | --- |
-| 使用者：安装、首次使用、两道确认门、状态与恢复 | [使用指南](docs/user-guide.md) |
-| 开发者：本地环境、架构入口、测试、调试与贡献 | [开发者指南](docs/developer-guide.md) |
+| 安装、首次使用、两道确认门、状态与恢复 | [使用指南](docs/user-guide.md) |
+| 本地环境、源码入口、测试、调试与贡献 | [开发者指南](docs/developer-guide.md) |
 | 状态机、数据布局和运行时接缝 | [架构说明](docs/architecture.md) |
 | 信任边界、安装门槛和验证证据 | [安全模型](docs/security.md) |
 
-每类内容只有一个权威出处：操作步骤以使用指南为准，开发流程以开发者指南为准，内部状态与安全不变量分别以架构说明和安全模型为准。
-
-交互流程图（独立 HTML，可缩放、搜索与导出）：[主工作流](docs/assets/flowcharts/autoevo-main-workflow.html) · [安装结果状态机](docs/assets/flowcharts/autoevo-install-outcomes.html) · [托管施工](docs/assets/flowcharts/autoevo-managed-work.html)。
+每类内容只有一个权威出处。交互流程图（独立 HTML，可缩放、搜索与导出）：[主工作流](docs/assets/flowcharts/autoevo-main-workflow.html) · [安装结果状态机](docs/assets/flowcharts/autoevo-install-outcomes.html) · [托管施工](docs/assets/flowcharts/autoevo-managed-work.html)。
 
 ## 安装
-
-安装到正在使用的 DSH profile，下面以 `web` 为例（通过 npx 运行 DSH，无需全局安装）：
 
 ```powershell
 npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
-- 命令必须带 `@deepseek-ai/` 前缀；npm 上无 scoped 的 `dsh` 是无关项目。
-- 日常启动该 profile：`npx @deepseek-ai/dsh web`。
-- 安装或升级后重启该 profile 以加载新 bundle；之后安装其它能力是否需要重启，见[使用指南 §5](docs/user-guide.md#5-结果状态与下一步)。
-
-版本要求：Node.js `^22.19.0 || ^24.0.0`；DSH `>=0.1.0-rc.6 <0.2.0`（未单独验证的 `0.1` 更新会有警告，但允许运行）。
+- `--profile web` 换成你实际使用的 profile；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。
+- 安装或升级后重启该 profile 加载新 bundle；日常启动：`npx @deepseek-ai/dsh web`。
+- 要求 Node.js `^22.19.0 || ^24.0.0`，DSH `>=0.1.0-rc.6 <0.2.0`。
 
 ## 快速体验
 
@@ -48,41 +42,29 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
    > 我需要一个能同步项目记录的 DSH 插件。先查现成的。
 
-3. 需求有实质歧义时先回答一次澄清；随后 AutoEvo 给出 1–5 个候选，或明确告知没有匹配。
-4. 有候选时，用一条新消息选择要审查的候选；无候选时，选择继续搜寻、创建新能力或停止。
-5. 审查完成后，再用一条新消息决定：原样使用、安装、修改、继续搜索、从零创建或停止。
+3. AutoEvo 给出 1–5 个候选，或明确告知没有匹配。用一条新消息选择要审查的候选——这是第一道确认门。
+4. 审查完成后，再用一条新消息决定：原样使用、安装、修改、继续搜索、从零创建或停止——这是第二道确认门。
 
-第 4、5 步是两道独立的确认门，完整流程见[使用指南 §3](docs/user-guide.md#3-第一次完整使用)。典型闭环：
-
-```text
-Search-first → 选择候选 → 审查事实与警告 → 用户决定
-→ 安装或托管施工 → 重新审查 → 确认最终安装 → 区分安装/加载/激活/验证结果
-```
+完整流程见[使用指南 §3](docs/user-guide.md#3-第一次完整使用)，真实运行的逐步截图见 [`example/README.md`](example/README.md)。
 
 [![AutoEvo 主工作流：Search-first 与两道确认门](docs/assets/flowcharts/autoevo-main-workflow.svg)](docs/assets/flowcharts/autoevo-main-workflow.html)
-
-（点击图片打开交互版，可缩放、搜索与导出。）真实运行的逐步截图（含空结果后创建、advisory-only 审查工具两个完整案例）见 [`example/README.md`](example/README.md)。
 
 ## 怎样理解结果
 
 | 结果 | 含义 | 下一步 |
 | --- | --- | --- |
 | `verified` | Host 完成了预期工具往返，功能已验证 | 可以直接使用 |
-| `activated` / `awaiting_user_test` | 已加载但无工具往返证据，或需人工在真实客户端测试 | 在目标 profile 中实际试用一次 |
+| `activated` / `awaiting_user_test` | 已加载但无工具往返证据，或需人工测试 | 在目标 profile 中实际试用一次 |
 | `restartRequired: true` | 已有非失败安装结果，但当前进程没有完整热加载 | 重启对应 profile 后再试 |
 | `failed_absent` / `recovery_required` | 安装失败，或状态不能安全判定 | 查看诊断；状态不明时先恢复，不要盲目重装 |
 
 `installed` 或 `loaded` 不等于功能已验证，只有 `verified` 才能这样表述。完整状态说明见[使用指南 §5](docs/user-guide.md#5-结果状态与下一步)。
 
-[![AutoEvo 安装结果状态机](docs/assets/flowcharts/autoevo-install-outcomes.svg)](docs/assets/flowcharts/autoevo-install-outcomes.html)
-
-AutoEvo 还跟踪每个包的版本链：`capability_versions` 列出版本，`capability_rollback` 回滚到历史版本，`capability_adopt` 登记工作流外手工安装的插件，`capability_updates` 只读检查上游更新。详见[使用指南 §4.6](docs/user-guide.md#46-版本领养与上游更新)。
+版本链工具：`capability_versions` 列出版本，`capability_rollback` 回滚到历史版本，`capability_adopt` 登记手工安装的插件，`capability_updates` 只读检查上游更新。详见[使用指南 §4.6](docs/user-guide.md#46-版本领养与上游更新)。
 
 ## 安全边界
 
-- AutoEvo 负责工作流、警告和证据记录；DSH Core 负责权限、sandbox 与 approval 的实际执行。AutoEvo 不能扩大、替代或绕过 DSH Core 的控制。
-- 发现、审查和诊断默认只读；安装、修改和新建的副作用由 DSH Core 的权限与一次性 approval 决定。警告会展示并记录在回执中，用户明确接受后可以继续；安装的第三方代码最终以当前用户权限运行。
-- 完整信任边界见[安全模型](docs/security.md)；使用中的注意事项见[使用指南 §8](docs/user-guide.md#8-安全与隐私提示)。
+AutoEvo 负责工作流、警告和证据记录；权限、sandbox 与 approval 的强制执行属于 DSH Core，AutoEvo 不能绕过。发现、审查和诊断默认只读；安装的第三方代码最终以当前用户权限运行。完整信任边界见[安全模型](docs/security.md)。
 
 ## 开发
 
@@ -91,7 +73,7 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
-源码结构、测试矩阵和发布前检查见[开发者指南](docs/developer-guide.md)。
+详见[开发者指南](docs/developer-guide.md)。
 
 ## 许可
 

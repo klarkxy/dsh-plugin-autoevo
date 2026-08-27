@@ -2,17 +2,15 @@
 
 [English](developer-guide.en.md) | 中文 · [返回 README](../README.md)
 
-本指南面向维护 AutoEvo、扩展其 Host 接缝、修复工作流或验证安装语义的开发者。它记录开发流程和源码入口；状态机与安全不变量分别以[架构说明](architecture.md)和[安全模型](security.md)为权威。
+本指南面向维护 AutoEvo、扩展 Host 接缝、修复工作流或验证安装语义的开发者。状态机与安全不变量分别以[架构说明](architecture.md)和[安全模型](security.md)为权威。
 
 ## 1. 本地环境
 
-要求：
-
 - Node.js `^22.19.0 || ^24.0.0`；CI 覆盖两个受支持的主版本。
 - pnpm；CI 当前使用 `10.29.2`。
-- Git；远端审查和 live GitHub discovery E2E 还需要可用的 GitHub CLI。
+- Git；远端审查和 live GitHub discovery E2E 还需要 GitHub CLI。
 - Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 在 runner 临时目录安装验收基线 `@deepseek-ai/dsh@0.1.1-rc.2`（Cordis `4.0.1`）并通过 `DSH_PACKAGE_ROOT` 指向它；本地可用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据须注明实际版本。
-- Windows / PowerShell 是完整支持与主要实测环境。Linux/macOS 只承诺 build/import smoke，不宣称完整 DSH workflow、profile 或 E2E 支持；核心流程使用 argv runner，不能依赖交互式 shell 副作用。
+- Windows / PowerShell 是完整支持与主要实测环境。Linux/macOS 只承诺 build/import smoke；核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
 初始化并运行日常验收：
 
@@ -48,7 +46,7 @@ live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通�
 
 不要把完整流程复制到多个文件；其它文档只保留一句摘要和链接。
 
-交互流程图在 `docs/assets/flowcharts/`，并随发布包提供：对应流程变化时，编辑同目录的 `*.workflow.json` / `*.lifecycle.json` 规格（英文版为 `-en` 后缀同名文件），用 archify 重新 `deliver` 生成 HTML，再在浏览器打开 HTML 用 Export → SVG 覆盖同名 `.svg`。不要直接手改 HTML 或 SVG。
+交互流程图在 `docs/assets/flowcharts/`，并随发布包提供：流程变化时，编辑同目录的 `*.workflow.json` / `*.lifecycle.json` 规格（英文版为 `-en` 后缀同名文件），用 archify 重新 `deliver` 生成 HTML，再在浏览器打开 HTML 用 Export → SVG 覆盖同名 `.svg`。不要直接手改 HTML 或 SVG。
 
 ## 3. 仓库结构
 
@@ -90,11 +88,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 4. 运行时入口
 
-包是 ESM：
-
-- 默认入口：`lib/index.js`；源码为 `src/index.ts`。
-- 子路径导出：`./evolution-mode`、`./verification-observer`。
-- `cordis.patch.yml` 以 `id: autoevo` 挂载 bundle，并传入 `dshHome` / `stateDir`。
+包是 ESM。默认入口 `lib/index.js`（源码 `src/index.ts`）；子路径导出 `./evolution-mode`、`./verification-observer`；`cordis.patch.yml` 以 `id: autoevo` 挂载 bundle，并传入 `dshHome` / `stateDir`。
 
 `apply()` 负责：
 
@@ -104,7 +98,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 4. 注入固定复用策略和工具执行 hooks；
 5. 注册 `capability_workflow*`、`capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates` 与 `plugin_remove`。
 
-提示词与 preset 是行为指导，不是权限边界。AutoEvo 的 receipts、fresh-turn 绑定与 execution guard 只负责工作流一致性和证据；DSH Core 才实际执行权限、sandbox 和 `allowed-once` approval。不要把 AutoEvo warning、receipt 或 status 当作 DSH 授权，也不要把 warning 当成不可接受的硬阻断。
+提示词与 preset 是行为指导，不是权限边界。AutoEvo 的 receipts、fresh-turn 绑定与 execution guard 只负责工作流一致性和证据；DSH Core 才实际执行权限、sandbox 和 `allowed-once` approval。不要把 AutoEvo warning、receipt 或 status 当作 DSH 授权，也不要把 warning 当成硬阻断。
 
 ## 5. 工作流与两道确认门
 
@@ -130,8 +124,6 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 7. 托管源码生命周期
 
-交互版流程图（点击查看 HTML 原图）：
-
 [![AutoEvo 托管施工流程](assets/flowcharts/autoevo-managed-work.svg)](assets/flowcharts/autoevo-managed-work.html)
 
 默认源码根是 `<workspace>/.autoevo/sources/`。父会话掌握决定与进度，实际施工在 Host-owned、cwd 精确绑定的短生命周期子会话中进行：
@@ -146,7 +138,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 8. 重新审查、冻结完整快照并生成 owned tgz；
 9. 释放锁或进入安装。
 
-父会话不会把合成 cwd 当作安全边界，也不会直接施工；真正的写入根来自新建子会话的不可变 cwd。子会话完成或失败后立即释放，决定、重审、安装和发布权限始终留在 Host/父流程。
+父会话不会把合成 cwd 当作安全边界，也不会直接施工；真正的写入根来自子会话的不可变 cwd。子会话完成或失败后立即释放，决定、重审、安装和发布权限始终留在 Host/父流程。
 
 取消或异常不会复用已取消 signal 做清理。Host 以独立 bounded lifetime checkpoint 有界编辑、验证状态并释放锁；不能把 cancel/timeout 误报成 Git 可执行文件缺失。
 
@@ -238,7 +230,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 | 5 | live profile dependency spec 和 Loader 可见 target |
 | 6 | 最后才检查模型是否错误解释用户决定 |
 
-HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载，更不能证明目标插件功能可用。真实功能证据需要看到目标工具 call/result。
+HTTP 200 只证明 Web 服务可访问，不能证明目标插件功能可用；真实功能证据需要看到目标工具 call/result。
 
 `dsh --profile web --help` 等命令可能进入 profile 准备流程并写文件，不能默认当成纯只读诊断。
 

@@ -7,25 +7,19 @@ This guide is for users who discover, install, improve, or create capabilities i
 ## 1. Before you start
 
 - Node.js `^22.19.0 || ^24.0.0`.
-- A working DSH profile; this guide uses `web` as the example.
-- For GitHub discovery or review, install GitHub CLI and confirm `gh auth status` works.
-- Use a model with reliable instruction following, context retention, and structured tool use.
-
-The `--profile web` in the install command must match the profile you actually use. Do not assume the example profile is your everyday profile.
+- A working DSH profile; this guide uses `web` as the example — replace `--profile web` with the profile you actually use.
+- GitHub discovery or review requires GitHub CLI; confirm `gh auth status` works.
+- A model with reliable instruction following, context retention, and structured tool use.
 
 ## 2. Install, upgrade, and first load
-
-Install the published release (run DSH through npx; no global install needed — keep the `@deepseek-ai/` prefix; the unscoped `dsh` package on npm is an unrelated project):
 
 ```powershell
 npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
-After installing or upgrading AutoEvo, restart that DSH profile so the new bundle takes effect. The meaning of the `restartRequired` field is explained under [Outcomes and next steps](#5-outcomes-and-next-steps).
+Run DSH through npx; no global install needed. Keep the `@deepseek-ai/` prefix — the unscoped `dsh` package on npm is an unrelated project. Restart the profile after installing or upgrading so the new bundle takes effect.
 
-After installation, the user preset **Capability Evolution** (id `evolution`) should appear in the DSH preset list. AutoEvo only upgrades an unchanged copy it owns; a same-name foreign directory or user-edited preset is preserved and diagnosed.
-
-If you do not want AutoEvo to install or upgrade the preset, set `evolutionPreset` to `false`; this only stops future materialization or upgrades, and never deletes an existing preset.
+After installation, the user preset **Capability Evolution** (id `evolution`) should appear in the preset list. AutoEvo only upgrades an unchanged copy it owns; a same-name foreign directory or user-edited preset is preserved and diagnosed. Setting `evolutionPreset` to `false` stops preset installs and upgrades, but never deletes an existing preset.
 
 ## 3. Your first complete workflow
 
@@ -39,7 +33,7 @@ A clear need starts search immediately. The Agent only asks a clarification when
 
 ### 3.2 Gate 1: choose a candidate to review
 
-The Agent runs bounded supplemental queries, then seals 1–5 candidates. Use a fresh chat reply to choose what to review, for example:
+The Agent runs bounded supplemental queries, then seals 1–5 candidates. Use a fresh chat message to choose what to review, for example:
 
 - "Review the second one."
 - "Go with the one you recommend."
@@ -49,34 +43,11 @@ This gate is read-only and cannot install, modify, or create anything. Search ma
 
 ### 3.3 Gate 2: decide after review
 
-The Host reviews the candidate's exact source, manifest, required source files, compatibility, and security facts. After review, use a fresh chat message to decide explicitly:
-
-- Reuse an existing local capability as is;
-- Install the reviewed candidate;
-- Improve on the candidate or installed source;
-- Create from scratch when no candidate fits;
-- Search again;
-- Stop.
-
-Natural language is enough; you do not need to type internal action names. Actual side effects remain enforced by DSH Core permissions and one-time approval.
-
-```text
-Requirement
-  ↓
-Discovery pool and bounded refinement
-  ↓
-Sealed 1–5 candidate shortlist
-  ↓  Gate 1: choose a candidate to review
-Read-only review
-  ↓  Gate 2: use / improve / create / search / stop
-Install or managed-source work
-  ↓
-Host verification and outcome receipt
-```
-
-Interactive version (click for the full HTML viewer):
+The Host reviews the candidate's exact source, manifest, required source files, compatibility, and security facts. After review, use a fresh chat message to decide explicitly: reuse as is, install, improve, create from scratch, search again, or stop. Natural language is enough; actual side effects remain enforced by DSH Core permissions and one-time approval.
 
 [![AutoEvo main workflow](assets/flowcharts/autoevo-main-workflow-en.svg)](assets/flowcharts/autoevo-main-workflow-en.html)
+
+(Click the image for the interactive workflow viewer.)
 
 ## 4. Common tasks
 
@@ -86,7 +57,7 @@ When a local tool or skill already meets the need, reuse it. This is a normal te
 
 ### 4.2 Install a reviewed candidate
 
-As long as the review identifies the source, target package, and a valid install description, the user decides whether to install. Fit, compatibility, lifecycle scripts, code risk, and reviewer opinions are shown as warnings and recommendations; they do not hide the install action by themselves. Only a non-materializable source must be repaired first. Every adopted capability is installed persistently into the target profile; lifecycle scripts and package-manager behavior follow DSH's normal permissions, sandbox, and approval rules.
+As long as the review identifies the source, target package, and a valid install description, the user decides whether to install. Fit, compatibility, lifecycle scripts, code risk, and reviewer opinions are shown as warnings and recommendations; they do not hide the install action. Only a non-materializable source must be repaired first. Every adopted capability is installed persistently into the target profile; lifecycle scripts and package-manager behavior follow DSH's normal permissions, sandbox, and approval rules.
 
 ### 4.3 Improve a candidate or installed capability
 
@@ -121,11 +92,9 @@ AutoEvo keeps an installation receipt chain per package. Four companion tools:
 
 ## 5. Outcomes and next steps
 
-Interactive version (click for the full HTML viewer):
-
 [![AutoEvo install outcome state machine](assets/flowcharts/autoevo-install-outcomes-en.svg)](assets/flowcharts/autoevo-install-outcomes-en.html)
 
-### Install receipt fields
+(Click the image for the interactive state machine.)
 
 | Field / outcome | Exact meaning | What you should do |
 | --- | --- | --- |
@@ -140,33 +109,23 @@ Interactive version (click for the full HTML viewer):
 
 AutoEvo records installed, loaded, activated, and verified against the real target-profile result. It does not substitute a private preflight result for real evidence.
 
-### Manual functional verification
-
 For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile and record the actual tool call and result. The model saying "looks successful" is not the same as a Host `verified` receipt.
 
 ## 6. Diagnose and recover
 
-### Only want to know what failed
-
-Say it directly:
+To only learn what failed, say it directly:
 
 > Inspect why this failed; do not retry, install, or clean up yet.
 
 Diagnosis is read-only, bounded, and redacted: it does not retry, and it does not hand full stderr, credentials, private paths, or session content to the model.
 
-### `recovery_required` during a failure
+Failure recovery is bound to the current sealed interrupt. Use a fresh message to confirm reconciliation, cleanup, or retry among the legal options the Agent presents; do not manually stitch old workflow, review, or installation IDs together.
 
-Recovery is bound to the current sealed interrupt. Use a fresh message to confirm reconciliation, cleanup, or retry among the legal options the Agent presents; do not manually stitch old workflow, review, or installation IDs together.
-
-### Clean up a completed install and start over
-
-This is a separate flow and requires a new top-level message:
+Cleaning up a completed install and starting over is a separate flow that requires a new top-level message:
 
 > Clean up this completed installation and start discovery from scratch.
 
 The Host precisely removes only the artifacts owned by that workflow's installation receipt and restarts; the managed source repository is not deleted. Do not mix completed cleanup with failure recovery.
-
-### Repeated failures
 
 AutoEvo bounds repeated diagnosis, verification, and modification attempts. On repeated failure, existing receipts are preserved, new evidence is compared, and a human decides the next step; the same install or repair is not looped.
 
