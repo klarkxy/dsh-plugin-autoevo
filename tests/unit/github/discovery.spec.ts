@@ -9,7 +9,6 @@ describe('GitHub repository identifiers', () => {
     }
   })
 })
-
 describe('scoped GitHub query', () => {
   it('drops archived, forked, and disabled repositories', () => {
     expect(_testing.asCandidate({
@@ -40,4 +39,3 @@ describe('scoped GitHub query', () => {
     }))
   })
 })
-

@@ -8,7 +8,6 @@ import { reviewLocalPlugin } from '../../src/review/review.js'
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
   maxCandidates: 5, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
-  
 }
 
 describe('local review binding', () => {

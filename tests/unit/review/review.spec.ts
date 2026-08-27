@@ -12,7 +12,7 @@ import type { CommandRequest, CommandRunner } from '../../../src/process/runner.
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
   maxCandidates: 5, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
-  
+
 }
 const loaderPatch = '- insert:\n    - id: synthetic-capability\n      name: synthetic-capability\n'
 
