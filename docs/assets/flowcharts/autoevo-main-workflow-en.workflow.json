@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AutoEvo Main Workflow: Search-first with Two Confirmation Gates",
+    "output": "docs/assets/flowcharts/autoevo-main-workflow-en.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1280,
+      640
+    ],
+    "views": [
+      {
+        "id": "discover",
+        "label": "Discovery and Gate 1",
+        "focus": [
+          "req",
+          "discover",
+          "seal",
+          "gate1"
+        ],
+        "note": "The user's original wording enters Search-first discovery; the Host seals a snapshot of 1–5 candidates."
+      },
+      {
+        "id": "decide",
+        "label": "Review and Gate 2",
+        "focus": [
+          "gate1",
+          "review",
+          "gate2",
+          "stop"
+        ],
+        "note": "After read-only review, the user makes the final decision in a fresh message; stopping is a normal end state."
+      },
+      {
+        "id": "execute",
+        "label": "Approval and evidence",
+        "focus": [
+          "gate2",
+          "approval",
+          "outcome"
+        ],
+        "note": "DSH Core approves one side effect; the Host verifies and writes the receipt."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "user",
+      "label": "User"
+    },
+    {
+      "id": "agent",
+      "label": "Capability Evolution session"
+    },
+    {
+      "id": "host",
+      "label": "AutoEvo Host"
+    },
+    {
+      "id": "dsh",
+      "label": "DSH Core"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-discover",
+      "label": "Discover",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "phase-review",
+      "label": "Review & decide",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phase-execute",
+      "label": "Execute",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "gates",
+      "label": "Two independent confirmation gates",
+      "lane": "user",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "req",
+    "discover",
+    "seal",
+    "gate1",
+    "review",
+    "gate2",
+    "approval",
+    "outcome"
+  ],
+  "nodes": [
+    {
+      "id": "req",
+      "lane": "user",
+      "col": 0,
+      "type": "external",
+      "label": "State the need",
+      "sublabel": "original wording kept"
+    },
+    {
+      "id": "discover",
+      "lane": "agent",
+      "col": 1,
+      "width": 124,
+      "type": "frontend",
+      "label": "Search-first",
+      "sublabel": "local + GitHub topic"
+    },
+    {
+      "id": "seal",
+      "lane": "host",
+      "col": 2,
+      "width": 118,
+      "type": "backend",
+      "label": "Seal candidates",
+      "sublabel": "1–5 real candidates"
+    },
+    {
+      "id": "gate1",
+      "lane": "user",
+      "col": 2,
+      "type": "security",
+      "label": "Gate 1",
+      "sublabel": "choose what to review",
+      "tag": "read-only"
+    },
+    {
+      "id": "review",
+      "lane": "host",
+      "col": 3,
+      "width": 124,
+      "type": "backend",
+      "label": "Read-only review",
+      "sublabel": "commit · hash · risk"
+    },
+    {
+      "id": "gate2",
+      "lane": "user",
+      "col": 4,
+      "width": 130,
+      "type": "security",
+      "label": "Gate 2",
+      "sublabel": "use / install / improve / create",
+      "tag": "final decision"
+    },
+    {
+      "id": "approval",
+      "lane": "dsh",
+      "col": 4,
+      "type": "security",
+      "label": "Approval",
+      "sublabel": "allowed-once"
+    },
+    {
+      "id": "outcome",
+      "lane": "host",
+      "col": 5,
+      "width": 100,
+      "type": "database",
+      "label": "Outcome",
+      "sublabel": "three-layer result"
+    },
+    {
+      "id": "stop",
+      "lane": "user",
+      "col": 5,
+      "type": "external",
+      "label": "Stop",
+      "sublabel": "normal exit",
+      "width": 64
+    }
+  ],
+  "edges": [
+    {
+      "from": "req",
+      "to": "discover",
+      "label": "capability_workflow"
+    },
+    {
+      "from": "discover",
+      "to": "seal",
+      "label": "candidate pool",
+      "labelDx": -48
+    },
+    {
+      "from": "seal",
+      "to": "gate1"
+    },
+    {
+      "from": "gate1",
+      "to": "review",
+      "label": "selected",
+      "variant": "emphasis"
+    },
+    {
+      "from": "review",
+      "to": "gate2",
+      "label": "review outcome",
+      "labelDx": -16,
+      "labelDy": 24
+    },
+    {
+      "from": "gate2",
+      "to": "approval",
+      "variant": "emphasis",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "approval",
+      "to": "outcome",
+      "label": "allowed-once",
+      "variant": "emphasis"
+    },
+    {
+      "from": "gate2",
+      "to": "stop",
+      "label": "stop",
+      "variant": "dashed",
+      "route": "straight"
+    },
+    {
+      "from": "gate2",
+      "to": "review",
+      "label": "improve/create, then re-review",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel"
+    },
+    {
+      "from": "gate1",
+      "to": "discover",
+      "label": "search again",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two confirmation gates",
+      "items": [
+        "Gate 1 only picks candidates, read-only; Gate 2 decides side effects",
+        "Every step needs a fresh user message; they cannot be merged",
+        "DSH approval authorizes one side effect and replaces no gate"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Layered evidence",
+      "items": [
+        "verified: the Host completed real tool round trips",
+        "activated: bundle loaded without a functional round trip",
+        "awaiting_user_test: waiting for a manual test"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Safety split",
+      "items": [
+        "AutoEvo owns flow, warnings, and receipts",
+        "DSH Core owns permissions, sandbox, and approval",
+        "Remote summaries are always treated as untrusted data"
+      ]
+    }
+  ]
+}

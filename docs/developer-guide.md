@@ -2,7 +2,7 @@
 
 [English](developer-guide.en.md) | 中文 · [返回 README](../README.md)
 
-本指南面向维护 AutoEvo、扩展其 Host 接缝、修复工作流或验证安装语义的开发者。它记录开发流程和源码入口；Policy 状态机与安全不变量仍分别以[架构说明](architecture.md)和[安全模型](security.md)为权威。
+本指南面向维护 AutoEvo、扩展其 Host 接缝、修复工作流或验证安装语义的开发者。它记录开发流程和源码入口；状态机与安全不变量分别以[架构说明](architecture.md)和[安全模型](security.md)为权威。
 
 ## 1. 本地环境
 
@@ -11,7 +11,7 @@
 - Node.js `^22.19.0 || ^24.0.0`；CI 覆盖两个受支持的主版本。
 - pnpm；CI 当前使用 `10.29.2`。
 - Git；远端审查和 live GitHub discovery E2E 还需要可用的 GitHub CLI。
-- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 在 runner 临时目录安装精确的验收基线 `@deepseek-ai/dsh@0.1.1-rc.2` 并通过 `DSH_PACKAGE_ROOT` 指向它，不改写仓库的 `package.json` 或 `pnpm-lock.yaml`；本地可以使用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据仍须注明实际版本。
+- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 在 runner 临时目录安装验收基线 `@deepseek-ai/dsh@0.1.1-rc.2`（Cordis `4.0.1`）并通过 `DSH_PACKAGE_ROOT` 指向它；本地可用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据须注明实际版本。
 - Windows / PowerShell 是完整支持与主要实测环境。Linux/macOS 只承诺 build/import smoke，不宣称完整 DSH workflow、profile 或 E2E 支持；核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
 初始化并运行日常验收：
@@ -25,7 +25,7 @@ pnpm check
 
 | 命令 | 覆盖范围 | 何时使用 |
 | --- | --- | --- |
-| `pnpm lint` | flat 配置 `eslint.config.mjs`，`eslint src tests`；解析级检查 TS 与 `tests/**/*.mjs` | 快速语法/规范检查 |
+| `pnpm lint` | flat 配置 `eslint.config.mjs`，`eslint src tests` | 快速语法/规范检查 |
 | `pnpm typecheck` | `tsc --noEmit` | 公共类型或合同变化 |
 | `pnpm test` | 全部 Vitest 单元与集成测试 | 逻辑变更 |
 | `pnpm build` | 用 tsdown 重建 `lib/` | 源码或导出变化 |
@@ -34,19 +34,21 @@ pnpm check
 | `pnpm check:release` | `check` 加 live marketplace E2E 和 pack dry-run | 发布候选 |
 | `pnpm pack:dry-run` | 检查发布包内容 | 文档、exports 或 files 变化 |
 
-live E2E 会访问外部市场或 GitHub，不应在缺少网络/认证时冒充离线通过。
+live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通过。
 
 ## 2. 文档职责
 
 | 文档 | 唯一职责 | 需要更新的触发条件 |
 | --- | --- | --- |
-| [README](../README.md) | 价值、安装、一次快速体验、状态边界和导航 | 版本、安装命令、最低基线或入口变化 |
+| [README](../README.md) | 价值、安装、快速体验、状态边界和导航 | 版本、安装命令、最低基线或入口变化 |
 | [使用指南](user-guide.md) | 用户可观察流程、选择、状态、恢复和卸载 | UI/行为、用户动作或结果语义变化 |
 | 本指南 | 本地开发、代码入口、测试、调试、贡献 | 脚本、目录、开发/发布流程变化 |
-| [架构说明](architecture.md) | Policy、状态机、数据布局、运行时接缝 | 合同、图、存储或注入关系变化 |
+| [架构说明](architecture.md) | 状态机、数据布局、运行时接缝 | 合同、存储或注入关系变化 |
 | [安全模型](security.md) | 信任边界、安装门槛、验证与删除不变量 | 权限、审查、验证、清理边界变化 |
 
-不要复制完整流程到多个文件。其它文档只保留一句摘要和链接。
+不要把完整流程复制到多个文件；其它文档只保留一句摘要和链接。
+
+交互流程图在 `docs/assets/flowcharts/`（不随包发布）：对应流程变化时，编辑同目录的 `*.workflow.json` / `*.lifecycle.json` 规格（英文版为 `-en` 后缀同名文件），用 archify 重新 `deliver` 生成 HTML，再在浏览器打开 HTML 用 Export → SVG 覆盖同名 `.svg`。不要直接手改 HTML 或 SVG。
 
 ## 3. 仓库结构
 
@@ -84,7 +86,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 `src/workflow/engine.ts` 是薄 façade；引擎实现按继承链拆分为 `engine-core.ts`、`engine-driver.ts`、`engine-recovery.ts`、`engine-resume.ts`，候选快照在 `candidates.ts`，selection receipt / commitment / lease 铸造在 `grants.ts`。
 
-`lib/` 是生成目录，但当前仓库会跟踪并发布它。不要直接编辑 `lib/`；修改 `src/` 后运行 `pnpm build`，并把对应生成差异一起审查。
+`lib/` 是生成目录，但仓库会跟踪并发布它。不要直接编辑 `lib/`；修改 `src/` 后运行 `pnpm build`，并把生成差异一起审查。
 
 ## 4. 运行时入口
 
@@ -106,12 +108,12 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 5. 工作流与两道确认门
 
-Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构说明](architecture.md#4-数据与状态) §4 为准；这里只列改动工作流时容易踩的边界：
+当前 Policy 为 V11。状态机、两道确认门与生命周期映射以[架构说明 §4](architecture.md#4-数据与状态) 为准；这里只列改动工作流时容易踩的边界：
 
 - 内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`；永远不要接受模型自报的 repository、review ID、路径或 install spec，`use_this` / `modify_this` 只绑定密封候选快照中的候选 ID。
 - 同回合重复 resume 不获得新授权；防重放失败不会消费当前合法 interrupt。
-- DSH `allowed-once` approval 只授权一次副作用，不能替代 Gate 1/2。
-- 旧 Policy 的 selection、review、commitment 或 lease 不跨版本复用；Host fail closed 并要求重新发现。
+- DSH `allowed-once` approval 只批准一次副作用，不能替代两道确认门。
+- 旧 Policy 的未完成记录（selection、review、commitment、lease）不跨版本恢复；Host fail closed 并要求重新发现。
 
 ## 6. Resolver 与来源 lineage
 
@@ -122,24 +124,28 @@ Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构
 - `github_exact`：profile 中真实依赖精确 GitHub SHA；
 - `owned_chain`：AutoEvo installation receipt 能证明当前安装链。
 
-历史 `failed_install` / `reviewed_snapshot` 若状态为 `not_installed` 或 `removed`，经完整 revalidation、重新认领、重审与冻结后按首次安装处理，不能放宽 `assertReplacementBinding()` 的 live-spec 漂移保护。
+历史 `failed_install` / `reviewed_snapshot` 若状态为 `not_installed` 或 `removed`，经完整重验证、重新认领、重审与冻结后按首次安装处理，不能放宽 `assertReplacementBinding()` 的 live-spec 漂移保护。
 
 `src/resolver/lineage.ts` 与 `SourceManager.validateCompletedSnapshot()` 共同防止任意本地 review 冒充托管来源：receipt、路径、仓库、base commit、review ID、artifact hash、干净 HEAD/branch、Git config/hooks 与 workspace containment 都必须匹配。
 
 ## 7. 托管源码生命周期
 
-默认源码根是 `<workspace>/.autoevo/sources/`。当前实现采用父会话可见施工：
+交互版流程图（点击查看 HTML 原图）：
+
+[![AutoEvo 托管施工流程](assets/flowcharts/autoevo-managed-work.svg)](assets/flowcharts/autoevo-managed-work.html)
+
+默认源码根是 `<workspace>/.autoevo/sources/`。施工在当前能力进化会话中可见进行：
 
 1. Host 克隆 exact GitHub commit 或创建脚手架；
 2. 写入 sidecar source receipt 并取得 workflow 排他锁；
 3. `prepareModify()` / `prepareCreate()` 设置 `pendingPath` 与结构化 WorkOrder；
-4. 当前能力进化会话只在托管目录内编辑、运行检查；
+4. 当前会话只在托管目录内编辑、运行检查；
 5. `finish_managed_work` 后，Host 验证 branch/HEAD、工作树、Git config/hooks；
 6. Host 禁用 hooks 与签名创建本地 commit；
 7. 重新审查、冻结完整快照并生成 owned tgz；
 8. 释放锁或进入安装。
 
-运行时不会创建子 Agent。`src/managed-child.ts` 仅保留历史兼容接口，其 `run()` 会明确拒绝旧路径；不要把它当成扩展 API。
+运行时不创建子 Agent；施工全程发生在当前会话绑定的托管目录中。
 
 取消或异常不会复用已取消 signal 做清理。Host 以独立 bounded lifetime checkpoint 有界编辑、验证状态并释放锁；不能把 cancel/timeout 误报成 Git 可执行文件缺失。
 
@@ -150,7 +156,7 @@ Policy 当前为 V9。状态机、两道确认门与生命周期映射以[架构
 - `<workspace>/.autoevo/sources/<source-id>/`：托管源码工作树；
 - `<dshHome>/autoevo/`：Host receipts（`resolutions/`、`reviews/`、`workflows/`、`installations/`、`source-control/`）与 `artifacts/`、`trials/`、`verifications/`。
 
-完整布局以[架构说明](architecture.md#4-数据与状态) §4 为准。`StateStore` 用同目录临时文件加原子 rename 写 receipt。任何 profile 变更前先持久化 provisional installation；最终写回失败时必须保留可恢复锚点或补偿清理，不能谎报未安装。
+完整布局以[架构说明 §4](architecture.md#4-数据与状态) 为准。`StateStore` 用同目录临时文件加原子 rename 写 receipt。任何 profile 变更前先持久化 provisional installation；最终写回失败时必须保留可恢复锚点或补偿清理，不能谎报未安装。
 
 ### `Config`
 
@@ -248,7 +254,7 @@ HTTP 200 只证明 Web 服务可访问；它不能证明 AutoEvo 工具已加载
 7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的发布 tag（`documentation.spec.ts` 会校验一致性）；
 8. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
 
-仓库 CI 负责验收，不自动创建 release。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。AutoEvo installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
+仓库 CI 负责验收，不自动创建 release。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
 
 ## 参考入口
 

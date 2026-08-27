@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "AutoEvo Install Outcome State Machine",
+    "output": "docs/assets/flowcharts/autoevo-install-outcomes-en.html",
+    "viewBox": [
+      1100,
+      640
+    ],
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "neutral": {
+          "visible": false
+        },
+        "external": {
+          "visible": false
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Install & verify"
+    },
+    {
+      "id": "outcomes",
+      "label": "Non-failure outcomes"
+    },
+    {
+      "id": "exceptions",
+      "label": "Failure & recovery"
+    },
+    {
+      "id": "terminal",
+      "label": "Terminal"
+    }
+  ],
+  "states": [
+    {
+      "id": "provisional",
+      "type": "start",
+      "label": "Provisional",
+      "sublabel": "unknown / pending",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "persisted first"
+    },
+    {
+      "id": "installing",
+      "type": "active",
+      "label": "Approve+install",
+      "sublabel": "allowed-once",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "DSH runs"
+    },
+    {
+      "id": "verifying",
+      "type": "decision",
+      "label": "Host verify",
+      "sublabel": "layer by runtime surface",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "mechanical"
+    },
+    {
+      "id": "verified",
+      "type": "success",
+      "label": "verified",
+      "sublabel": "tool_roundtrip",
+      "lane": "outcomes",
+      "col": 0,
+      "tag": "functional"
+    },
+    {
+      "id": "activated",
+      "type": "success",
+      "label": "activated",
+      "sublabel": "bundle_activation",
+      "lane": "outcomes",
+      "col": 1,
+      "tag": "no round trip"
+    },
+    {
+      "id": "awaiting",
+      "type": "waiting",
+      "label": "awaiting_user_test",
+      "sublabel": "manual_runtime",
+      "lane": "outcomes",
+      "col": 2,
+      "width": 150,
+      "tag": "manual test"
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "failed_absent",
+      "sublabel": "target absent",
+      "lane": "exceptions",
+      "col": 1,
+      "yOffset": 78,
+      "tag": "diagnosable"
+    },
+    {
+      "id": "recovery",
+      "type": "failure",
+      "label": "recovery_required",
+      "sublabel": "state unsafe to judge",
+      "lane": "exceptions",
+      "col": 0,
+      "yOffset": 78,
+      "width": 150,
+      "tag": "recover first"
+    },
+    {
+      "id": "removed",
+      "type": "neutral",
+      "label": "removed",
+      "sublabel": "receipt-driven",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "terminal",
+      "yOffset": -40
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t-decide",
+      "from": "provisional",
+      "to": "installing",
+      "label": "decision + re-check",
+      "route": "straight",
+      "labelAt": [
+        171,
+        110
+      ]
+    },
+    {
+      "id": "t-installed",
+      "from": "installing",
+      "to": "verifying",
+      "label": "reconciled",
+      "route": "straight",
+      "labelAt": [
+        325,
+        110
+      ]
+    },
+    {
+      "id": "t-verified",
+      "from": "verifying",
+      "to": "verified",
+      "label": "round trip passed",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-activated",
+      "from": "verifying",
+      "to": "activated",
+      "label": "load only",
+      "labelDx": -20,
+      "labelDy": 44
+    },
+    {
+      "id": "t-awaiting",
+      "from": "verifying",
+      "to": "awaiting",
+      "label": "no fixture"
+    },
+    {
+      "id": "t-failed",
+      "from": "installing",
+      "to": "failed",
+      "label": "install failed",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          248,
+          430
+        ],
+        [
+          556,
+          430
+        ]
+      ],
+      "labelAt": [
+        380,
+        428
+      ]
+    },
+    {
+      "id": "t-recovery",
+      "from": "installing",
+      "to": "recovery",
+      "label": "reconcile unclear",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          248,
+          385
+        ]
+      ],
+      "labelAt": [
+        196,
+        300
+      ]
+    },
+    {
+      "id": "t-retry",
+      "from": "recovery",
+      "to": "installing",
+      "label": "retry after recovery",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [
+        [
+          20,
+          385
+        ],
+        [
+          20,
+          80
+        ],
+        [
+          248,
+          80
+        ]
+      ],
+      "labelAt": [
+        134,
+        73
+      ]
+    },
+    {
+      "id": "t-remove",
+      "from": "awaiting",
+      "to": "removed",
+      "label": "plugin_remove",
+      "note": "all non-failure outcomes",
+      "route": "drop",
+      "labelAt": [
+        700,
+        352
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Three outcomes are not equal",
+      "items": [
+        "Only verified claims functional verification",
+        "activated / awaiting_user_test need one real try",
+        "installed / loaded are progress signals, not verdicts"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "restartRequired",
+      "items": [
+        "A non-failure outcome exists, but hot-load was incomplete",
+        "Restart the target profile, then verify again",
+        "It is a flag on outcomes, not a fifth outcome"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Failure paths stay distinct",
+      "items": [
+        "failed_absent: diagnose first, then decide whether to retry",
+        "recovery_required: sealed recovery; never blind-reinstall or hand-delete",
+        "Repeated failures exit to a human decision, never loop"
+      ]
+    }
+  ]
+}

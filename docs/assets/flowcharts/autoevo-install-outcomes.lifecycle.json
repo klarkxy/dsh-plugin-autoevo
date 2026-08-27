@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "AutoEvo 安装结果状态机",
+    "output": "docs/assets/flowcharts/autoevo-install-outcomes.html",
+    "viewBox": [
+      1100,
+      640
+    ],
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "neutral": {
+          "visible": false
+        },
+        "external": {
+          "visible": false
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "安装与验证"
+    },
+    {
+      "id": "outcomes",
+      "label": "非失败完成态"
+    },
+    {
+      "id": "exceptions",
+      "label": "失败与恢复"
+    },
+    {
+      "id": "terminal",
+      "label": "终态"
+    }
+  ],
+  "states": [
+    {
+      "id": "provisional",
+      "type": "start",
+      "label": "临时回执",
+      "sublabel": "unknown / pending",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "先行持久化"
+    },
+    {
+      "id": "installing",
+      "type": "active",
+      "label": "批准与安装",
+      "sublabel": "allowed-once",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "DSH 执行"
+    },
+    {
+      "id": "verifying",
+      "type": "decision",
+      "label": "Host 三层验证",
+      "sublabel": "按 runtime surface 选层",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "机械验证"
+    },
+    {
+      "id": "verified",
+      "type": "success",
+      "label": "verified",
+      "sublabel": "tool_roundtrip",
+      "lane": "outcomes",
+      "col": 0,
+      "tag": "功能已验证"
+    },
+    {
+      "id": "activated",
+      "type": "success",
+      "label": "activated",
+      "sublabel": "bundle_activation",
+      "lane": "outcomes",
+      "col": 1,
+      "tag": "无工具往返"
+    },
+    {
+      "id": "awaiting",
+      "type": "waiting",
+      "label": "awaiting_user_test",
+      "sublabel": "manual_runtime",
+      "lane": "outcomes",
+      "col": 2,
+      "width": 150,
+      "tag": "待人工实测"
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "failed_absent",
+      "sublabel": "目标不存在",
+      "lane": "exceptions",
+      "col": 1,
+      "yOffset": 78,
+      "tag": "可诊断"
+    },
+    {
+      "id": "recovery",
+      "type": "failure",
+      "label": "recovery_required",
+      "sublabel": "状态不可判定",
+      "lane": "exceptions",
+      "col": 0,
+      "yOffset": 78,
+      "width": 150,
+      "tag": "先恢复"
+    },
+    {
+      "id": "removed",
+      "type": "neutral",
+      "label": "removed",
+      "sublabel": "回执驱动移除",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "终态",
+      "yOffset": -40
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t-decide",
+      "from": "provisional",
+      "to": "installing",
+      "label": "决定与复核",
+      "route": "straight",
+      "labelAt": [
+        171,
+        110
+      ]
+    },
+    {
+      "id": "t-installed",
+      "from": "installing",
+      "to": "verifying",
+      "label": "对账一致",
+      "route": "straight",
+      "labelAt": [
+        325,
+        110
+      ]
+    },
+    {
+      "id": "t-verified",
+      "from": "verifying",
+      "to": "verified",
+      "label": "往返成功",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-activated",
+      "from": "verifying",
+      "to": "activated",
+      "label": "仅加载",
+      "labelDx": -44,
+      "labelDy": 24
+    },
+    {
+      "id": "t-awaiting",
+      "from": "verifying",
+      "to": "awaiting",
+      "label": "无夹具"
+    },
+    {
+      "id": "t-failed",
+      "from": "installing",
+      "to": "failed",
+      "label": "安装失败",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          248,
+          430
+        ],
+        [
+          556,
+          430
+        ]
+      ],
+      "labelAt": [
+        380,
+        428
+      ]
+    },
+    {
+      "id": "t-recovery",
+      "from": "installing",
+      "to": "recovery",
+      "label": "对账不明",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          248,
+          385
+        ]
+      ],
+      "labelAt": [
+        214,
+        300
+      ]
+    },
+    {
+      "id": "t-retry",
+      "from": "recovery",
+      "to": "installing",
+      "label": "恢复后重试",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [
+        [
+          20,
+          385
+        ],
+        [
+          20,
+          80
+        ],
+        [
+          248,
+          80
+        ]
+      ],
+      "labelAt": [
+        134,
+        73
+      ]
+    },
+    {
+      "id": "t-remove",
+      "from": "awaiting",
+      "to": "removed",
+      "label": "plugin_remove",
+      "note": "适用于所有非失败完成态",
+      "route": "drop"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "三种完成态不等价",
+      "items": [
+        "只有 verified 能宣称功能已验证",
+        "activated 与 awaiting_user_test 需要一次真实试用",
+        "installed / loaded 是过程信号，不是验证结论"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "restartRequired",
+      "items": [
+        "非失败完成态已成立，但当前进程热加载不完整",
+        "重启对应 profile 后再验证",
+        "它不是第五种完成态，而是完成态上的标记"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败路径不混用",
+      "items": [
+        "failed_absent：先诊断再决定是否重试",
+        "recovery_required：走 sealed 恢复，不盲目重装或手删",
+        "重复失败有人工决策出口，不会原样循环"
+      ]
+    }
+  ]
+}

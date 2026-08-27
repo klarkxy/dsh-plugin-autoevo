@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AutoEvo 主工作流：Search-first 与两道确认门",
+    "output": "docs/assets/flowcharts/autoevo-main-workflow.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "discover",
+        "label": "发现与第一道门",
+        "focus": [
+          "req",
+          "discover",
+          "seal",
+          "gate1"
+        ],
+        "note": "用户原话进入 Search-first 发现，Host 密封 1–5 个候选快照。"
+      },
+      {
+        "id": "decide",
+        "label": "审查与第二道门",
+        "focus": [
+          "gate1",
+          "review",
+          "gate2",
+          "stop"
+        ],
+        "note": "只读审查之后，用户用新消息做最终决定；停止是正常终态。"
+      },
+      {
+        "id": "execute",
+        "label": "批准与证据",
+        "focus": [
+          "gate2",
+          "approval",
+          "outcome"
+        ],
+        "note": "DSH Core 一次性批准副作用，Host 验证并写回执。"
+      }
+    ],
+    "viewBox": [
+      1280,
+      640
+    ]
+  },
+  "lanes": [
+    {
+      "id": "user",
+      "label": "用户"
+    },
+    {
+      "id": "agent",
+      "label": "能力进化会话"
+    },
+    {
+      "id": "host",
+      "label": "AutoEvo Host"
+    },
+    {
+      "id": "dsh",
+      "label": "DSH Core"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-discover",
+      "label": "发现",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "phase-review",
+      "label": "审查与决定",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phase-execute",
+      "label": "执行与证据",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "gates",
+      "label": "两道独立确认门",
+      "lane": "user",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "req",
+    "discover",
+    "seal",
+    "gate1",
+    "review",
+    "gate2",
+    "approval",
+    "outcome"
+  ],
+  "nodes": [
+    {
+      "id": "req",
+      "lane": "user",
+      "col": 0,
+      "type": "external",
+      "label": "提出需求",
+      "sublabel": "保留用户原话"
+    },
+    {
+      "id": "discover",
+      "lane": "agent",
+      "col": 1,
+      "width": 124,
+      "type": "frontend",
+      "label": "Search-first 发现",
+      "sublabel": "本地 + GitHub topic"
+    },
+    {
+      "id": "seal",
+      "lane": "host",
+      "col": 2,
+      "type": "backend",
+      "label": "密封候选快照",
+      "sublabel": "1–5 个真实候选"
+    },
+    {
+      "id": "gate1",
+      "lane": "user",
+      "col": 2,
+      "type": "security",
+      "label": "确认门 1",
+      "sublabel": "选择要审查的候选",
+      "tag": "只读"
+    },
+    {
+      "id": "review",
+      "lane": "host",
+      "col": 3,
+      "width": 112,
+      "type": "backend",
+      "label": "只读审查",
+      "sublabel": "commit · hash · 风险"
+    },
+    {
+      "id": "gate2",
+      "lane": "user",
+      "col": 4,
+      "width": 118,
+      "type": "security",
+      "label": "确认门 2",
+      "sublabel": "使用 / 安装 / 修改 / 创建",
+      "tag": "最终决定"
+    },
+    {
+      "id": "approval",
+      "lane": "dsh",
+      "col": 4,
+      "type": "security",
+      "label": "一次性批准",
+      "sublabel": "allowed-once"
+    },
+    {
+      "id": "outcome",
+      "lane": "host",
+      "col": 5,
+      "width": 100,
+      "type": "database",
+      "label": "安装与回执",
+      "sublabel": "三层验证结果"
+    },
+    {
+      "id": "stop",
+      "lane": "user",
+      "col": 5,
+      "type": "external",
+      "label": "停止",
+      "sublabel": "正常终态",
+      "width": 64
+    }
+  ],
+  "edges": [
+    {
+      "from": "req",
+      "to": "discover",
+      "label": "capability_workflow"
+    },
+    {
+      "from": "discover",
+      "to": "seal",
+      "label": "候选池"
+    },
+    {
+      "from": "seal",
+      "to": "gate1"
+    },
+    {
+      "from": "gate1",
+      "to": "review",
+      "label": "选中候选",
+      "variant": "emphasis"
+    },
+    {
+      "from": "review",
+      "to": "gate2",
+      "label": "审查结论",
+      "labelDx": -56
+    },
+    {
+      "from": "gate2",
+      "to": "approval",
+      "variant": "emphasis",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "approval",
+      "to": "outcome",
+      "label": "allowed-once",
+      "variant": "emphasis"
+    },
+    {
+      "from": "gate2",
+      "to": "stop",
+      "label": "停止",
+      "variant": "dashed",
+      "route": "straight"
+    },
+    {
+      "from": "gate2",
+      "to": "review",
+      "label": "修改 / 创建后重审",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel"
+    },
+    {
+      "from": "gate1",
+      "to": "discover",
+      "label": "继续搜寻",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两道确认门",
+      "items": [
+        "门 1 只读选候选，门 2 才决定副作用",
+        "每一步都要新鲜用户消息，不能合并",
+        "DSH approval 只批准一次副作用，不替代任何门"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "证据分层",
+      "items": [
+        "verified：Host 完成真实工具往返",
+        "activated：bundle 已加载但无功能往返",
+        "awaiting_user_test：等待人工实测"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "安全分工",
+      "items": [
+        "AutoEvo 管流程、警告与回执",
+        "DSH Core 管权限、sandbox 与 approval",
+        "远端摘要一律按不可信数据处理"
+      ]
+    }
+  ]
+}

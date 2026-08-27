@@ -2,62 +2,68 @@
 
 English | [中文](user-guide.md) · [Back to README](../README.en.md)
 
-This guide is for people who discover, install, improve, or create capabilities in DSH. **Capability Evolution** uses a Search-first workflow: temporary experiments and formal needs follow the same path. AutoEvo owns workflow, warnings, and evidence receipts; DSH Core enforces permissions, sandboxes, and approvals. It explains the choices you make, what AutoEvo can prove, and how to recover.
+This guide is for users who discover, install, improve, or create capabilities in DSH. The **Capability Evolution** preset uses a Search-first workflow: temporary experiments and formal needs follow the same path. AutoEvo owns the workflow, warnings, and evidence receipts; DSH Core enforces permissions, sandboxes, and approvals.
 
 ## 1. Before you start
 
-- Target stable release `v1.0.0`; its tag and Release are published separately by a maintainer after acceptance.
 - Node.js `^22.19.0 || ^24.0.0`.
-- A working DSH profile; examples below use `web`.
-- For GitHub discovery/review, install GitHub CLI and make sure `gh auth status` works.
+- A working DSH profile; this guide uses `web` as the example.
+- For GitHub discovery or review, install GitHub CLI and confirm `gh auth status` works.
 - Use a model with reliable instruction following, context retention, and structured tool use.
 
-The `--profile web` argument must name the profile you actually use. Do not copy it into a test or production environment without checking the target.
+The `--profile web` in the install command must match the profile you actually use. Do not assume the example profile is your everyday profile.
 
 ## 2. Install, upgrade, and first load
 
-Install the release listed in [§1](#1-before-you-start) (run DSH through npx; no global install needed — keep the `@deepseek-ai/` prefix, the unscoped `dsh` package on npm is an unrelated project):
+Install the published release (run DSH through npx; no global install needed — keep the `@deepseek-ai/` prefix; the unscoped `dsh` package on npm is an unrelated project):
 
 ```powershell
 npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.0.0
 ```
 
-Restart that DSH profile after installing or upgrading AutoEvo so the new bundle takes effect. The meaning of the `restartRequired` result field is explained under [Outcomes and next steps](#5-outcomes-and-next-steps).
+After installing or upgrading AutoEvo, restart that DSH profile so the new bundle takes effect. The meaning of the `restartRequired` field is explained under [Outcomes and next steps](#5-outcomes-and-next-steps).
 
-After installation, look for the preset with id `evolution` (display name **Capability Evolution**) in the DSH user preset list. AutoEvo upgrades only an unchanged copy it owns. A same-name foreign directory or user-edited preset is preserved and diagnosed.
+After installation, the user preset **Capability Evolution** (id `evolution`) should appear in the DSH preset list. AutoEvo only upgrades an unchanged copy it owns; a same-name foreign directory or user-edited preset is preserved and diagnosed.
 
-Setting `evolutionPreset: false` stops future materialization or upgrades. It never deletes an existing preset.
+If you do not want AutoEvo to install or upgrade the preset, set `evolutionPreset` to `false`; this only stops future materialization or upgrades, and never deletes an existing preset.
 
 ## 3. Your first complete workflow
 
 ### 3.1 State the need
 
-Choose **Capability Evolution** in a new or blank DSH session and describe the goal:
+In a new DSH session, choose **Capability Evolution** and describe the goal directly:
 
 > I need a DSH plugin that can synchronize project records. Search for an existing one first.
 
-The Host stores this top-level message verbatim. A clear need starts search immediately; only a material ambiguity that changes search classification permits one clarification. Its answer affects read-only search only and grants no selection, creation, modification, or installation authority.
+A clear need starts search immediately. The Agent only asks a clarification when a material ambiguity would change the search direction. The clarification answer affects read-only search only and grants no selection, creation, modification, or installation authority.
 
-### 3.2 Gate 1: choose what to review
+### 3.2 Gate 1: choose a candidate to review
 
-The Agent may refine within a bounded budget and then seals a 1–5 item shortlist. Use a fresh chat reply to choose what to review, for example:
+The Agent runs bounded supplemental queries, then seals 1–5 candidates. Use a fresh chat reply to choose what to review, for example:
 
-- “Review the second one.”
-- “Go with the one you recommend.”
-- “None of these fit — keep searching.”
+- "Review the second one."
+- "Go with the one you recommend."
+- "None of these fit — keep searching."
 
-This gate is read-only: it cannot install, modify, or create anything. Search may return no candidates; that state offers only continued search, creating a new capability, or stopping. Creation still needs a fresh top-level confirmation.
+This gate is read-only and cannot install, modify, or create anything. Search may return no candidates; in that case only continued search, creating a new capability, or stopping is offered. Choosing "create" still requires a fresh confirmation later.
 
 ### 3.3 Gate 2: decide after review
 
-The Host reviews exact source identity, manifest, required code, compatibility, and security facts. Use another fresh reply to decide whether to reuse, install, improve, create from scratch, search again, or stop.
+The Host reviews the candidate's exact source, manifest, required source files, compatibility, and security facts. After review, use a fresh chat message to decide explicitly:
 
-Natural language is enough to express your workflow decision; no internal action names are required. The Host binds your reply to the current turn, candidate, and review. Actual side effects remain enforced by DSH Core permissions and one-time approval; AutoEvo never treats a workflow receipt as permission.
+- Reuse an existing local capability as is;
+- Install the reviewed candidate;
+- Improve on the candidate or installed source;
+- Create from scratch when no candidate fits;
+- Search again;
+- Stop.
+
+Natural language is enough; you do not need to type internal action names. Actual side effects remain enforced by DSH Core permissions and one-time approval.
 
 ```text
 Requirement
   ↓
-Discovery and bounded refinement
+Discovery pool and bounded refinement
   ↓
 Sealed 1–5 candidate shortlist
   ↓  Gate 1: choose a candidate to review
@@ -65,95 +71,109 @@ Read-only review
   ↓  Gate 2: use / improve / create / search / stop
 Install or managed-source work
   ↓
-Host verification and receipt
+Host verification and outcome receipt
 ```
+
+Interactive version (click for the full HTML viewer):
+
+[![AutoEvo main workflow](assets/flowcharts/autoevo-main-workflow-en.svg)](assets/flowcharts/autoevo-main-workflow-en.html)
 
 ## 4. Common tasks
 
 ### 4.1 Reuse an existing local capability
 
-If a local tool or skill already satisfies the need, reuse it. This is a normal terminal result with no remote review or installation.
+When a local tool or skill already meets the need, reuse it. This is a normal terminal state with no remote review or installation artifact.
 
 ### 4.2 Install a reviewed candidate
 
-The user can choose direct install when the current-policy review identifies an exact source, target package, and valid install description. Fit, compatibility (including explicit incompatibility), lifecycle scripts, code risk, and reviewer opinions remain warnings and recommendations; they do not hide the install action by themselves. Only a non-materializable source must be repaired first. Every user-adopted capability is installed persistently. Lifecycle scripts and package-manager behavior follow normal DSH permission, sandbox, and approval rules; AutoEvo does not create a private preflight profile.
+As long as the review identifies the source, target package, and a valid install description, the user decides whether to install. Fit, compatibility, lifecycle scripts, code risk, and reviewer opinions are shown as warnings and recommendations; they do not hide the install action by themselves. Only a non-materializable source must be repaired first. Every adopted capability is installed persistently into the target profile; lifecycle scripts and package-manager behavior follow DSH's normal permissions, sandbox, and approval rules.
 
 ### 4.3 Improve a candidate or installed capability
 
-When a candidate is almost right, an installed plugin needs an upgrade, or a historically failed source needs repair, choose “improve on this source”. AutoEvo will:
+When a candidate is almost right, an installed plugin needs an upgrade, or a historically failed source needs repair, choose "improve on this source". AutoEvo will:
 
 1. Validate the exact upstream or historical managed source;
-2. Prepare a Host-managed Git source under `.autoevo/sources/` in the current session workspace;
-3. Keep edits and checks visible in the current Capability Evolution session;
+2. Prepare a managed Git source under `.autoevo/sources/` in the current session workspace;
+3. Let the current session edit and run checks within the managed source;
 4. Have the Host commit, re-review, and freeze the result;
-5. Wait for you to confirm the installation again.
+5. Wait for your confirmation of installation again.
 
-AutoEvo does not launch a hidden child Agent for this step. A historical failed or removed source becomes a new first install after repair. Only a package that really exists in the live profile with exact source ownership is a replacement.
+No hidden child Agent is launched. A historical failed or removed source becomes a new first install after repair. Only a package that genuinely exists in the profile with exact source match is treated as a replacement.
 
 ### 4.4 Create from scratch
 
-Creation is available only after discovery is complete, no suitable candidate remains, and you explicitly choose create at Gate 2. Creation happens in the same visible managed source; after checks and local review, the final install still requires your explicit confirmation.
+Creation is available only after discovery is complete, no suitable candidate remains, and you explicitly choose create at Gate 2. Creation happens in the same visible managed source; after checks and local review, the final install still requires your confirmation again.
 
 ### 4.5 Stop
 
-You can stop at either gate. Stop is never treated as install or create authority, and a DSH approval cannot override it. See the [FAQ](#9-faq) for how chat confirmation and DSH approval divide their roles.
+You can stop at either gate. Stop is never treated as install or create authority, and DSH approval cannot override it.
 
 ### 4.6 Versions, adoption, and upstream updates
 
 AutoEvo keeps an installation receipt chain per package. Four companion tools:
 
-- `capability_versions`: lists the Host-tracked version chain for one package, marking the live version and artifact availability. Read-only.
-- `capability_rollback`: rolls back to a historical version of the package (the direct predecessor by default). It reinstalls the linked reviewed source through the standard install path and still requires one-time DSH approval; adopted receipts have no linked review and cannot be rollback targets.
-- `capability_adopt`: without arguments, scans the current profile for installed plugins the Host does not track; with `package_name`, registers one as an adopted receipt so the version and update tools can track it. Adopted receipts have no review and are never `verified`.
-- `capability_updates`: read-only comparison of exact GitHub-pinned installations against the upstream default-branch head and latest release. Upgrading itself still goes through the improve flow in §4.3.
+| Tool | Purpose |
+| --- | --- |
+| `capability_versions` | Lists the version chain by package, marking the live version and artifact availability; read-only. |
+| `capability_rollback` | Rolls back to a historical version (the direct predecessor by default). Reinstalls through the standard reviewed-source path and still requires one-time approval; adopted receipts without a linked review cannot be rollback targets. |
+| `capability_adopt` | Without arguments, scans the current profile for untracked installed plugins; with `package_name`, registers one as an adopted receipt so the version and update tools can track it. Adopted receipts have no review and `verified` is false. |
+| `capability_updates` | For installations pinned to an exact GitHub source, read-only comparison against the upstream default-branch head and the latest release. Upgrading itself still goes through the §4.3 improve flow. |
 
 ## 5. Outcomes and next steps
 
-| Field / outcome | Exact meaning | Next step |
+Interactive version (click for the full HTML viewer):
+
+[![AutoEvo install outcome state machine](assets/flowcharts/autoevo-install-outcomes-en.svg)](assets/flowcharts/autoevo-install-outcomes-en.html)
+
+### Install receipt fields
+
+| Field / outcome | Exact meaning | What you should do |
 | --- | --- | --- |
-| `installed: true` | Exact target-profile source match plus a non-failure completion | Inspect outcome, `loaded`, and `verified` |
-| `loaded: true` | The Host proved the bundle loaded in the destination process | Do not call it functionally verified yet |
-| `verified` / `verified: true` | Host `tool_roundtrip` (an automated real tool round trip) covered and successfully returned every expected tool | Use the capability |
-| `activated` | `bundle_activation` (a bundle load check without tools) passed; Loader/Fiber settled | Try the capability in the target profile |
-| `awaiting_user_test` | Persistent `manual_runtime` (verification left to you at runtime) completed without a Host fixture | Perform one real client/profile test |
-| `restartRequired: true` | A non-failure result exists, but current-process hot-load was incomplete | Restart the target profile |
-| `failed_absent` | The install command failed, and neither the profile nor the visible package target exists | Diagnose before retrying |
-| `recovery_required` | Install, replacement, or cleanup state cannot be determined safely | Recover; do not reinstall or delete blindly |
+| `installed: true` | Target profile matches the reviewed source, and the result is a non-failure completion | Continue to inspect `verified`, `loaded`, and outcome |
+| `loaded: true` | The bundle is loaded in the destination process | Do not claim functional verification on this alone |
+| `verified` | The Host's `tool_roundtrip` (an automated real tool round trip) covered the expected tools and returned successfully | The capability can be called verified |
+| `activated` | `bundle_activation` (a bundle load check with no tools) passed | Try the capability in the target profile |
+| `awaiting_user_test` | Persistent `manual_runtime` completed, no Host automatic fixture | Run one real test in the real client or profile |
+| `restartRequired: true` | A non-failure result exists, but the current process has no complete hot-load | Restart the profile and try again |
+| `failed_absent` | The install command failed, and neither the profile nor the visible package target exists | Diagnose first, then decide whether to retry |
+| `recovery_required` | Install, replacement, or cleanup state cannot be determined safely | Follow the recovery flow; do not reinstall or delete blindly |
 
-AutoEvo records installed, loaded, activated, and verified against the real target-profile result. It does not substitute a private preflight result for destination-profile or real tool-roundtrip evidence.
+AutoEvo records installed, loaded, activated, and verified against the real target-profile result. It does not substitute a private preflight result for real evidence.
 
-For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile. Record the actual tool call and its result; a model saying “looks successful” is not a Host `verified` receipt.
+### Manual functional verification
+
+For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile and record the actual tool call and result. The model saying "looks successful" is not the same as a Host `verified` receipt.
 
 ## 6. Diagnose and recover
 
 ### Only want to know what failed
 
-Ask for read-only diagnosis explicitly:
+Say it directly:
 
 > Inspect why this failed; do not retry, install, or clean up yet.
 
-Diagnosis is read-only, bounded, and redacted: it does not retry, and it does not expose credentials, full private paths, raw stderr, or session content to the model.
+Diagnosis is read-only, bounded, and redacted: it does not retry, and it does not hand full stderr, credentials, private paths, or session content to the model.
 
 ### `recovery_required` during a failure
 
-`recovery_required` uses the current sealed failure interrupt. Follow the legal options presented in a fresh reply; do not construct old workflow/review/installation IDs yourself.
+Recovery is bound to the current sealed interrupt. Use a fresh message to confirm reconciliation, cleanup, or retry among the legal options the Agent presents; do not manually stitch old workflow, review, or installation IDs together.
 
-### Cleaning up a completed install and starting over
+### Clean up a completed install and start over
 
-This is a separate path. Again, say it directly, as a new top-level message:
+This is a separate flow and requires a new top-level message:
 
 > Clean up this completed installation and start discovery from scratch.
 
-The Host removes only the installed artifacts owned by that workflow's installation receipt and starts over. It does not delete the managed source repository. Do not mix completed cleanup with a failure interrupt.
+The Host precisely removes only the artifacts owned by that workflow's installation receipt and restarts; the managed source repository is not deleted. Do not mix completed cleanup with failure recovery.
 
 ### Repeated failures
 
-Repeated diagnosis, verification, and modification are bounded. Preserve receipts and compare new evidence instead of looping the same install or repair.
+AutoEvo bounds repeated diagnosis, verification, and modification attempts. On repeated failure, existing receipts are preserved, new evidence is compared, and a human decides the next step; the same install or repair is not looped.
 
 ## 7. Uninstall AutoEvo
 
 1. Remove **Capability Evolution** from the DSH user-preset UI.
-2. Remove AutoEvo from the same profile:
+2. Remove the plugin from the same profile:
 
    ```powershell
    npx @deepseek-ai/dsh plugin --profile web remove dsh-plugin-autoevo
@@ -161,25 +181,33 @@ Repeated diagnosis, verification, and modification are bounded. Preserve receipt
 
 3. Restart that DSH profile.
 
-This differs from AutoEvo's `plugin_remove`, which removes a receipt-owned third-party capability. It does not uninstall AutoEvo or delete managed source.
+This differs from AutoEvo's `plugin_remove`, which removes AutoEvo-installed third-party capabilities by receipt; it does not uninstall AutoEvo itself, and it does not delete managed source.
 
 ## 8. Safety and privacy
 
-- The full trust-boundary and review-evidence model lives in the [Security Model](security.md) (Chinese): GitHub READMEs, source code, manifests, and marketplace summaries are treated as untrusted data, and review conclusions rest on Host-derived facts and content hashes.
-- AutoEvo findings and recommendations are workflow evidence, not sandbox or permission controls. DSH Core decides whether an operation is allowed; when it is, a user may explicitly accept a warning, which remains in the receipt.
-- An installed third-party plugin ultimately runs with the current user's authority. An isolated profile is not a malware sandbox.
-- `forwardedCredentialEnv` is an AutoEvo config key that lists the names of environment variables allowed to be forwarded — names only, never values. Never put secrets in prompts, documentation, fixtures, or repositories.
-- Before contributing a managed change upstream, inspect the diff for local paths, accounts, private endpoints, secrets, and proprietary logic, then obtain separate fork/push/PR approval.
+- GitHub READMEs, source code, manifests, and repository summaries are treated as untrusted data; review conclusions rest on Host-derived facts and content hashes. The full model is in the [Security Model](security.md) (Chinese).
+- AutoEvo findings and recommendations are workflow evidence, not permission controls. DSH Core decides whether an operation is allowed; when allowed, you may explicitly accept a warning, which remains in the receipt.
+- Installed third-party plugins ultimately run with the current user's authority. An isolated profile is not a malware sandbox.
+- The `forwardedCredentialEnv` config lists only the names of environment variables allowed to be forwarded to installed capabilities, never values. Do not put secrets in prompts, documentation, fixtures, or repositories.
+- Source modified or created locally may contain local paths, accounts, or proprietary logic. Before contributing upstream, recheck the diff and obtain separate fork, push, or PR approval.
 
 ## 9. FAQ
 
-**Why can't one message select and install a candidate?** Selecting a candidate and the final side-effect decision are two separate gates. The read-only review between them may change your decision about fit, risk, or compatibility.
+### Why can't one message both select a candidate and install it?
 
-**Why confirm in chat after a DSH approval?** Chat selects the action and candidate. DSH approval authorizes one concrete side effect. Neither substitutes for the other.
+Selecting a candidate and the final side-effect decision are two different confirmation gates. The read-only review between them may change your judgment of fit, risk, and compatibility.
 
-**Is `activated` success?** It is a non-failure completion proving bundle load, not functional tool verification. A successful hands-on trial counts as independent runtime evidence, but the model must not rewrite the Host receipt into `verified`.
+### Why does DSH prompt for approval and still need chat confirmation?
 
-**Does deleting workspace source break an installed plugin?** No. Persistent install uses an AutoEvo-owned immutable artifact.
+Chat confirmation states "what to do, on which candidate"; DSH approval authorizes one concrete side effect. The two cannot substitute for each other.
+
+### Is `activated` a success?
+
+It is a non-failure completion that proves the bundle loaded, not functional tool verification. A successful hands-on trial counts as independent runtime evidence, but the Host receipt is not rewritten to `verified`.
+
+### If the workspace source is deleted, does the installed plugin break?
+
+No. The persistent install uses an AutoEvo-owned immutable artifact, not the workspace managed source.
 
 ## Further reading
 

@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AutoEvo 托管施工流程：修改与创建",
+    "output": "docs/assets/flowcharts/autoevo-managed-work.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1280,
+      640
+    ],
+    "views": [
+      {
+        "id": "prepare",
+        "label": "准备托管源",
+        "focus": [
+          "decide",
+          "prepare"
+        ],
+        "note": "Host 从精确 commit 建立托管 Git 源，加排他锁并下发结构化 WorkOrder。"
+      },
+      {
+        "id": "construct",
+        "label": "会话内施工",
+        "focus": [
+          "prepare",
+          "construct"
+        ],
+        "note": "当前会话在绑定目录内可见地编辑和运行检查，不启动隐藏子 Agent。"
+      },
+      {
+        "id": "finalize",
+        "label": "收口与重审",
+        "focus": [
+          "construct",
+          "validate",
+          "rereview",
+          "confirm"
+        ],
+        "note": "Host 校验、无 hook 提交、重审冻结，然后交回用户做安装决定。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "user",
+      "label": "用户"
+    },
+    {
+      "id": "agent",
+      "label": "能力进化会话"
+    },
+    {
+      "id": "host",
+      "label": "AutoEvo Host"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-prepare",
+      "label": "准备",
+      "fromCol": 0,
+      "toCol": 0
+    },
+    {
+      "id": "phase-construct",
+      "label": "施工",
+      "fromCol": 1,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phase-finalize",
+      "label": "收口与重审",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "sandbox",
+      "label": "托管源 .autoevo/sources（排他锁）",
+      "lane": "agent",
+      "fromCol": 3,
+      "toCol": 3,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "decide",
+    "prepare",
+    "construct",
+    "validate",
+    "rereview",
+    "confirm"
+  ],
+  "nodes": [
+    {
+      "id": "decide",
+      "lane": "user",
+      "col": 0,
+      "type": "security",
+      "label": "门 2 决定",
+      "sublabel": "修改 / 创建",
+      "tag": "新鲜回合"
+    },
+    {
+      "id": "prepare",
+      "lane": "host",
+      "col": 0,
+      "type": "backend",
+      "label": "准备托管源",
+      "sublabel": "WorkOrder + 锁"
+    },
+    {
+      "id": "construct",
+      "lane": "agent",
+      "col": 3,
+      "width": 140,
+      "type": "frontend",
+      "label": "会话内施工",
+      "sublabel": "finish_managed_work 收口"
+    },
+    {
+      "id": "validate",
+      "lane": "host",
+      "col": 3,
+      "type": "backend",
+      "label": "校验与提交",
+      "sublabel": "hookless commit"
+    },
+    {
+      "id": "rereview",
+      "lane": "host",
+      "col": 5,
+      "type": "database",
+      "label": "重审与冻结",
+      "sublabel": "快照 + owned tgz"
+    },
+    {
+      "id": "confirm",
+      "lane": "user",
+      "col": 5,
+      "type": "security",
+      "label": "再次确认安装",
+      "sublabel": "回到门 2 决定",
+      "tag": "新鲜回合"
+    }
+  ],
+  "edges": [
+    {
+      "from": "decide",
+      "to": "prepare",
+      "label": "授权施工",
+      "variant": "emphasis",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "prepare",
+      "to": "construct",
+      "label": "绑定 cwd",
+      "variant": "emphasis"
+    },
+    {
+      "from": "construct",
+      "to": "validate",
+      "label": "检查通过并回传",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": 56
+    },
+    {
+      "from": "validate",
+      "to": "rereview"
+    },
+    {
+      "from": "rereview",
+      "to": "confirm",
+      "label": "冻结 tgz",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "validate",
+      "to": "construct",
+      "label": "校验失败可修复",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel",
+      "fromSide": "top",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "施工边界",
+      "items": [
+        "只在托管源内编辑，不换目标、不发布",
+        "可用 DSH 允许的编辑、shell、构建、测试与依赖工具",
+        "取消或异常有独立有界收口，不复用已取消 signal"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Host 收口",
+      "items": [
+        "验证 branch / HEAD、工作树、Git config/hooks",
+        "禁用 hooks 与签名创建本地 commit",
+        "重审冻结完整快照，生成 owned tgz"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "回到用户决定",
+      "items": [
+        "最终安装始终绑定最新 review 与固定内容",
+        "modify 最多两次，重复失败转人工决策",
+        "安装仍需新鲜回合确认与 DSH 一次性批准"
+      ]
+    }
+  ]
+}

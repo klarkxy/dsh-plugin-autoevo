@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AutoEvo Managed Construction: Improve and Create",
+    "output": "docs/assets/flowcharts/autoevo-managed-work-en.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1280,
+      640
+    ],
+    "views": [
+      {
+        "id": "prepare",
+        "label": "Prepare the managed source",
+        "focus": [
+          "decide",
+          "prepare"
+        ],
+        "note": "The Host clones the exact commit into a managed Git source, locks it, and issues a structured WorkOrder."
+      },
+      {
+        "id": "construct",
+        "label": "In-session construction",
+        "focus": [
+          "prepare",
+          "construct"
+        ],
+        "note": "The current session edits and runs checks visibly inside the bound directory; no hidden child agent."
+      },
+      {
+        "id": "finalize",
+        "label": "Finalize and re-review",
+        "focus": [
+          "construct",
+          "validate",
+          "rereview",
+          "confirm"
+        ],
+        "note": "The Host validates, commits hookless, re-reviews and freezes, then hands the install decision back."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "user",
+      "label": "User"
+    },
+    {
+      "id": "agent",
+      "label": "Capability Evolution session"
+    },
+    {
+      "id": "host",
+      "label": "AutoEvo Host"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-prepare",
+      "label": "Prepare",
+      "fromCol": 0,
+      "toCol": 0
+    },
+    {
+      "id": "phase-construct",
+      "label": "Construct",
+      "fromCol": 1,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "phase-finalize",
+      "label": "Finalize & re-review",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "groups": [
+    {
+      "id": "sandbox",
+      "label": "managed source .autoevo/sources (exclusive lock)",
+      "lane": "agent",
+      "fromCol": 3,
+      "toCol": 3,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "decide",
+    "prepare",
+    "construct",
+    "validate",
+    "rereview",
+    "confirm"
+  ],
+  "nodes": [
+    {
+      "id": "decide",
+      "lane": "user",
+      "col": 0,
+      "type": "security",
+      "label": "Gate 2",
+      "sublabel": "improve / create",
+      "tag": "fresh turn"
+    },
+    {
+      "id": "prepare",
+      "lane": "host",
+      "col": 0,
+      "type": "backend",
+      "label": "Prepare source",
+      "sublabel": "WorkOrder + lock"
+    },
+    {
+      "id": "construct",
+      "lane": "agent",
+      "col": 3,
+      "width": 140,
+      "type": "frontend",
+      "label": "In-session work",
+      "sublabel": "finish_managed_work wrap-up"
+    },
+    {
+      "id": "validate",
+      "lane": "host",
+      "col": 3,
+      "type": "backend",
+      "label": "Validate",
+      "sublabel": "hookless commit"
+    },
+    {
+      "id": "rereview",
+      "lane": "host",
+      "col": 5,
+      "type": "database",
+      "label": "Re-review",
+      "sublabel": "snapshot + owned tgz"
+    },
+    {
+      "id": "confirm",
+      "lane": "user",
+      "col": 5,
+      "type": "security",
+      "label": "Confirm",
+      "sublabel": "back to Gate 2",
+      "tag": "fresh turn"
+    }
+  ],
+  "edges": [
+    {
+      "from": "decide",
+      "to": "prepare",
+      "label": "authorize",
+      "variant": "emphasis",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "prepare",
+      "to": "construct",
+      "label": "bind cwd",
+      "variant": "emphasis"
+    },
+    {
+      "from": "construct",
+      "to": "validate",
+      "label": "checks passed, return",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": 76
+    },
+    {
+      "from": "validate",
+      "to": "rereview"
+    },
+    {
+      "from": "rereview",
+      "to": "confirm",
+      "label": "frozen tgz",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "validate",
+      "to": "construct",
+      "label": "validation failure is fixable",
+      "variant": "dashed",
+      "role": "return",
+      "route": "up-channel",
+      "fromSide": "top",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Construction boundary",
+      "items": [
+        "Edit only inside the managed source; no target switch, no publishing",
+        "DSH-permitted edit, shell, build, test, and dependency tools are allowed",
+        "Cancel or error gets an independent bounded wrap-up; canceled signals are never reused"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Host finalization",
+      "items": [
+        "Verify branch / HEAD, worktree, Git config/hooks",
+        "Commit locally with hooks and signing disabled",
+        "Re-review and freeze the full snapshot into an owned tgz"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Back to the user",
+      "items": [
+        "The final install always binds the latest review and frozen content",
+        "At most two modify rounds; repeated failure goes to a human decision",
+        "Install still needs a fresh-turn confirmation and one-time DSH approval"
+      ]
+    }
+  ]
+}
