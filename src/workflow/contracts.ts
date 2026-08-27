@@ -651,7 +651,7 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
   modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改', placement: 'advanced' },
-  finish_managed_work: { id: 'finish_managed_work', labelEn: 'Finish in-session construction', labelZh: '完成当前会话中的修改', placement: 'primary' },
+  finish_managed_work: { id: 'finish_managed_work', labelEn: 'Continue managed construction', labelZh: '继续托管施工', placement: 'primary' },
 }
 
 export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
@@ -683,6 +683,44 @@ export function selectionFacts(resolution: ResolutionRecord, workflow?: Workflow
   }
 }
 
+function frozenBuiltinEnablement(workflow?: WorkflowRecord): {
+  candidate: CandidateSnapshotItem
+  endpoint: Extract<ActionCommitment['endpoint'], { kind: 'host_bundled_enable' }>
+} | undefined {
+  const receipt = workflow?.selectionReceipt
+  const commitment = workflow?.actionCommitment
+  const candidateId = receipt?.candidateIds.length === 1 ? receipt.candidateIds[0] : undefined
+  const candidate = candidateId
+    ? workflow?.candidateSnapshot?.find((item) => item.id === candidateId)
+    : undefined
+  const endpoint = commitment?.endpoint
+  const bundled = candidate?.hostBundled
+  if (!receipt
+    || receipt.phase !== 'gate1'
+    || receipt.kind !== 'enable_builtin'
+    || !candidateId
+    || !candidate
+    || candidate.kind !== 'local'
+    || candidate.availability !== 'host_bundled'
+    || !bundled
+    || receipt.candidateDigests[candidateId] !== candidate.digest
+    || !commitment
+    || commitment.selectionReceiptId !== receipt.id
+    || commitment.snapshotDigest !== receipt.snapshotDigest
+    || commitment.requestedAction !== 'enable_builtin'
+    || commitment.candidateId !== candidateId
+    || commitment.candidateDigest !== candidate.digest
+    || endpoint?.kind !== 'host_bundled_enable'
+    || endpoint.packageName !== bundled.packageName
+    || endpoint.version !== bundled.version
+    || endpoint.mountId !== bundled.mountId
+    || !endpoint.targetProfile
+    || commitment.targetProfile !== endpoint.targetProfile) {
+    return undefined
+  }
+  return { candidate, endpoint }
+}
+
 function compactConfirmationFindings(review: ReviewRecord): {
   findings: ReturnType<typeof securityFindingFacts>
   findingDetails: ReturnType<typeof securityFindingFacts>
@@ -702,6 +740,7 @@ export function confirmationFacts(
   extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
 ): Record<string, unknown> {
   const review = reviews[0]
+  const builtinEnablement = frozenBuiltinEnablement(workflow)
   const compact = review ? compactConfirmationFindings(review) : undefined
   const reviewLayer = review?.runtimeSurface?.verificationLayer
   const lastChecks = workflow?.modificationOutcome?.attempts.at(-1)?.checks
@@ -737,6 +776,16 @@ export function confirmationFacts(
       directUseEligible: isDirectlyUsableReview(item, workflow),
       ...(item.reviewerVerdict ? { reviewerDecision: item.reviewerVerdict.decision } : {}),
     })),
+    ...(builtinEnablement ? {
+      builtinEnablement: {
+        candidateId: builtinEnablement.candidate.id,
+        name: builtinEnablement.candidate.name,
+        packageName: builtinEnablement.endpoint.packageName,
+        version: builtinEnablement.endpoint.version,
+        mountId: builtinEnablement.endpoint.mountId,
+        targetProfile: builtinEnablement.endpoint.targetProfile,
+      },
+    } : {}),
     candidateSnapshot: workflow?.candidateSnapshot ?? [],
     reviewedCandidateIds: workflow?.reviewedCandidateIds ?? [],
     remainingCandidateIds: (workflow?.candidateSnapshot ?? [])
@@ -763,7 +812,7 @@ export function modifyWorkFacts(review: ReviewRecord, workflow?: WorkflowRecord)
   return {
     reviewId: review.id,
     commit: source.kind === 'github' ? source.commit : source.baseCommit,
-    instruction: 'Modification continues in this session on the Host-managed source. Edit files there, then finish construction; do not install or commit.',
+    instruction: 'The Host-owned construction child works only inside the managed source, then returns for Host commit and re-review. The parent must not edit, install, or commit.',
     ...(source.kind === 'github' ? { repository: source.repository } : {}),
     ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
@@ -771,7 +820,7 @@ export function modifyWorkFacts(review: ReviewRecord, workflow?: WorkflowRecord)
 
 export function createWorkFacts(workflow?: WorkflowRecord): Record<string, unknown> {
   return {
-    instruction: 'Creation continues in this session on the Host-managed scaffold. Edit files there, then finish construction; do not call cordis_define or install.',
+    instruction: 'The Host-owned construction child works only inside the managed scaffold, then returns for Host commit and re-review. The parent must not call cordis_define, edit, or install.',
     ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
   }
 }
@@ -816,6 +865,13 @@ export function optionsFor(
     options.push({ ...WORKFLOW_OPTIONS.review_existing, candidateIds: evolvableLocalIds })
   }
   if (kind === 'await_confirmation') {
+    const builtinEnablement = frozenBuiltinEnablement(workflow)
+    if (builtinEnablement) {
+      return [
+        { ...WORKFLOW_OPTIONS.enable_builtin, candidateIds: [builtinEnablement.candidate.id] },
+        WORKFLOW_OPTIONS.stop,
+      ]
+    }
     const candidateIdFor = (review: ReviewRecord): string | undefined => {
       const mapped = Object.entries(workflow?.reviewIdsByCandidate ?? {})
         .find(([, reviewId]) => reviewId === review.id)?.[0]

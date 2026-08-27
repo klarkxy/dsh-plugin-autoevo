@@ -81,7 +81,8 @@ async function run(ctx, config) {
       || !/runtime Policy V11/u.test(policy.text)
       || !/original requirement/u.test(policy.text)
       || !/zero candidates is a valid result/u.test(policy.text)
-      || !/Host alone performs final installation and internal verification/u.test(policy.text)
+      || !/Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface/u.test(policy.text)
+      || !/Host alone performs commit, final installation, and internal verification/u.test(policy.text)
       || /runtime Policy V7/u.test(policy.text)
       || /independent semantic verifier/u.test(policy.text)
     ) {

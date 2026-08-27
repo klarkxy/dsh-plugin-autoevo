@@ -8,6 +8,7 @@ coverage/
 *.tgz
 .pnpm-store/
 .tmp/
+.playwright-mcp/
 artifacts/
 quality/
 ekQ33-acdeK2hT3cSn8-n8.jpg

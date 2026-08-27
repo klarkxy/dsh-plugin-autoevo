@@ -7,7 +7,7 @@ description: Runtime reference for AutoEvo Capability Evolution discovery and Ho
 
 # AutoEvo Capability Evolution
 
-This packaged skill is compatibility guidance for the Capability Evolution preset. The Host workflow and execution guards are authoritative. A prompt or this file never grants permission to install, modify, create, remove, or publish. After an explicit create/modify decision, ordinary DSH-permitted construction and collaboration remain available inside the bound source.
+This packaged skill is compatibility guidance for the Capability Evolution preset. The Host workflow and execution guards are authoritative. A prompt or this file never grants permission to install, modify, create, remove, or publish. After an explicit create/modify decision, only the bounded filesystem, shell, build, test, and skill surface exposed by the Host-owned managed child is available inside the bound source.
 
 ## 1. Start with discovery
 
@@ -43,14 +43,13 @@ Same-turn resume is a parked no-op, not new authority. Starting another resoluti
 
 ## 3. Managed modify/create loop
 
-After `modify_review` or `create_authorized`, the Host prepares a Git source under the current workspace's `.autoevo/sources/` root and returns a structured WorkOrder. Construction remains visible in the current Capability Evolution session.
+After `modify_review` or `create_authorized`, the Host prepares a Git source under the current workspace's `.autoevo/sources/` root and starts a short-lived, cwd-bound managed child with a structured WorkOrder. The parent Capability Evolution session remains read-only during construction.
 
 1. Confirm the returned managed path, workflow identity, scope, and acceptance commands.
 2. Inspect only the files and contracts required by the WorkOrder.
 3. Edit only inside the managed source. Preserve package identity unless the WorkOrder says otherwise, but make every change needed for a complete result.
-4. Use DSH-permitted shell, build, test, dependency, skill, and collaboration tools as needed. Record actual checks and results; do not claim an unobserved test.
-5. Call `capability_workflow_resume` with the managed-work completion action `finish_managed_work`. Do not pass an arbitrary checkout path.
-6. The Host validates Git state, commits without hooks/signing, re-reviews the exact source, freezes an owned artifact, and returns to a fresh install decision.
+4. Use only the child-permitted filesystem, shell, build, test, and skill tools. Do not install dependencies, start nested collaboration, mutate plugins, run Git, or publish. Record actual checks and results; do not claim an unobserved test.
+5. Complete the WorkOrder in the managed child. The Host validates Git state, commits without hooks/signing, re-reviews the exact source, freezes an owned artifact, and returns to a fresh install decision. Do not pass an arbitrary checkout path or edit from the parent session.
 
 Never call Cordis live mutation, directly install/remove a package, silently switch to a same-named substitute, publish/release/deploy, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception.
 

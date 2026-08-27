@@ -22,6 +22,7 @@ export type AuthorizationState =
   | 'market_required'
   | 'stopped'
   | 'reuse_local'
+  | 'enable_builtin'
   | 'use_review'
   | 'modify_review'
   | 'create_authorized'
@@ -34,6 +35,7 @@ export type AuthorizationAction =
   | 'stop'
   | 'use_this'
   | 'modify_this'
+  | 'enable_builtin'
 export type NavigationKind =
   | 'clarify_requirement'
   | 'review_candidates'
@@ -643,7 +645,7 @@ export interface AuthorizationDecisionInput {
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 export interface ResumeInput {
   workflowId: string
-  /** Required at user gates. Omit for in-session `finish_managed_work`. */
+  /** Required at user gates. Omit for Host-owned managed-work finalization. */
   interruptId?: string
   /** Model-interpreted read-only navigation. Never grants a side effect except finish_managed_work. */
   navigation?: NavigationInput
@@ -660,6 +662,8 @@ export interface SelectionReceipt {
   workflowId: string
   interruptId: string
   snapshotDigest: string
+  /** Gate 1 records a read-only choice; only Gate 2 may authorize mutation. */
+  phase?: DecisionPhase
   kind: NavigationKind | AuthorizationAction
   candidateIds: string[]
   candidateDigests: Record<string, string>

@@ -21,12 +21,12 @@
       },
       {
         "id": "construct",
-        "label": "In-session construction",
+        "label": "Managed child construction",
         "focus": [
           "prepare",
           "construct"
         ],
-        "note": "The current session edits and runs checks visibly inside the bound directory; no hidden child agent."
+        "note": "The Host creates a short-lived child whose cwd and workspace-write root are exactly the managed source."
       },
       {
         "id": "finalize",
@@ -48,7 +48,7 @@
     },
     {
       "id": "agent",
-      "label": "Capability Evolution session"
+      "label": "Managed construction child"
     },
     {
       "id": "host",
@@ -119,8 +119,8 @@
       "col": 3,
       "width": 140,
       "type": "frontend",
-      "label": "In-session work",
-      "sublabel": "finish_managed_work wrap-up"
+      "label": "Managed work",
+      "sublabel": "exact cwd + sandbox"
     },
     {
       "id": "validate",
@@ -202,7 +202,7 @@
       "title": "Construction boundary",
       "items": [
         "Edit only inside the managed source; no target switch, no publishing",
-        "DSH-permitted edit, shell, build, test, and dependency tools are allowed",
+        "Edit and run bounded build/test checks; the parent does not write",
         "Cancel or error gets an independent bounded wrap-up; canceled signals are never reused"
       ]
     },

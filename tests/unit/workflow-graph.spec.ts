@@ -526,6 +526,85 @@ describe('workflow graph nodes', () => {
   })
 
   it.each([
+    ['receipt identifier', { id: `installation_${'e'.repeat(24)}` }],
+    ['workflow', { workflowId: `workflow_${'e'.repeat(24)}` }],
+    ['review', { reviewId: `review_${'e'.repeat(64)}` }],
+    ['target profile', { targetProfile: 'desktop' }],
+    ['retention', { retention: 'temporary' }],
+    ['install specification', { installSpec: `github:acme/two#${'e'.repeat(40)}` }],
+  ])('rejects a pending installation receipt with a mismatched %s binding', async (_binding, mismatch) => {
+    const current = resolution()
+    const record = workflow('install_verify')
+    const installationId = `installation_${'f'.repeat(24)}`
+    record.pendingInstallationId = installationId
+    const inspected = review()
+    const host = installVerifyHost({
+      async installReviewed() {
+        throw new Error('must not install when a receipt is present')
+      },
+      async getInstallation() {
+        return {
+          id: installationId,
+          workflowId: record.id,
+          reviewId: inspected.id,
+          targetProfile: record.pendingInstall!.targetProfile,
+          retention: record.pendingInstall!.retention,
+          installSpec: inspected.installSpec,
+          ...mismatch,
+        }
+      },
+    })
+
+    await expect(runNode('install_verify', { host, resolution: current, workflow: record }))
+      .rejects.toMatchObject({
+        code: 'invalid_input',
+        message: 'Pending installation receipt is not bound to the current workflow, review, and install target',
+      })
+  })
+
+  it('accepts a managed-local receipt after materialization changes its install spec', async () => {
+    const current = resolution()
+    const record = workflow('install_verify')
+    const installationId = `installation_${'f'.repeat(24)}`
+    record.pendingInstallationId = installationId
+    const inspected = review()
+    inspected.sourceSnapshot = {
+      kind: 'local',
+      path: 'C:/workspace/managed-plugin',
+      baseReviewId: `review_${'b'.repeat(64)}`,
+      baseCommit: 'c'.repeat(40),
+      statusHash: 'd'.repeat(64),
+    }
+    inspected.installSpec = 'file:C:/workspace/review-artifacts/reviewed.tgz'
+    const host = {
+      async latestReview() { return inspected },
+      async getInstallation() {
+        return {
+          id: installationId,
+          workflowId: record.id,
+          reviewId: inspected.id,
+          targetProfile: record.pendingInstall!.targetProfile,
+          retention: record.pendingInstall!.retention,
+          installSpec: 'file:C:/workspace/install-artifacts/owned.tgz',
+          installed: false,
+          verification: { reason: 'installation was interrupted after materialization' },
+        }
+      },
+      async installReviewed() {
+        throw new Error('must not reinstall a recovered receipt')
+      },
+    } as unknown as WorkflowHost
+
+    const result = await runNode('install_verify', { host, resolution: current, workflow: record })
+
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'recovery_required',
+      installation: { id: installationId, reviewId: inspected.id },
+    })
+  })
+
+  it.each([
     ['verified', true, true, 'done', 'installed'],
     ['activated', true, false, 'done', 'activated'],
     ['awaiting_user_test', true, false, 'done', 'awaiting_user_test'],
@@ -847,6 +926,59 @@ describe('workflow graph nodes', () => {
     })
     const result = await runNode('install_verify', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'done', node: 'restart_required' })
+  })
+
+  it('completes built-in enablement without restart when the mount was already present', async () => {
+    const current = resolution()
+    const record = workflow('enable_builtin')
+    const installationId = `installation_${'a'.repeat(24)}`
+    record.pendingInstallationId = installationId
+    const host = {
+      async enableBuiltin() {
+        throw new Error('must not re-enable from a completed receipt')
+      },
+      async getInstallation(id: string) {
+        expect(id).toBe(installationId)
+        return {
+          id,
+          workflowId: record.id,
+          installPhase: 'completed',
+          installed: true,
+          restartRequired: false,
+        }
+      },
+    } as unknown as WorkflowHost
+
+    const result = await runNode('enable_builtin', { host, resolution: current, workflow: record })
+
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'installed',
+      installation: { id: installationId, restartRequired: false },
+    })
+  })
+
+  it('uses the returned built-in receipt restart flag for a newly completed no-write enablement', async () => {
+    const current = resolution()
+    const installationId = `installation_${'b'.repeat(24)}`
+    const host = {
+      async enableBuiltin() {
+        return {
+          id: installationId,
+          installPhase: 'completed',
+          installed: true,
+          restartRequired: false,
+        }
+      },
+    } as unknown as WorkflowHost
+
+    const result = await runNode('enable_builtin', { host, resolution: current })
+
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'installed',
+      installation: { id: installationId, restartRequired: false },
+    })
   })
 
   it('authorizes create-new without a scratch grant node', async () => {

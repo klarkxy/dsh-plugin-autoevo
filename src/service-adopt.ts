@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import type { RuntimeConfig } from './config.js'
 import type { AdoptInput, InstallationRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
@@ -27,6 +28,24 @@ export interface OrphanScan {
   orphans: OrphanedInstallation[]
 }
 
+function normalizedDshHome(dshHome: string): string {
+  const normalized = path.resolve(dshHome)
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function isActiveTrackedInstallation(
+  record: InstallationRecord,
+  dshHome: string,
+  profile: string,
+  packageName: string,
+): boolean {
+  return !record.removed
+    && !record.supersededByInstallationId
+    && record.packageName === packageName
+    && normalizedDshHome(record.dshHome) === normalizedDshHome(dshHome)
+    && record.targetProfile === profile
+}
+
 export async function scanOrphanedInstallations(deps: AdoptDeps): Promise<OrphanScan> {
   const profile = await deps.currentProfile()
   const candidates = await resolveProfilePluginCapabilities({
@@ -35,13 +54,16 @@ export async function scanOrphanedInstallations(deps: AdoptDeps): Promise<Orphan
     requirement: '',
     match: () => 1,
   })
-  const tracked = new Set((await deps.store.listInstallations())
-    .filter((record) => !record.removed && record.packageName)
-    .map((record) => record.packageName))
+  const installations = await deps.store.listInstallations()
   const orphans: OrphanedInstallation[] = []
   for (const candidate of candidates) {
     const evidence = candidate.profileEvidence
-    if (!evidence || tracked.has(evidence.packageName)) continue
+    if (!evidence || installations.some((record) => isActiveTrackedInstallation(
+      record,
+      deps.config.dshHome,
+      profile,
+      evidence.packageName,
+    ))) continue
     const parsed = parseExactGithubDependency(evidence.dependencySpec)
     orphans.push({
       packageName: evidence.packageName,
@@ -60,7 +82,7 @@ export async function adoptInstallation(deps: AdoptDeps, input: AdoptInput): Pro
   }
   const scan = await scanOrphanedInstallations(deps)
   const tracked = (await deps.store.listInstallations())
-    .find((record) => !record.removed && record.packageName === packageName)
+    .find((record) => isActiveTrackedInstallation(record, deps.config.dshHome, scan.profile, packageName))
   if (tracked) {
     throw new EvolutionError('invalid_input', 'This package is already tracked by a Host installation receipt', {
       installationId: tracked.id,

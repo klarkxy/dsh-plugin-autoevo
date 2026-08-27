@@ -39,12 +39,12 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 
 安全 finding 由静态 detector 产生。对 Agent 展示时按 `code + severity + detail` 合并同类 source/build 观察，同时保留全部来源和 evidence hash；持久 review 仍保存原始 finding，风险策略不降级。`process_execution` 只证明快照中存在进程 API 导入与调用模式，不证明命令目标、用途、必要性、实际运行或回调服务。Agent 必须把这些未建立语义明确说成未知，不能自行补理由。
 
-## 2.1 父会话边界与托管源创建
+## 2.1 父会话边界与托管施工
 
-- 父会话边界：能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。AutoEvo 将 `create_new` / `modify_this` 与 workflow、user turn、boot identity 和托管根绑定，并记录 `finish_managed_work` 回传；这些是工作流和证据约束，不会重绑或替代 DSH Core sandbox。文件、shell、技能、插件变更和安装是否允许，始终以 DSH Core 的 scope、sandbox 与 approval 为准。
+- 父会话边界：能力进化模式由 `agentPresets.serviceFor(agent, "autoevoEvolutionMode")` 的精确标记界定。AutoEvo 将 `create_new` / `modify_this` 与 workflow、user turn、boot identity 和托管根绑定；父会话只负责决定、展示与 Host 工具调用，不在托管根内直接写文件或运行施工 shell。
 - 发现预算：能力发现用用户原话进入 `capability_workflow`；模型在 Host 限定的两轮补查、五个补充查询和二十候选预算内自主收敛，只能用 `capability_workflow_present` 密封发现池中的 1–5 个候选，空池不能生成候选。
 - 两道确认门不可由 DSH approval 替代：Gate 1 只接受密封候选的新鲜用户选择，Gate 2 才接受安装、修改、新建或停止决定；`allowed-once` 只批准副作用，不代替用户决定。澄清回答只影响只读搜寻，不是 Gate 2。审查与安装仍要求当前 Policy review 回执、匹配的不可变 install specification、Host commitment、真实新用户回合与防重放。
-- 施工边界：相同无效参数在同一回合重复时断路，且不消费 interrupt 或 commitment。诊断输出屏蔽凭据、完整路径与原始 stderr。创建或修改获批后，LLM 可在绑定的 managed source 内使用 DSH 允许的编辑、shell、构建、测试、依赖和协作工具修复普通失败；更换目标、最终安装、发布和明显破坏性操作仍需新的用户决定。
+- 施工边界：相同无效参数在同一回合重复时断路，且不消费 interrupt 或 commitment。诊断输出屏蔽凭据、完整路径与原始 stderr。创建或修改获批后，Host 创建独立子会话，其不可变 `session.header.cwd` 与 DSH `workspace-write` 根都精确指向单个 managed source；首个模型步骤前还要验证父子归属、系统级 Creator preset、工具目录和真实文件/shell 越界探针。子会话只能在该根内编辑并运行有界构建/测试，不能更换目标、安装插件、修改 profile、发布、提交 Git 或嵌套委派；Host 随后无 hook 提交、重审与冻结。
 
 取消、超时与真实 executable 缺失分别报告。普通构建或安装失败保持可诊断、可修复；只有安装对象无法唯一对账时才进入 `recovery_required`。completed 安装的清理重开与 sealed failure 恢复是两条互不混同的路径。模型展示只包含版本化语义状态、定长事实、候选作用域动作和可用工具；仓库描述与内容始终标记为不可信数据，选择阶段误提交的 `use_this` 会安全归一化为只读审查。完整流程见[架构说明](architecture.md) §2 与 §4。
 

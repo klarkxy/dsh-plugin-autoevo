@@ -16,8 +16,30 @@ import { testingCreatorFoundation, testingCreatorPreflight } from '../../src/cre
 import { CapabilityEvolutionService } from '../../src/service.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
+import type { ManagedChildHost, ManagedChildRequest } from '../../src/managed-child.js'
+import { mintCreatorReceipt } from '../../src/creator-foundation.js'
 
 const temporary = trackTempDirs()
+
+function managedChild(...edits: Array<(request: ManagedChildRequest) => Promise<void>>): ManagedChildHost {
+  let run = 0
+  return {
+    async run(request) {
+      const index = run++
+      const edit = edits[index]
+      if (!edit) throw new Error(`unexpected managed child run ${index + 1}`)
+      await edit(request)
+      const sessionId = `child-${index + 1}`
+      const preflight = request.preflight ?? testingCreatorPreflight()
+      return {
+        sessionId,
+        taskResult: 'implemented\nAUTOEVO_CHILD_COMPLETED',
+        sandbox: { ok: true, cwd: request.cwd, mode: 'workspace-write' } as never,
+        creator: mintCreatorReceipt(preflight, sessionId),
+      }
+    },
+  }
+}
 
 class NativeRunner implements CommandRunner {
   async run(request: CommandRequest): Promise<CommandResult> {
@@ -50,20 +72,32 @@ function config(root: string): RuntimeConfig {
 }
 
 describe('managed modify closure', () => {
-  it('uses and accounts for one focused in-session correction', async () => {
+  it('uses and accounts for one focused managed-child correction', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-modify-e2e-'))
     temporary.push(root)
     const runner = new NativeRunner()
     const cfg = config(root)
     const store = new StateStore(cfg.stateDir!)
     const preflight = testingCreatorPreflight()
+    const child = managedChild(
+      async ({ cwd }) => {
+        const readme = path.join(cwd, 'README.md')
+        await writeFile(readme, `${await readFile(readme, 'utf8')}\nFirst attempt changed the wrong surface.\n`)
+      },
+      async ({ cwd }) => {
+        const pkgPath = path.join(cwd, 'package.json')
+        const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+        pkg.peerDependencies['@deepseek-ai/dsh-tools'] = '>=0.1.0-rc.6 <0.2.0'
+        await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+      },
+    )
     const service = new CapabilityEvolutionService(
       { get: () => undefined } as unknown as Context,
       cfg,
       runner,
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
-      undefined,
+      child,
       undefined,
       undefined,
       testingCreatorFoundation(preflight),
@@ -137,23 +171,9 @@ describe('managed modify closure', () => {
       lineageTipReviewId: baselineEvidence.record.id,
     }
     const exec = { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent }
-    const prepared = await service.prepareModify(resolution, baselineEvidence.record, exec, workflow)
-    expect(prepared.path).toBeTruthy()
-    expect(prepared.review).toBeUndefined()
-    expect(workflow.pendingWorkOrder?.operation).toBe('modify')
-    expect(workflow.pendingWorkOrder?.blockers.length).toBeGreaterThan(0)
-    const readme = path.join(prepared.path!, 'README.md')
-    await writeFile(readme, `${await readFile(readme, 'utf8')}\nFirst attempt changed the wrong surface.\n`)
-    const first = await service.finishManagedWork(prepared.resolution, exec, workflow)
-    expect(first.continueConstruction).toBe(true)
-    expect(workflow.pendingWorkOrder?.operation).toBe('correct')
-    expect(workflow.pendingWorkOrder?.acceptanceTargets.join(' ')).toMatch(/remaining Host-observed blockers/i)
-    const pkgPathAfter = path.join(first.path!, 'package.json')
-    const pkgAfter = JSON.parse(await readFile(pkgPathAfter, 'utf8'))
-    pkgAfter.peerDependencies['@deepseek-ai/dsh-tools'] = '>=0.1.0-rc.6 <0.2.0'
-    await writeFile(pkgPathAfter, `${JSON.stringify(pkgAfter, null, 2)}\n`)
-    const result = await service.finishManagedWork(first.resolution, exec, workflow)
-    expect(result.continueConstruction).toBeFalsy()
+    const result = await service.prepareModify(resolution, baselineEvidence.record, exec, workflow)
+    expect(result.path).toBeTruthy()
+    expect(workflow.pendingWorkOrder).toBeUndefined()
     expect(result.review?.compatibility.status).toBe('compatible')
     expect(workflow.modificationOutcome).toMatchObject({
       contractVersion: 1,
@@ -162,8 +182,8 @@ describe('managed modify closure', () => {
       automaticCorrectionUsed: true,
       status: 'resolved',
       attempts: [
-        { attempt: 1, commit: expect.any(String), changedFiles: ['README.md'], changedFilesTruncated: false },
-        { attempt: 2, commit: expect.any(String), changedFiles: ['package.json'], changedFilesTruncated: false },
+        { attempt: 1, childSessionId: 'child-1', commit: expect.any(String), changedFiles: ['README.md'], changedFilesTruncated: false },
+        { attempt: 2, childSessionId: 'child-2', commit: expect.any(String), changedFiles: ['package.json'], changedFilesTruncated: false },
       ],
       unresolvedBlockers: [],
       introducedBlockers: [],

@@ -108,7 +108,7 @@ interface AgentPresetsLike {
   read?(id: string): Promise<string>
   resolve?(id: string): Promise<AgentPresetRosterItem | undefined>
   standingKeyFor?(id: string): Promise<unknown>
-  mount?(agentCtx: unknown, id?: string): Promise<{ id: string }>
+  mount?(agentCtx: unknown, id?: string): Promise<{ id: string; trust?: string }>
   composedPreset?(agentCtx: unknown): string | undefined
 }
 
@@ -422,15 +422,26 @@ export async function assertChildCreatorCatalog(
   agentCtx: unknown,
   childScope: unknown,
   preflight: CreatorFoundationPreflight,
+  mounted: { id: string; trust?: string },
   composedPreset: string | undefined,
-  _mountedComposition: string,
+  mountedComposition: string,
+  expectedCompositionSha256: string,
 ): Promise<CreatorCatalog> {
+  rejectCodePreset(mounted.id)
   rejectCodePreset(composedPreset)
-  if (composedPreset && composedPreset !== EVOLUTION_PRESET_ID) {
-    throw creatorUnavailable('Managed construction did not remain on the Capability Evolution parent session; code and fallback presets are not permitted', {
+  if (mounted.id !== CREATOR_PRESET_ID || mounted.trust !== 'system' || composedPreset !== CREATOR_PRESET_ID) {
+    throw creatorUnavailable('Managed child did not compose the official system Creator cordis preset; code and fallback presets are not permitted', {
+      mounted: mounted.id,
+      trust: mounted.trust,
       actual: composedPreset,
-      expected: EVOLUTION_PRESET_ID,
+      expected: CREATOR_PRESET_ID,
     })
+  }
+  if (!compositionLooksMountable(mountedComposition)) {
+    throw creatorUnavailable('Managed child Creator cordis composition is missing, empty, or not mountable')
+  }
+  if (compositionSha256(mountedComposition) !== expectedCompositionSha256) {
+    throw creatorUnavailable('Managed child mounted Creator composition changed after Host preflight')
   }
   const catalog = await collectCreatorCatalog(agentCtx, childScope)
   assertRequiredCreatorCatalog(catalog)

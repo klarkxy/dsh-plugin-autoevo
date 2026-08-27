@@ -1,8 +1,10 @@
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { Context } from '@deepseek-ai/cordis'
 import { parse } from 'yaml'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { ExecutionEndpoint } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
@@ -27,6 +29,22 @@ const ENDPOINT: Extract<ExecutionEndpoint, { kind: 'host_bundled_enable' }> = {
 }
 
 const TEMPLATE_PATCH = '# Your patch layer for this dsh profile, applied after every bundle layer:\n[]\n'
+
+const EXEC = {
+  callId: 'call-enable-builtin',
+  signal: new AbortController().signal,
+  agent: { id: 'session-enable-builtin', session: { header: { id: 'session-enable-builtin' } } },
+} as unknown as ToolRunContext
+
+function approvedMutation(
+  request: () => Promise<string> = async () => 'allowed-once',
+): { ctx: Context; exec: ToolRunContext; requirement: string } {
+  return {
+    ctx: { get: () => ({ request }) } as unknown as Context,
+    exec: EXEC,
+    requirement: 'current time',
+  }
+}
 
 async function seed(root: string, patchBody = TEMPLATE_PATCH): Promise<{
   bundledRoot: string
@@ -66,8 +84,20 @@ describe('enableBuiltinMount', () => {
     temporary.push(root)
     const { bundledRoot, dshHome, patchPath } = await seed(root)
 
+    const events: string[] = []
     const result = await enableBuiltinMount({
-      launcher: launcherWith({ exitCode: 0, stdout: '... time-context ...' }),
+      ...approvedMutation(async () => {
+        expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+        events.push('allowed-once')
+        return 'allowed-once'
+      }),
+      launcher: {
+        dumpConfig: async () => {
+          expect(await readFile(patchPath, 'utf8')).not.toBe(TEMPLATE_PATCH)
+          events.push('profile-write')
+          return { exitCode: 0, signal: null, stdout: '... time-context ...', stderr: '' }
+        },
+      } as unknown as DshLauncher,
       dshHome,
       bundledRoot,
       endpoint: ENDPOINT,
@@ -75,6 +105,7 @@ describe('enableBuiltinMount', () => {
     })
 
     expect(result).toMatchObject({ wrote: true, mountId: 'time-context', targetProfile: 'web' })
+    expect(events).toEqual(['allowed-once', 'profile-write'])
     expect(parse(await readFile(patchPath, 'utf8'))).toEqual([
       { insert: [{ id: 'time-context', name: '@deepseek-ai/dsh-time-context' }] },
     ])
@@ -86,6 +117,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome, patchPath } = await seed(root, "- id: other-row\n  disabled: true\n")
 
     await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -99,13 +131,45 @@ describe('enableBuiltinMount', () => {
     ])
   })
 
+  it('requires an allowed-once DSH approval before changing the profile', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-denied-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const dumpConfig = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      stdout: 'time-context',
+      stderr: '',
+    }))
+    const request = vi.fn(async () => 'denied')
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(request),
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'approval_required', details: { outcome: 'denied' } })
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: 'capability_workflow_resume',
+      callId: 'call-enable-builtin',
+      reason: expect.stringContaining('@deepseek-ai/dsh-time-context@0.1.1-rc.2'),
+    }))
+    expect(dumpConfig).not.toHaveBeenCalled()
+    expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+  })
+
   it('is idempotent when the mount row already exists', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-idem-'))
     temporary.push(root)
     const body = "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n"
     const { bundledRoot, dshHome, patchPath } = await seed(root, body)
 
+    const request = vi.fn(async () => 'allowed-once')
     const result = await enableBuiltinMount({
+      ...approvedMutation(request),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -114,6 +178,7 @@ describe('enableBuiltinMount', () => {
     })
 
     expect(result.wrote).toBe(false)
+    expect(request).not.toHaveBeenCalled()
     expect(await readFile(patchPath, 'utf8')).toBe(body)
   })
 
@@ -123,6 +188,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome, patchPath } = await seed(root)
 
     const failure = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -141,6 +207,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome } = await seed(root)
 
     const failure = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: '' }),
       dshHome,
       bundledRoot,
@@ -157,6 +224,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome } = await seed(root)
 
     const failure = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: '' }),
       dshHome,
       bundledRoot,
@@ -173,6 +241,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome, patchPath } = await seed(root)
 
     const failure = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 1, stderr: 'loader exploded' }),
       dshHome,
       bundledRoot,
@@ -193,6 +262,7 @@ describe('enableBuiltinMount', () => {
     const { bundledRoot, dshHome, patchPath } = await seed(root)
 
     const failure = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'composed tree without the row' }),
       dshHome,
       bundledRoot,
@@ -209,6 +279,7 @@ describe('enableBuiltinMount', () => {
     temporary.push(root)
     const { bundledRoot, dshHome, patchPath } = await seed(root)
     const enabled = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -247,6 +318,7 @@ describe('enableBuiltinMount', () => {
     expect(owned).toBe(true)
 
     const first = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -257,6 +329,7 @@ describe('enableBuiltinMount', () => {
 
     // Simulate restart after the profile write but before the final receipt.
     const recovered = await enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,
@@ -282,6 +355,7 @@ describe('enableBuiltinMount', () => {
     const original = '- id: time-context\n  disabled: true\n'
     const { bundledRoot, dshHome, patchPath } = await seed(root, original)
     await expect(enableBuiltinMount({
+      ...approvedMutation(),
       launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
       dshHome,
       bundledRoot,

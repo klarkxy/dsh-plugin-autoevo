@@ -28,8 +28,11 @@ interface AgentGateState {
   activeResolutionId?: string
   authorization?: ResolutionAuthorization
   lastUserMessage?: string
+  currentMessageId?: string
   currentTurnId?: string
   turnSequence: number
+  seenMessageIds: Set<string>
+  consumedMessageIds: Set<string>
   consumedTurnIds: Set<string>
   waitingKind?: 'await_clarification' | 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery'
   interruptWatermarkTurnId?: string
@@ -48,13 +51,35 @@ const DSH_PLUGIN_ADD = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\badd\b/iu
 const SKIP_USER_TEXT = /^(?:Current runtime context\.|<system-reminder>)/u
 
 export interface UserFacingMessage {
+  id?: unknown
+  role?: unknown
+  source?: unknown
   content?: readonly unknown[]
 }
 
 export interface ClaimedHostTurn {
   turnId: string
+  messageId: string
   message: string
   sequence: number
+}
+
+interface TrustedTopLevelUserMessage extends UserFacingMessage {
+  id: string
+  role: 'user'
+  source: { kind: 'user' }
+}
+
+/** Runtime provenance boundary for authority-bearing inbox messages. */
+export function isTrustedTopLevelUserMessage(message: unknown): message is TrustedTopLevelUserMessage {
+  if (!isRecord(message)) return false
+  if (typeof message.id !== 'string' || !message.id.trim()) return false
+  if (message.role !== 'user' || !isRecord(message.source)) return false
+  return message.source.kind === 'user'
+}
+
+function hasExplicitMessageIdentity(message: UserFacingMessage): boolean {
+  return message.id !== undefined || message.role !== undefined || message.source !== undefined
 }
 
 export function extractUserFacingText(message: UserFacingMessage): string {
@@ -134,7 +159,7 @@ function denialReason(authorization?: ResolutionAuthorization): string {
     return `${prefix}: this older receipt is still parked on marketplace setup. Call capability_workflow again so Host-owned GitHub topic search can run. Do not create a plugin. ${authorization.reason}`
   }
   if (authorization.state === 'create_authorized') {
-    return `${prefix}: create-new continues as in-session work on a Host-managed git source; use repository files instead of cordis_define(kind:new).`
+    return `${prefix}: create-new continues in a Host-owned managed child on a managed git source; use repository files instead of cordis_define(kind:new).`
   }
   return `${prefix}: Host-managed construction is using the managed git source; live cordis_define(kind:new) is not the construction path.`
 }
@@ -167,31 +192,47 @@ export class CreationGuard {
     this.states.set(agent, {
       generation,
       turnSequence: prior?.turnSequence ?? 0,
+      seenMessageIds: prior?.seenMessageIds ?? new Set<string>(),
+      consumedMessageIds: prior?.consumedMessageIds ?? new Set<string>(),
       consumedTurnIds: prior?.consumedTurnIds ?? new Set<string>(),
       ...(prior?.lastUserMessage ? { lastUserMessage: prior.lastUserMessage } : {}),
+      ...(prior?.currentMessageId ? { currentMessageId: prior.currentMessageId } : {}),
       ...(prior?.currentTurnId ? { currentTurnId: prior.currentTurnId } : {}),
       ...(prior?.sessionId ? { sessionId: prior.sessionId } : {}),
     })
     return generation
   }
 
-  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void {
-    if (!agent) return
+  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): boolean {
+    if (!agent) return false
+    const explicitIdentity = hasExplicitMessageIdentity(message)
+    if (explicitIdentity && !isTrustedTopLevelUserMessage(message)) return false
     const text = extractUserFacingText(message)
-    if (!text) return
+    if (!text) return false
     const sessionId = ownerSessionId(agent) ?? 'anonymous'
     const state = this.states.get(agent) ?? {
       generation: 0,
       turnSequence: 0,
+      seenMessageIds: new Set<string>(),
+      consumedMessageIds: new Set<string>(),
       consumedTurnIds: new Set<string>(),
       sessionId,
     }
+    const messageId = isTrustedTopLevelUserMessage(message)
+      ? message.id.trim()
+      : `legacy_${state.turnSequence + 1}`
+    if (state.seenMessageIds.has(messageId)) return false
     state.turnSequence += 1
-    state.currentTurnId = newTurnId(sessionId, state.turnSequence)
+    state.seenMessageIds.add(messageId)
+    state.currentMessageId = messageId
+    state.currentTurnId = isTrustedTopLevelUserMessage(message)
+      ? `turn_${hashObject({ sessionId, messageId }).slice(0, 24)}`
+      : newTurnId(sessionId, state.turnSequence)
     state.lastUserMessage = text
     state.sessionId = sessionId
     this.resignLeaseIfUnchanged(state, sessionId)
     this.states.set(agent, state)
+    return true
   }
 
   lastUserMessage(agent: Agent | undefined): string | undefined {
@@ -250,13 +291,15 @@ export class CreationGuard {
     }
     const state = this.states.get(agent)
     const turnId = state?.currentTurnId
+    const messageId = state?.currentMessageId
     const message = state?.lastUserMessage
-    if (!state || !turnId || !message) {
+    if (!state || !turnId || !messageId || !message) {
       throw new EvolutionError('invalid_input', 'No host-claimed user turn is available for this decision')
     }
-    if (state.consumedTurnIds.has(turnId)) {
+    if (state.consumedTurnIds.has(turnId) || state.consumedMessageIds.has(messageId)) {
       throw new EvolutionError('invalid_input', 'This host user turn was already consumed by a prior resume (replay rejected)', {
         turnId,
+        messageId,
       })
     }
     if (this.isAwaitingFreshUserTurn(agent, interrupt)) {
@@ -265,7 +308,7 @@ export class CreationGuard {
         validAfterTurnId: interrupt.validAfterTurnId,
       })
     }
-    return { turnId, message, sequence: state.turnSequence }
+    return { turnId, messageId, message, sequence: state.turnSequence }
   }
 
   /**
@@ -279,6 +322,7 @@ export class CreationGuard {
     // Sequence watermark: turn ids are opaque; also compare via remembered order by requiring inequality with watermark
     // and that a new claim happened after interrupt issuance (caller reissues interrupt with current turn as watermark).
     state.consumedTurnIds.add(turn.turnId)
+    state.consumedMessageIds.add(turn.messageId)
     return turn
   }
 
@@ -375,6 +419,8 @@ export class CreationGuard {
       this.states.set(agent, {
         generation: 0,
         turnSequence: 0,
+        seenMessageIds: new Set(),
+        consumedMessageIds: new Set(),
         consumedTurnIds: new Set(),
         waitingKind: kind,
         ...(watermarkTurnId ? { interruptWatermarkTurnId: watermarkTurnId } : {}),

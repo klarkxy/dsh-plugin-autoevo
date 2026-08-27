@@ -99,7 +99,7 @@ const HARD_CONSTRAINTS = [
   'Clarification may occur at most once, changes read-only search classification only, and never grants selection, creation, modification, installation, or execution authority.',
   'Call capability_workflow_recover in two legal modes only: sealed failure recovery with the current interrupt_id, or a new top-level user request to clean up a completed installation with interrupt_id omitted. Never pass an installation id. If this tool result is waiting or a completed presentation, do not call it again in the same turn.',
   'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
-  'Authorized modify or create continues on the Host-managed source path. Inside that source, use normal DSH-permitted editing, shell, build, test, dependency, skill, and collaboration tools as needed. After construction, call capability_workflow_resume with finish construction navigation and no new user decision.',
+  'Authorized modify or create runs in a Host-owned, cwd-bound managed child. Use only its bounded filesystem, shell, build, test, and skill surface; do not mutate dependencies, start nested collaboration, run Git, mutate plugins, or publish. The Host completes validation, commit, re-review, and freezing without a new user decision.',
   'After a completed local install, only Host installation.contribution.eligible may prompt asking whether to contribute upstream. Ask in natural language; do not fork, push, or run GitHub CLI until a separate explicit approval. Never invent eligibility.',
 ]
 
@@ -345,7 +345,7 @@ function userFacingMeaning(action: string, requirement: string, completedCleanup
     },
     finish_managed_work: {
       en: 'After editing the managed source in this session, tell Host construction is finished',
-      zh: '在当前会话改完托管源后，通知 Host 施工已完成',
+      zh: '受管施工完成后，由 Host 继续校验、提交与重审',
     },
   }
   const pair = meanings[action]

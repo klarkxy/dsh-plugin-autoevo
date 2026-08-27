@@ -38,7 +38,6 @@ import { prefersChinese } from './i18n.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
-import type { ManagedChildHost } from './managed-child.js'
 import type { CommandRunner } from './process/runner.js'
 import { applyIntentToCandidate } from './resolver/intent.js'
 import {
@@ -73,6 +72,7 @@ import {
   prepareManagedModification,
   type ManagedWorkDeps,
 } from './service-managed-work.js'
+import { DshManagedChildHost, type ManagedChildHost } from './managed-child.js'
 import {
   addExplicitCandidate,
   assertRequirement,
@@ -119,6 +119,7 @@ import {
 } from './service-versions.js'
 import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
+import { assertBuiltinEnablementBinding } from './workflow/grants.js'
 import type {
   MarketplaceStepResult,
   DiscoveryPresentInput,
@@ -171,6 +172,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
   private readonly launcher: DshLauncher
   private readonly engine: WorkflowEngine
   private readonly creatorFoundation: CreatorFoundation
+  private readonly managedChild: ManagedChildHost
 
   constructor(
     private readonly ctx: Context,
@@ -178,7 +180,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly runner: CommandRunner,
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
-    _managedChild?: ManagedChildHost,
+    managedChild?: ManagedChildHost,
     _semanticReviewer?: SemanticReviewerHost,
     _semanticVerifier?: SemanticVerifierHost,
     creatorFoundation?: CreatorFoundation,
@@ -186,6 +188,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     this.launcher = new DshLauncher(runner, config)
     this.sources = new SourceManager(config, runner)
     this.creatorFoundation = creatorFoundation ?? createCreatorFoundation(ctx)
+    this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
     this.installer = new PluginInstaller(
       ctx,
       config,
@@ -213,6 +216,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       store: this.store,
       sources: this.sources,
       creatorFoundation: this.creatorFoundation,
+      managedChild: this.managedChild,
     }
   }
 
@@ -951,6 +955,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
         resolutionId: resolution.id,
         reason: 'The user selected a full local capability; no plugin mutation was authorized.',
       }
+    } else if (navigation.kind === 'enable_builtin') {
+      authorization = {
+        state: 'confirmation_required',
+        resolutionId: resolution.id,
+        reason: 'The user selected one Host-bundled candidate for an exact Gate-2 enablement confirmation; no profile mutation is authorized yet.',
+      }
     } else if (navigation.kind === 'stop') {
       authorization = {
         state: 'stopped',
@@ -1023,11 +1033,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
   }
 
   async enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord> {
-    const commitment = workflow.actionCommitment
-    const endpoint = commitment?.endpoint
-    if (!commitment || commitment.requestedAction !== 'enable_builtin' || endpoint?.kind !== 'host_bundled_enable') {
-      throw new EvolutionError('invalid_input', 'enable_builtin requires a frozen host-bundled enablement commitment')
-    }
+    const { endpoint } = assertBuiltinEnablementBinding(workflow, 'gate2')
     const bundledRoot = await resolveBundledDshRoot({
       dshHome: this.config.dshHome,
       config: this.config,
@@ -1097,6 +1103,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
         await this.store.put('installations', provisional)
       }
       await enableBuiltinMount({
+        ctx: this.ctx,
+        exec: asToolExec(exec),
+        requirement: workflow.requirement,
         launcher: this.launcher,
         dshHome: this.config.dshHome,
         bundledRoot,

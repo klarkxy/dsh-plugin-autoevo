@@ -131,7 +131,7 @@ describe('constructor execution boundaries', () => {
   const root = path.join(os.tmpdir(), 'autoevo-managed-source')
   const constructor = new ExecutionGuard({ role: 'constructor', allowedRoot: root, cwd: root })
 
-  it('allows ordinary DSH construction tools after a managed root is bound, while retaining AutoEvo boundaries', () => {
+  it('keeps the parent read-only while construction runs in the cwd-bound Host child', () => {
     expect(constructor.guard(exec('capability_workflow_resume', {
       workflow_id: `workflow_${'a'.repeat(24)}`,
       navigation: { kind: 'finish_managed_work' },
@@ -142,27 +142,23 @@ describe('constructor execution boundaries', () => {
     }))).toMatch(/only capability_workflow_resume with finish_managed_work/i)
     expect(constructor.guard(exec('capability_workflow'))).toMatch(/Host owns every other AutoEvo/i)
     expect(constructor.guard(exec('plugin_remove'))).toMatch(/Host owns every other AutoEvo/i)
-    expect(constructor.guard(exec('write', { path: path.join(root, 'src', 'index.ts') }))).toBeUndefined()
-    expect(constructor.guard(exec('write', { path: 'src/index.ts' }))).toBeUndefined()
-    expect(constructor.guard(exec('write', { path: './src/index.ts' }))).toBeUndefined()
+    expect(constructor.guard(exec('write', { path: path.join(root, 'src', 'index.ts') }))).toMatch(/cwd-bound Host-owned child|parent-session filesystem/i)
+    expect(constructor.guard(exec('write', { path: 'src/index.ts' }))).toMatch(/cwd-bound Host-owned child|parent-session filesystem/i)
+    expect(constructor.guard(exec('write', { path: './src/index.ts' }))).toMatch(/cwd-bound Host-owned child|parent-session filesystem/i)
     expect(constructor.guard(exec('write', { path: '../outside.ts' }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('write', { path: path.join(os.tmpdir(), 'outside.ts') }))).toMatch(/outside the Host-managed source/i)
     expect(constructor.guard(exec('cordis_define', { plugin: { kind: 'new' } }))).toMatch(/Cordis mutation/i)
-    expect(constructor.guard(exec('pwsh', { command: 'dsh plugin add unreviewed' }))).toMatch(/plugin install\/remove/i)
-    expect(constructor.guard(exec('pwsh', { command: 'dsh plugin install unreviewed' }))).toMatch(/plugin install\/remove/i)
-    expect(constructor.guard(exec('pwsh', { command: 'pnpm publish' }))).toMatch(/publication|version|release|deploy|install/i)
-    expect(constructor.guard(exec('pwsh', { command: 'git push origin HEAD' }))).toMatch(/fresh user decision/i)
-    expect(constructor.guard(exec('bash', { command: 'gh pr create --title update' }))).toMatch(/fresh user decision/i)
-    expect(constructor.guard(exec('pwsh', { command: 'git reset --hard HEAD~1' }))).toMatch(/fresh user decision/i)
+    expect(constructor.guard(exec('pwsh', { command: 'dsh plugin add unreviewed' }))).toMatch(/cwd-bound Host-owned child|parent session/i)
+    expect(constructor.guard(exec('pwsh', { command: 'pnpm test' }))).toMatch(/cwd-bound Host-owned child|parent session/i)
+    expect(constructor.guard(exec('bash', { command: 'git status' }))).toMatch(/cwd-bound Host-owned child|parent session/i)
 
     for (const call of [
-      exec('pwsh', { command: 'pnpm test', cwd: root }),
-      exec('bash', { command: 'pnpm add example-package' }),
-      exec('pwsh', { command: 'git commit -am checkpoint' }),
-      exec('subagent'),
-      exec('skill', { name: 'some-dsh-permitted-skill' }),
-      exec('run_code'),
+      exec('read', { path: 'src/index.ts' }),
+      exec('grep', { pattern: 'apply' }),
+      exec('todo_write'),
     ]) expect(constructor.guard(call)).toBeUndefined()
+    expect(constructor.guard(exec('subagent'))).toMatch(/cwd-bound Host-owned child/i)
+    expect(constructor.guard(exec('run_code'))).toMatch(/cwd-bound Host-owned child/i)
   })
 })
 
@@ -183,9 +179,13 @@ describe('child execution boundaries', () => {
     expect(child.guard(exec('pwsh', { command: 'git -c alias.ship=push ship origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
     expect(child.guard(exec('pwsh', { command: 'git status; git push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
     expect(child.guard(exec('pwsh', { command: "& 'git' commit -am unsafe" }))).toMatch(/Host owns commits|read-only git/i)
-    expect(child.guard(exec('pwsh', { command: 'pwsh -Command "git push origin HEAD"' }))).toMatch(/Host owns commits|read-only git/i)
-    expect(child.guard(exec('pwsh', { command: '& (Get-Command git) push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
+    expect(child.guard(exec('pwsh', { command: 'pwsh -Command "git push origin HEAD"' }))).toMatch(/Host owns commits|read-only git|indirect/i)
+    expect(child.guard(exec('pwsh', { command: '& (Get-Command git) push origin HEAD' }))).toMatch(/Host owns commits|read-only git|indirect/i)
     expect(child.guard(exec('pwsh', { command: 'C:\\ProgramData\\Git\\git.exe push origin HEAD' }))).toMatch(/Host owns commits|read-only git/i)
+    expect(child.guard(exec('pwsh', { command: 'cmd /c "g^h release create v1.0.0"' }))).toMatch(/indirect|dynamically resolved/i)
+    expect(child.guard(exec('pwsh', { command: 'pwsh -Command "& (Get-Command (\'g\'+\'it\')) push origin HEAD"' }))).toMatch(/indirect|dynamically resolved/i)
+    expect(child.guard(exec('pwsh', { command: "& ([string]::Concat('g','h')) release create v1.0.0" }))).toMatch(/indirect|dynamically resolved/i)
+    expect(child.guard(exec('bash', { command: 'node -e "require(\'child_process\').execSync(\'gh release create v1.0.0\')"' }))).toMatch(/GitHub CLI|indirect|dynamically resolved/i)
     expect(child.guard(exec('bash', { command: 'gh pr create' }))).toMatch(/GitHub CLI/i)
     expect(child.guard(exec('bash', { command: 'pnpm publish' }))).toMatch(/publication|version|release|deploy|install/i)
     expect(child.guard(exec('pwsh', { command: 'pnpm version patch' }))).toMatch(/publication|version|release|deploy|install/i)
@@ -206,6 +206,8 @@ describe('child execution boundaries', () => {
       exec('write'),
       exec('read'),
       exec('pwsh', { command: 'pnpm test' }),
+      exec('pwsh', { command: 'pnpm run build' }),
+      exec('bash', { command: 'cargo test' }),
       exec('bash', { command: 'git diff --check' }),
       exec('todo_write'),
       exec('todo_read'),

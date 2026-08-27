@@ -94,15 +94,15 @@ When a candidate is almost right, an installed plugin needs an upgrade, or a his
 
 1. Validate the exact upstream or historical managed source;
 2. Prepare a managed Git source under `.autoevo/sources/` in the current session workspace;
-3. Let the current session edit and run checks within the managed source;
+3. Have the Host start a short-lived construction session whose cwd is exactly that managed source, then perform edits and bounded checks there;
 4. Have the Host commit, re-review, and freeze the result;
 5. Wait for your confirmation of installation again.
 
-No hidden child Agent is launched. A historical failed or removed source becomes a new first install after repair. Only a package that genuinely exists in the profile with exact source match is treated as a replacement.
+The Host-owned construction child cannot escape the managed source, install plugins, mutate the profile, commit, or publish, and is disposed after it returns. A historical failed or removed source becomes a new first install after repair. Only a package that genuinely exists in the profile with exact source match is treated as a replacement.
 
 ### 4.4 Create from scratch
 
-Creation is available only after discovery is complete, no suitable candidate remains, and you explicitly choose create at Gate 2. Creation happens in the same visible managed source; after checks and local review, the final install still requires your confirmation again.
+Creation is available only after discovery is complete, no suitable candidate remains, and you explicitly choose create at Gate 2. Creation uses the same cwd-bound managed construction session; after checks and local review, the final install still requires your confirmation again.
 
 ### 4.5 Stop
 

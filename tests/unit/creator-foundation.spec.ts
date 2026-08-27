@@ -158,14 +158,17 @@ describe('Creator foundation preflight', () => {
 })
 
 describe('Creator child catalog and receipt', () => {
-  it('accepts an evolution parent catalog that matches preflight', async () => {
+  it('accepts a system-trust cordis child catalog that matches parent preflight', async () => {
     const preflight = testingCreatorPreflight()
+    const composition = creatorTesting.TESTING_CORDIS_COMPOSITION
     const catalog = await assertChildCreatorCatalog(
       foundationCtx(),
       { child: true },
       preflight,
-      EVOLUTION_PRESET_ID,
-      creatorTesting.TESTING_CORDIS_COMPOSITION,
+      { id: 'cordis', trust: 'system' },
+      'cordis',
+      composition,
+      compositionSha256(composition),
     )
     expect(catalog.tools).toEqual(expect.arrayContaining(requiredTools()))
     const receipt = mintCreatorReceipt(preflight, 'parent-session-1')
@@ -178,8 +181,10 @@ describe('Creator child catalog and receipt', () => {
       foundationCtx(),
       { child: true },
       preflight,
+      { id: 'code', trust: 'system' },
       'code',
       creatorTesting.TESTING_CORDIS_COMPOSITION,
+      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
     ))
       .rejects.toThrow(/code preset is not permitted/i)
     expect(() => assertCreatorReceipt({
@@ -188,15 +193,26 @@ describe('Creator child catalog and receipt', () => {
     }, preflight)).toThrow(/does not match Creator preflight/i)
   })
 
-  it('rejects a parent session that is not Capability Evolution', async () => {
+  it('rejects child preset, trust, and composition drift independently of the evolution parent', async () => {
     const preflight = testingCreatorPreflight()
     await expect(assertChildCreatorCatalog(
       foundationCtx(),
       { child: true },
       preflight,
-      'code',
+      { id: 'cordis', trust: 'user' },
+      'cordis',
+      creatorTesting.TESTING_CORDIS_COMPOSITION,
+      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
+    )).rejects.toThrow(/official system Creator cordis preset/i)
+    await expect(assertChildCreatorCatalog(
+      foundationCtx(),
+      { child: true },
+      preflight,
+      { id: 'cordis', trust: 'system' },
+      'cordis',
       `${creatorTesting.TESTING_CORDIS_COMPOSITION}# changed after preflight\n`,
-    )).rejects.toThrow(/code preset is not permitted/i)
+      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
+    )).rejects.toThrow(/changed after Host preflight/i)
   })
 })
 

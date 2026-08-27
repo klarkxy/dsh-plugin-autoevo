@@ -39,10 +39,10 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   const action = typeof decision.action === 'string' ? decision.action : ''
   const navKind = typeof navigation.kind === 'string' ? navigation.kind : ''
   if (action === 'modify_this' || navKind === 'finish_managed_work') {
-    return genericPendingCard(args, 'Authorized in-session construction on the managed source', '已授权，正在当前会话修改托管源', 'edit')
+    return genericPendingCard(args, 'Running authorized managed construction', '已授权，正在受管施工会话中修改', 'edit')
   }
   if (action === 'create_new') {
-    return genericPendingCard(args, 'Authorized in-session creation on the managed source', '已授权，正在当前会话创建托管源', 'edit')
+    return genericPendingCard(args, 'Running authorized managed creation', '已授权，正在受管施工会话中创建', 'edit')
   }
   if (action === 'use_this') {
     return genericPendingCard(args, 'Installing and verifying the reviewed plugin; this may take several minutes', '正在安装并验证已审查的插件，可能需要几分钟', 'execute')
@@ -52,6 +52,9 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
   }
   if (navKind === 'review_candidates') {
     return genericPendingCard(args, 'Reviewing selected plugin candidates', '正在审查选中的插件候选', 'read')
+  }
+  if (action === 'enable_builtin') {
+    return genericPendingCard(args, 'Enabling the confirmed built-in Host capability', '正在启用已确认的内置能力', 'execute')
   }
   if (navKind === 'clarify_requirement') {
     return genericPendingCard(args, 'Applying the clarification and starting search', '正在应用澄清并开始搜索', 'search')
@@ -66,7 +69,7 @@ function presentResumePendingCard(args: Record<string, unknown>): ToolCallView {
     return genericPendingCard(args, 'Using the existing local capability unchanged', '正在原样使用已有本地能力', 'read')
   }
   if (navKind === 'enable_builtin') {
-    return genericPendingCard(args, 'Enabling the built-in Host capability', '正在启用内置能力', 'execute')
+    return genericPendingCard(args, 'Selecting the built-in capability for final confirmation', '正在选择内置能力并进入最终确认', 'read')
   }
   return genericPendingCard(args, 'Continuing the capability workflow', '正在继续能力工作流', 'other')
 }
@@ -192,10 +195,10 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_resume',
-      description: 'Interpret a fresh user reply at a sealed Host gate, or finish in-session construction after an authorized modify/create. Use navigation for candidate review/search/local reuse/built-in enable/finish construction, or decision for the final reviewed use/modify/create/stop choice. Host validates the current interrupt except for finish construction, which continues the already-authorized turn.',
+      description: 'Interpret a fresh user reply at a sealed Host gate, or continue Host-owned managed construction after an authorized modify/create. Use navigation for candidate review/search/local reuse/Gate-1 built-in selection/managed recovery, or decision for the final use/modify/create/built-in enable/stop choice. Host validates the current interrupt except for managed recovery, which continues the already-authorized workflow.',
       parameters: {
         workflow_id: { type: 'string', required: true, description: 'Workflow id returned by capability_workflow.' },
-        interrupt_id: { type: 'string', description: 'interrupt_id from the current interrupt payload. Required at user gates; omit when finishing in-session construction.' },
+        interrupt_id: { type: 'string', description: 'interrupt_id from the current interrupt payload. Required at user gates; omit only when continuing an already-authorized managed recovery.' },
         navigation: {
           type: 'object',
           additionalProperties: false,
@@ -226,13 +229,13 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           properties: {
             action: {
               type: 'string',
-              enum: ['use_this', 'modify_this', 'create_new', 'stop'],
+              enum: ['use_this', 'modify_this', 'create_new', 'enable_builtin', 'stop'],
               required: true,
               description: 'Your semantic interpretation of the user\'s fresh final choice; must be offered by the current interrupt.',
             },
             candidate_id: {
               type: 'string',
-              description: 'Required for use_this or modify_this. Copy the id from that action\'s current candidate_ids.',
+              description: 'Required for use_this, modify_this, or enable_builtin. Copy the id from that action\'s current candidate_ids.',
             },
           },
         },

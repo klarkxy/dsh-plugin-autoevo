@@ -8,7 +8,7 @@ import {
   installCordisInspectCompatibility,
   type CordisInspectRegistryLike,
 } from './cordis-inspect-compat.js'
-import { CreationGuard } from './creation-guard.js'
+import { CreationGuard, isTrustedTopLevelUserMessage } from './creation-guard.js'
 import { ExecutionGuard } from './execution-guard.js'
 import {
   EVOLUTION_MODE_SERVICE_KEY,
@@ -188,7 +188,9 @@ export function apply(ctx: Context, input: Config): void {
 
   ctx.systemPrompt.section({ name: 'autoevo:reuse-policy', order: 118, text: POLICY })
   ctx.on('agent/inbox/claimed', (payload) => {
-    creationGuard.rememberUserMessage(payload.agent, payload.message)
+    if (isTrustedTopLevelUserMessage(payload.message)) {
+      creationGuard.rememberUserMessage(payload.agent, payload.message)
+    }
   })
   const guardFor = (agent: Agent | undefined): ExecutionGuard => {
     const root = creationGuard.constructionRoot(agent)

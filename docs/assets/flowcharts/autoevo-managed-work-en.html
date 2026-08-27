@@ -4866,7 +4866,7 @@
       </div>
     </div>
 
-    <script id="archify-guided-views-data" type="application/json">[{"id":"prepare","label":"Prepare the managed source","focus":["decide","prepare"],"note":"The Host clones the exact commit into a managed Git source, locks it, and issues a structured WorkOrder."},{"id":"construct","label":"In-session construction","focus":["prepare","construct"],"note":"The current session edits and runs checks visibly inside the bound directory; no hidden child agent."},{"id":"finalize","label":"Finalize and re-review","focus":["construct","validate","rereview","confirm"],"note":"The Host validates, commits hookless, re-reviews and freezes, then hands the install decision back."}]</script>
+    <script id="archify-guided-views-data" type="application/json">[{"id":"prepare","label":"Prepare the managed source","focus":["decide","prepare"],"note":"The Host clones the exact commit into a managed Git source, locks it, and issues a structured WorkOrder."},{"id":"construct","label":"Managed child construction","focus":["prepare","construct"],"note":"The Host creates a short-lived child whose cwd and workspace-write root are exactly the managed source."},{"id":"finalize","label":"Finalize and re-review","focus":["construct","validate","rereview","confirm"],"note":"The Host validates, commits hookless, re-reviews and freezes, then hands the install decision back."}]</script>
 
     <div class="guided-views no-print" id="guided-views" hidden aria-label="Guided diagram views">
       <button id="guided-view-prev" type="button" aria-label="Previous guided view" title="Previous guided view ([)">&#8592;</button>
@@ -4939,7 +4939,7 @@
         <text x="54" y="74" class="t-dim" font-size="10" font-weight="600">01 / User</text>
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="176" width="640" height="104" rx="10" class="c-lane" stroke-width="1"/>
-        <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / Capability Evolution session</text>
+        <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / Managed construction child</text>
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="300" width="640" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="322" class="t-dim" font-size="10" font-weight="600">03 / AutoEvo Host</text>
@@ -4992,8 +4992,8 @@
           <text data-detail="context" x="88" y="379" class="t-muted" font-size="8" text-anchor="middle">WorkOrder + lock</text>
         </g>
 
-        <g id="node-construct" data-node-id="construct" data-node-label="In-session work" tabindex="0" role="button" aria-label="Focus In-session work, finish_managed_work wrap-up, Capability Evolution session › managed source .autoevo/sources (exclusive lock) › Construct" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="finish_managed_work wrap-up" data-node-context="Capability Evolution session › managed source .autoevo/sources (exclusive lock) › Construct">
-          <title>In-session work · finish_managed_work wrap-up · Capability Evolution session › managed source .autoevo/sources (exclusive lock) › Construct</title>
+        <g id="node-construct" data-node-id="construct" data-node-label="Managed work" tabindex="0" role="button" aria-label="Focus Managed work, exact cwd + sandbox, Managed construction child › managed source .autoevo/sources (exclusive lock) › Construct" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="exact cwd + sandbox" data-node-context="Managed construction child › managed source .autoevo/sources (exclusive lock) › Construct">
+          <title>Managed work · exact cwd + sandbox · Managed construction child › managed source .autoevo/sources (exclusive lock) › Construct</title>
           <rect x="360" y="217" width="140" height="52" rx="6" class="c-mask"/>
           <rect x="360" y="217" width="140" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(366 223) scale(0.6875)">
@@ -5002,8 +5002,8 @@
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="430" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">In-session work</text>
-          <text data-detail="context" x="430" y="255" class="t-muted" font-size="8" text-anchor="middle">finish_managed_work wrap-up</text>
+          <text data-detail-anchor x="430" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Managed work</text>
+          <text data-detail="context" x="430" y="255" class="t-muted" font-size="8" text-anchor="middle">exact cwd + sandbox</text>
         </g>
 
         <g id="node-validate" data-node-id="validate" data-node-label="Validate" tabindex="0" role="button" aria-label="Focus Validate, hookless commit, AutoEvo Host › Construct" aria-pressed="false" data-node-kind="backend" data-node-sublabel="hookless commit" data-node-context="AutoEvo Host › Construct">
@@ -5276,7 +5276,7 @@
         </div>
         <ul>
           <li>&bull; Edit only inside the managed source; no target switch, no publishing</li>
-          <li>&bull; DSH-permitted edit, shell, build, test, and dependency tools are allowed</li>
+          <li>&bull; Edit and run bounded build/test checks; the parent does not write</li>
           <li>&bull; Cancel or error gets an independent bounded wrap-up; canceled signals are never reused</li>
         </ul>
       </div>

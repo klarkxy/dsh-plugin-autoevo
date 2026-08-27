@@ -48,7 +48,7 @@ Live E2E touches external GitHub; it must not pretend to pass offline when netwo
 
 Do not copy the full flow into multiple files. Other documents only keep a one-line summary and a link.
 
-The interactive flow diagrams live in `docs/assets/flowcharts/` (not published in the package). When a flow changes, edit the sibling `*.workflow.json` / `*.lifecycle.json` specification (English variants use the `-en` suffix), re-`deliver` the HTML with archify, then open the HTML in a browser and use Export → SVG to overwrite the matching `.svg`. Never hand-edit the HTML or SVG.
+The interactive flow diagrams live in `docs/assets/flowcharts/` and ship in the release package. When a flow changes, edit the sibling `*.workflow.json` / `*.lifecycle.json` specification (English variants use the `-en` suffix), re-`deliver` the HTML with archify, then open the HTML in a browser and use Export → SVG to overwrite the matching `.svg`. Never hand-edit the HTML or SVG.
 
 ## 3. Repository layout
 
@@ -134,18 +134,19 @@ Interactive version (click for the full HTML viewer):
 
 [![AutoEvo managed construction workflow](assets/flowcharts/autoevo-managed-work-en.svg)](assets/flowcharts/autoevo-managed-work-en.html)
 
-The default source root is `<workspace>/.autoevo/sources/`. Construction stays visible in the current Capability Evolution session:
+The default source root is `<workspace>/.autoevo/sources/`. The parent session owns decisions and progress while actual construction runs in a short-lived Host-owned child whose cwd is exactly the managed source:
 
 1. The Host clones an exact GitHub commit or creates a scaffold;
 2. Writes a sidecar source receipt and acquires the workflow exclusive lock;
 3. `prepareModify()` / `prepareCreate()` set `pendingPath` and a structured WorkOrder;
-4. The current session edits and runs checks only within the managed directory;
-5. After `finish_managed_work`, the Host validates branch/HEAD, worktree, Git config/hooks;
-6. The Host creates a local commit with hooks and signing disabled;
-7. Re-review, freeze the complete snapshot, and produce an owned tgz;
-8. Release the lock or proceed to installation.
+4. The Host creates a child and verifies immutable cwd, the `workspace-write` root, parent ownership, the system Creator preset, and escape probes;
+5. The child edits only inside the managed directory and runs bounded build/test checks, then returns its result to the Host;
+6. The Host validates branch/HEAD, worktree, and Git config/hooks;
+7. The Host creates a local commit with hooks and signing disabled;
+8. Re-review, freeze the complete snapshot, and produce an owned tgz;
+9. Release the lock or proceed to installation.
 
-Runtime does not create child Agents; construction happens entirely in the managed directory bound to the current session.
+The parent never treats a synthetic cwd as confinement and never performs construction writes. The real write root comes from the new child session's immutable cwd. The child is disposed after success or failure; decisions, re-review, installation, and publication authority remain with the Host/parent workflow.
 
 Cancellation or exceptions never reuse the cancelled signal for cleanup. The Host checkpoints bounded edits, validates state, and releases locks under an independent bounded lifetime; never misreport a cancel/timeout as a missing Git executable.
 

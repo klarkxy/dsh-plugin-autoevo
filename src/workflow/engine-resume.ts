@@ -22,6 +22,7 @@ import { retryableResumeHint } from './agent-view.js'
 import { transition } from './graph.js'
 import { snapshotDigestFor } from './candidates.js'
 import {
+  assertBuiltinEnablementBinding,
   endpointForLocalReuse,
   mintActionCommitment,
   mintExecutionLease,
@@ -257,7 +258,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       if (resume.optionId === 'modify_this' && decisionReview) {
         latest.lineageTipReviewId = decisionReview.id
       }
-      latest.cursor = transition(latest.cursor, resume.optionId)
+      latest.cursor = resume.optionId === 'enable_builtin'
+        ? 'enable_builtin'
+        : transition(latest.cursor, resume.optionId)
       const consumedInterrupt = workflow.interrupt
       delete latest.interrupt
       this.grantFinalDecision({
@@ -290,7 +293,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       )
     }
     if (workflow.cursor !== 'await_modify_work' || workflow.status !== 'interrupted' || workflow.interrupt) {
-      throw new EvolutionError('invalid_input', 'This workflow is not waiting for in-session construction to finish', {
+      throw new EvolutionError('invalid_input', 'This workflow is not waiting for managed construction to finish', {
         status: workflow.status,
         cursor: workflow.cursor,
       })
@@ -401,6 +404,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     const receipt = mintSelectionReceipt({
       workflowId: latest.id,
       interrupt,
+      phase: 'gate1',
       kind: navigation.kind,
       candidateIds: receiptCandidateIds,
       snapshot,
@@ -483,11 +487,10 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         targetProfile,
       })
       this.creationGuard.invalidateExecutionLease(exec.agent)
-      this.creationGuard.grantHostSelection(exec.agent, receipt, commitment)
       latest.selectionReceipt = receipt
       latest.actionCommitment = commitment
       delete latest.executionLease
-      latest.cursor = 'enable_builtin'
+      latest.cursor = 'await_confirmation'
     } else {
       this.creationGuard.invalidateExecutionLease(exec.agent)
       latest.selectionReceipt = receipt
@@ -519,23 +522,32 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       throw new EvolutionError('invalid_input', 'Final decision requires the consumed interrupt')
     }
     const snapshot = input.workflow.candidateSnapshot ?? []
-    const needsCandidate = input.resume.optionId === 'use_this' || input.resume.optionId === 'modify_this'
+    const needsCandidate = input.resume.optionId === 'use_this'
+      || input.resume.optionId === 'modify_this'
+      || input.resume.optionId === 'enable_builtin'
     const candidate = input.resume.candidateId
       ? snapshot.find((item) => item.id === input.resume.candidateId)
       : undefined
     if (needsCandidate && !candidate) {
-      throw new EvolutionError('invalid_input', 'Final use/modify commitment requires the interrupt-bound candidate', {
+      throw new EvolutionError('invalid_input', 'Final use/modify/enable commitment requires the interrupt-bound candidate', {
         candidateId: input.resume.candidateId,
       })
     }
-    if (needsCandidate && !input.review) {
+    if ((input.resume.optionId === 'use_this' || input.resume.optionId === 'modify_this') && !input.review) {
       throw new EvolutionError('invalid_input', 'Final use/modify commitment requires the selected review', {
         candidateId: input.resume.candidateId,
       })
     }
+    const builtinBinding = input.resume.optionId === 'enable_builtin'
+      ? assertBuiltinEnablementBinding(input.workflow, 'gate1')
+      : undefined
+    if (builtinBinding && builtinBinding.candidate.id !== candidate?.id) {
+      throw new EvolutionError('review_expired', 'Gate-2 enablement does not match the exact Gate-1 built-in candidate')
+    }
     const receipt = mintSelectionReceipt({
       workflowId: input.workflow.id,
       interrupt,
+      phase: 'gate2',
       kind: input.resume.optionId,
       candidateIds: candidate ? [candidate.id] : [],
       snapshot,
@@ -545,13 +557,14 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       receipt,
       action: input.resume.optionId,
       ...(candidate ? { candidate } : {}),
-      endpoint: { kind: 'none' },
+      endpoint: builtinBinding?.endpoint ?? { kind: 'none' },
       ...(input.resume.optionId === 'use_this' && input.resume.install?.retention
         ? { retention: input.resume.install.retention }
         : {}),
       ...(input.resume.optionId === 'use_this' && input.resume.install?.targetProfile
         ? { targetProfile: input.resume.install.targetProfile }
         : {}),
+      ...(builtinBinding ? { targetProfile: builtinBinding.endpoint.targetProfile } : {}),
       ...(needsCandidate && input.review ? { review: input.review } : {}),
       workflow: input.workflow,
     })

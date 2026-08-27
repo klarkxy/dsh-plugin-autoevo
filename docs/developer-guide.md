@@ -48,7 +48,7 @@ live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通�
 
 不要把完整流程复制到多个文件；其它文档只保留一句摘要和链接。
 
-交互流程图在 `docs/assets/flowcharts/`（不随包发布）：对应流程变化时，编辑同目录的 `*.workflow.json` / `*.lifecycle.json` 规格（英文版为 `-en` 后缀同名文件），用 archify 重新 `deliver` 生成 HTML，再在浏览器打开 HTML 用 Export → SVG 覆盖同名 `.svg`。不要直接手改 HTML 或 SVG。
+交互流程图在 `docs/assets/flowcharts/`，并随发布包提供：对应流程变化时，编辑同目录的 `*.workflow.json` / `*.lifecycle.json` 规格（英文版为 `-en` 后缀同名文件），用 archify 重新 `deliver` 生成 HTML，再在浏览器打开 HTML 用 Export → SVG 覆盖同名 `.svg`。不要直接手改 HTML 或 SVG。
 
 ## 3. 仓库结构
 
@@ -134,18 +134,19 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 [![AutoEvo 托管施工流程](assets/flowcharts/autoevo-managed-work.svg)](assets/flowcharts/autoevo-managed-work.html)
 
-默认源码根是 `<workspace>/.autoevo/sources/`。施工在当前能力进化会话中可见进行：
+默认源码根是 `<workspace>/.autoevo/sources/`。父会话掌握决定与进度，实际施工在 Host-owned、cwd 精确绑定的短生命周期子会话中进行：
 
 1. Host 克隆 exact GitHub commit 或创建脚手架；
 2. 写入 sidecar source receipt 并取得 workflow 排他锁；
 3. `prepareModify()` / `prepareCreate()` 设置 `pendingPath` 与结构化 WorkOrder；
-4. 当前会话只在托管目录内编辑、运行检查；
-5. `finish_managed_work` 后，Host 验证 branch/HEAD、工作树、Git config/hooks；
-6. Host 禁用 hooks 与签名创建本地 commit；
-7. 重新审查、冻结完整快照并生成 owned tgz；
-8. 释放锁或进入安装。
+4. Host 创建子会话，验证不可变 cwd、`workspace-write` 根、父子归属、系统级 Creator preset 和越界探针；
+5. 子会话只在托管目录内编辑并运行有界构建/测试，完成结果回到 Host；
+6. Host 验证 branch/HEAD、工作树、Git config/hooks；
+7. Host 禁用 hooks 与签名创建本地 commit；
+8. 重新审查、冻结完整快照并生成 owned tgz；
+9. 释放锁或进入安装。
 
-运行时不创建子 Agent；施工全程发生在当前会话绑定的托管目录中。
+父会话不会把合成 cwd 当作安全边界，也不会直接施工；真正的写入根来自新建子会话的不可变 cwd。子会话完成或失败后立即释放，决定、重审、安装和发布权限始终留在 Host/父流程。
 
 取消或异常不会复用已取消 signal 做清理。Host 以独立 bounded lifetime checkpoint 有界编辑、验证状态并释放锁；不能把 cancel/timeout 误报成 Git 可执行文件缺失。
 

@@ -4866,7 +4866,7 @@
       </div>
     </div>
 
-    <script id="archify-guided-views-data" type="application/json">[{"id":"prepare","label":"准备托管源","focus":["decide","prepare"],"note":"Host 从精确 commit 建立托管 Git 源，加排他锁并下发结构化 WorkOrder。"},{"id":"construct","label":"会话内施工","focus":["prepare","construct"],"note":"当前会话在绑定目录内可见地编辑和运行检查，不启动隐藏子 Agent。"},{"id":"finalize","label":"收口与重审","focus":["construct","validate","rereview","confirm"],"note":"Host 校验、无 hook 提交、重审冻结，然后交回用户做安装决定。"}]</script>
+    <script id="archify-guided-views-data" type="application/json">[{"id":"prepare","label":"准备托管源","focus":["decide","prepare"],"note":"Host 从精确 commit 建立托管 Git 源，加排他锁并下发结构化 WorkOrder。"},{"id":"construct","label":"受管子会话施工","focus":["prepare","construct"],"note":"Host 创建 cwd 与 workspace-write 根都精确绑定到托管源的短生命周期子会话。"},{"id":"finalize","label":"收口与重审","focus":["construct","validate","rereview","confirm"],"note":"Host 校验、无 hook 提交、重审冻结，然后交回用户做安装决定。"}]</script>
 
     <div class="guided-views no-print" id="guided-views" hidden aria-label="Guided diagram views">
       <button id="guided-view-prev" type="button" aria-label="Previous guided view" title="Previous guided view ([)">&#8592;</button>
@@ -4939,7 +4939,7 @@
         <text x="54" y="74" class="t-dim" font-size="10" font-weight="600">01 / 用户</text>
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="176" width="640" height="104" rx="10" class="c-lane" stroke-width="1"/>
-        <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / 能力进化会话</text>
+        <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / 受管施工子会话</text>
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="300" width="640" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="322" class="t-dim" font-size="10" font-weight="600">03 / AutoEvo Host</text>
@@ -4992,8 +4992,8 @@
           <text data-detail="context" x="88" y="379" class="t-muted" font-size="8" text-anchor="middle">WorkOrder + 锁</text>
         </g>
 
-        <g id="node-construct" data-node-id="construct" data-node-label="会话内施工" tabindex="0" role="button" aria-label="Focus 会话内施工, finish_managed_work 收口, 能力进化会话 › 托管源 .autoevo/sources（排他锁） › 施工" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="finish_managed_work 收口" data-node-context="能力进化会话 › 托管源 .autoevo/sources（排他锁） › 施工">
-          <title>会话内施工 · finish_managed_work 收口 · 能力进化会话 › 托管源 .autoevo/sources（排他锁） › 施工</title>
+        <g id="node-construct" data-node-id="construct" data-node-label="受管施工" tabindex="0" role="button" aria-label="Focus 受管施工, 精确 cwd + sandbox, 受管施工子会话 › 托管源 .autoevo/sources（排他锁） › 施工" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="精确 cwd + sandbox" data-node-context="受管施工子会话 › 托管源 .autoevo/sources（排他锁） › 施工">
+          <title>受管施工 · 精确 cwd + sandbox · 受管施工子会话 › 托管源 .autoevo/sources（排他锁） › 施工</title>
           <rect x="360" y="217" width="140" height="52" rx="6" class="c-mask"/>
           <rect x="360" y="217" width="140" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(366 223) scale(0.6875)">
@@ -5002,8 +5002,8 @@
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="430" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">会话内施工</text>
-          <text data-detail="context" x="430" y="255" class="t-muted" font-size="8" text-anchor="middle">finish_managed_work 收口</text>
+          <text data-detail-anchor x="430" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">受管施工</text>
+          <text data-detail="context" x="430" y="255" class="t-muted" font-size="8" text-anchor="middle">精确 cwd + sandbox</text>
         </g>
 
         <g id="node-validate" data-node-id="validate" data-node-label="校验与提交" tabindex="0" role="button" aria-label="Focus 校验与提交, hookless commit, AutoEvo Host › 施工" aria-pressed="false" data-node-kind="backend" data-node-sublabel="hookless commit" data-node-context="AutoEvo Host › 施工">
@@ -5276,7 +5276,7 @@
         </div>
         <ul>
           <li>&bull; 只在托管源内编辑，不换目标、不发布</li>
-          <li>&bull; 可用 DSH 允许的编辑、shell、构建、测试与依赖工具</li>
+          <li>&bull; 可编辑并运行有界构建/测试；父会话不直接写入</li>
           <li>&bull; 取消或异常有独立有界收口，不复用已取消 signal</li>
         </ul>
       </div>

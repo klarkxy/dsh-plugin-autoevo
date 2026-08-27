@@ -54,10 +54,9 @@ const SAFE_GIT_READ_RE = /(?:^|[\s&])["']?git(?:\.exe)?["']?(?:\s+-C\s+(?:"[^"]+
 const GH_COMMAND_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?(?=$|[\s)"'`])/iu
 const DSH_PLUGIN_MUTATION_RE = /(?:^|[\\/\s;&|("'`])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\b(add|install|remove|rm|uninstall)\b/iu
 const PACKAGE_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:publish|pack\s+--publish|version)\b/iu
-const GIT_PUBLICATION_OR_DESTRUCTIVE_RE = /(?:^|[\\/\s;&|("'`])git(?:\.exe|\.cmd)?(?:\s+-[^\s]+(?:\s+[^\s]+)?)*\s+(?:push|tag|reset\s+--hard|clean\s+-[^\s]*f)\b/iu
-const GH_PUBLICATION_RE = /(?:^|[\\/\s;&|("'`])gh(?:\.exe|\.cmd)?\s+(?:(?:pr|release|repo|gist)\s+(?:create|delete)|workflow\s+run)\b/iu
 const PACKAGE_DEPENDENCY_MUTATION_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:install|add|i|ci|update|up|remove|rm|uninstall|dlx|exec)|npx(?:\.cmd)?\b)/iu
 const RELEASE_DEPLOY_INSTALL_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:release|deploy)\b|dsh(?:\.cmd)?\s+(?:release|deploy|publish|install)\b)/iu
+const INDIRECT_SHELL_EXECUTION_RE = /(?:\b(?:invoke-expression|iex|start-process|set-alias|new-alias)\b|(?:^|[\s;&|])(?:cmd(?:\.exe)?\s+\/[ck]|(?:pwsh|powershell|bash|sh)(?:\.exe)?\s+(?:-[^\s]+\s+)*-(?:command|c)\b|(?:node|python\d*|ruby|perl)(?:\.exe)?\s+-(?:e|c)\b)|&\s*(?:\$|\(|\{))/iu
 const SHELL_CONTROL_RE = /(?:&&|\|\||[;&|<>`$(){}@^]|\r|\n)/u
 const SAFE_PARENT_SHELL_RE = /^\s*(?:(?:pwd|ls|dir|cat|type|rg)(?:\.exe|\.cmd)?\b|(?:get-location|get-childitem|get-content|select-string|resolve-path|test-path)\b|git(?:\.exe|\.cmd)?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b)/iu
 const UNSAFE_READ_OPTION_RE = /(?:^|\s)(?:--pre(?:-glob)?|--output|--ext-diff|--textconv)(?:=|\s|$)/iu
@@ -280,16 +279,7 @@ export class ExecutionGuard {
       return 'Managed construction denies direct plugin install/remove.'
     }
     if (matchesSet(name, SHELL_TOOLS)) {
-      const command = shellCommandText(exec.arguments)
-      if (DSH_PLUGIN_MUTATION_RE.test(command)) {
-        return 'Managed construction denies direct DSH plugin install/remove.'
-      }
-      if (PACKAGE_PUBLICATION_RE.test(command) || RELEASE_DEPLOY_INSTALL_RE.test(command)) {
-        return 'Managed construction denies package publication, version, release, deploy, and install commands.'
-      }
-      if (GIT_PUBLICATION_OR_DESTRUCTIVE_RE.test(command) || GH_PUBLICATION_RE.test(command)) {
-        return 'Managed construction requires a fresh user decision before publication or destructive repository operations.'
-      }
+      return 'Managed construction denies shell execution in the parent session; implementation commands must run in the Host-owned child whose real session cwd and workspace-write sandbox root are the managed source.'
     }
     if (matchesSet(name, FS_WRITE_TOOLS)) {
       const allowedRoot = this.options.allowedRoot
@@ -304,12 +294,10 @@ export class ExecutionGuard {
       if (!isPathInsideRoot(resolved, allowedRoot)) {
         return 'Managed construction denies filesystem writes outside the Host-managed source repository.'
       }
-      return undefined
+      return 'Managed construction denies parent-session filesystem mutation even inside the managed path; implementation writes must run in the cwd-bound Host-owned child.'
     }
-    // Once CreationGuard has bound a managed root, DSH remains authoritative for
-    // normal tools, workspace sandboxing, approvals, and collaboration. This
-    // guard only owns AutoEvo's decision and final-action boundaries above.
-    return undefined
+    if (matchesSet(name, FS_READ_TOOLS) || matchesSet(name, CHILD_SUPPORT_TOOLS)) return undefined
+    return `Managed construction denies parent-session tool ${JSON.stringify(name)}; bounded implementation, build, test, and skill tools run only in the cwd-bound Host-owned child.`
   }
 
   private childDenial(name: string, exec: Readonly<ToolExecution>): string | undefined {
@@ -345,6 +333,9 @@ export class ExecutionGuard {
       if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
         return 'Managed source child session denies dependency installation or mutation; use only the reviewed repository inputs already present.'
       }
+      if (INDIRECT_SHELL_EXECUTION_RE.test(command)) {
+        return 'Managed source child session denies indirect or dynamically resolved shell execution; invoke ordinary build and test commands directly.'
+      }
       if (hasUnsafeGitCommand(command)) {
         return 'Managed source child session permits only read-only git status/diff/show/log/rev-parse; the Host owns commits and publication.'
       }
@@ -375,6 +366,7 @@ export const _testing = {
   PACKAGE_PUBLICATION_RE,
   PACKAGE_DEPENDENCY_MUTATION_RE,
   RELEASE_DEPLOY_INSTALL_RE,
+  INDIRECT_SHELL_EXECUTION_RE,
   SAFE_PARENT_SHELL_RE,
   SHELL_CONTROL_RE,
   UNSAFE_READ_OPTION_RE,

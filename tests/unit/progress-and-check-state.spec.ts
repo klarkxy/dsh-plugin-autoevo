@@ -239,18 +239,34 @@ describe('tool pending presentation', () => {
     })).toMatchObject({
       card: 'generic',
       kind: 'edit',
-      title: 'Authorized in-session construction on the managed source',
+      title: 'Running authorized managed construction',
     })
     expect(presented('capability_workflow_resume', {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
       decision: { action: 'create_new' },
-    }).title).toMatch(/in-session creation|creating a new plugin/i)
+    }).title).toMatch(/managed (construction|creation)|creating a new plugin/i)
     expect(presented('capability_workflow_resume', {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
       decision: { action: 'use_this', candidate_id: CANDIDATE_ID },
     }).title).toMatch(/installing and verifying/i)
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      navigation: { kind: 'enable_builtin', candidate_ids: [CANDIDATE_ID] },
+    })).toMatchObject({
+      kind: 'read',
+      title: 'Selecting the built-in capability for final confirmation',
+    })
+    expect(presented('capability_workflow_resume', {
+      workflow_id: WORKFLOW_ID,
+      interrupt_id: INTERRUPT_ID,
+      decision: { action: 'enable_builtin', candidate_id: CANDIDATE_ID },
+    })).toMatchObject({
+      kind: 'execute',
+      title: 'Enabling the confirmed built-in Host capability',
+    })
     expect(presented('capability_workflow_diagnose', {
       workflow_id: WORKFLOW_ID,
       probes: ['managed_child'],
@@ -264,6 +280,13 @@ describe('tool pending presentation', () => {
       kind: 'delete',
       title: 'Removing the selected plugin',
     })
+  })
+
+  it('exposes enable_builtin as a Gate-2 decision in the real tool schema', () => {
+    const parameters = tool('capability_workflow_resume').parameters as unknown as {
+      properties: { decision: { properties: { action: { enum: string[] } } } }
+    }
+    expect(parameters.properties.decision.properties.action.enum).toContain('enable_builtin')
   })
 
   it('shows Chinese pending titles for a Chinese requirement', () => {
@@ -285,7 +308,7 @@ describe('tool pending presentation', () => {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
       decision: { action: 'modify_this', candidate_id: CANDIDATE_ID },
-    }).title).toBe('已授权，正在当前会话修改托管源')
+    }).title).toBe('已授权，正在受管施工会话中修改')
   })
 
   it('never includes supplied machine IDs, paths, decision tokens, or raw args', () => {

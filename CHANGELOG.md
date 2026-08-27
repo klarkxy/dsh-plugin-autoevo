@@ -7,7 +7,7 @@ All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Ver
 - Establish AutoEvo as a lightweight DSH capability discovery, review, and installation workflow.
 - Preserve Search-first discovery and fresh user decisions while treating empty results and rejected shortlists as normal outcomes.
 - Make semantic review advisory: installability is blocked only when the selected source or install target cannot be identified and installed correctly.
-- Allow normal DSH-governed editing, builds, tests, dependency work, and collaboration after create or modify authorization.
+- Run authorized create/modify work in a Host-owned child whose immutable cwd and DSH workspace-write root are the exact managed source; keep profile mutation, Git commits, publication, and final acceptance Host-owned.
 - Return structured lifecycle failures and keep installed, activated, awaiting-user-test, and verified outcomes distinct.
 - Add provisional installation receipts, exact-source removal checks, basic persisted-record validation, and in-process profile mutation serialization.
 - Keep managed-source construction recoverable when finalization or re-review fails: return to the authorized modify phase with a structured retryable failure instead of exposing a stale install choice.

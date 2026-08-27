@@ -4,13 +4,14 @@ import {
   assertCreatorReceipt,
   assertWorkOrderScope,
   createCreatorWorkOrder,
-  mintCreatorReceipt,
   type CreatorFoundation,
   type CreatorFoundationPreflight,
   type CreatorFoundationReceipt,
   type CreatorOperation,
+  type CreatorWorkOrder,
 } from './creator-foundation.js'
 import { EvolutionError } from './errors.js'
+import type { ManagedChildHost, ManagedChildResult } from './managed-child.js'
 import { reviewLocalPlugin } from './review/index.js'
 import {
   authenticatedModificationInstruction,
@@ -40,6 +41,12 @@ import type {
 
 export interface ManagedWorkDeps extends ReviewOrchestrationDeps {
   creatorFoundation: CreatorFoundation
+  managedChild: ManagedChildHost
+}
+
+interface CompletedManagedChild {
+  preflight: CreatorFoundationPreflight
+  result: ManagedChildResult
 }
 
 export function requireParentAgent(exec: WorkflowExec): NonNullable<WorkflowExec['agent']> {
@@ -84,20 +91,21 @@ export async function preflightCreator(
   }
 }
 
-export async function preserveCancelledManagedWork(
+export async function preserveFailedManagedWork(
   deps: Pick<ManagedWorkDeps, 'sources'>,
   input: {
     sourceId: string
     workflowId: string
     reviewId: string
     cause: unknown
+    cancelled: boolean
   },
 ): Promise<never> {
   let checkpoint: SourceReceipt
   try {
-    // Cancellation belongs to the user turn, not to Host cleanup.  Checkpoint
-    // with the runner's own bounded timeout so an already-aborted signal
-    // cannot strand a dirty tree behind a live workflow lock.
+    // A failed child may leave bounded edits behind. Checkpoint with the
+    // runner's own timeout so an aborted user signal cannot strand a dirty
+    // tree behind a live workflow lock.
     checkpoint = await deps.sources.preserveInterruptedChild({
       sourceId: input.sourceId,
       workflowId: input.workflowId,
@@ -106,10 +114,12 @@ export async function preserveCancelledManagedWork(
   } catch (preserveError) {
     throw new EvolutionError(
       'command_failed',
-      'Managed child was cancelled and its edits require explicit source recovery',
+      input.cancelled
+        ? 'Managed child was cancelled and its edits require explicit source recovery'
+        : 'Managed child failed and its edits require explicit source recovery',
       {
         recoveryRequired: true,
-        cancelled: true,
+        cancelled: input.cancelled,
         sourceId: input.sourceId,
         childDiagnostic: hashObject({ cause: input.cause instanceof Error ? input.cause.message : String(input.cause) }),
         preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
@@ -118,15 +128,56 @@ export async function preserveCancelledManagedWork(
   }
   throw new EvolutionError(
     'command_failed',
-    'Managed child was cancelled; its bounded edits were checkpointed for recovery',
+    input.cancelled
+      ? 'Managed child was cancelled; its bounded edits were checkpointed for recovery'
+      : 'Managed child failed; its bounded edits were checkpointed for recovery',
     {
       recoveryRequired: true,
-      cancelled: true,
+      cancelled: input.cancelled,
       sourceId: input.sourceId,
       branch: checkpoint.branch,
       headCommit: checkpoint.headCommit,
     },
   )
+}
+
+async function runManagedChild(
+  deps: ManagedWorkDeps,
+  workflow: WorkflowRecord,
+  parent: NonNullable<WorkflowExec['agent']>,
+  cwd: string,
+  workOrder: CreatorWorkOrder,
+  preflight: CreatorFoundationPreflight,
+  exec: WorkflowExec,
+): Promise<CompletedManagedChild> {
+  const sourceId = workflow.managedSourceId
+  if (!sourceId) {
+    throw new EvolutionError('invalid_input', 'Managed child construction is missing a Host-managed source')
+  }
+  try {
+    const result = await deps.managedChild.run({
+      parent,
+      cwd,
+      workOrder,
+      preflight,
+      ...(exec.signal ? { signal: exec.signal } : {}),
+    })
+    return { preflight, result }
+  } catch (error) {
+    rememberCreator(workflow, workOrder.operation, 'unavailable')
+    workflow.updatedAt = new Date().toISOString()
+    await deps.store.put('workflows', workflow)
+    return await preserveFailedManagedWork(deps, {
+      sourceId,
+      workflowId: workflow.id,
+      reviewId: workOrder.baselineReview?.reviewId
+        ?? workflow.lineageTipReviewId
+        ?? workflow.lastReviewId
+        ?? 'unknown',
+      cause: error,
+      cancelled: exec.signal?.aborted === true,
+    })
+  }
 }
 
 export async function prepareManagedModification(
@@ -189,10 +240,10 @@ export async function prepareManagedModification(
   await deps.store.put('reviews', review)
   workflow.pendingPath = receipt.path
   workflow.pendingWorkOrder = workOrder
-  rememberCreator(workflow, workOrder.operation, 'verified', mintCreatorReceipt(preflight, parent.id))
   workflow.updatedAt = new Date().toISOString()
   await deps.store.put('workflows', workflow)
-  return { resolution, path: receipt.path }
+  const child = await runManagedChild(deps, workflow, parent, receipt.path, workOrder, preflight, exec)
+  return finishManagedWork(deps, resolution, exec, workflow, child)
 }
 
 export async function prepareManagedCreation(
@@ -242,20 +293,22 @@ export async function prepareManagedCreation(
     const parent = requireParentAgent(exec)
     workflow.pendingPath = receipt.path
     workflow.pendingWorkOrder = workOrder
-    rememberCreator(workflow, 'create', 'verified', mintCreatorReceipt(preflight, parent.id))
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
-    return { resolution, path: receipt.path }
+    const child = await runManagedChild(deps, workflow, parent, receipt.path, workOrder, preflight, exec)
+    return finishManagedWork(deps, resolution, exec, workflow, child)
   } catch (error) {
+    if (error instanceof EvolutionError && error.details.recoveryRequired === true) throw error
     rememberCreator(workflow, 'create', 'unavailable')
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
     if (!exec.signal?.aborted) throw error
-    return await preserveCancelledManagedWork(deps, {
+    return await preserveFailedManagedWork(deps, {
       sourceId: sourceKey,
       workflowId: workflow.id,
       reviewId,
       cause: error,
+      cancelled: true,
     })
   }
 }
@@ -265,35 +318,41 @@ export async function finishManagedWork(
   resolution: ResolutionRecord,
   exec: WorkflowExec,
   workflow: WorkflowRecord,
+  completedChild?: CompletedManagedChild,
 ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord; continueConstruction?: boolean }> {
   const sourceKey = workflow.managedSourceId
   const cwd = workflow.pendingPath
   const workOrder = workflow.pendingWorkOrder
   if (!sourceKey || !cwd || !workOrder) {
-    throw new EvolutionError('invalid_input', 'In-session construction is missing a Host-managed source and work order')
+    throw new EvolutionError('invalid_input', 'Managed child construction is missing a Host-managed source and work order')
   }
   if (exec.signal?.aborted) {
     rememberCreator(workflow, workOrder.operation, 'unavailable')
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
-    return await preserveCancelledManagedWork(deps, {
+    return await preserveFailedManagedWork(deps, {
       sourceId: sourceKey,
       workflowId: workflow.id,
       reviewId: workOrder.baselineReview?.reviewId ?? workflow.lineageTipReviewId ?? workflow.lastReviewId ?? 'unknown',
       cause: new EvolutionError('command_failed', 'Managed construction was cancelled'),
+      cancelled: true,
     })
   }
   assertWorkOrderScope(workOrder, cwd)
   const parent = requireParentAgent(exec)
-  const preflight = await preflightCreator(deps, workflow, workOrder.operation, exec)
-  const receipt = mintCreatorReceipt(preflight, parent.id)
-  assertCreatorReceipt(receipt, preflight)
-  rememberCreator(workflow, workOrder.operation, 'verified', receipt)
+  const preflight = completedChild?.preflight ?? await preflightCreator(deps, workflow, workOrder.operation, exec)
+  const childResult = completedChild?.result
+    ?? (await runManagedChild(deps, workflow, parent, cwd, workOrder, preflight, exec)).result
+  assertCreatorReceipt(childResult.creator, preflight)
+  if (childResult.creator.childSessionId !== childResult.sessionId) {
+    throw new EvolutionError('invalid_input', 'Managed child Creator receipt is not bound to the completed child session')
+  }
+  rememberCreator(workflow, workOrder.operation, 'verified', childResult.creator)
   const baselineReviewId = workOrder.baselineReview?.reviewId
     ?? workflow.lineageTipReviewId
     ?? workflow.lastReviewId
   if (!baselineReviewId) {
-    throw new EvolutionError('invalid_input', 'In-session construction is missing a baseline review')
+    throw new EvolutionError('invalid_input', 'Managed child construction is missing a baseline review')
   }
   const baselineReview = await deps.store.getReview(baselineReviewId)
   const source = await deps.sources.readReceipt(sourceKey)
@@ -344,7 +403,7 @@ export async function finishManagedWork(
       ...(workflow.modificationOutcome?.attempts ?? []),
       {
         attempt,
-        childSessionId: parent.id,
+        childSessionId: childResult.sessionId,
         commit: committed.headCommit,
         changedFiles: committed.changedFiles,
         changedFilesTruncated: committed.changedFilesTruncated,
@@ -404,7 +463,7 @@ export async function finishManagedWork(
       workflow.pendingPath = source.path
       workflow.updatedAt = new Date().toISOString()
       await deps.store.put('workflows', workflow)
-      return { ...finalized, path: source.path, continueConstruction: true }
+      return finishManagedWork(deps, finalized.resolution, exec, workflow)
     }
     delete workflow.pendingWorkOrder
     workflow.updatedAt = new Date().toISOString()
@@ -415,11 +474,12 @@ export async function finishManagedWork(
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
     if (!exec.signal?.aborted) throw error
-    return await preserveCancelledManagedWork(deps, {
+    return await preserveFailedManagedWork(deps, {
       sourceId: sourceKey,
       workflowId: workflow.id,
       reviewId: baselineReviewId,
       cause: error,
+      cancelled: true,
     })
   }
 }

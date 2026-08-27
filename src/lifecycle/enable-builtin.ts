@@ -1,5 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { Context } from '@deepseek-ai/cordis'
 import { parse, stringify } from 'yaml'
 import type { ExecutionEndpoint } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
@@ -127,6 +129,9 @@ export async function disableBuiltinMount(input: {
  * `dsh --dump-config`; a failed check rolls the patch file back.
  */
 export async function enableBuiltinMount(input: {
+  ctx: Context
+  exec: ToolRunContext
+  requirement: string
   launcher: DshLauncher
   dshHome: string
   bundledRoot: string
@@ -174,6 +179,20 @@ export async function enableBuiltinMount(input: {
   }
   const wrote = !alreadyMounted(rows, mountId, packageName)
   if (wrote) {
+    const approval = input.ctx.get('approval')
+    if (!approval || !input.exec.agent) {
+      throw new EvolutionError('approval_required', 'A live DSH approval service and Agent turn are required')
+    }
+    const outcome = await approval.request({
+      agent: input.exec.agent,
+      toolName: 'capability_workflow_resume',
+      callId: input.exec.callId,
+      reason: `Enable exact Host-bundled capability ${packageName}@${version} by adding mount ${mountId} to profile ${targetProfile} for requirement: ${input.requirement}`,
+      signal: input.exec.signal,
+    })
+    if (outcome !== 'allowed-once') {
+      throw new EvolutionError('approval_required', `The built-in profile change was not approved (${outcome})`, { outcome })
+    }
     rows.push({ insert: [{ id: mountId, name: packageName }] })
     await writeFile(patchPath, stringify(rows), 'utf8')
   }

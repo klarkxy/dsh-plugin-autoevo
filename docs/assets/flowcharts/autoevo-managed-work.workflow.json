@@ -21,12 +21,12 @@
       },
       {
         "id": "construct",
-        "label": "会话内施工",
+        "label": "受管子会话施工",
         "focus": [
           "prepare",
           "construct"
         ],
-        "note": "当前会话在绑定目录内可见地编辑和运行检查，不启动隐藏子 Agent。"
+        "note": "Host 创建 cwd 与 workspace-write 根都精确绑定到托管源的短生命周期子会话。"
       },
       {
         "id": "finalize",
@@ -48,7 +48,7 @@
     },
     {
       "id": "agent",
-      "label": "能力进化会话"
+      "label": "受管施工子会话"
     },
     {
       "id": "host",
@@ -119,8 +119,8 @@
       "col": 3,
       "width": 140,
       "type": "frontend",
-      "label": "会话内施工",
-      "sublabel": "finish_managed_work 收口"
+      "label": "受管施工",
+      "sublabel": "精确 cwd + sandbox"
     },
     {
       "id": "validate",
@@ -202,7 +202,7 @@
       "title": "施工边界",
       "items": [
         "只在托管源内编辑，不换目标、不发布",
-        "可用 DSH 允许的编辑、shell、构建、测试与依赖工具",
+        "可编辑并运行有界构建/测试；父会话不直接写入",
         "取消或异常有独立有界收口，不复用已取消 signal"
       ]
     },

@@ -190,7 +190,7 @@ async function assertPackedCurrentPolicy(packedRoot) {
 
   const userGuide = await readFile(path.join(packedRoot, 'docs', 'user-guide.md'), 'utf8')
   assert.match(userGuide, /tool_roundtrip/u)
-  assert.match(userGuide, /AutoEvo 不另建私有预检 profile/u)
+  assert.match(userGuide, /不会用私有预检结果代替真实证据/u)
   assert.match(userGuide, /restartRequired: true/u)
 
   const developerGuide = await readFile(path.join(packedRoot, 'docs', 'developer-guide.md'), 'utf8')
@@ -222,7 +222,9 @@ async function assertPackedCurrentPolicy(packedRoot) {
   )
   assert.match(skill, /Host `tool_roundtrip` passed/u)
   assert.match(skill, /model judgment, semantic verifier,[^\n]+cannot mint `verified`/u)
-  assert.match(skill, /finish_managed_work/u)
+  assert.match(skill, /short-lived, cwd-bound managed child/u)
+  assert.match(skill, /parent Capability Evolution session remains read-only/u)
+  assert.doesNotMatch(skill, /finish_managed_work/u)
   assert.match(state, /completed `awaiting_user_test`/u)
   assert.match(state, /two legal modes that must not be mixed/u)
   assert.match(state, /Policy V11 workflow/u)

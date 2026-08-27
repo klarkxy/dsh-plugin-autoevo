@@ -56,6 +56,7 @@
     "docs/architecture.md",
     "docs/security.md",
     "docs/assets/kanban.png",
+    "docs/assets/flowcharts",
     "example/README.md",
     "example/create",
     "example/auto-review",

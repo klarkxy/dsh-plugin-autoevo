@@ -88,7 +88,7 @@ describe('documentation set', () => {
     }
   })
 
-  it('does not revive the removed child-agent construction contract', () => {
+  it('documents the Host-owned managed-child construction boundary', () => {
     const governedDocs = [
       ...documentationFiles,
       'skills/autoevo-plugin-creator/SKILL.md',
@@ -96,7 +96,9 @@ describe('documentation set', () => {
       'skills/autoevo-plugin-creator/references/eval-traces.md',
     ].map(read).join('\n')
 
-    expect(governedDocs).not.toMatch(/Host-launched child|workspace-write child|workspace-write 子会话|AgentHandle\.dispose\(\)|resume with the local checkout path/u)
-    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('finish_managed_work')
+    expect(governedDocs).not.toMatch(/resume with the local checkout path|finish_managed_work/u)
+    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('short-lived, cwd-bound managed child')
+    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('The parent Capability Evolution session remains read-only')
+    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('Do not pass an arbitrary checkout path or edit from the parent session')
   })
 })

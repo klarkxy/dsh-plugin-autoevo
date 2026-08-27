@@ -11,6 +11,7 @@ import {
   CREATOR_PRESET_ID,
   assertChildCreatorCatalog,
   assertWorkOrderScope,
+  compositionSha256,
   formatCreatorWorkOrder,
   mintCreatorReceipt,
   preflightCreatorFoundation,
@@ -160,11 +161,111 @@ export class DshManagedChildHost implements ManagedChildHost {
     private readonly runner: CommandRunner,
   ) {}
 
-  async run(_request: ManagedChildRequest): Promise<ManagedChildResult> {
-    throw new EvolutionError(
-      'invalid_input',
-      'AutoEvo Host no longer creates child Agents; construction continues in the parent session',
-    )
+  async run(request: ManagedChildRequest): Promise<ManagedChildResult> {
+    const services = requireLiveServices(this.ctx)
+    const parentAgents = request.parent.ctx.get('agents') as AgentRegistry | undefined
+    if (!parentAgents) {
+      throw new EvolutionError('invalid_input', 'Initiating parent Agent context cannot access the Agent registry')
+    }
+    const cwd = path.resolve(request.cwd)
+    const parentDepth = request.parent.session.header.delegationDepth ?? 0
+    if (parentDepth !== 0) {
+      throw new EvolutionError('invalid_input', 'Managed AutoEvo children may only be launched from a top-level parent session', {
+        parentDepth,
+      })
+    }
+    assertWorkOrderScope(request.workOrder, cwd)
+    const preflight = request.preflight ?? await preflightCreatorFoundation(this.ctx, {
+      ...(request.signal ? { signal: request.signal } : {}),
+      parentCtx: request.parent.ctx,
+    })
+    const expectedChildCompositionSha256 = compositionSha256(await services.agentPresets.read(CREATOR_PRESET_ID))
+    const childGuard = new ExecutionGuard({ role: 'child' })
+    const childBudget = new ChildTurnBudget()
+    const sessionId = SessionId(`autoevo-child-${randomUUID()}`)
+    const handle = await parentAgents.create({
+      sessionId,
+      meta: {
+        cwd,
+        parentSession: request.parent.id,
+        origin: 'subagent',
+        delegationDepth: 1,
+        agentPreset: CREATOR_PRESET_ID,
+      },
+      agentOptions: { ...request.parent.options },
+      ...(request.signal ? { signal: request.signal } : {}),
+      setup: async (agentCtx) => {
+        const child = agentCtx.agent
+        if (!child || child.id !== sessionId || path.resolve(child.session.header.cwd ?? '') !== cwd) {
+          throw new EvolutionError('invalid_input', 'DSH child setup did not bind the expected session identity and managed cwd')
+        }
+        setSandboxMode(child.session, 'workspace-write')
+        const mounted = await services.agentPresets.mount(agentCtx, CREATOR_PRESET_ID)
+        const composed = services.agentPresets.composedPreset(agentCtx)
+        const mountedComposition = await services.agentPresets.read(CREATOR_PRESET_ID)
+        await assertChildCreatorCatalog(
+          agentCtx,
+          child,
+          preflight,
+          mounted,
+          composed,
+          mountedComposition,
+          expectedChildCompositionSha256,
+        )
+        agentCtx.on('agent/pre-step', ({ messages, step }, next) => childBudget.preStep(step, messages, next))
+        agentCtx.on('tools/pre-execute', (exec, next) => {
+          const budgetDenial = childBudget.denialReason()
+          return budgetDenial ? Promise.resolve({ kind: 'deny', reason: budgetDenial }) : childGuard.preExecute(exec, next)
+        })
+        agentCtx.tools.guard((exec) => childGuard.guard(exec))
+        agentCtx.systemPrompt.section({
+          name: 'autoevo:managed-child-boundary',
+          order: 119,
+          text: 'This is a Host-owned AutoEvo managed-source child on the official Creator cordis preset. The session cwd and workspace-write sandbox are fixed to one managed Git repository. AutoEvo decisions, Cordis mutation, nested delegation, plugin mutation, and publication are forbidden. Official Creator constructs; AutoEvo governs.',
+        })
+      },
+    })
+
+    let disposePromise: Promise<void> | undefined
+    const dispose = (): Promise<void> => {
+      disposePromise ??= handle.dispose()
+      return disposePromise
+    }
+
+    try {
+      if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
+        throw new EvolutionError('invalid_input', 'Created child is not owned by the initiating parent Agent')
+      }
+      if (path.resolve(handle.agent.session.header.cwd ?? '') !== cwd) {
+        throw new EvolutionError('invalid_input', 'Created child cwd does not match the managed source repository')
+      }
+      const sandbox = await probeWorkspaceWriteSandbox({
+        sandbox: services.sandbox,
+        sandboxPolicy: services.sandboxPolicy,
+        fs: services.fs,
+        runner: this.runner,
+      }, handle.agent.session, cwd, request.signal)
+
+      handle.agent.followup(createUserMessage({
+        source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
+        content: [{ type: 'text', text: childInstruction(cwd, request.workOrder) }],
+      }))
+      await waitForIdleOrAbort(handle, request.signal, dispose)
+      assertCompletedTurn(handle.agent)
+      const taskResult = assistantText(handle.agent)
+      if (!taskResult.endsWith(CHILD_RESULT_MARKER)) {
+        throw new EvolutionError('command_failed', 'Managed child completed without the required task-result marker')
+      }
+      const childSessionId = String(handle.agent.id)
+      return {
+        sessionId: childSessionId,
+        taskResult,
+        sandbox,
+        creator: mintCreatorReceipt(preflight, childSessionId),
+      }
+    } finally {
+      await dispose()
+    }
   }
 }
 

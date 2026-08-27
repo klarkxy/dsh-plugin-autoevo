@@ -68,9 +68,12 @@ describe('capability adopt', () => {
       'dsh-tool-tracked': TRACKED_SPEC,
       'dsh-tool-removed': 'file:/local/removed.tgz',
     })
-    await store.put('installations', trackedInstallation())
+    await store.put('installations', trackedInstallation({
+      dshHome: path.join(deps.config.dshHome, '..', path.basename(deps.config.dshHome)),
+    }))
     await store.put('installations', trackedInstallation({
       id: `installation_${'2'.repeat(24)}`,
+      dshHome: deps.config.dshHome,
       packageName: 'dsh-tool-removed',
       installSpec: 'file:/local/removed.tgz',
       removed: true,
@@ -92,6 +95,39 @@ describe('capability adopt', () => {
         dependencySpec: 'file:[local-reference]',
         configuredBundle: false,
       },
+    ])
+  })
+
+  it('does not suppress a current-profile package from receipts in another DSH home or profile', async () => {
+    const { store, deps } = await setup({
+      'dsh-tool-other-home': TRACKED_SPEC,
+      'dsh-tool-other-profile': TRACKED_SPEC,
+      'dsh-tool-superseded': TRACKED_SPEC,
+    })
+    await store.put('installations', trackedInstallation({
+      id: `installation_${'3'.repeat(24)}`,
+      dshHome: path.join(deps.config.dshHome, '..', 'other-dsh-home'),
+      packageName: 'dsh-tool-other-home',
+    }))
+    await store.put('installations', trackedInstallation({
+      id: `installation_${'4'.repeat(24)}`,
+      dshHome: deps.config.dshHome,
+      targetProfile: 'desktop',
+      packageName: 'dsh-tool-other-profile',
+    }))
+    await store.put('installations', trackedInstallation({
+      id: `installation_${'5'.repeat(24)}`,
+      dshHome: deps.config.dshHome,
+      packageName: 'dsh-tool-superseded',
+      supersededByInstallationId: `installation_${'6'.repeat(24)}`,
+    }))
+
+    const scan = await scanOrphanedInstallations(deps)
+
+    expect(scan.orphans.map((item) => item.packageName)).toEqual([
+      'dsh-tool-other-home',
+      'dsh-tool-other-profile',
+      'dsh-tool-superseded',
     ])
   })
 
@@ -117,10 +153,27 @@ describe('capability adopt', () => {
 
   it('rejects adopting an already tracked package', async () => {
     const { store, deps } = await setup({ 'dsh-tool-tracked': TRACKED_SPEC })
-    await store.put('installations', trackedInstallation())
+    await store.put('installations', trackedInstallation({ dshHome: deps.config.dshHome }))
 
     await expect(adoptInstallation(deps, { packageName: 'dsh-tool-tracked' }))
       .rejects.toThrow(/already tracked/i)
+  })
+
+  it('allows adoption when the matching package is tracked only in another profile', async () => {
+    const { store, deps } = await setup({ 'dsh-tool-tracked': TRACKED_SPEC })
+    await store.put('installations', trackedInstallation({
+      dshHome: deps.config.dshHome,
+      targetProfile: 'desktop',
+    }))
+
+    const record = await adoptInstallation(deps, { packageName: 'dsh-tool-tracked' })
+
+    expect(record).toMatchObject({
+      origin: 'adopted',
+      dshHome: deps.config.dshHome,
+      targetProfile: 'web',
+      packageName: 'dsh-tool-tracked',
+    })
   })
 
   it('rejects adopting a package that is not installed in the current profile', async () => {

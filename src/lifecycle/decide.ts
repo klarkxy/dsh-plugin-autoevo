@@ -85,17 +85,17 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'selection_required') {
     return zh
-      ? '只把 snapshot 里的真实候选写成带序号短名单，先写在对话里，然后停。每行只写序号、名字、仓库和一句话说明；candidate_id 只用于随后的 resume，不要念给用户。不要提问，不要把官方 API、自建方案或“再搜一下”写成候选。parked 是成功停牌：本回合不要再调用任何工具。等用户回话后，把“两个都、前两个、全部、另一个、第二个、看看3”等映射为 candidate_id，立刻用当前 interrupt 允许的 navigation 调用 capability_workflow_resume；选候选阶段不要 use_this 或 modify_this。reuse_local 表示原样使用，不审查、不修改。enable_builtin 表示直接启用宿主自带的内置能力，不审查、不安装、不新建。不要调用 ask_user。'
-      : 'Write a numbered shortlist of real snapshot candidates in chat, then stop. Each row is index, name, repository, and one-line why; keep candidate_id for the later resume call and do not recite it. Do not ask questions, and do not invent official-API, build-it-yourself, or search-further rows. Parked is a successful stop: do not call any tools until the user replies. After the user replies, map natural language such as both, the first two, all, the other one, the second one, or look at 3 to candidate IDs and immediately call capability_workflow_resume with a currently allowed navigation. Do not send use_this or modify_this at selection. reuse_local means use unchanged: no review and no modification. enable_builtin means directly enable a capability already bundled with the Host: no review, no install, no creation. Do not call ask_user.'
+      ? '只把 snapshot 里的真实候选写成带序号短名单，先写在对话里，然后停。每行只写序号、名字、仓库和一句话说明；candidate_id 只用于随后的 resume，不要念给用户。不要提问，不要把官方 API、自建方案或“再搜一下”写成候选。parked 是成功停牌：本回合不要再调用任何工具。等用户回话后，把“两个都、前两个、全部、另一个、第二个、看看3”等映射为 candidate_id，立刻用当前 interrupt 允许的 navigation 调用 capability_workflow_resume；选候选阶段不要 use_this 或 modify_this。reuse_local 表示原样使用，不审查、不修改。Gate 1 的 enable_builtin 只冻结内置候选与目标 profile，随后必须停在新的最终确认，不能在这一回合启用。不要调用 ask_user。'
+      : 'Write a numbered shortlist of real snapshot candidates in chat, then stop. Each row is index, name, repository, and one-line why; keep candidate_id for the later resume call and do not recite it. Do not ask questions, and do not invent official-API, build-it-yourself, or search-further rows. Parked is a successful stop: do not call any tools until the user replies. After the user replies, map natural language such as both, the first two, all, the other one, the second one, or look at 3 to candidate IDs and immediately call capability_workflow_resume with a currently allowed navigation. Do not send use_this or modify_this at selection. reuse_local means use unchanged: no review and no modification. Gate-1 enable_builtin only freezes the built-in candidate and target profile; it must then park at a fresh final confirmation and cannot enable anything in the same turn. Do not call ask_user.'
   }
   if (authorization.state === 'confirmation_required') {
     return zh
-      ? '用两三句话写审查结论和风险，只展示当前合法动作，然后停。不要提问。本回合不要再调用任何工具。安全发现只是静态观察，不得推断用途。审查层为 manual_runtime 的候选需要用户在真实客户端手动测试，先向用户说明这一点。用户要看其它候选时用 navigation；用户明确选择使用、修改、新建或先停时提交结构化 decision。采用的能力始终持久安装，公开决策不接受 retention。'
-      : 'Summarize the review conclusion and risk in two or three sentences, show only legal actions, then stop. Do not ask questions. Do not call any tools until the user replies. Security findings are static observations; do not infer purpose. A manual_runtime candidate requires a manual user test in a real client; tell the user before the final choice. For another candidate, use navigation. For an explicit use, modify, create, or stop choice, submit a structured decision. Adopted capabilities are always installed persistently, and public decisions do not accept retention.'
+      ? '用两三句话写审查结论和风险，只展示当前合法动作，然后停。不要提问。本回合不要再调用任何工具。安全发现只是静态观察，不得推断用途。审查层为 manual_runtime 的候选需要用户在真实客户端手动测试，先向用户说明这一点。若 facts 提供 builtinEnablement，明确说明将为其中冻结的内置包、mount 和 profile 启用，并等待用户再次确认；确认时用 decision.enable_builtin 和该候选 id。用户要看其它候选时用 navigation；用户明确选择使用、修改、新建或先停时提交结构化 decision。采用的能力始终持久安装，公开决策不接受 retention。'
+      : 'Summarize the review conclusion and risk in two or three sentences, show only legal actions, then stop. Do not ask questions. Do not call any tools until the user replies. Security findings are static observations; do not infer purpose. A manual_runtime candidate requires a manual user test in a real client; tell the user before the final choice. When facts include builtinEnablement, name the exact frozen built-in package, mount, and profile that would be enabled and wait for another user confirmation; submit decision.enable_builtin with that candidate id only after it arrives. For another candidate, use navigation. For an explicit use, modify, create, or stop choice, submit a structured decision. Adopted capabilities are always installed persistently, and public decisions do not accept retention.'
   }
   if (authorization.state === 'create_authorized') {
     return zh
-      ? '用户允许新建。创建只在当前会话的托管 git 源中进行；不要用 cordis_define 代替这份施工。'
+      ? '用户允许新建。创建只在 Host 持有的受管子会话和托管 git 源中进行；不要用 cordis_define 代替这份施工。'
       : 'The user allowed create-new. Creation continues in this session on the Host-managed git source; do not use cordis_define instead of that construction.'
   }
   if (authorization.state === 'use_review') {
@@ -105,13 +105,18 @@ export function nextStepForAuthorization(
   }
   if (authorization.state === 'modify_review') {
     return zh
-      ? '用户选择在这次审查上做最小修改。修改在当前会话的托管源中进行；不要提交本地路径。'
+      ? '用户选择在这次审查上做最小修改。修改在 Host 持有的受管子会话和托管源中进行；不要提交本地路径。'
       : 'The user chose to improve this review. Modification continues in this session on the Host-managed source; do not supply a local path.'
   }
   if (authorization.state === 'reuse_local') {
     return zh
       ? '用户选择原样使用已有的本地能力。不要审查、修改或安装。'
       : 'The user chose the existing local capability unchanged. Do not review, modify, or install.'
+  }
+  if (authorization.state === 'enable_builtin') {
+    return zh
+      ? '用户已在新的确认回合允许启用所选的 Host 内置能力。工作流只可修改冻结的 profile mount。'
+      : 'The user confirmed enabling the selected Host-bundled capability in a fresh turn. The workflow may mutate only the frozen profile mount.'
   }
   if (authorization.state === 'stopped') {
     return zh
@@ -157,6 +162,13 @@ export function authorizationFromDecision(
       selectedRepositories,
     }
   }
+  if (action === 'enable_builtin') {
+    return {
+      state: 'enable_builtin',
+      resolutionId,
+      reason: 'The user confirmed the exact Host-bundled capability enablement in a fresh Gate-2 turn.',
+    }
+  }
   return {
     state: 'selection_required',
     resolutionId,
@@ -186,7 +198,9 @@ export function resolveDecisionTarget(
     throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V11')
   }
   const option = interrupt.options.find((item) => item.id === decision.action)!
-  const needsCandidate = decision.action === 'use_this' || decision.action === 'modify_this'
+  const needsCandidate = decision.action === 'use_this'
+    || decision.action === 'modify_this'
+    || decision.action === 'enable_builtin'
   if (!needsCandidate) {
     if (decision.candidateId) {
       throw new EvolutionError('invalid_input', `${decision.action} does not accept candidate_id`)

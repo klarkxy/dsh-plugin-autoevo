@@ -56,12 +56,12 @@ declare const POLICY_VERSION = "11";
 declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
-type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'use_review' | 'modify_review' | 'create_authorized';
+type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'enable_builtin' | 'use_review' | 'modify_review' | 'create_authorized';
 type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source' | 'host_bundled';
 type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
-type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this';
+type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'enable_builtin';
 type NavigationKind = 'clarify_requirement' | 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'enable_builtin' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
@@ -575,7 +575,7 @@ interface AuthorizationDecisionInput {
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 interface ResumeInput {
   workflowId: string;
-  /** Required at user gates. Omit for in-session `finish_managed_work`. */
+  /** Required at user gates. Omit for Host-owned managed-work finalization. */
   interruptId?: string;
   /** Model-interpreted read-only navigation. Never grants a side effect except finish_managed_work. */
   navigation?: NavigationInput;
@@ -591,6 +591,8 @@ interface SelectionReceipt {
   workflowId: string;
   interruptId: string;
   snapshotDigest: string;
+  /** Gate 1 records a read-only choice; only Gate 2 may authorize mutation. */
+  phase?: DecisionPhase;
   kind: NavigationKind | AuthorizationAction;
   candidateIds: string[];
   candidateDigests: Record<string, string>;
@@ -1171,8 +1173,11 @@ interface AgentGateState {
   activeResolutionId?: string;
   authorization?: ResolutionAuthorization;
   lastUserMessage?: string;
+  currentMessageId?: string;
   currentTurnId?: string;
   turnSequence: number;
+  seenMessageIds: Set<string>;
+  consumedMessageIds: Set<string>;
   consumedTurnIds: Set<string>;
   waitingKind?: 'await_clarification' | 'await_discovery' | 'await_selection' | 'await_confirmation' | 'await_modify_work' | 'await_recovery';
   interruptWatermarkTurnId?: string;
@@ -1183,10 +1188,14 @@ interface AgentGateState {
   constructionRoot?: string;
 }
 interface UserFacingMessage {
+  id?: unknown;
+  role?: unknown;
+  source?: unknown;
   content?: readonly unknown[];
 }
 interface ClaimedHostTurn {
   turnId: string;
+  messageId: string;
   message: string;
   sequence: number;
 }
@@ -1204,7 +1213,7 @@ declare class CreationGuard {
   readonly bootId: string;
   constructor(options?: CreationGuardOptions);
   beginResolution(agent?: Agent): number | undefined;
-  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): void;
+  rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): boolean;
   lastUserMessage(agent: Agent | undefined): string | undefined;
   currentTurnId(agent: Agent | undefined): string | undefined;
   setConstructionRoot(agent: Agent | undefined, root: string | undefined): void;
@@ -2089,7 +2098,8 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly launcher;
   private readonly engine;
   private readonly creatorFoundation;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, _managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
+  private readonly managedChild;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   private managedWorkDeps;
   private withWorkspace;
   start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string): Promise<WorkflowView>;

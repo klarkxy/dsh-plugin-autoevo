@@ -471,7 +471,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(reused.workflow.executionLease).toMatchObject({ candidateId: candidate.id, candidateDigest: candidate.digest, endpoint: { kind: 'exact_tool', name: 'pwsh' } })
   })
 
-  it('enables a host-bundled candidate directly and ends at restart_required', async () => {
+  it('parks a host-bundled Gate-1 selection and enables only after a fresh bound Gate-2 decision', async () => {
     const record = resolution('current time')
     record.localCandidates = [{
       kind: 'plugin',
@@ -493,6 +493,42 @@ describe('workflow engine autonomous discovery', () => {
     const candidate = selection.workflow.candidateSnapshot![0]!
     expect(selection.workflow.interrupt?.options.map((option) => option.id)).toContain('enable_builtin')
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '直接启用' }] })
+    const confirmation = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+    }, turn)
+
+    expect(confirmation.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_confirmation' })
+    expect(confirmation.workflow.selectionReceipt).toMatchObject({
+      phase: 'gate1',
+      kind: 'enable_builtin',
+      candidateIds: [candidate.id],
+    })
+    expect(confirmation.workflow.interrupt?.options).toEqual([
+      expect.objectContaining({ id: 'enable_builtin', candidateIds: [candidate.id] }),
+      expect.objectContaining({ id: 'stop' }),
+    ])
+    expect(confirmation.workflow.interrupt?.facts).toMatchObject({
+      builtinEnablement: {
+        candidateId: candidate.id,
+        packageName: '@deepseek-ai/dsh-time-context',
+        version: '0.1.1-rc.2',
+        mountId: 'time-context',
+        targetProfile: 'web',
+      },
+    })
+    expect(workflowHost.enableBuiltin).not.toHaveBeenCalled()
+
+    const sameTurn = await engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId: confirmation.workflow.interrupt!.interruptId,
+      decision: { action: 'enable_builtin', candidateId: candidate.id },
+    }, turn)
+    expect(sameTurn.status).toBe('parked')
+    expect(workflowHost.enableBuiltin).not.toHaveBeenCalled()
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用这个内置能力' }] })
     // Terminal settlement clears the grant on the shared record object; capture at execution time.
     let capturedCommitment: unknown
     let capturedReceipt: unknown
@@ -502,9 +538,9 @@ describe('workflow engine autonomous discovery', () => {
     })
 
     const enabled = await engine.resume({
-      workflowId: selection.workflow.id,
-      interruptId: selection.workflow.interrupt!.interruptId,
-      navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+      workflowId: confirmation.workflow.id,
+      interruptId: confirmation.workflow.interrupt!.interruptId,
+      decision: { action: 'enable_builtin', candidateId: candidate.id },
     }, turn)
 
     expect(enabled.workflow).toMatchObject({ status: 'completed', cursor: 'restart_required' })
@@ -520,9 +556,70 @@ describe('workflow engine autonomous discovery', () => {
         targetProfile: 'web',
       },
     })
-    expect(capturedReceipt).toMatchObject({ kind: 'enable_builtin', candidateIds: [candidate.id] })
+    expect(capturedReceipt).toMatchObject({ phase: 'gate2', kind: 'enable_builtin', candidateIds: [candidate.id] })
     expect(enabled.workflow.executionLease).toBeUndefined()
     expect(workflowHost.enableBuiltin).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects stale or forged Gate-2 built-in enablement without mutation', async () => {
+    const record = resolution('current time')
+    record.localCandidates = [
+      {
+        kind: 'plugin',
+        name: '@deepseek-ai/dsh-time-context',
+        description: 'Time context',
+        availability: 'host_bundled',
+        confidence: 0.92,
+        fit: 'full',
+        reuseEligible: false,
+        hostBundled: {
+          packageName: '@deepseek-ai/dsh-time-context',
+          version: '0.1.1-rc.2',
+          mountId: 'time-context',
+        },
+      },
+      {
+        kind: 'plugin',
+        name: '@deepseek-ai/dsh-other-context',
+        description: 'Other context',
+        availability: 'host_bundled',
+        confidence: 0.9,
+        fit: 'full',
+        reuseEligible: false,
+        hostBundled: {
+          packageName: '@deepseek-ai/dsh-other-context',
+          version: '0.1.1-rc.2',
+          mountId: 'other-context',
+        },
+      },
+    ]
+    const { guard, engine, workflowHost } = await makeEngine(record, 'enable-builtin-forged')
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'current time', turn, 2)
+    const [selected, forged] = selection.workflow.candidateSnapshot!
+    const gate1InterruptId = selection.workflow.interrupt!.interruptId
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先看第一个内置能力' }] })
+    const confirmation = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: gate1InterruptId,
+      navigation: { kind: 'enable_builtin', candidateIds: [selected!.id] },
+    }, turn)
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用第二个' }] })
+    await expect(engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId: gate1InterruptId,
+      decision: { action: 'enable_builtin', candidateId: selected!.id },
+    }, turn)).rejects.toMatchObject({ code: 'invalid_input' })
+
+    const invalid = await engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId: confirmation.workflow.interrupt!.interruptId,
+      decision: { action: 'enable_builtin', candidateId: forged!.id },
+    }, turn)
+    expect(invalid.status).toBe('invalid_resume')
+    expect(invalid.resumeHint).toMatch(/candidate_id is not allowed/i)
+    expect(workflowHost.enableBuiltin).not.toHaveBeenCalled()
   })
 
   it('rejects enable_builtin for a non-bundled candidate', async () => {

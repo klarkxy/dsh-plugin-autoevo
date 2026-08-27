@@ -1,6 +1,7 @@
 import {
   BRIDGE_EXECUTION_TOOLS,
   type ActionCommitment,
+  type DecisionPhase,
   type ExecutionEndpoint,
   type ExecutionLease,
   type ReviewRecord,
@@ -54,6 +55,7 @@ export function endpointForLocalReuse(candidate: CandidateSnapshotItem): Executi
 export function mintSelectionReceipt(input: {
   workflowId: string
   interrupt: InterruptPayload
+  phase: DecisionPhase
   kind: SelectionReceipt['kind']
   candidateIds: string[]
   snapshot: CandidateSnapshotItem[]
@@ -70,6 +72,7 @@ export function mintSelectionReceipt(input: {
       workflowId: input.workflowId,
       interruptId: input.interrupt.interruptId,
       snapshotDigest: input.interrupt.snapshotDigest,
+      phase: input.phase,
       kind: input.kind,
       candidateIds: input.candidateIds,
       candidateDigests,
@@ -79,6 +82,7 @@ export function mintSelectionReceipt(input: {
     workflowId: input.workflowId,
     interruptId: input.interrupt.interruptId,
     snapshotDigest: input.interrupt.snapshotDigest,
+    phase: input.phase,
     kind: input.kind,
     candidateIds: input.candidateIds,
     candidateDigests,
@@ -87,6 +91,50 @@ export function mintSelectionReceipt(input: {
     bootId: input.interrupt.bootId,
     createdAt,
   }
+}
+
+export function assertBuiltinEnablementBinding(
+  workflow: WorkflowRecord,
+  phase: SelectionReceipt['phase'],
+): {
+  candidate: CandidateSnapshotItem
+  endpoint: Extract<ExecutionEndpoint, { kind: 'host_bundled_enable' }>
+} {
+  const receipt = workflow.selectionReceipt
+  const commitment = workflow.actionCommitment
+  const candidateId = receipt?.candidateIds.length === 1 ? receipt.candidateIds[0] : undefined
+  const candidate = candidateId
+    ? workflow.candidateSnapshot?.find((item) => item.id === candidateId)
+    : undefined
+  const endpoint = commitment?.endpoint
+  const bundled = candidate?.hostBundled
+  if (!receipt
+    || receipt.phase !== phase
+    || receipt.kind !== 'enable_builtin'
+    || !candidateId
+    || !candidate
+    || candidate.kind !== 'local'
+    || candidate.availability !== 'host_bundled'
+    || !bundled
+    || receipt.candidateDigests[candidateId] !== candidate.digest
+    || !commitment
+    || commitment.selectionReceiptId !== receipt.id
+    || commitment.snapshotDigest !== receipt.snapshotDigest
+    || commitment.requestedAction !== 'enable_builtin'
+    || commitment.candidateId !== candidateId
+    || commitment.candidateDigest !== candidate.digest
+    || endpoint?.kind !== 'host_bundled_enable'
+    || endpoint.packageName !== bundled.packageName
+    || endpoint.version !== bundled.version
+    || endpoint.mountId !== bundled.mountId
+    || !endpoint.targetProfile
+    || commitment.targetProfile !== endpoint.targetProfile) {
+    throw new EvolutionError(
+      'review_expired',
+      `enable_builtin requires an exact frozen ${phase} candidate, mount, and profile binding`,
+    )
+  }
+  return { candidate, endpoint }
 }
 
 export function mintActionCommitment(input: {

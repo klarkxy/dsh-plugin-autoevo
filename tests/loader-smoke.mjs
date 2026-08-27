@@ -64,7 +64,7 @@ try {
   assert.deepEqual(resumeSchema.parameters.properties.decision.required, ['action'])
   assert.deepEqual(
     resumeSchema.parameters.properties.decision.properties.action.enum,
-    ['use_this', 'modify_this', 'create_new', 'stop'],
+    ['use_this', 'modify_this', 'create_new', 'enable_builtin', 'stop'],
   )
   assert.equal(resumeSchema.parameters.properties.decision.properties.retention, undefined)
   assert.ok(resumeSchema.parameters.properties.navigation.properties.kind.enum.includes('clarify_requirement'))

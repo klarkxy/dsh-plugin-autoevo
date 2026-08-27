@@ -75,9 +75,9 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
 - `systemPrompt`：注入固定复用策略；
-- `agentPresets`：可选地确认当前会话确实使用能力进化 preset，并在施工前验证父会话施工目录；不会创建子 Agent。
+- `agentPresets`：确认父会话使用能力进化 preset，并为受管施工子会话挂载受信任的系统级 Creator preset。
 
-当前会话的文件、shell 与工具调用由 DSH Core scope、sandbox 与 approval 强制执行；AutoEvo `ExecutionGuard` 仅维护工作流上下文与证据一致性。提示词不是授权边界。
+父会话保持决策与治理边界，不在托管源内直接施工。获批的创建/修改由 Host 创建 cwd 精确绑定到单个托管源的短生命周期子会话；DSH Core 以该不可变 cwd 作为 `workspace-write` 根，AutoEvo 再限制发布、插件变更、Cordis 运行时变更与嵌套委派。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`；安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -169,7 +169,7 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 
 ## 6. 部分适配
 
-用户选择 `modify` 时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 和绑定 cwd 交给当前能力进化会话。当前会话可在托管源内使用 DSH 正常允许的编辑、shell、构建、测试、依赖和协作工具；`finish_managed_work` 后，Host 校验当前内容、重新审查并固定实际安装包。
+用户选择 `modify` 时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 交给 cwd 精确绑定到该仓库的受管施工子会话。子会话可编辑并运行有界构建/测试，但不能发布、改动 DSH 插件/profile、提交 Git 或逃出托管根；完成后 Host 校验当前内容、无 hook 提交、重新审查并固定实际安装包。
 
 - Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。
 - 无法形成有效安装描述或快照不完整时不可安装，其余风险与适配差异作为建议展示。

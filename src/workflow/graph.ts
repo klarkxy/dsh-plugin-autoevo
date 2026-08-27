@@ -159,7 +159,7 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
 async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   if (!ctx.host.finishManagedWork) {
-    throw new EvolutionError('invalid_input', 'This workflow host does not support in-session construction')
+    throw new EvolutionError('invalid_input', 'This workflow host does not support managed construction')
   }
   try {
     const finished = await ctx.host.finishManagedWork(current, ctx.exec, ctx.workflow)
@@ -398,6 +398,28 @@ function workflowFailureStage(installation: InstallationRecord): 'install' | 've
   }
 }
 
+function assertPendingInstallReceipt(
+  workflow: WorkflowRecord,
+  review: ReviewRecord,
+  install: NonNullable<WorkflowRecord['pendingInstall']>,
+  installation: InstallationRecord,
+): void {
+  const installSpecMatches = review.sourceSnapshot.kind === 'local'
+    || installation.installSpec === review.installSpec
+  if (installation.id !== workflow.pendingInstallationId
+    || installation.workflowId !== workflow.id
+    || installation.reviewId !== review.id
+    || installation.targetProfile !== install.targetProfile
+    || installation.retention !== install.retention
+    || !installSpecMatches) {
+    throw new EvolutionError('invalid_input', 'Pending installation receipt is not bound to the current workflow, review, and install target')
+  }
+}
+
+function builtinTerminalNode(installation: InstallationRecord | undefined): WorkflowNodeId {
+  return installation?.restartRequired === false ? 'installed' : 'restart_required'
+}
+
 function projectLinkedInstallation(
   ctx: GraphContext,
   current: ResolutionRecord,
@@ -464,7 +486,10 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
       if (error instanceof EvolutionError && error.code === 'not_found') return undefined
       throw error
     })
-    if (linked) return projectLinkedInstallation(ctx, current, review, linked)
+    if (linked) {
+      assertPendingInstallReceipt(ctx.workflow, review, install, linked)
+      return projectLinkedInstallation(ctx, current, review, linked)
+    }
   }
   delete ctx.workflow.lastFailure
   try {
@@ -521,7 +546,7 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
           throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
         }
         if (linked.installPhase === 'completed' && linked.installed) {
-          return { kind: 'done', node: 'restart_required', resolution: current, installation: linked }
+          return { kind: 'done', node: builtinTerminalNode(linked), resolution: current, installation: linked }
         }
       }
     }
@@ -530,7 +555,7 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
       ?? await ctx.host.findInstallationForWorkflow?.(ctx.workflow.id)
     return {
       kind: 'done',
-      node: 'restart_required',
+      node: builtinTerminalNode(installation),
       resolution: current,
       ...(installation ? { installation } : {}),
     }

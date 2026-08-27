@@ -56,7 +56,8 @@ describe('evolution-mode entry', () => {
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one clarification_question')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('zero candidates is a valid result')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Public decisions never accept retention')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('normal DSH-permitted tools, shell commands, builds, tests, dependency adjustment, skills, and collaboration')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Dependency mutation, nested collaboration, Git writes, plugin mutation, publication/release/deploy')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V11 unfinished workflows')
 
     expect(provide).toHaveBeenCalledTimes(1)
