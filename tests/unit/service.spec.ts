@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { EvolutionError } from '../../src/errors.js'
 import { _testing } from '../../src/service.js'
 import { hashObject } from '../../src/state/hashes.js'
 import { modificationAttemptsExhausted } from '../../src/workflow/contracts.js'
@@ -57,6 +58,133 @@ describe('profile mutation serialization', () => {
     releaseFirst()
     await Promise.all([first, second])
     expect(order).toEqual(['first:start', 'first:end', 'second:start', 'second:end'])
+  })
+})
+
+describe('built-in enablement failure journal', () => {
+  function provisional(wrote: boolean): InstallationRecord {
+    return {
+      schemaVersion: 1,
+      id: `installation_${'f'.repeat(24)}`,
+      createdAt: '2026-08-27T00:00:00.000Z',
+      workflowId: `workflow_${'a'.repeat(24)}`,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: 'C:/dsh',
+      packageName: '@deepseek-ai/dsh-time-context',
+      installSpec: `builtin:0.1.1-rc.2:time-context:${wrote ? '1' : '0'}`,
+      installPhase: 'prepared',
+      installState: 'unknown',
+      installOutcome: 'pending',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'prepared',
+      },
+    }
+  }
+
+  it('settles a denied pre-write approval as failed_absent with no ownership claim', () => {
+    const result = _testing.failedBuiltinEnablement(
+      provisional(false),
+      new EvolutionError('approval_required', 'The profile change was denied.', { outcome: 'denied' }),
+      false,
+    )
+
+    expect(result).toMatchObject({
+      installSpec: 'builtin:0.1.1-rc.2:time-context:0',
+      installPhase: 'completed',
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      removed: true,
+      installFailure: { code: 'approval_required', retryable: true },
+    })
+  })
+
+  it('fails closed when a write-ahead receipt cannot reconcile the exact row', () => {
+    const result = _testing.failedBuiltinEnablement(
+      provisional(true),
+      new EvolutionError('command_failed', 'The profile state is unreadable.'),
+      undefined,
+    )
+
+    expect(result).toMatchObject({
+      installSpec: 'builtin:0.1.1-rc.2:time-context:1',
+      installPhase: 'completed',
+      installState: 'unknown',
+      installOutcome: 'recovery_required',
+      installed: false,
+      removed: false,
+      installFailure: { code: 'command_failed', retryable: false },
+    })
+  })
+
+  it('drops a write-ahead ownership claim when reconciliation proves the row absent', () => {
+    const result = _testing.failedBuiltinEnablement(
+      provisional(true),
+      new EvolutionError('command_failed', 'The profile write failed.'),
+      false,
+    )
+
+    expect(result).toMatchObject({
+      installSpec: 'builtin:0.1.1-rc.2:time-context:0',
+      installOutcome: 'failed_absent',
+      removed: true,
+    })
+  })
+
+  it('reconciles the hard-crash window after write-ahead and before profile write', () => {
+    const absent = _testing.reconcileBuiltinWriteAhead(provisional(true), false)
+    expect(absent).toMatchObject({
+      kind: 'continue',
+      record: {
+        installSpec: 'builtin:0.1.1-rc.2:time-context:0',
+        installPhase: 'prepared',
+        installOutcome: 'pending',
+        removed: false,
+      },
+    })
+
+    const present = _testing.reconcileBuiltinWriteAhead(provisional(true), true)
+    expect(present).toMatchObject({
+      kind: 'continue',
+      record: { installSpec: 'builtin:0.1.1-rc.2:time-context:1' },
+    })
+
+    const unreadable = _testing.reconcileBuiltinWriteAhead(provisional(true), undefined)
+    expect(unreadable).toMatchObject({
+      kind: 'recovery',
+      record: { installOutcome: 'recovery_required', removed: false },
+    })
+  })
+
+  it('resets a reused no-effect receipt before a fresh approved attempt', () => {
+    const prior = _testing.failedBuiltinEnablement(
+      provisional(false),
+      new EvolutionError('approval_required', 'The profile change was denied.', { outcome: 'denied' }),
+      false,
+    )
+    const result = _testing.reconcileBuiltinWriteAhead(prior, false)
+    expect(result).toMatchObject({
+      kind: 'continue',
+      record: {
+        installPhase: 'prepared',
+        installOutcome: 'pending',
+        removed: false,
+      },
+    })
+    expect(result.record.installFailure).toBeUndefined()
   })
 })
 

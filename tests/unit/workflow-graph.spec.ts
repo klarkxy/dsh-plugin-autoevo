@@ -981,6 +981,84 @@ describe('workflow graph nodes', () => {
     })
   })
 
+  it('returns a denied no-effect built-in enablement to fresh confirmation', async () => {
+    const current = resolution()
+    const record = workflow('enable_builtin')
+    const installationId = `installation_${'d'.repeat(24)}`
+    record.pendingInstallationId = installationId
+    const installation = {
+      id: installationId,
+      workflowId: record.id,
+      installPhase: 'completed',
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      removed: true,
+      installFailure: {
+        stage: 'install',
+        code: 'approval_required',
+        message: 'The profile change was denied.',
+        retryable: true,
+      },
+    }
+    const host = {
+      async enableBuiltin() {
+        throw new EvolutionError('approval_required', 'The profile change was denied.', { outcome: 'denied' })
+      },
+      async getInstallation(id: string) {
+        expect(id).toBe(installationId)
+        return installation
+      },
+    } as unknown as WorkflowHost
+
+    const result = await runNode('enable_builtin', { host, resolution: current, workflow: record })
+
+    expect(result).toMatchObject({
+      kind: 'next',
+      node: 'await_confirmation',
+      installation: { id: installationId, installOutcome: 'failed_absent', removed: true },
+    })
+    expect(record.lastFailure).toMatchObject({ code: 'approval_required', retryable: true })
+  })
+
+  it('keeps a possibly-effectful built-in failure in explicit recovery', async () => {
+    const current = resolution()
+    const record = workflow('enable_builtin')
+    const installationId = `installation_${'e'.repeat(24)}`
+    record.pendingInstallationId = installationId
+    const installation = {
+      id: installationId,
+      workflowId: record.id,
+      installPhase: 'completed',
+      installState: 'unknown',
+      installOutcome: 'recovery_required',
+      installed: false,
+      removed: false,
+      installFailure: {
+        stage: 'install',
+        code: 'command_failed',
+        message: 'The exact row could not be reconciled.',
+        retryable: false,
+      },
+    }
+    const host = {
+      async enableBuiltin() {
+        throw new EvolutionError('command_failed', 'The exact row could not be reconciled.')
+      },
+      async getInstallation() {
+        return installation
+      },
+    } as unknown as WorkflowHost
+
+    const result = await runNode('enable_builtin', { host, resolution: current, workflow: record })
+
+    expect(result).toMatchObject({
+      kind: 'done',
+      node: 'recovery_required',
+      installation: { id: installationId, installOutcome: 'recovery_required', removed: false },
+    })
+  })
+
   it('authorizes create-new without a scratch grant node', async () => {
     const current = resolution()
     const result = await runNode('prepare_create', { host: {} as WorkflowHost, resolution: current })

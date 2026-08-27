@@ -148,6 +148,10 @@ export class PluginRemover {
           packageName: packageName!,
           spec: builtin,
           cwd,
+          // The exact owned row may already be absent after a crash or abort
+          // following the profile write. Absence is an idempotent completion;
+          // conflicting use of the same identity is still rejected below.
+          allowAbsent: true,
           ...(exec.signal ? { signal: exec.signal } : {}),
         })
       } else {

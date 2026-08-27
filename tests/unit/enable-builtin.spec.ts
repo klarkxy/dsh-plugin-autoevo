@@ -102,10 +102,14 @@ describe('enableBuiltinMount', () => {
       bundledRoot,
       endpoint: ENDPOINT,
       cwd: root,
+      beforeProfileWrite: async () => {
+        expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+        events.push('write-ahead-journal')
+      },
     })
 
     expect(result).toMatchObject({ wrote: true, mountId: 'time-context', targetProfile: 'web' })
-    expect(events).toEqual(['allowed-once', 'profile-write'])
+    expect(events).toEqual(['allowed-once', 'write-ahead-journal', 'profile-write'])
     expect(parse(await readFile(patchPath, 'utf8'))).toEqual([
       { insert: [{ id: 'time-context', name: '@deepseek-ai/dsh-time-context' }] },
     ])
@@ -142,6 +146,7 @@ describe('enableBuiltinMount', () => {
       stderr: '',
     }))
     const request = vi.fn(async () => 'denied')
+    const beforeProfileWrite = vi.fn(async () => {})
 
     await expect(enableBuiltinMount({
       ...approvedMutation(request),
@@ -150,6 +155,7 @@ describe('enableBuiltinMount', () => {
       bundledRoot,
       endpoint: ENDPOINT,
       cwd: root,
+      beforeProfileWrite,
     })).rejects.toMatchObject({ code: 'approval_required', details: { outcome: 'denied' } })
 
     expect(request).toHaveBeenCalledWith(expect.objectContaining({
@@ -157,6 +163,72 @@ describe('enableBuiltinMount', () => {
       callId: 'call-enable-builtin',
       reason: expect.stringContaining('@deepseek-ai/dsh-time-context@0.1.1-rc.2'),
     }))
+    expect(dumpConfig).not.toHaveBeenCalled()
+    expect(beforeProfileWrite).not.toHaveBeenCalled()
+    expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+  })
+
+  it('refuses to overwrite a profile patch changed while approval was pending', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-approval-drift-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const changed = "- id: user-change\n  disabled: true\n"
+    const beforeProfileWrite = vi.fn(async () => {})
+    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }))
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(async () => {
+        await writeFile(patchPath, changed, 'utf8')
+        return 'allowed-once'
+      }),
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+      beforeProfileWrite,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+
+    expect(beforeProfileWrite).not.toHaveBeenCalled()
+    expect(dumpConfig).not.toHaveBeenCalled()
+    expect(await readFile(patchPath, 'utf8')).toBe(changed)
+  })
+
+  it('revalidates the exact bundled version after approval before writing the profile', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-bundle-drift-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const beforeProfileWrite = vi.fn(async () => {})
+    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }))
+    const manifestPath = path.join(
+      bundledRoot,
+      'node_modules',
+      '@deepseek-ai',
+      'dsh-time-context',
+      'package.json',
+    )
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(async () => {
+        await writeFile(manifestPath, JSON.stringify({
+          name: '@deepseek-ai/dsh-time-context',
+          version: '0.1.1-rc.3',
+          description: 'Opt-in durable per-step context with the current time and elapsed time',
+        }), 'utf8')
+        return 'allowed-once'
+      }),
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+      beforeProfileWrite,
+    })).rejects.toMatchObject({
+      code: 'review_expired',
+      details: { expectedVersion: '0.1.1-rc.2', actualVersion: '0.1.1-rc.3' },
+    })
+
+    expect(beforeProfileWrite).not.toHaveBeenCalled()
     expect(dumpConfig).not.toHaveBeenCalled()
     expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
   })
@@ -256,6 +328,52 @@ describe('enableBuiltinMount', () => {
     expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
   })
 
+  it('preserves an external patch edit made during a failed enablement check', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-rollback-race-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const external = "- id: user-change\n  disabled: true\n"
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(),
+      launcher: {
+        dumpConfig: async () => {
+          await writeFile(patchPath, external, 'utf8')
+          return { exitCode: 1, signal: null, stdout: '', stderr: 'loader exploded' }
+        },
+      } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(external)
+  })
+
+  it('rejects an externally removed and reinserted mount row after a successful check', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-postimage-race-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const external = "- id: user-change\n  disabled: true\n- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n"
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(),
+      launcher: {
+        dumpConfig: async () => {
+          await writeFile(patchPath, external, 'utf8')
+          return { exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }
+        },
+      } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(external)
+  })
+
   it('fails when the dump output does not contain the mounted row', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-absent-'))
     temporary.push(root)
@@ -303,6 +421,75 @@ describe('enableBuiltinMount', () => {
       cwd: root,
     })
     expect(parse(await readFile(patchPath, 'utf8'))).toEqual([])
+  })
+
+  it('preserves an external patch edit made during a failed removal check', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-remove-rollback-race-'))
+    temporary.push(root)
+    const original = "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n"
+    const { dshHome, patchPath } = await seed(root, original)
+    const external = "- id: user-change\n  disabled: true\n"
+
+    await expect(disableBuiltinMount({
+      launcher: {
+        dumpConfig: async () => {
+          await writeFile(patchPath, external, 'utf8')
+          return { exitCode: 1, signal: null, stdout: '', stderr: 'loader exploded' }
+        },
+      } as unknown as DshLauncher,
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      packageName: ENDPOINT.packageName,
+      spec: { version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: true },
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(external)
+  })
+
+  it('rejects an externally reinserted mount row after a successful removal check', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-remove-postimage-race-'))
+    temporary.push(root)
+    const original = "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n"
+    const { dshHome, patchPath } = await seed(root, original)
+    const external = "- id: user-change\n  disabled: true\n- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n"
+
+    await expect(disableBuiltinMount({
+      launcher: {
+        dumpConfig: async () => {
+          await writeFile(patchPath, external, 'utf8')
+          return { exitCode: 0, signal: null, stdout: 'profile without opt-in mount', stderr: '' }
+        },
+      } as unknown as DshLauncher,
+      dshHome,
+      targetProfile: ENDPOINT.targetProfile,
+      packageName: ENDPOINT.packageName,
+      spec: { version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: true },
+      cwd: root,
+    })).rejects.toMatchObject({ code: 'review_expired' })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(external)
+  })
+
+  it('treats an absent exact row as a no-op only for recovery journals', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-recovery-absent-'))
+    temporary.push(root)
+    const { dshHome, patchPath } = await seed(root)
+    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+
+    const result = await disableBuiltinMount({
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      targetProfile: 'web',
+      packageName: ENDPOINT.packageName,
+      spec: { version: ENDPOINT.version, mountId: ENDPOINT.mountId, wrote: true },
+      cwd: root,
+      allowAbsent: true,
+    })
+
+    expect(result).toEqual({ wrote: false })
+    expect(dumpConfig).not.toHaveBeenCalled()
+    expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
   })
 
   it('preserves pre-effect ownership across a crash-style retry and removes the exact row', async () => {

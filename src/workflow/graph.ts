@@ -561,7 +561,22 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
     }
   } catch (error) {
     if (ctx.exec.signal?.aborted) throw error
-    ctx.workflow.lastFailure = {
+    const linked = ctx.workflow.pendingInstallationId
+      ? await ctx.host.getInstallation(ctx.workflow.pendingInstallationId).catch((readError: unknown) => {
+          if (readError instanceof EvolutionError && readError.code === 'not_found') return undefined
+          throw readError
+        })
+      : undefined
+    if (linked && linked.workflowId !== ctx.workflow.id) {
+      throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
+    }
+    ctx.workflow.lastFailure = linked?.installFailure ? {
+      stage: 'install',
+      code: linked.installFailure.code,
+      message: linked.installFailure.summary ?? linked.installFailure.message,
+      retryable: linked.installFailure.retryable ?? linked.installOutcome === 'failed_absent',
+      ...(linked.installFailure.diagnosticHash ? { diagnosticHash: linked.installFailure.diagnosticHash } : {}),
+    } : {
       stage: 'install',
       code: error instanceof EvolutionError ? error.code : 'command_failed',
       message: error instanceof Error ? error.message : String(error),
@@ -572,7 +587,15 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
         ? { diagnosticHash: error.details.diagnosticHash }
         : {}),
     }
-    return { kind: 'done', node: 'recovery_required', resolution: current }
+    if (linked?.installOutcome === 'failed_absent') {
+      return { kind: 'next', node: 'await_confirmation', resolution: current, installation: linked }
+    }
+    return {
+      kind: 'done',
+      node: 'recovery_required',
+      resolution: current,
+      ...(linked ? { installation: linked } : {}),
+    }
   }
 }
 

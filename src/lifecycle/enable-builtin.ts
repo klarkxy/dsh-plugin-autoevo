@@ -78,6 +78,31 @@ function exactBuiltinRow(entry: Record<string, unknown>, mountId: string, packag
     && (row as { name?: unknown }).name === packageName
 }
 
+async function assertExactBundledEndpoint(
+  bundledRoot: string,
+  endpoint: HostBundledEnableEndpoint,
+): Promise<void> {
+  const bundled = (await listBundledOptInPackages(bundledRoot))
+    .find((entry) => entry.packageName === endpoint.packageName)
+  if (!bundled) {
+    throw new EvolutionError('not_found', 'The built-in capability is no longer bundled with this Host', {
+      packageName: endpoint.packageName,
+    })
+  }
+  if (bundled.version !== endpoint.version) {
+    throw new EvolutionError('review_expired', 'The built-in capability version changed between selection and enablement', {
+      expectedVersion: endpoint.version,
+      actualVersion: bundled.version,
+    })
+  }
+  if (bundled.mountId !== endpoint.mountId) {
+    throw new EvolutionError('review_expired', 'The built-in capability mount id changed between selection and enablement', {
+      expectedMountId: endpoint.mountId,
+      actualMountId: bundled.mountId,
+    })
+  }
+}
+
 /** Inspect the exact row shape AutoEvo owns without changing the profile. */
 export async function builtinMountPresent(input: {
   dshHome: string
@@ -99,25 +124,41 @@ export async function disableBuiltinMount(input: {
   spec: BuiltinReceiptSpec
   cwd: string
   signal?: AbortSignal
+  /** Recovery journals may precede the write; absence is then a proven no-op. */
+  allowAbsent?: boolean
 }): Promise<{ wrote: boolean }> {
   if (!input.spec.wrote) return { wrote: false }
   const patchPath = path.join(input.dshHome, 'profiles', input.targetProfile, 'cordis.patch.yml')
   const original = await readFile(patchPath, 'utf8')
   const rows = patchRows(original)
   const matches = rows.filter((row) => exactBuiltinRow(row, input.spec.mountId, input.packageName))
+  if (matches.length === 0 && input.allowAbsent) {
+    if (hasConflictingMountIdentity(rows, input.spec.mountId, input.packageName)) {
+      throw new EvolutionError('review_expired', 'The built-in mount identity changed after the recovery journal; refusing cleanup')
+    }
+    return { wrote: false }
+  }
   if (matches.length !== 1) {
     throw new EvolutionError('review_expired', 'The exact built-in mount row changed after enablement; refusing removal')
   }
   const next = rows.filter((row) => !exactBuiltinRow(row, input.spec.mountId, input.packageName))
-  await writeFile(patchPath, stringify(next), 'utf8')
+  const postimage = stringify(next)
+  await writeFile(patchPath, postimage, 'utf8')
   const dump = await input.launcher.dumpConfig(input.dshHome, input.targetProfile, input.cwd, input.signal)
+  const live = await readFile(patchPath, 'utf8')
   if (dump.exitCode !== 0 || dump.stdout.includes(input.spec.mountId)) {
+    if (live !== postimage) {
+      throw new EvolutionError('review_expired', 'The profile patch changed during the built-in removal check; external edits were preserved and recovery is required')
+    }
     await writeFile(patchPath, original, 'utf8')
     throw new EvolutionError('command_failed', 'Built-in removal composition check failed', {
       command: 'dsh',
       exitCode: dump.exitCode,
       diagnosticHash: sha256(dump.stderr),
     })
+  }
+  if (live !== postimage) {
+    throw new EvolutionError('review_expired', 'The profile patch changed during the built-in removal check; external edits were preserved and recovery is required')
   }
   return { wrote: true }
 }
@@ -138,28 +179,14 @@ export async function enableBuiltinMount(input: {
   endpoint: HostBundledEnableEndpoint
   cwd: string
   signal?: AbortSignal
+  /** Host crash journal persisted after approval and immediately before the profile write. */
+  beforeProfileWrite?: () => Promise<void>
 }): Promise<BuiltinEnableResult> {
   const { packageName, version, mountId, targetProfile } = input.endpoint
   if (!MOUNT_ID_PATTERN.test(mountId)) {
     throw new EvolutionError('invalid_input', 'Refusing an unsafe built-in mount id', { mountId })
   }
-  const bundled = (await listBundledOptInPackages(input.bundledRoot))
-    .find((entry) => entry.packageName === packageName)
-  if (!bundled) {
-    throw new EvolutionError('not_found', 'The built-in capability is no longer bundled with this Host', { packageName })
-  }
-  if (bundled.version !== version) {
-    throw new EvolutionError('review_expired', 'The built-in capability version changed between selection and enablement', {
-      expectedVersion: version,
-      actualVersion: bundled.version,
-    })
-  }
-  if (bundled.mountId !== mountId) {
-    throw new EvolutionError('review_expired', 'The built-in capability mount id changed between selection and enablement', {
-      expectedMountId: mountId,
-      actualMountId: bundled.mountId,
-    })
-  }
+  await assertExactBundledEndpoint(input.bundledRoot, input.endpoint)
 
   const patchPath = path.join(input.dshHome, 'profiles', targetProfile, 'cordis.patch.yml')
   let original: string
@@ -178,6 +205,7 @@ export async function enableBuiltinMount(input: {
     throw new EvolutionError('review_expired', 'The built-in mount identity is already used by a different profile row')
   }
   const wrote = !alreadyMounted(rows, mountId, packageName)
+  let postimage = original
   if (wrote) {
     const approval = input.ctx.get('approval')
     if (!approval || !input.exec.agent) {
@@ -193,18 +221,38 @@ export async function enableBuiltinMount(input: {
     if (outcome !== 'allowed-once') {
       throw new EvolutionError('approval_required', `The built-in profile change was not approved (${outcome})`, { outcome })
     }
+    await assertExactBundledEndpoint(input.bundledRoot, input.endpoint)
+    const approvedPreimage = await readFile(patchPath, 'utf8')
+    if (approvedPreimage !== original) {
+      throw new EvolutionError('review_expired', 'The target profile patch changed while approval was pending; refusing a stale overwrite')
+    }
+    await input.beforeProfileWrite?.()
+    const journaledPreimage = await readFile(patchPath, 'utf8')
+    if (journaledPreimage !== original) {
+      throw new EvolutionError('review_expired', 'The target profile patch changed before the approved write; refusing a stale overwrite')
+    }
     rows.push({ insert: [{ id: mountId, name: packageName }] })
-    await writeFile(patchPath, stringify(rows), 'utf8')
+    postimage = stringify(rows)
+    await writeFile(patchPath, postimage, 'utf8')
   }
 
   const dump = await input.launcher.dumpConfig(input.dshHome, targetProfile, input.cwd, input.signal)
+  const live = await readFile(patchPath, 'utf8')
   if (dump.exitCode !== 0 || !dump.stdout.includes(mountId)) {
-    if (wrote) await writeFile(patchPath, original, 'utf8')
+    if (wrote) {
+      if (live !== postimage) {
+        throw new EvolutionError('review_expired', 'The profile patch changed during the built-in enablement check; external edits were preserved and recovery is required')
+      }
+      await writeFile(patchPath, original, 'utf8')
+    }
     throw new EvolutionError('command_failed', `dsh exited with code ${dump.exitCode ?? 'null'}`, {
       command: 'dsh',
       exitCode: dump.exitCode,
       diagnosticHash: sha256(dump.stderr),
     })
+  }
+  if (live !== postimage || !alreadyMounted(patchRows(live), mountId, packageName)) {
+    throw new EvolutionError('review_expired', 'The exact built-in mount row changed during the composition check; recovery is required')
   }
   return { packageName, version, mountId, targetProfile, wrote }
 }

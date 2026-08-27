@@ -622,6 +622,98 @@ describe('workflow engine autonomous discovery', () => {
     expect(workflowHost.enableBuiltin).not.toHaveBeenCalled()
   })
 
+  it('requires a fresh trusted turn after denied built-in approval returns to confirmation', async () => {
+    const record = resolution('current time')
+    record.localCandidates = [{
+      kind: 'plugin',
+      name: '@deepseek-ai/dsh-time-context',
+      description: 'Time context',
+      availability: 'host_bundled',
+      confidence: 0.92,
+      fit: 'full',
+      reuseEligible: false,
+      hostBundled: {
+        packageName: '@deepseek-ai/dsh-time-context',
+        version: '0.1.1-rc.2',
+        mountId: 'time-context',
+      },
+    }]
+    const { store, guard, engine, workflowHost } = await makeEngine(record, 'enable-builtin-denied')
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'current time', turn)
+    const candidate = selection.workflow.candidateSnapshot![0]!
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先查看这个内置能力' }] })
+    const confirmation = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+    }, turn)
+
+    vi.mocked(workflowHost.enableBuiltin!).mockImplementation(async (workflow) => {
+      const id = workflow.pendingInstallationId!
+      const failed: InstallationRecord = {
+        schemaVersion: 1,
+        id,
+        createdAt: '2026-08-27T00:00:00.000Z',
+        workflowId: workflow.id,
+        targetProfile: 'web',
+        retention: 'persistent',
+        dshHome: 'C:/dsh',
+        packageName: '@deepseek-ai/dsh-time-context',
+        installSpec: 'builtin:0.1.1-rc.2:time-context:0',
+        installPhase: 'completed',
+        installState: 'not_installed',
+        installOutcome: 'failed_absent',
+        installed: false,
+        loaded: false,
+        verified: false,
+        restartRequired: false,
+        removed: true,
+        installFailure: {
+          stage: 'install',
+          code: 'approval_required',
+          summary: 'The profile change was denied.',
+          message: 'The profile change was denied.',
+          retryable: true,
+        },
+        verification: {
+          attempted: false,
+          expectedTools: [],
+          calledTools: [],
+          resultTools: [],
+          failedTools: [],
+          sessionFiles: [],
+          taskResultObserved: false,
+          reason: 'Built-in enablement had no profile effect.',
+        },
+      }
+      await store.put('installations', failed)
+      throw new EvolutionError('approval_required', 'The profile change was denied.', { outcome: 'denied' })
+    })
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+    const denied = await engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId: confirmation.workflow.interrupt!.interruptId,
+      decision: { action: 'enable_builtin', candidateId: candidate.id },
+    }, turn)
+
+    expect(denied.workflow).toMatchObject({
+      status: 'interrupted',
+      cursor: 'await_confirmation',
+      lastFailure: { code: 'approval_required', retryable: true },
+    })
+    expect(workflowHost.enableBuiltin).toHaveBeenCalledTimes(1)
+
+    const sameTurn = await engine.resume({
+      workflowId: denied.workflow.id,
+      interruptId: denied.workflow.interrupt!.interruptId,
+      decision: { action: 'enable_builtin', candidateId: candidate.id },
+    }, turn)
+    expect(sameTurn.status).toBe('parked')
+    expect(workflowHost.enableBuiltin).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects enable_builtin for a non-bundled candidate', async () => {
     const { guard, engine } = await makeEngine(resolution(), 'enable-builtin-invalid')
     const turn = exec()

@@ -165,6 +165,105 @@ async function serializeProfileMutation<T>(dshHome: string, profile: string, ope
   }
 }
 
+function failedBuiltinEnablement(
+  provisional: InstallationRecord,
+  error: unknown,
+  exactOwnedRowPresent: boolean | undefined,
+): InstallationRecord {
+  const spec = parseBuiltinReceiptSpec(provisional.installSpec)
+  if (!spec) throw new EvolutionError('invalid_input', 'The provisional built-in receipt is malformed')
+  const noEffect = !spec.wrote || exactOwnedRowPresent === false
+  const code = error instanceof EvolutionError ? error.code : 'command_failed'
+  const message = (error instanceof Error ? error.message : String(error))
+    .normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim().slice(0, 400)
+  const failure = {
+    stage: 'install' as const,
+    code,
+    summary: message,
+    message,
+    retryable: noEffect,
+    repairHints: noEffect
+      ? ['Return to the sealed confirmation gate and request a fresh final decision.']
+      : ['Inspect the exact built-in profile row before cleanup or retry.'],
+  }
+  return {
+    ...provisional,
+    installSpec: builtinReceiptSpec({ ...spec, wrote: noEffect ? false : spec.wrote }),
+    installPhase: 'completed',
+    installState: noEffect ? 'not_installed' : exactOwnedRowPresent === true ? 'installed' : 'unknown',
+    installOutcome: noEffect ? 'failed_absent' : 'recovery_required',
+    installed: !noEffect && exactOwnedRowPresent === true,
+    loaded: false,
+    verified: false,
+    restartRequired: false,
+    removed: noEffect,
+    installFailure: failure,
+    verification: {
+      attempted: false,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: false,
+      reason: noEffect
+        ? `Built-in enablement had no profile effect. ${message}`
+        : `Built-in enablement may have changed the exact profile row; recovery is required. ${message}`,
+    },
+  }
+}
+
+function reconcileBuiltinWriteAhead(
+  provisional: InstallationRecord,
+  exactOwnedRowPresent: boolean | undefined,
+): { kind: 'continue' | 'recovery'; record: InstallationRecord } {
+  const spec = parseBuiltinReceiptSpec(provisional.installSpec)
+  if (!spec) throw new EvolutionError('invalid_input', 'The provisional built-in receipt is malformed')
+  if (spec.wrote && exactOwnedRowPresent === undefined) {
+    return {
+      kind: 'recovery',
+      record: failedBuiltinEnablement(
+        provisional,
+        new EvolutionError('command_failed', 'The write-ahead built-in receipt could not reconcile the exact profile row'),
+        undefined,
+      ),
+    }
+  }
+  if (spec.wrote && exactOwnedRowPresent === true) return { kind: 'continue', record: provisional }
+  if (!spec.wrote
+    && provisional.installPhase === 'prepared'
+    && provisional.installOutcome === 'pending'
+    && !provisional.removed) {
+    return { kind: 'continue', record: provisional }
+  }
+  const record: InstallationRecord = {
+    ...provisional,
+    installSpec: builtinReceiptSpec({ ...spec, wrote: false }),
+    installPhase: 'prepared',
+    installState: 'unknown',
+    installOutcome: 'pending',
+    installed: false,
+    loaded: false,
+    verified: false,
+    restartRequired: false,
+    removed: false,
+    verification: {
+      attempted: false,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: false,
+      reason: spec.wrote
+        ? 'The prior write-ahead journal had no profile effect; a fresh approved attempt may proceed.'
+        : 'Built-in enablement was reset to a coherent prepared state for a fresh approved attempt.',
+    },
+  }
+  delete record.installFailure
+  return { kind: 'continue', record }
+}
+
 export class CapabilityEvolutionService implements WorkflowHost {
   readonly installer: PluginInstaller
   readonly remover: PluginRemover
@@ -1064,13 +1163,23 @@ export class CapabilityEvolutionService implements WorkflowHost {
           throw new EvolutionError('review_expired', 'The provisional built-in receipt no longer matches the selected target')
         }
         if (provisional.installPhase === 'completed' && provisional.installed) return provisional
+        const exactOwnedRowPresent = spec.wrote
+          ? await builtinMountPresent({
+              dshHome: this.config.dshHome,
+              targetProfile: endpoint.targetProfile,
+              mountId: endpoint.mountId,
+              packageName: endpoint.packageName,
+            }).catch(() => undefined)
+          : false
+        const reconciliation = reconcileBuiltinWriteAhead(provisional, exactOwnedRowPresent)
+        if (reconciliation.record !== provisional) {
+          provisional = reconciliation.record
+          await this.store.put('installations', provisional)
+        }
+        if (reconciliation.kind === 'recovery') {
+          throw new EvolutionError('command_failed', 'The write-ahead built-in receipt requires explicit recovery')
+        }
       } else {
-        const presentBefore = await builtinMountPresent({
-          dshHome: this.config.dshHome,
-          targetProfile: endpoint.targetProfile,
-          mountId: endpoint.mountId,
-          packageName: endpoint.packageName,
-        })
         provisional = {
           schemaVersion: 1,
           id: installationId,
@@ -1080,7 +1189,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
           retention: 'persistent',
           dshHome: this.config.dshHome,
           packageName: endpoint.packageName,
-          installSpec: builtinReceiptSpec({ version: endpoint.version, mountId: endpoint.mountId, wrote: !presentBefore }),
+          // `wrote` is proof of a Host write-ahead journal, not a prediction.
+          // It stays false until allowed-once approval succeeds immediately
+          // before the exact profile write.
+          installSpec: builtinReceiptSpec({ version: endpoint.version, mountId: endpoint.mountId, wrote: false }),
           installPhase: 'prepared',
           installState: 'unknown',
           installOutcome: 'pending',
@@ -1102,20 +1214,58 @@ export class CapabilityEvolutionService implements WorkflowHost {
         }
         await this.store.put('installations', provisional)
       }
-      await enableBuiltinMount({
-        ctx: this.ctx,
-        exec: asToolExec(exec),
-        requirement: workflow.requirement,
-        launcher: this.launcher,
-        dshHome: this.config.dshHome,
-        bundledRoot,
-        endpoint,
-        cwd: workflow.cwd ?? process.cwd(),
-        ...(exec.signal ? { signal: exec.signal } : {}),
-      })
-      const ownership = parseBuiltinReceiptSpec(provisional.installSpec)!.wrote
+      let journal = provisional
+      let enabled
+      try {
+        enabled = await enableBuiltinMount({
+          ctx: this.ctx,
+          exec: asToolExec(exec),
+          requirement: workflow.requirement,
+          launcher: this.launcher,
+          dshHome: this.config.dshHome,
+          bundledRoot,
+          endpoint,
+          cwd: workflow.cwd ?? process.cwd(),
+          beforeProfileWrite: async () => {
+            const spec = parseBuiltinReceiptSpec(journal.installSpec)
+            if (!spec) throw new EvolutionError('invalid_input', 'The provisional built-in receipt is malformed')
+            journal = {
+              ...journal,
+              installSpec: builtinReceiptSpec({ ...spec, wrote: true }),
+              installPhase: 'prepared',
+              installState: 'unknown',
+              installOutcome: 'pending',
+              installed: false,
+              loaded: false,
+              verified: false,
+              restartRequired: false,
+              removed: false,
+              verification: {
+                ...journal.verification,
+                reason: 'Built-in profile mutation was approved and journaled immediately before the exact write.',
+              },
+            }
+            delete journal.installFailure
+            await this.store.put('installations', journal)
+          },
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+      } catch (error) {
+        const writeAhead = parseBuiltinReceiptSpec(journal.installSpec)?.wrote === true
+        const exactOwnedRowPresent = writeAhead
+          ? await builtinMountPresent({
+              dshHome: this.config.dshHome,
+              targetProfile: endpoint.targetProfile,
+              mountId: endpoint.mountId,
+              packageName: endpoint.packageName,
+            }).catch(() => undefined)
+          : false
+        await this.store.put('installations', failedBuiltinEnablement(journal, error, exactOwnedRowPresent))
+        throw error
+      }
+      const ownership = parseBuiltinReceiptSpec(journal.installSpec)!.wrote || enabled.wrote
       const record: InstallationRecord = {
-        ...provisional,
+        ...journal,
         installSpec: builtinReceiptSpec({ version: endpoint.version, mountId: endpoint.mountId, wrote: ownership }),
         installPhase: 'completed',
         installState: 'installed',
@@ -1193,4 +1343,6 @@ export const _testing = {
   reviewCandidateDigest,
   reviewSnapshotDigest,
   serializeProfileMutation,
+  failedBuiltinEnablement,
+  reconcileBuiltinWriteAhead,
 }

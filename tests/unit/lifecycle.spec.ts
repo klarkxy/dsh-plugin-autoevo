@@ -677,6 +677,53 @@ describe('lifecycle validation', () => {
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
   })
 
+  it('retries built-in removal after the composition check throws post-write', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-builtin-retry-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'7'.repeat(24)}`
+    const patchRoot = path.join(config(root).dshHome, 'profiles', 'persistent')
+    await mkdir(patchRoot, { recursive: true })
+    const patchPath = path.join(patchRoot, 'cordis.patch.yml')
+    await writeFile(patchPath, "- insert:\n    - id: time-context\n      name: '@deepseek-ai/dsh-time-context'\n")
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      dshHome: config(root).dshHome,
+      packageName: '@deepseek-ai/dsh-time-context',
+      installSpec: builtinReceiptSpec({ version: '0.1.1-rc.2', mountId: 'time-context', wrote: true }),
+      installed: true,
+      loaded: false,
+      verified: false,
+      restartRequired: true,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'built-in composition validated',
+      },
+    })
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const dumpConfig = vi.fn(async () => { throw new Error('aborted after profile write') })
+    const remover = new PluginRemover(ctx, config(root), store, { dumpConfig } as unknown as DshLauncher)
+
+    await expect(remover.remove({ installationId }, execution())).rejects.toThrow('aborted after profile write')
+    expect(await readFile(patchPath, 'utf8')).not.toContain('time-context')
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false })
+
+    await expect(remover.remove({ installationId }, execution())).resolves.toMatchObject({ removed: true })
+    expect(dumpConfig).toHaveBeenCalledTimes(1)
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
+  })
+
   it('calls Host tool_roundtrip once and keeps the receipt free of args, output, env, and paths', async () => {
     const { root, store, ctx } = await installHarness(attestedReview())
     let verifyHostCalls = 0
