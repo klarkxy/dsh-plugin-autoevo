@@ -12,10 +12,11 @@ export function argvForResolvedExecutable(
   args: readonly string[],
   platform: NodeJS.Platform = process.platform,
 ): [string, ...string[]] {
-  if (platform !== 'win32' || !WINDOWS_CMD_SHIMS.has(path.extname(executable).toLowerCase())) {
+  const executablePath = platform === 'win32' ? path.win32 : path
+  if (platform !== 'win32' || !WINDOWS_CMD_SHIMS.has(executablePath.extname(executable).toLowerCase())) {
     return [executable, ...args]
   }
-  if (path.basename(executable).toLowerCase() !== 'dsh.cmd') {
+  if (executablePath.basename(executable).toLowerCase() !== 'dsh.cmd') {
     throw new EvolutionError('command_failed', 'Refusing to shell-interpret an unsupported Windows command shim', {
       executable,
     })
@@ -23,10 +24,10 @@ export function argvForResolvedExecutable(
   // Node 24 refuses to spawn .cmd directly, while cmd.exe introduces a second
   // parser over user-controlled task text and file specs. npm/pnpm DSH shims
   // have two stable layouts; invoke the real JS entry with Node instead.
-  const directory = path.dirname(executable)
-  const dshBin = path.basename(directory).toLowerCase() === '.bin'
-    ? path.resolve(directory, '..', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-    : path.join(directory, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  const directory = executablePath.dirname(executable)
+  const dshBin = executablePath.basename(directory).toLowerCase() === '.bin'
+    ? executablePath.resolve(directory, '..', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    : executablePath.join(directory, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   return [process.execPath, dshBin, ...args]
 }
 
