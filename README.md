@@ -69,7 +69,7 @@ Search-first → 选择候选 → 审查事实与警告 → 用户决定
 | --- | --- | --- |
 | `verified` | Host 完成了预期工具往返，功能已验证 | 可以直接使用 |
 | `activated` / `awaiting_user_test` | 已加载但无工具往返证据，或需人工在真实客户端测试 | 在目标 profile 中实际试用一次 |
-| `restartRequired: true` | 安装成功，但当前进程没有完整热加载 | 重启对应 profile 后再试 |
+| `restartRequired: true` | 已有非失败安装结果，但当前进程没有完整热加载 | 重启对应 profile 后再试 |
 | `failed_absent` / `recovery_required` | 安装失败，或状态不能安全判定 | 查看诊断；状态不明时先恢复，不要盲目重装 |
 
 `installed` 或 `loaded` 不等于功能已验证，只有 `verified` 才能这样表述。完整状态说明见[使用指南 §5](docs/user-guide.md#5-结果状态与下一步)。

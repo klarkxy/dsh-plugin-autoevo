@@ -133,7 +133,7 @@ Interactive version (click for the full HTML viewer):
 | `loaded: true` | The bundle is loaded in the destination process | Do not claim functional verification on this alone |
 | `verified` | The Host's `tool_roundtrip` (an automated real tool round trip) covered the expected tools and returned successfully | The capability can be called verified |
 | `activated` | `bundle_activation` (a bundle load check with no tools) passed | Try the capability in the target profile |
-| `awaiting_user_test` | Persistent `manual_runtime` completed, no Host automatic fixture | Run one real test in the real client or profile |
+| `awaiting_user_test` | Persistent `manual_runtime` completed, no Host automatic fixture | Try it once in the real client or profile |
 | `restartRequired: true` | A non-failure result exists, but the current process has no complete hot-load | Restart the profile and try again |
 | `failed_absent` | The install command failed, and neither the profile nor the visible package target exists | Diagnose first, then decide whether to retry |
 | `recovery_required` | Install, replacement, or cleanup state cannot be determined safely | Follow the recovery flow; do not reinstall or delete blindly |

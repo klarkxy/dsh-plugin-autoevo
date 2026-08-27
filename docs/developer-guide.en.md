@@ -2,7 +2,7 @@
 
 English | [中文](developer-guide.md) · [Back to README](../README.en.md)
 
-This guide is for maintainers of AutoEvo, for developers extending its Host seams, for those fixing workflows, and for those verifying install semantics. It records the development flow and source entry points; the state machine and security invariants remain canonical in [Architecture](architecture.md) and the [Security Model](security.md).
+This guide is for developers who maintain AutoEvo, extend its Host seams, fix workflows, or verify install semantics. It records the development flow and source entry points; the state machine and security invariants remain canonical in [Architecture](architecture.md) and the [Security Model](security.md).
 
 ## 1. Local environment
 
@@ -11,8 +11,8 @@ Requirements:
 - Node.js `^22.19.0 || ^24.0.0`; CI covers both supported major lines.
 - pnpm; CI currently uses `10.29.2`.
 - Git; remote review and live GitHub discovery E2E also require GitHub CLI.
-- Host DSH CLI for packaged acceptance and E2E must not be a repo-root dependency, or `npx @deepseek-ai/dsh` would shadow an expired CLI. CI installs the acceptance baseline `@deepseek-ai/dsh@0.1.1-rc.2` (Cordis `4.0.1`) in a runner-temp directory and points `DSH_PACKAGE_ROOT` there; locally you may use any DSH in `>=0.1.0-rc.6 <0.2.0`, and release evidence must record the actual version.
-- Windows / PowerShell is fully supported and is the primary exercised environment. Linux / macOS only promise build and import smoke, not the complete DSH workflow, profile, or E2E path. Core execution uses argv runners and must not depend on interactive shell side effects.
+- Host DSH CLI for packaged acceptance and E2E must not be added as a repo-root dependency, or `npx @deepseek-ai/dsh` would resolve to a stale CLI. CI installs the acceptance baseline `@deepseek-ai/dsh@0.1.1-rc.2` (Cordis `4.0.1`) in a runner-temp directory and points `DSH_PACKAGE_ROOT` there; locally you may use any DSH in `>=0.1.0-rc.6 <0.2.0`, and release evidence must record the actual version.
+- Windows / PowerShell is fully supported and is the primary tested environment. Linux / macOS only promise build and import smoke, not the complete DSH workflow, profile, or E2E path. Core execution uses argv runners and must not depend on interactive shell side effects.
 
 Initialize and run the daily acceptance:
 
@@ -104,7 +104,7 @@ The package is ESM:
 4. Installing the fixed reuse policy and tool-execution hooks;
 5. Registering `capability_workflow*`, `capability_versions` / `capability_rollback` / `capability_adopt` / `capability_updates`, and `plugin_remove`.
 
-Prompts and presets are behavioral guidance, not authorization boundaries. AutoEvo's receipts, fresh-turn bindings, and execution guards only enforce workflow consistency and evidence; DSH Core actually enforces permissions, sandboxes, and `allowed-once` approval. Do not treat an AutoEvo warning, receipt, or status as DSH authorization, nor treat a warning as an unacceptably hard block.
+Prompts and presets are behavioral guidance, not authorization boundaries. AutoEvo's receipts, fresh-turn bindings, and execution guards only enforce workflow consistency and evidence; DSH Core actually enforces permissions, sandboxes, and `allowed-once` approval. Do not treat an AutoEvo warning, receipt, or status as DSH authorization, and do not treat a warning as a hard block either.
 
 ## 5. Workflow and the two confirmation gates
 

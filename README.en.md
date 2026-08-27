@@ -36,10 +36,10 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 ```
 
 - The command must carry the `@deepseek-ai/` prefix; the unscoped `dsh` package on npm is an unrelated project.
-- Start the profile day to day with `npx @deepseek-ai/dsh web`.
+- For day-to-day use, start the profile with `npx @deepseek-ai/dsh web`.
 - Restart the target DSH profile after installing or upgrading AutoEvo so it loads the new bundle; whether later capability installs need another restart is covered in [User Guide §5](docs/user-guide.en.md#5-outcomes-and-next-steps).
 
-Version requirements: Node.js `^22.19.0 || ^24.0.0`; DSH `>=0.1.0-rc.6 <0.2.0` (unverified `0.1` updates remain warning-level but may be run).
+Version requirements: Node.js `^22.19.0 || ^24.0.0`; DSH `>=0.1.0-rc.6 <0.2.0` (unverified `0.1` updates produce a warning but are still allowed to run).
 
 ## Quick start
 
