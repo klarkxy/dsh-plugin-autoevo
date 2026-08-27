@@ -1,0 +1,9 @@
+[
+  "docs/assets/flowcharts/autoevo-main-workflow.svg",
+  "example/auto-review/01-search-shortlist.png",
+  "example/auto-review/02-candidate-review.png",
+  "example/auto-review/04-review-install-choice.png",
+  "example/auto-review/05-install-authorized.png",
+  "example/auto-review/06-installed-result.png",
+  "example/auto-review/07-tool-roundtrip.png"
+]
