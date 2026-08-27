@@ -12,7 +12,9 @@ jobs:
   platform-matrix:
     name: ${{ matrix.os }} / Node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # The frozen Windows DSH fixture has a large dependency closure and can
+    # take more than 20 minutes to install on a cold hosted runner.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
