@@ -19,7 +19,7 @@ import type {
 } from '../contracts.js'
 import { creatorAgentFacts, type CreatorRecord } from '../creator-foundation.js'
 import { EvolutionError } from '../errors.js'
-import { isDirectlyUsableReview } from '../review/direct-use.js'
+import { isDirectlyUsableReview, isManagedModificationEligibleReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import { hashObject } from '../state/hashes.js'
 import { boundedAgentText } from './sanitize.js'
@@ -341,7 +341,7 @@ export interface ModificationAttemptEvidence {
   commit: string
   changedFiles: string[]
   changedFilesTruncated: boolean
-  postReviewId: string
+  postReviewId?: string
   completionMarkerObserved: boolean
   checks: ModificationCheckEvidence
 }
@@ -491,6 +491,8 @@ export interface WorkflowRecord {
   pendingWorkOrder?: import('../creator-foundation.js').CreatorWorkOrder
   pendingInstall?: WorkflowPendingInstall
   managedSourceId?: string
+  /** A Host-created commit exists and must be re-reviewed before another child edit is requested. */
+  managedCommitPendingReview?: boolean
   modificationOutcome?: ModificationOutcome
   /** Optional bounded Creator foundation records. Absent on schemaVersion 1/2 legacy JSON. */
   creatorRecords?: CreatorRecord[]
@@ -1065,7 +1067,7 @@ export function optionsFor(
         || !consumed.some((attempt) => sameVerificationAttempt(attempt, item)))
       && !failedSameSpec(item))
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
-    const repairableIds = reviews.filter((item) => item.fit !== 'none' && item.license !== null)
+    const repairableIds = reviews.filter(isManagedModificationEligibleReview)
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
     if (usableIds.length > 0 && installProfiles.length > 0) {
       options.push({ ...WORKFLOW_OPTIONS.use_this, candidateIds: usableIds })

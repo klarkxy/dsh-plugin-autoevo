@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -10,6 +10,7 @@ import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
+import { EvolutionError } from '../../src/errors.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { reviewLocalPlugin } from '../../src/review/review.js'
 import { testingCreatorFoundation, testingCreatorPreflight } from '../../src/creator-foundation.js'
@@ -192,5 +193,108 @@ describe('managed modify closure', () => {
     expect(workflow.lineageTipReviewId).toBe(result.review?.id)
     expect(workflow.lastFailure).toBeUndefined()
     expect(workflow.creatorRecords?.map((item) => item.operation)).toEqual(expect.arrayContaining(['modify', 'correct']))
+  }, 30_000)
+
+  it('persists a successful child commit when Host re-review cannot yet seal it', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-modify-partial-'))
+    temporary.push(root)
+    const runner = new NativeRunner()
+    const cfg = testRuntimeConfig(root, {
+      stateDir: path.join(root, 'state'),
+      sourceDir: path.join(root, 'state', 'sources'),
+      maxRepositoryBytes: 500_000,
+    })
+    const store = new StateStore(cfg.stateDir!)
+    const preflight = testingCreatorPreflight()
+    const child = managedChild(async ({ cwd }) => {
+      await writeFile(path.join(cwd, 'generated.js'), 'x'.repeat(500_001))
+    })
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
+    )
+    const resolutionId = `resolution_${'f'.repeat(24)}`
+    const workflowId = `workflow_${'e'.repeat(24)}`
+    const requirement = 'orbit telemetry'
+    const initial = await service.sources.initializeCreateSource({ resolutionId, workflowId, packageName: 'dsh-plugin-orbit-telemetry' })
+    const baselineEvidence = await reviewLocalPlugin({
+      runner,
+      config: cfg,
+      workspaceRoot: service.sources.sourceRoot,
+      path: initial.path,
+      baseReviewId: `review_${'c'.repeat(64)}`,
+      lineageRootCommit: initial.baseCommit,
+      resolutionId,
+      requirement,
+      runtimeVersion: '0.1.0-rc.6',
+    })
+    const resolution: ResolutionRecord = {
+      schemaVersion: 2,
+      id: resolutionId,
+      policyVersion: POLICY_VERSION,
+      createdAt: new Date().toISOString(),
+      requirement,
+      cwd: root,
+      decision: 'inspect_remote',
+      localCandidates: [],
+      remoteCandidates: [],
+      remoteDiscoveryComplete: true,
+      authorization: { state: 'confirmation_required', resolutionId, reason: 'modify selected', reviewId: baselineEvidence.record.id },
+      decisions: [],
+      queries: [],
+      reasons: [],
+    }
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: POLICY_VERSION,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      requirement,
+      status: 'running',
+      cursor: 'prepare_modify',
+      generation: 1,
+      managedSourceId: initial.sourceId,
+      lastReviewId: baselineEvidence.record.id,
+      lineageTipReviewId: baselineEvidence.record.id,
+    }
+    const exec = { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent }
+
+    const failure = await service.prepareModify(resolution, baselineEvidence.record, exec, workflow).catch((error) => error)
+    expect(failure).toBeInstanceOf(EvolutionError)
+    expect((failure as EvolutionError).details.managedChildCompleted).toBe(true)
+    expect(workflow.creatorRecords?.at(-1)?.status).toBe('verified')
+    expect(workflow.modificationOutcome).toMatchObject({
+      status: 'indeterminate',
+      attempts: [{
+        attempt: 1,
+        commit: expect.any(String),
+        changedFiles: ['generated.js'],
+        completionMarkerObserved: true,
+      }],
+    })
+    expect(workflow.modificationOutcome?.attempts[0]?.postReviewId).toBeUndefined()
+    expect((await store.getWorkflow(workflowId))?.modificationOutcome?.attempts[0]?.commit)
+      .toBe(workflow.modificationOutcome?.attempts[0]?.commit)
+
+    const externalEdit = path.join(initial.path, 'external-edit.txt')
+    await writeFile(externalEdit, 'must fail closed')
+    await expect(service.finishManagedWork(resolution, exec, workflow)).rejects.toThrow(/working tree|source repository|changed/iu)
+    expect(workflow.managedCommitPendingReview).toBe(true)
+    await unlink(externalEdit)
+
+    cfg.maxRepositoryBytes = 2_097_152
+    const sealed = await service.finishManagedWork(resolution, exec, workflow)
+    expect(sealed.review?.installSpec).toMatch(/^file:.*\.tgz$/u)
+    expect(workflow.managedCommitPendingReview).toBeUndefined()
+    expect(workflow.modificationOutcome?.attempts).toHaveLength(1)
+    expect(workflow.modificationOutcome?.attempts[0]?.postReviewId).toBe(sealed.review?.id)
   }, 30_000)
 })

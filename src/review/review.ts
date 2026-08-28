@@ -21,6 +21,7 @@ import type { CommandRunner } from '../process/runner.js'
 import { activationTargetsFromPatch } from '../lifecycle/bundle-activation.js'
 import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
+import { isExcludedLocalPackagePath } from './local-path-policy.js'
 
 /** Mechanical Host hard-skip findings. Regex detectors are not in this set. */
 export const HARD_SKIP_FINDING_CODES = new Set([
@@ -1053,7 +1054,8 @@ export async function inspectLocalDirectory(root: string, config: RuntimeConfig)
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       visited += 1
       if (visited > maxVisited) { truncated = true; return }
-      if (entry.name === '.git' || entry.name === 'node_modules') continue
+      const relative = path.relative(root, path.join(directory, entry.name))
+      if (isExcludedLocalPackagePath(relative)) continue
       const absolute = path.join(directory, entry.name)
       if (entry.isSymbolicLink()) { truncated = true; continue }
       if (entry.isDirectory()) await visit(absolute)

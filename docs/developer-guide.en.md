@@ -162,8 +162,8 @@ The full layout is canonical in [Architecture §4](architecture.md#4-数据与�
 | `ghCommand` / `gitCommand` / `dshCommand` | Corresponding executable names |
 | `dshCommandArgs` | Fixed extra arguments passed to DSH |
 | `maxCandidates` | 1–20, default 20 |
-| `maxFiles` | 4–200, default 80 |
-| `maxRepositoryBytes` | 64 KiB–8 MiB, default 1 MiB |
+| `maxFiles` | 4–200, default 200 |
+| `maxRepositoryBytes` | 64 KiB–8 MiB, default 2 MiB |
 | `commandTimeoutMs` | 1–300 seconds, default 30 seconds |
 | `forwardedCredentialEnv` | Allowed credential environment-variable names, never values |
 | `verificationPatchPaths` | Additional absolute verification patch paths |

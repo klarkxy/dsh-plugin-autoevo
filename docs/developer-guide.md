@@ -162,8 +162,8 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 | `ghCommand` / `gitCommand` / `dshCommand` | 对应可执行文件名 |
 | `dshCommandArgs` | 传给 DSH 的固定前置参数 |
 | `maxCandidates` | 1–20，默认 20 |
-| `maxFiles` | 4–200，默认 80 |
-| `maxRepositoryBytes` | 64 KiB–8 MiB，默认 1 MiB |
+| `maxFiles` | 4–200，默认 200 |
+| `maxRepositoryBytes` | 64 KiB–8 MiB，默认 2 MiB |
 | `commandTimeoutMs` | 1–300 秒，默认 30 秒 |
 | `forwardedCredentialEnv` | 允许转发的凭据环境变量名，不保存值 |
 | `verificationPatchPaths` | 额外验证 patch 的绝对路径列表 |

@@ -54,6 +54,7 @@ import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
   isDirectlyUsableReview,
+  isManagedModificationEligibleReview,
   previewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
@@ -1061,7 +1062,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         'Host will not reinstall the failed specification; improve the reviewed source first',
       )
     }
-    if (resume.optionId === 'modify_this' && (!review || review.fit === 'none' || review.license === null)) {
+    if (resume.optionId === 'modify_this' && (!review || !isManagedModificationEligibleReview(review))) {
       throw new EvolutionError('review_rejected', 'The selected review is not eligible for managed modification', {
         reviewId: review?.id,
       })

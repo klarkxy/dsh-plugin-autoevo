@@ -94,6 +94,13 @@ export function isDirectlyUsableReview(review: ReviewRecord, _workflow?: ReviewC
   return hostDirectUseBoundary(review) === undefined
 }
 
+/** Managed repair still requires a complete, current-policy review to bind its baseline. */
+export function isManagedModificationEligibleReview(review: ReviewRecord): boolean {
+  if (review.policyVersion !== POLICY_VERSION || review.fit === 'none' || review.license === null) return false
+  if (review.mechanicalFacts?.truncated) return false
+  return !review.findings.some((finding) => finding.code === 'review_truncated')
+}
+
 export function reviewerBindingDigest(verdict: ReviewerVerdict): string {
   return hashObject({
     requestId: verdict.requestId,

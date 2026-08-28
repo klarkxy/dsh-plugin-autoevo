@@ -15,6 +15,7 @@ import type { ManagedChildHost, ManagedChildResult } from './managed-child.js'
 import { reviewLocalPlugin } from './review/index.js'
 import {
   authenticatedModificationInstruction,
+  childCheckEvidence,
   hasMeaningfulModificationInstruction,
   modificationAcceptance,
   modificationBlockers,
@@ -299,7 +300,9 @@ export async function prepareManagedCreation(
     return finishManagedWork(deps, resolution, exec, workflow, child)
   } catch (error) {
     if (error instanceof EvolutionError && error.details.recoveryRequired === true) throw error
-    rememberCreator(workflow, 'create', 'unavailable')
+    if (!(error instanceof EvolutionError && error.details.managedChildCompleted === true)) {
+      rememberCreator(workflow, 'create', 'unavailable')
+    }
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
     if (!exec.signal?.aborted) throw error
@@ -311,6 +314,91 @@ export async function prepareManagedCreation(
       cancelled: true,
     })
   }
+}
+
+function completedManagedReviewError(error: unknown): EvolutionError {
+  return error instanceof EvolutionError
+    ? new EvolutionError(error.code, error.message, { ...error.details, managedChildCompleted: true })
+    : new EvolutionError('command_failed', error instanceof Error ? error.message : String(error), {
+        managedChildCompleted: true,
+      })
+}
+
+async function acceptReviewedModification(
+  deps: ManagedWorkDeps,
+  resolution: ResolutionRecord,
+  exec: WorkflowExec,
+  workflow: WorkflowRecord,
+  workOrder: CreatorWorkOrder,
+  sourcePath: string,
+  finalized: Awaited<ReturnType<typeof reviewAndFreezeManagedSource>>,
+): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord; continueConstruction?: boolean }> {
+  const partialOutcome = workflow.modificationOutcome
+  const lastAttempt = partialOutcome?.attempts.at(-1)
+  if (!partialOutcome || !lastAttempt || lastAttempt.postReviewId) {
+    throw new EvolutionError('invalid_input', 'Managed modification is missing its pending Host review evidence')
+  }
+  const outcomeBaseline = await deps.store.getReview(partialOutcome.baselineReviewId)
+  const baselineBlockers = workOrder.blockers as readonly ModificationBlocker[]
+  const instruction = authenticatedModificationInstruction(resolution, outcomeBaseline)
+  const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
+  const attempts: ModificationAttemptEvidence[] = partialOutcome.attempts.map((item) => (
+    item.attempt === lastAttempt.attempt ? { ...item, postReviewId: finalized.review.id } : item
+  ))
+  const acceptance = modificationAcceptance({
+    baselineReview: outcomeBaseline,
+    baselineBlockers,
+    postReview: finalized.review,
+    meaningfulInstruction,
+    attempt: lastAttempt.attempt,
+  })
+  const outcome: ModificationOutcome = {
+    contractVersion: 1,
+    policyVersion: outcomeBaseline.policyVersion,
+    baselineReviewId: outcomeBaseline.id,
+    ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
+    baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
+    maxAttempts: 2,
+    automaticCorrectionUsed: lastAttempt.attempt > 1,
+    status: acceptance.status,
+    attempts,
+    resolvedBlockers: acceptance.resolved,
+    unresolvedBlockers: acceptance.unresolved,
+    introducedBlockers: acceptance.introduced,
+  }
+  workflow.modificationOutcome = outcome
+  workflow.lastReviewId = finalized.review.id
+  workflow.lineageTipReviewId = finalized.review.id
+  delete workflow.managedCommitPendingReview
+  if (outcome.status === 'unresolved' && !acceptance.canCorrect) {
+    workflow.lastFailure = {
+      stage: 'review',
+      code: acceptance.introduced.length > 0 ? 'modify_introduced_blocker' : 'modify_targets_unresolved',
+      message: acceptance.introduced.length > 0
+        ? `Host re-review found ${acceptance.introduced.length} new blocking modification target(s); automatic correction stopped without expanding scope.`
+        : `Host re-review still reports ${acceptance.unresolved.length} original modification target(s) after one focused correction.`,
+      retryable: false,
+    }
+  } else {
+    delete workflow.lastFailure
+  }
+  if (acceptance.canCorrect) {
+    workflow.pendingWorkOrder = modificationWorkOrder(
+      finalized.resolution,
+      outcomeBaseline,
+      sourcePath,
+      acceptance.unresolved,
+      true,
+    )
+    workflow.pendingPath = sourcePath
+    workflow.updatedAt = new Date().toISOString()
+    await deps.store.put('workflows', workflow)
+    return finishManagedWork(deps, finalized.resolution, exec, workflow)
+  }
+  delete workflow.pendingWorkOrder
+  workflow.updatedAt = new Date().toISOString()
+  await deps.store.put('workflows', workflow)
+  return { ...finalized, path: sourcePath }
 }
 
 export async function finishManagedWork(
@@ -326,8 +414,11 @@ export async function finishManagedWork(
   if (!sourceKey || !cwd || !workOrder) {
     throw new EvolutionError('invalid_input', 'Managed child construction is missing a Host-managed source and work order')
   }
+  const pendingAttempt = workflow.modificationOutcome?.attempts.at(-1)
+  const retryPendingHostReview = workflow.managedCommitPendingReview === true
+    || Boolean(workOrder.operation !== 'create' && pendingAttempt && !pendingAttempt.postReviewId)
   if (exec.signal?.aborted) {
-    rememberCreator(workflow, workOrder.operation, 'unavailable')
+    if (!retryPendingHostReview) rememberCreator(workflow, workOrder.operation, 'unavailable')
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
     return await preserveFailedManagedWork(deps, {
@@ -339,6 +430,54 @@ export async function finishManagedWork(
     })
   }
   assertWorkOrderScope(workOrder, cwd)
+  const baselineReviewId = workOrder.baselineReview?.reviewId
+    ?? workflow.lineageTipReviewId
+    ?? workflow.lastReviewId
+  if (!baselineReviewId) {
+    throw new EvolutionError('invalid_input', 'Managed child construction is missing a baseline review')
+  }
+  const baselineReview = await deps.store.getReview(baselineReviewId)
+  const source = retryPendingHostReview
+    ? await deps.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
+    : await deps.sources.readReceipt(sourceKey)
+  if (!source || source.activeWorkflowId !== workflow.id) {
+    throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
+  }
+  if (retryPendingHostReview) {
+    let finalized: Awaited<ReturnType<typeof reviewAndFreezeManagedSource>>
+    try {
+      finalized = await reviewAndFreezeManagedSource(deps, {
+        resolution,
+        sourceId: sourceKey,
+        path: source.path,
+        baseReviewId: baselineReview.id,
+        lineageRootCommit: source.baseCommit,
+        workflowId: workflow.id,
+        exec,
+      })
+    } catch (error) {
+      workflow.updatedAt = new Date().toISOString()
+      await deps.store.put('workflows', workflow)
+      throw completedManagedReviewError(error)
+    }
+    if (workOrder.operation !== 'create') {
+      return acceptReviewedModification(deps, resolution, exec, workflow, workOrder, source.path, finalized)
+    }
+    try {
+      delete workflow.pendingWorkOrder
+      delete workflow.managedCommitPendingReview
+      delete workflow.lastFailure
+      workflow.lastReviewId = finalized.review.id
+      workflow.lineageTipReviewId = finalized.review.id
+      workflow.updatedAt = new Date().toISOString()
+      await deps.store.put('workflows', workflow)
+      return { ...finalized, path: source.path }
+    } catch (error) {
+      workflow.updatedAt = new Date().toISOString()
+      await deps.store.put('workflows', workflow)
+      throw completedManagedReviewError(error)
+    }
+  }
   const parent = requireParentAgent(exec)
   const preflight = completedChild?.preflight ?? await preflightCreator(deps, workflow, workOrder.operation, exec)
   const childResult = completedChild?.result
@@ -348,17 +487,8 @@ export async function finishManagedWork(
     throw new EvolutionError('invalid_input', 'Managed child Creator receipt is not bound to the completed child session')
   }
   rememberCreator(workflow, workOrder.operation, 'verified', childResult.creator)
-  const baselineReviewId = workOrder.baselineReview?.reviewId
-    ?? workflow.lineageTipReviewId
-    ?? workflow.lastReviewId
-  if (!baselineReviewId) {
-    throw new EvolutionError('invalid_input', 'Managed child construction is missing a baseline review')
-  }
-  const baselineReview = await deps.store.getReview(baselineReviewId)
-  const source = await deps.sources.readReceipt(sourceKey)
-  if (!source || source.activeWorkflowId !== workflow.id) {
-    throw new EvolutionError('invalid_input', 'Managed source is not owned by this workflow')
-  }
+  let childCommitRecorded = false
+  let finalized: Awaited<ReturnType<typeof reviewAndFreezeManagedSource>>
   try {
     const committed = await deps.sources.finalizeChildCommit({
       sourceId: sourceKey,
@@ -371,7 +501,53 @@ export async function finishManagedWork(
           : `fix: satisfy AutoEvo workflow ${workflow.id}`,
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    const finalized = await reviewAndFreezeManagedSource(deps, {
+    childCommitRecorded = true
+    workflow.managedCommitPendingReview = true
+    const attempt = (workflow.modificationOutcome?.attempts.length ?? 0) + 1
+    const baselineBlockers = workOrder.blockers as readonly ModificationBlocker[]
+    const outcomeBaseline = workOrder.operation === 'create'
+      ? baselineReview
+      : workflow.modificationOutcome
+        ? await deps.store.getReview(workflow.modificationOutcome.baselineReviewId)
+        : baselineReview
+    const instruction = workOrder.operation === 'create'
+      ? undefined
+      : authenticatedModificationInstruction(resolution, outcomeBaseline)
+    const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
+    if (workOrder.operation !== 'create') {
+      const attempts: ModificationAttemptEvidence[] = [
+        ...(workflow.modificationOutcome?.attempts ?? []),
+        {
+          attempt,
+          childSessionId: childResult.sessionId,
+          commit: committed.headCommit,
+          changedFiles: committed.changedFiles,
+          changedFilesTruncated: committed.changedFilesTruncated,
+          completionMarkerObserved: true,
+          checks: childCheckEvidence(childResult.taskResult),
+        },
+      ]
+      workflow.modificationOutcome = {
+        contractVersion: 1,
+        policyVersion: outcomeBaseline.policyVersion,
+        baselineReviewId: outcomeBaseline.id,
+        ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
+        baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
+        maxAttempts: 2,
+        automaticCorrectionUsed: attempt > 1,
+        status: 'indeterminate',
+        attempts,
+        resolvedBlockers: [],
+        unresolvedBlockers: [...baselineBlockers],
+        introducedBlockers: [],
+      }
+      workflow.updatedAt = new Date().toISOString()
+      await deps.store.put('workflows', workflow)
+    } else {
+      workflow.updatedAt = new Date().toISOString()
+      await deps.store.put('workflows', workflow)
+    }
+    finalized = await reviewAndFreezeManagedSource(deps, {
       resolution,
       sourceId: sourceKey,
       path: source.path,
@@ -380,100 +556,15 @@ export async function finishManagedWork(
       workflowId: workflow.id,
       exec,
     })
-    const attempt = (workflow.modificationOutcome?.attempts.length ?? 0) + 1
-    if (workOrder.operation === 'create') {
-      delete workflow.pendingWorkOrder
-      workflow.lastReviewId = finalized.review.id
-      workflow.lineageTipReviewId = finalized.review.id
-      workflow.updatedAt = new Date().toISOString()
-      await deps.store.put('workflows', workflow)
-      return { ...finalized, path: source.path }
-    }
-    // A focused work order is the user's authorized repair boundary. Recomputing
-    // every semantic suggestion here can turn a small mechanical repair into
-    // unrelated feature work, so acceptance follows the blockers shown to the
-    // managed child for this attempt.
-    const baselineBlockers = workOrder.blockers as readonly ModificationBlocker[]
-    const outcomeBaseline = workflow.modificationOutcome
-      ? await deps.store.getReview(workflow.modificationOutcome.baselineReviewId)
-      : baselineReview
-    const instruction = authenticatedModificationInstruction(resolution, outcomeBaseline)
-    const meaningfulInstruction = hasMeaningfulModificationInstruction(instruction)
-    const attempts: ModificationAttemptEvidence[] = [
-      ...(workflow.modificationOutcome?.attempts ?? []),
-      {
-        attempt,
-        childSessionId: childResult.sessionId,
-        commit: committed.headCommit,
-        changedFiles: committed.changedFiles,
-        changedFilesTruncated: committed.changedFilesTruncated,
-        postReviewId: finalized.review.id,
-        completionMarkerObserved: true,
-        checks: {
-          source: 'unknown',
-          status: 'unknown',
-          summary: 'Host did not independently observe a test command result.',
-        },
-      },
-    ]
-    const acceptance = modificationAcceptance({
-      baselineReview: outcomeBaseline,
-      baselineBlockers,
-      postReview: finalized.review,
-      meaningfulInstruction,
-      attempt,
-    })
-    const outcome: ModificationOutcome = {
-      contractVersion: 1,
-      policyVersion: outcomeBaseline.policyVersion,
-      baselineReviewId: outcomeBaseline.id,
-      ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
-      baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
-      maxAttempts: 2,
-      automaticCorrectionUsed: attempt > 1,
-      status: acceptance.status,
-      attempts,
-      resolvedBlockers: acceptance.resolved,
-      unresolvedBlockers: acceptance.unresolved,
-      introducedBlockers: acceptance.introduced,
-    }
-    workflow.modificationOutcome = outcome
-    workflow.lastReviewId = finalized.review.id
-    workflow.lineageTipReviewId = finalized.review.id
-    if (outcome.status === 'unresolved' && !acceptance.canCorrect) {
-      workflow.lastFailure = {
-        stage: 'review',
-        code: acceptance.introduced.length > 0 ? 'modify_introduced_blocker' : 'modify_targets_unresolved',
-        message: acceptance.introduced.length > 0
-          ? `Host re-review found ${acceptance.introduced.length} new blocking modification target(s); automatic correction stopped without expanding scope.`
-          : `Host re-review still reports ${acceptance.unresolved.length} original modification target(s) after one focused correction.`,
-        retryable: false,
-      }
-    } else {
-      delete workflow.lastFailure
-    }
-    if (acceptance.canCorrect) {
-      workflow.pendingWorkOrder = modificationWorkOrder(
-        finalized.resolution,
-        outcomeBaseline,
-        source.path,
-        acceptance.unresolved,
-        true,
-      )
-      workflow.pendingPath = source.path
-      workflow.updatedAt = new Date().toISOString()
-      await deps.store.put('workflows', workflow)
-      return finishManagedWork(deps, finalized.resolution, exec, workflow)
-    }
-    delete workflow.pendingWorkOrder
-    workflow.updatedAt = new Date().toISOString()
-    await deps.store.put('workflows', workflow)
-    return { ...finalized, path: source.path }
   } catch (error) {
-    rememberCreator(workflow, workOrder.operation, 'unavailable')
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
-    if (!exec.signal?.aborted) throw error
+    if (!exec.signal?.aborted) {
+      if (childCommitRecorded) {
+        throw completedManagedReviewError(error)
+      }
+      throw error
+    }
     return await preserveFailedManagedWork(deps, {
       sourceId: sourceKey,
       workflowId: workflow.id,
@@ -482,4 +573,14 @@ export async function finishManagedWork(
       cancelled: true,
     })
   }
+  if (workOrder.operation === 'create') {
+    delete workflow.pendingWorkOrder
+    delete workflow.managedCommitPendingReview
+    workflow.lastReviewId = finalized.review.id
+    workflow.lineageTipReviewId = finalized.review.id
+    workflow.updatedAt = new Date().toISOString()
+    await deps.store.put('workflows', workflow)
+    return { ...finalized, path: source.path }
+  }
+  return acceptReviewedModification(deps, resolution, exec, workflow, workOrder, source.path, finalized)
 }

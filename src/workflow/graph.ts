@@ -36,6 +36,12 @@ export interface NodeExecutionResult {
   installation?: InstallationRecord
 }
 
+function managedWorkFailureStage(error: unknown): 'managed_child' | 'review' {
+  return error instanceof EvolutionError && error.details.managedChildCompleted === true
+    ? 'review'
+    : 'managed_child'
+}
+
 const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionId, WorkflowNodeId>>>> = {
   await_clarification: {
     clarify_requirement: 'resolve_local',
@@ -195,7 +201,7 @@ async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecut
       ? await ctx.host.getReview(ctx.workflow.lastReviewId).catch(() => undefined)
       : undefined
     ctx.workflow.lastFailure = {
-      stage: 'managed_child',
+      stage: managedWorkFailureStage(error),
       code: error instanceof EvolutionError ? error.code : 'command_failed',
       message: error instanceof Error ? error.message : String(error),
       retryable: true,
@@ -656,10 +662,11 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
           && error.code !== 'command_failed'
           && error.code !== 'review_rejected')) throw error
       ctx.workflow.lastFailure = {
-        stage: 'managed_child',
+        stage: managedWorkFailureStage(error),
         code: error instanceof EvolutionError ? error.code : 'command_failed',
         message: error instanceof Error ? error.message : String(error),
-        retryable: error instanceof EvolutionError && error.code === 'command_failed',
+        retryable: error instanceof EvolutionError
+          && (error.code === 'command_failed' || error.details.managedChildCompleted === true),
       }
       const preservedReview = await ctx.host.latestReview(
         current.id,
@@ -668,7 +675,9 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
       const preservedResolution = await Promise.resolve()
         .then(() => ctx.host.getResolution(current.id))
         .catch(() => current)
-      return { kind: 'next', node: 'await_confirmation', resolution: preservedResolution, review: preservedReview }
+      return error instanceof EvolutionError && error.details.managedChildCompleted === true
+        ? { kind: 'next', node: 'await_modify_work', resolution: preservedResolution, review: preservedReview }
+        : { kind: 'next', node: 'await_confirmation', resolution: preservedResolution, review: preservedReview }
     }
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
@@ -720,12 +729,15 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
         throw error
       }
       ctx.workflow.lastFailure = {
-        stage: 'managed_child',
+        stage: managedWorkFailureStage(error),
         code: error instanceof EvolutionError ? error.code : 'command_failed',
         message: error instanceof Error ? error.message : String(error),
-        retryable: error instanceof EvolutionError && error.code === 'command_failed',
+        retryable: error instanceof EvolutionError
+          && (error.code === 'command_failed' || error.details.managedChildCompleted === true),
       }
-      return { kind: 'next', node: 'await_confirmation', resolution: current, review }
+      return error instanceof EvolutionError && error.details.managedChildCompleted === true
+        ? { kind: 'next', node: 'await_modify_work', resolution: current, review }
+        : { kind: 'next', node: 'await_confirmation', resolution: current, review }
     }
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path

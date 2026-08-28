@@ -224,6 +224,7 @@ export function modificationWorkOrder(
         : 'Host re-review must no longer report the baseline blockers',
       'Host re-review must not introduce a new blocking target',
       'Preserve package identity and choose the implementation path without expanding scope',
+      'Leave package.json-declared runtime entrypoints and generated build artifacts present; Host packages with lifecycle scripts disabled',
       ...(repairFiber
         ? ['Host re-review and later install must produce a Loader-visible wrapping Fiber; do not reinstall the failed specification unchanged']
         : []),

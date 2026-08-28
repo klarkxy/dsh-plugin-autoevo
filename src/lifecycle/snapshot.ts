@@ -5,6 +5,7 @@ import type { ReviewRecord } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import type { CommandRunner } from '../process/runner.js'
 import { inspectLocalDirectory } from '../review/review.js'
+import { isExcludedLocalPackagePath } from '../review/local-path-policy.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 
 export interface MaterializedLocalPackage {
@@ -44,11 +45,6 @@ function shellForwardedFileSpec(filename: string): string {
     throw new EvolutionError('unsafe_path', 'The owned package path contains characters unsafe for DSH plugin forwarding')
   }
   return `file:${absolute.replaceAll('\\', '/')}`
-}
-
-function isExcludedRootEntry(relative: string): boolean {
-  const first = relative.split(path.sep)[0]
-  return first === '.git' || first === 'node_modules'
 }
 
 async function npmPackArgv(runner: CommandRunner, signal?: AbortSignal): Promise<[string, ...string[]]> {
@@ -100,7 +96,7 @@ export async function materializeLocalPackage(options: {
     async filter(source) {
       const relative = path.relative(sourceRoot, source)
       if (!relative) return true
-      if (isExcludedRootEntry(relative)) return false
+      if (isExcludedLocalPackagePath(relative)) return false
       const facts = await lstat(source)
       if (facts.isSymbolicLink() || (!facts.isDirectory() && !facts.isFile())) {
         throw new EvolutionError('unsafe_path', 'Local packages with symbolic links or special files cannot be materialized', {

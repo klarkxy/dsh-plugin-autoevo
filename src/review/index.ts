@@ -3,6 +3,7 @@ export {
   frozenManifestDigest,
   hostDirectUseBoundary,
   isDirectlyUsableReview,
+  isManagedModificationEligibleReview,
   reviewCandidateDigest,
   reviewerBindingDigest,
   reviewSnapshotDigest,

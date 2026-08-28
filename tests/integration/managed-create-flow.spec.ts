@@ -257,6 +257,51 @@ describe('managed create vertical flow', () => {
     expect(status.stdout.trim()).toBe('')
   }, 60_000)
 
+  it('retries Host review of a committed create without launching another child', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-create-review-retry-'))
+    temporary.push(root)
+    const preflight = testingCreatorPreflight()
+    const runner = new NativeRunner()
+    const cfg = testRuntimeConfig(root, {
+      stateDir: path.join(root, 'state'),
+      sourceDir: path.join(root, 'state', 'sources'),
+      maxRepositoryBytes: 500_000,
+    })
+    const store = new StateStore(cfg.stateDir!)
+    const child = managedChild(async ({ cwd }) => {
+      const pkgPath = path.join(cwd, 'package.json')
+      const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+      await writeFile(pkgPath, `${JSON.stringify({ ...pkg, license: 'MIT' }, null, 2)}\n`)
+      await writeFile(path.join(cwd, 'lib', 'index.js'), "export function apply() {}\n")
+      await writeFile(path.join(cwd, 'LICENSE'), 'MIT\n')
+      await writeFile(path.join(cwd, 'generated.js'), 'x'.repeat(500_001))
+    })
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
+    )
+    const flow = workflow()
+    const current = resolution(root)
+    const exec = { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent }
+    const failure = await service.prepareCreate(current, exec, flow).catch((error) => error)
+    expect(failure).toMatchObject({ details: expect.objectContaining({ managedChildCompleted: true }) })
+    expect(flow.creatorRecords?.at(-1)?.status).toBe('verified')
+    expect(flow.managedCommitPendingReview).toBe(true)
+
+    cfg.maxRepositoryBytes = 2_097_152
+    const sealed = await service.finishManagedWork(current, exec, flow)
+    expect(sealed.review?.installSpec).toMatch(/^file:.*\.tgz$/u)
+    expect(flow.creatorRecords?.at(-1)?.status).toBe('verified')
+    expect(flow.managedCommitPendingReview).toBeUndefined()
+  }, 60_000)
+
   it('checkpoints ordinary managed-child failures as structured recovery state', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-failure-e2e-'))
     temporary.push(root)

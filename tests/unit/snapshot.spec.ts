@@ -18,6 +18,44 @@ function config(root: string): RuntimeConfig {
 }
 
 describe('immutable local package materialization', () => {
+  it('reviews the complete bounded source set while excluding only Host-owned roots', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-review-bounds-'))
+    temporary.push(root)
+    const source = path.join(root, 'source-plugin')
+    await mkdir(path.join(source, 'src'), { recursive: true })
+    await mkdir(path.join(source, '.pnpm-store'), { recursive: true })
+    await writeFile(path.join(source, 'package.json'), '{"name":"bounded-source"}\n')
+    for (let index = 0; index < 108; index += 1) {
+      await writeFile(path.join(source, 'src', `${String(index).padStart(3, '0')}.ts`), 'x'.repeat(10_000))
+    }
+    await writeFile(path.join(source, '.pnpm-store', 'cache.bin'), 'z'.repeat(2_097_153))
+
+    const snapshot = await inspectLocalDirectory(source, config(root))
+    const inspectedBytes = snapshot.files.reduce((total, file) => total + file.content.byteLength, 0)
+    expect(snapshot.files).toHaveLength(109)
+    expect(snapshot.files.some((file) => file.path.startsWith('.pnpm-store/'))).toBe(false)
+    expect(inspectedBytes).toBeGreaterThan(1_048_576)
+    expect(inspectedBytes).toBeLessThanOrEqual(2_097_152)
+    expect(snapshot.truncated).toBe(false)
+
+    const overLimit = path.join(root, 'over-limit')
+    await mkdir(overLimit)
+    await writeFile(path.join(overLimit, 'package.json'), '{}')
+    await writeFile(path.join(overLimit, 'payload.bin'), 'y'.repeat(2_097_152))
+    expect((await inspectLocalDirectory(overLimit, config(root))).truncated).toBe(true)
+  })
+
+  it('does not trust arbitrary ignored-looking directories as Host-owned exclusions', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-review-ignored-'))
+    temporary.push(root)
+    const source = path.join(root, 'source-plugin')
+    await mkdir(path.join(source, '.custom-cache'), { recursive: true })
+    await writeFile(path.join(source, 'package.json'), '{}')
+    await writeFile(path.join(source, '.custom-cache', 'still-reviewed.txt'), 'review me')
+    const snapshot = await inspectLocalDirectory(source, config(root))
+    expect(snapshot.files.map((file) => file.path)).toContain('.custom-cache/still-reviewed.txt')
+  })
+
   it('binds the complete reviewed file set and installs from an owned tarball, never the workspace link', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-snapshot-'))
     temporary.push(root)
@@ -31,6 +69,8 @@ describe('immutable local package materialization', () => {
     }))
     await writeFile(path.join(source, 'cordis.patch.yml'), '- insert: []\n')
     await writeFile(path.join(source, 'runtime.wasm'), Buffer.from([0, 97, 115, 109, 1]))
+    await mkdir(path.join(source, '.pnpm-store'), { recursive: true })
+    await writeFile(path.join(source, '.pnpm-store', 'cache.bin'), 'not package input')
     const runtimeConfig = config(root)
     const snapshot = await inspectLocalDirectory(source, runtimeConfig)
     expect(snapshot.truncated).toBe(false)
@@ -59,6 +99,7 @@ describe('immutable local package materialization', () => {
     const runner: CommandRunner = {
       async run(request) {
         requests.push([...request.argv])
+        await expect(readFile(path.join(request.cwd, '.pnpm-store', 'cache.bin'))).rejects.toThrow()
         const destination = request.argv.at(-1)!
         await writeFile(path.join(destination, 'local-tool-1.0.0.tgz'), Buffer.from('immutable package bytes'))
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }

@@ -5,6 +5,7 @@ import {
   assertDirectUseAllowed,
   hostDirectUseBoundary,
   isDirectlyUsableReview,
+  isManagedModificationEligibleReview,
   reviewCandidateDigest,
   reviewSnapshotDigest,
 } from '../../src/review/direct-use.js'
@@ -225,6 +226,19 @@ describe('direct use eligibility', () => {
       expect(isDirectlyUsableReview(review, workflowFor(review))).toBe(false)
       expect(() => assertDirectUseAllowed(review, workflowFor(review))).toThrow(/cannot authorize installation|does not authorize installation/i)
     }
+  })
+
+  it('offers managed modification only from a complete current-policy baseline', () => {
+    const complete = githubReview({ recommendation: 'modify', installSpec: null })
+    const truncated = githubReview({
+      recommendation: 'modify',
+      installSpec: null,
+      findings: [{ code: 'review_truncated', severity: 'warning', source: 'repository', detail: 'limit' }],
+    })
+    expect(isManagedModificationEligibleReview(complete)).toBe(true)
+    expect(confirmationIds(complete, workflowFor(complete))).toContain('modify_this')
+    expect(isManagedModificationEligibleReview(truncated)).toBe(false)
+    expect(confirmationIds(truncated, workflowFor(truncated))).not.toContain('modify_this')
   })
 
   it('does not treat prompt-injection regex or static high risk as mechanical install blockers', () => {

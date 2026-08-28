@@ -557,6 +557,47 @@ describe('AgentWorkflowViewV2', () => {
     expect(JSON.stringify(card)).not.toContain('private-child-session')
   })
 
+  it('keeps committed modification evidence visible while Host re-review is pending repair', () => {
+    const workflow = baseWorkflow('await_modify_work')
+    workflow.pendingPath = 'D:/managed/source'
+    workflow.lastFailure = {
+      stage: 'review',
+      code: 'review_rejected',
+      message: 'A truncated local package cannot be materialized for installation',
+      retryable: true,
+    }
+    workflow.modificationOutcome = {
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 2,
+      automaticCorrectionUsed: false,
+      status: 'indeterminate',
+      attempts: [{
+        attempt: 1,
+        childSessionId: 'private-child-session',
+        commit: 'b'.repeat(40),
+        changedFiles: ['src/index.ts'],
+        changedFilesTruncated: false,
+        completionMarkerObserved: true,
+        checks: { source: 'child_reported', status: 'passed', summary: 'The child reported passing tests.' },
+      }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [],
+    }
+    const card = compactAgentView({ workflow, resolution: resolution(), lifecycleState: 'interrupted' })
+    expect(card.facts).toMatchObject({
+      failure: { stage: 'review', code: 'review_rejected', retryable: true },
+      modification: {
+        outcome: 'indeterminate',
+        host_verified_attempts: [{ commit: 'b'.repeat(40), post_review_pending: true }],
+      },
+    })
+    expect(JSON.stringify(card)).not.toContain('private-child-session')
+  })
+
   it('exposes only Creator verified or unavailable and never digest, session, path, or control fields', () => {
     const workflow = baseWorkflow('await_confirmation')
     workflow.creatorRecords = [{

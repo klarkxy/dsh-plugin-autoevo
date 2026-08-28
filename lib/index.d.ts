@@ -1061,7 +1061,7 @@ interface ModificationAttemptEvidence {
   commit: string;
   changedFiles: string[];
   changedFilesTruncated: boolean;
-  postReviewId: string;
+  postReviewId?: string;
   completionMarkerObserved: boolean;
   checks: ModificationCheckEvidence;
 }
@@ -1143,6 +1143,8 @@ interface WorkflowRecord {
   pendingWorkOrder?: CreatorWorkOrder;
   pendingInstall?: WorkflowPendingInstall;
   managedSourceId?: string;
+  /** A Host-created commit exists and must be re-reviewed before another child edit is requested. */
+  managedCommitPendingReview?: boolean;
   modificationOutcome?: ModificationOutcome;
   /** Optional bounded Creator foundation records. Absent on schemaVersion 1/2 legacy JSON. */
   creatorRecords?: CreatorRecord[];

@@ -309,7 +309,9 @@ function modificationEvidence(view: WorkflowView): Record<string, unknown> | und
       commit: attempt.commit,
       changed_files: attempt.changedFiles.slice(0, 100),
       changed_files_truncated: attempt.changedFilesTruncated || attempt.changedFiles.length > 100,
-      post_review_id: attempt.postReviewId,
+      ...(attempt.postReviewId
+        ? { post_review_id: attempt.postReviewId }
+        : { post_review_pending: true }),
       completion_marker_observed: attempt.completionMarkerObserved,
       checks: {
         source: attempt.checks.source,
@@ -636,6 +638,13 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
         },
       } : {}),
       ...(creator ? { creator } : {}),
+      ...(modificationEvidence(view) ? { modification: modificationEvidence(view) } : {}),
+      ...(view.workflow.lastFailure ? { failure: {
+        stage: view.workflow.lastFailure.stage,
+        code: boundedText(view.workflow.lastFailure.code, 100),
+        summary: boundedText(view.workflow.lastFailure.message, 300),
+        retryable: view.workflow.lastFailure.retryable,
+      } } : {}),
     }
   }
   return {

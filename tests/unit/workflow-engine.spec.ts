@@ -1193,7 +1193,9 @@ describe('workflow engine autonomous discovery', () => {
       workflow.lastReviewId = staleReview.id
       workflow.lineageTipReviewId = staleReview.id
       if (finishAttempts === 1) {
-        throw new EvolutionError('review_rejected', 'Managed child changed Git branch or HEAD instead of only editing the working tree')
+        throw new EvolutionError('review_rejected', 'A truncated local package cannot be materialized for installation', {
+          managedChildCompleted: true,
+        })
       }
       return { resolution: current, path: sourceRoot, review: staleReview }
     }
@@ -1219,7 +1221,7 @@ describe('workflow engine autonomous discovery', () => {
       cursor: 'await_modify_work',
       status: 'interrupted',
       lastFailure: {
-        stage: 'managed_child',
+        stage: 'review',
         code: 'review_rejected',
         retryable: true,
       },
