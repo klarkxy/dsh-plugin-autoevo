@@ -4,6 +4,7 @@ All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Ver
 
 ## Unreleased
 
+- Review and materialize only the literal `package.json` publication surface for managed local packages, while falling back to the complete-tree review for unsupported glob declarations; non-package tests, docs, and lockfiles can no longer cause a false truncated-package rejection.
 - Move the public Policy contract to V12 so unfinished release-specific recovery actions restart safely while completed historical receipts remain readable.
 - Preserve a bounded, redacted summary from both stdout and stderr when DSH/pnpm installation fails, and expose its exit code and structured state to users, agents, and diagnosis probes.
 - Preserve trusted Windows `LOCALAPPDATA` for DSH subprocesses so nested pnpm installs reuse the Web profile's existing store instead of failing with `ERR_PNPM_UNEXPECTED_STORE`.

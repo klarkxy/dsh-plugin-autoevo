@@ -91,6 +91,48 @@ describe('local review binding', () => {
     }
   })
 
+  it('binds only a literal package publication surface when the repository itself exceeds review limits', async () => {
+    const workspace = await mkdtemp(path.join(process.cwd(), 'tests', '.review-workspace-'))
+    const plugin = path.join(workspace, 'plugin')
+    await mkdir(path.join(plugin, 'lib'), { recursive: true })
+    await mkdir(path.join(plugin, 'test'), { recursive: true })
+    await writeFile(path.join(plugin, 'package.json'), JSON.stringify({
+      name: 'local-tool',
+      main: './lib/index.js',
+      files: ['lib', 'cordis.patch.yml'],
+      dsh: { bundle: { patch: './cordis.patch.yml', tools: ['local-tool'] } },
+      peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
+    }))
+    await writeFile(path.join(plugin, 'cordis.patch.yml'), '- insert:\n    - id: local-tool\n      name: local-tool\n')
+    await writeFile(path.join(plugin, 'lib', 'index.js'), "defineTool('local-tool')")
+    for (let index = 0; index < 12; index += 1) {
+      await writeFile(path.join(plugin, 'test', `${index}.spec.js`), 'not published')
+    }
+    const runner: CommandRunner = {
+      async run(request) {
+        const args = request.argv.slice(1)
+        const stdout = args.includes('--show-toplevel') ? plugin
+          : args.includes('HEAD') ? 'b'.repeat(40)
+            : ''
+        return { exitCode: 0, signal: null, stdout, stderr: '' }
+      },
+    }
+    try {
+      const result = await reviewLocalPlugin({
+        runner, config, workspaceRoot: workspace, path: plugin, baseReviewId: 'review_0123456789abcdef',
+        resolutionId: 'resolution_0123456789abcdef', requirement: 'local tool', runtimeVersion: '0.1.0-rc.6',
+      })
+      expect(result.record.findings).not.toEqual(expect.arrayContaining([expect.objectContaining({ code: 'review_truncated' })]))
+      expect(result.record.inspectedFiles.map((file) => file.path)).toEqual([
+        'cordis.patch.yml',
+        'lib/index.js',
+        'package.json',
+      ])
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('accepts a descendant HEAD of the lineage root and rejects an unrelated commit', async () => {
     const workspace = await mkdtemp(path.join(process.cwd(), 'tests', '.review-workspace-'))
     const plugin = path.join(workspace, 'plugin')

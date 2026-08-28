@@ -1,4 +1,4 @@
-import { access, chmod, cp, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises'
+import { access, chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeConfig } from '../config.js'
 import type { ReviewRecord } from '../contracts.js'
@@ -17,6 +17,13 @@ export interface MaterializedLocalPackage {
 function fileFacts(files: ReviewRecord['inspectedFiles']): Array<{ path: string; sha256: string; bytes: number }> {
   return files.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes }))
     .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function safeReviewedPath(value: string): string | null {
+  if (!value || value.includes('\\') || value.includes('\0') || (process.platform === 'win32' && value.includes(':'))
+    || path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || isExcludedLocalPackagePath(value)) return null
+  if (value.split('/').some((part) => part === '.' || part === '..' || !part)) return null
+  return value
 }
 
 function assertReviewedSnapshot(
@@ -89,23 +96,21 @@ export async function materializeLocalPackage(options: {
   const snapshotRoot = path.join(artifactRoot, 'source')
   const packageRoot = path.join(artifactRoot, 'package')
   await mkdir(artifactRoot, { recursive: true })
-  await cp(sourceRoot, snapshotRoot, {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-    async filter(source) {
-      const relative = path.relative(sourceRoot, source)
-      if (!relative) return true
-      if (isExcludedLocalPackagePath(relative)) return false
-      const facts = await lstat(source)
-      if (facts.isSymbolicLink() || (!facts.isDirectory() && !facts.isFile())) {
-        throw new EvolutionError('unsafe_path', 'Local packages with symbolic links or special files cannot be materialized', {
-          pathHash: sha256(relative),
-        })
-      }
-      return true
-    },
-  })
+  await mkdir(snapshotRoot)
+  for (const reviewed of fileFacts(options.review.inspectedFiles)) {
+    const relative = safeReviewedPath(reviewed.path)
+    if (!relative) throw new EvolutionError('unsafe_path', 'The reviewed local package contains an unsafe file path')
+    const source = path.join(sourceRoot, ...relative.split('/'))
+    const facts = await lstat(source)
+    if (!facts.isFile() || facts.isSymbolicLink()) {
+      throw new EvolutionError('unsafe_path', 'Local packages with symbolic links or special files cannot be materialized', {
+        pathHash: sha256(relative),
+      })
+    }
+    const destination = path.join(snapshotRoot, ...relative.split('/'))
+    await mkdir(path.dirname(destination), { recursive: true })
+    await copyFile(source, destination)
+  }
 
   assertReviewedSnapshot(options.review, await inspectLocalDirectory(snapshotRoot, options.config))
   await mkdir(packageRoot, { recursive: true })

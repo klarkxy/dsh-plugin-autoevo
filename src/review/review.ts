@@ -1,4 +1,4 @@
-import { readdir, readFile, realpath } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { parseDocument } from 'yaml'
 import { satisfies, valid, validRange } from 'semver'
@@ -1081,6 +1081,127 @@ export async function inspectLocalDirectory(root: string, config: RuntimeConfig)
   return { files, truncated }
 }
 
+const PACKAGE_FILE_GLOB_MAGIC = /[*?[\]{}!]/u
+const NPM_ALWAYS_INCLUDED_FILE = /^(?:readme|licen[cs]e|notice|copying)(?:\.|$)/iu
+
+function literalPackagePath(value: unknown): string | null {
+  if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0')
+    || (process.platform === 'win32' && value.includes(':'))
+    || PACKAGE_FILE_GLOB_MAGIC.test(value) || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) return null
+  const relative = value.replace(/^\.\//u, '').replace(/\/+$/u, '')
+  if (!relative || isExcludedLocalPackagePath(relative)
+    || relative.split('/').some((part) => part === '.' || part === '..' || !part)) return null
+  return relative
+}
+
+function nestedStringValues(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (!value || typeof value !== 'object') return []
+  if (Array.isArray(value)) return value.flatMap(nestedStringValues)
+  return Object.values(value as Record<string, unknown>).flatMap(nestedStringValues)
+}
+
+function minimizePackageRoots(roots: readonly string[]): string[] {
+  const selected: string[] = []
+  for (const candidate of [...new Set(roots)].sort((left, right) => left.length - right.length || left.localeCompare(right))) {
+    if (selected.some((root) => candidate === root || candidate.startsWith(`${root}/`))) continue
+    selected.push(candidate)
+  }
+  return selected.sort((left, right) => priority(left) - priority(right) || left.localeCompare(right))
+}
+
+async function declaredPackageRoots(root: string): Promise<string[] | null> {
+  let pkg: Record<string, unknown> | undefined
+  try {
+    pkg = jsonObject(await readFile(path.join(root, 'package.json')))
+  } catch {
+    return null
+  }
+  if (!pkg || !Array.isArray(pkg.files)) return null
+  const declared = pkg.files.map(literalPackagePath)
+  // npm supports a wide files grammar. Unsupported globs and unsafe paths fall
+  // back to the complete-tree review instead of guessing a narrower package.
+  if (declared.some((entry) => entry === null)) return null
+
+  const roots = ['package.json', ...(declared as string[])]
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (entry.isFile() && (NPM_ALWAYS_INCLUDED_FILE.test(entry.name) || entry.name === 'npm-shrinkwrap.json')) roots.push(entry.name)
+  }
+  const dsh = record(pkg.dsh)
+  const bundle = record(dsh?.bundle)
+  const entrypoints = [
+    pkg.main,
+    pkg.types,
+    pkg.typings,
+    ...nestedStringValues(pkg.browser),
+    ...nestedStringValues(pkg.exports),
+    ...nestedStringValues(pkg.bin),
+    ...nestedStringValues(pkg.man),
+    bundle?.patch,
+  ]
+  for (const entrypoint of entrypoints) {
+    const relative = literalPackagePath(entrypoint)
+    if (relative) roots.push(relative)
+  }
+  return minimizePackageRoots(roots)
+}
+
+async function inspectLiteralPackageRoots(root: string, roots: readonly string[], config: RuntimeConfig): Promise<ContentSnapshot> {
+  const paths = new Set<string>()
+  const visitedDirectories = new Set<string>()
+  let visited = 0
+  let truncated = false
+  const maxVisited = Math.max(config.maxFiles * 20, 1_000)
+
+  async function visit(relative: string): Promise<void> {
+    if (truncated) return
+    const absolute = path.join(root, ...relative.split('/'))
+    let facts: Awaited<ReturnType<typeof lstat>>
+    try {
+      facts = await lstat(absolute)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    visited += 1
+    if (visited > maxVisited) { truncated = true; return }
+    if (facts.isSymbolicLink() || (!facts.isDirectory() && !facts.isFile())) { truncated = true; return }
+    if (facts.isFile()) {
+      paths.add(relative)
+      if (paths.size > config.maxFiles) truncated = true
+      return
+    }
+    if (visitedDirectories.has(relative)) return
+    visitedDirectories.add(relative)
+    for (const entry of await readdir(absolute, { withFileTypes: true })) {
+      await visit(`${relative}/${entry.name}`)
+      if (truncated) return
+    }
+  }
+
+  for (const relative of roots) {
+    await visit(relative)
+    if (truncated) break
+  }
+  const selected = [...paths].sort((left, right) => priority(left) - priority(right) || left.localeCompare(right))
+  const files: ContentFile[] = []
+  let bytes = 0
+  for (const filePath of selected) {
+    if (files.length >= config.maxFiles) { truncated = true; continue }
+    const content = await readFile(path.join(root, ...filePath.split('/')))
+    if (bytes + content.byteLength > config.maxRepositoryBytes) { truncated = true; continue }
+    bytes += content.byteLength
+    files.push({ path: filePath, content })
+  }
+  return { files, truncated }
+}
+
+/** Review the literal package surface when package.json declares one; otherwise review the complete tree. */
+export async function inspectLocalPackageDirectory(root: string, config: RuntimeConfig): Promise<ContentSnapshot> {
+  const roots = await declaredPackageRoots(root)
+  return roots ? inspectLiteralPackageRoots(root, roots, config) : inspectLocalDirectory(root, config)
+}
+
 async function git(runner: CommandRunner, config: RuntimeConfig, cwd: string, args: string[]): Promise<string> {
   const result = await runner.run({ argv: [config.gitCommand, ...args], cwd })
   return result.stdout.trim()
@@ -1130,7 +1251,7 @@ export async function reviewLocalPlugin(options: {
   }
   const baseCommit = lineageRoot.toLowerCase()
   const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
-  const snapshot = await inspectLocalDirectory(canonicalRoot, options.config)
+  const snapshot = await inspectLocalPackageDirectory(canonicalRoot, options.config)
   // A Host-committed managed change has a clean worktree, so status alone is
   // always the SHA-256 of empty text. Bind the local identity to exact HEAD as
   // well as any residual status to distinguish reviewed commits truthfully.

@@ -8,7 +8,7 @@ import type { RuntimeConfig } from '../../src/config.js'
 import type { ReviewRecord } from '../../src/contracts.js'
 import { materializeLocalPackage } from '../../src/lifecycle/snapshot.js'
 import type { CommandRunner } from '../../src/process/runner.js'
-import { inspectLocalDirectory } from '../../src/review/review.js'
+import { inspectLocalDirectory, inspectLocalPackageDirectory } from '../../src/review/review.js'
 import { sha256 } from '../../src/state/hashes.js'
 
 const temporary = trackTempDirs()
@@ -56,6 +56,41 @@ describe('immutable local package materialization', () => {
     expect(snapshot.files.map((file) => file.path)).toContain('.custom-cache/still-reviewed.txt')
   })
 
+  it('reviews a literal package publication surface without counting unrelated repository files', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-package-surface-'))
+    temporary.push(root)
+    const source = path.join(root, 'source-plugin')
+    await mkdir(path.join(source, 'lib'), { recursive: true })
+    await mkdir(path.join(source, 'test'), { recursive: true })
+    await writeFile(path.join(source, 'package.json'), JSON.stringify({
+      name: 'bounded-package',
+      main: './lib/index.js',
+      files: ['lib'],
+    }))
+    await writeFile(path.join(source, 'README.md'), 'always included')
+    await writeFile(path.join(source, 'lib', 'index.js'), 'export const value = 1')
+    for (let index = 0; index < 205; index += 1) {
+      await writeFile(path.join(source, 'test', `${String(index).padStart(3, '0')}.spec.js`), 'not published')
+    }
+
+    const complete = await inspectLocalPackageDirectory(source, config(root))
+    expect(complete.truncated).toBe(false)
+    expect(complete.files.map((file) => file.path)).toEqual(['package.json', 'README.md', 'lib/index.js'])
+    expect((await inspectLocalDirectory(source, config(root))).truncated).toBe(true)
+  })
+
+  it('falls back to complete-tree review for unsupported package file globs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-package-glob-'))
+    temporary.push(root)
+    const source = path.join(root, 'source-plugin')
+    await mkdir(path.join(source, 'lib'), { recursive: true })
+    await writeFile(path.join(source, 'package.json'), JSON.stringify({ name: 'glob-package', files: ['lib/**/*.js'] }))
+    for (let index = 0; index < 205; index += 1) {
+      await writeFile(path.join(source, 'lib', `${String(index).padStart(3, '0')}.js`), 'review me')
+    }
+    expect((await inspectLocalPackageDirectory(source, config(root))).truncated).toBe(true)
+  })
+
   it('binds the complete reviewed file set and installs from an owned tarball, never the workspace link', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-snapshot-'))
     temporary.push(root)
@@ -65,14 +100,16 @@ describe('immutable local package materialization', () => {
     await writeFile(path.join(source, 'package.json'), JSON.stringify({
       name: 'local-tool',
       version: '1.0.0',
+      files: ['cordis.patch.yml', 'runtime.wasm'],
       dsh: { bundle: { patch: './cordis.patch.yml', tools: ['local-tool'] } },
     }))
     await writeFile(path.join(source, 'cordis.patch.yml'), '- insert: []\n')
     await writeFile(path.join(source, 'runtime.wasm'), Buffer.from([0, 97, 115, 109, 1]))
+    await writeFile(path.join(source, 'unpublished.txt'), 'must not enter the owned package snapshot')
     await mkdir(path.join(source, '.pnpm-store'), { recursive: true })
     await writeFile(path.join(source, '.pnpm-store', 'cache.bin'), 'not package input')
     const runtimeConfig = config(root)
-    const snapshot = await inspectLocalDirectory(source, runtimeConfig)
+    const snapshot = await inspectLocalPackageDirectory(source, runtimeConfig)
     expect(snapshot.truncated).toBe(false)
     const review: ReviewRecord = {
       schemaVersion: 1,
@@ -100,6 +137,7 @@ describe('immutable local package materialization', () => {
       async run(request) {
         requests.push([...request.argv])
         await expect(readFile(path.join(request.cwd, '.pnpm-store', 'cache.bin'))).rejects.toThrow()
+        await expect(readFile(path.join(request.cwd, 'unpublished.txt'))).rejects.toThrow()
         const destination = request.argv.at(-1)!
         await writeFile(path.join(destination, 'local-tool-1.0.0.tgz'), Buffer.from('immutable package bytes'))
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
