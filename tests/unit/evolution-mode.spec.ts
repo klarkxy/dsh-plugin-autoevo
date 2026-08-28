@@ -50,7 +50,7 @@ describe('evolution-mode entry', () => {
     expect(register).not.toHaveBeenCalled()
 
     expect(section).not.toHaveBeenCalled()
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V11')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V13')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('supposedly temporary capability')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host captures the latest top-level user message verbatim')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one clarification_question')
@@ -58,7 +58,7 @@ describe('evolution-mode entry', () => {
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Public decisions never accept retention')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Dependency mutation, nested collaboration, Git writes, plugin mutation, publication/release/deploy')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V11 unfinished workflows')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V13 unfinished workflows')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

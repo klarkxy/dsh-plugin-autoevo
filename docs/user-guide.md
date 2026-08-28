@@ -121,6 +121,8 @@ AutoEvo 在目标 profile 的真实安装结果上分别记录 installed、loade
 
 故障恢复绑定当前 sealed interrupt。根据 Agent 提供的合法选项，用新消息确认对账、清理或重试；不要手工拼接旧 workflow、review 或 installation ID。
 
+如果 pnpm 的 store 与目标 profile 已有依赖不一致，并且 Host 已确认目标插件根本没有装上，AutoEvo 会停在当前候选处，提供“先修复安装环境，再重试这个候选”的明确选项。确认后，Host 只在本次安装命令中复用该 profile 已记录的 store；不会把路径交给模型，也不会修改 profile 或全局 pnpm 配置。store 元数据变化、缺失或不可信时不会提供这条恢复路径。
+
 已完成安装后想清理并重新开始是另一条流程，需要一条新的顶层消息：
 
 > 清理这次已完成的安装，然后从头重新发现。

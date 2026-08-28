@@ -55,7 +55,7 @@ live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通�
 src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
-├─ contracts.ts                # Policy V11 公共合同、review/install receipts
+├─ contracts.ts                # Policy V13 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
 ├─ service-review.ts           # 审查编排与重验证
@@ -103,7 +103,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 5. 工作流与两道确认门
 
-当前 Policy 为 V11。状态机、两道确认门与生命周期映射以[架构说明 §4](architecture.md#4-数据与状态) 为准；这里只列改动工作流时容易踩的边界：
+当前 Policy 为 V13。状态机、两道确认门与生命周期映射以[架构说明 §4](architecture.md#4-数据与状态) 为准；这里只列改动工作流时容易踩的边界：
 
 - 内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`；永远不要接受模型自报的 repository、review ID、路径或 install spec，`use_this` / `modify_this` 只绑定密封候选快照中的候选 ID。
 - 同回合重复 resume 不获得新授权；防重放失败不会消费当前合法 interrupt。
@@ -112,7 +112,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 6. Resolver 与来源 lineage
 
-解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 Host 侧 `topic:dsh-plugin` GitHub 搜索。远端摘要始终是不可信数据；Host 只接受严格 GitHub 仓库标识和有界摘要。
+解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 Host 侧 `topic:dsh-plugin` GitHub 搜索。远端摘要始终是不可信数据；Host 只做严格 GitHub 仓库标识、客观状态、有界摘要和去重，完整有界结果由 Agent 判断语义相关性。精确仓库置顶；只有 Agent 密封的 1–5 项读取受限预览。
 
 已安装来源必须由 live profile ownership 解析，不能仅凭本地 inventory 推断。replacement 只适用于：
 

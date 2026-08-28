@@ -104,6 +104,17 @@ export interface GithubReviewEvidence {
   files: ContentFile[]
 }
 
+export interface GithubPluginPreview {
+  repository: string
+  commit: string
+  defaultBranch: string
+  inspectedFiles: InspectedFile[]
+  truncated: boolean
+  manifest: Pick<ManifestFacts, 'kind' | 'packageName' | 'packageVersion' | 'bundlePatch' | 'license'>
+  packageSummary?: { description?: string; keywords?: string[] }
+  readmeExcerpt?: string
+}
+
 const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.tsx', '.jsx', '.json', '.yaml', '.yml'])
 const LIFECYCLE_SCRIPTS = new Set(['preinstall', 'install', 'postinstall', 'prepublish', 'prepare', 'prepack', 'postpack', 'prepublishOnly'])
 const LOADER_PATCH_EXTENSIONS = new Set(['.json', '.yaml', '.yml'])
@@ -858,12 +869,37 @@ function selectedEntries(entries: readonly TreeEntry[], config: RuntimeConfig): 
   return { entries: selected, truncated }
 }
 
+function selectedPreviewEntries(entries: readonly TreeEntry[], config: RuntimeConfig): { entries: TreeEntry[]; truncated: boolean } {
+  const previewBytes = Math.min(config.maxRepositoryBytes, 262_144)
+  const eligible = entries.filter((entry) => {
+    if (entry.type !== 'blob' || typeof entry.sha !== 'string' || !/^[a-f0-9]{40,64}$/iu.test(entry.sha)) return false
+    const filePath = safeTreePath(entry.path)
+    if (!filePath) return false
+    const lower = filePath.toLowerCase()
+    return lower === 'package.json'
+      || /^readme(?:\.|$)/iu.test(path.posix.basename(filePath)) && !filePath.includes('/')
+      || /(^|\/)dsh\.bundle(?:\.|\/|$)/iu.test(filePath)
+      || /(^|\/)[^/]*patch\.(?:json|ya?ml)$/iu.test(filePath)
+  }).sort((left, right) => priority(left.path as string) - priority(right.path as string)
+    || (left.path as string).localeCompare(right.path as string))
+  const selected: TreeEntry[] = []
+  let bytes = 0
+  for (const entry of eligible) {
+    const size = typeof entry.size === 'number' && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+    if (selected.length >= 6 || bytes + size > previewBytes) continue
+    selected.push(entry)
+    bytes += size
+  }
+  return { entries: selected, truncated: selected.length < eligible.length }
+}
+
 async function githubSnapshot(options: {
   runner: CommandRunner
   config: RuntimeConfig
   cwd: string
   repository: string
   ref: string
+  preview?: boolean
   signal?: AbortSignal
 }): Promise<{ sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>; snapshot: ContentSnapshot; maintained: boolean }> {
   const repository = validateGithubRepository(options.repository)
@@ -875,7 +911,9 @@ async function githubSnapshot(options: {
   if (typeof repo.default_branch !== 'string' || !repo.default_branch) throw new EvolutionError('github_unavailable', 'GitHub did not provide a default branch')
   const tree = parseGithub<GithubTree>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/git/trees/${commit.sha}?recursive=1`, options.signal), 'tree data')
   if (!Array.isArray(tree.tree)) throw new EvolutionError('github_unavailable', 'GitHub did not provide a file tree')
-  const chosen = selectedEntries(tree.tree as TreeEntry[], options.config)
+  const chosen = options.preview
+    ? selectedPreviewEntries(tree.tree as TreeEntry[], options.config)
+    : selectedEntries(tree.tree as TreeEntry[], options.config)
   const files: ContentFile[] = []
   let actualBytes = 0
   let truncated = chosen.truncated || tree.truncated === true
@@ -899,6 +937,66 @@ async function githubSnapshot(options: {
     sourceSnapshot: { kind: 'github', repository, requestedRef: options.ref, commit: commit.sha, defaultBranch: repo.default_branch },
     snapshot: { files, truncated },
     maintained,
+  }
+}
+
+function boundedPreviewText(content: Uint8Array, maxLength: number): string {
+  return Buffer.from(content).toString('utf8').normalize('NFKC')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/gu, ' ')
+    .replace(/\s+/gu, ' ').trim().slice(0, maxLength)
+}
+
+/** Fetch only package/README/bundle-manifest evidence for Agent shortlist curation. */
+export async function previewGithubPlugin(options: {
+  runner: CommandRunner
+  config: RuntimeConfig
+  cwd: string
+  repository: string
+  ref: string
+  signal?: AbortSignal
+}): Promise<GithubPluginPreview> {
+  const result = await githubSnapshot({ ...options, preview: true })
+  const manifest = manifestFrom(result.snapshot.files)
+  const packageFile = result.snapshot.files.find((file) => file.path === 'package.json')
+  let packageSummary: GithubPluginPreview['packageSummary']
+  if (packageFile) {
+    try {
+      const value: unknown = JSON.parse(Buffer.from(packageFile.content).toString('utf8'))
+      const item = record(value)
+      const description = typeof item?.description === 'string' ? boundedPreviewText(Buffer.from(item.description), 1_000) : undefined
+      const keywords = Array.isArray(item?.keywords)
+        ? item.keywords.filter((entry): entry is string => typeof entry === 'string').map((entry) => boundedPreviewText(Buffer.from(entry), 100)).filter(Boolean).slice(0, 30)
+        : undefined
+      if (description || keywords?.length) packageSummary = {
+        ...(description ? { description } : {}),
+        ...(keywords?.length ? { keywords } : {}),
+      }
+    } catch {
+      // The formal review reports malformed package data. Preview stays read-only and best-effort.
+    }
+  }
+  const readme = result.snapshot.files.find((file) => /^readme(?:\.|$)/iu.test(path.posix.basename(file.path)))
+  const inspectedFiles = result.snapshot.files.map((file) => ({
+    path: file.path,
+    ...(file.blobId ? { blobId: file.blobId } : {}),
+    sha256: sha256(file.content),
+    bytes: file.content.byteLength,
+  })).sort((left, right) => left.path.localeCompare(right.path))
+  return {
+    repository: result.sourceSnapshot.repository,
+    commit: result.sourceSnapshot.commit,
+    defaultBranch: result.sourceSnapshot.defaultBranch,
+    inspectedFiles,
+    truncated: result.snapshot.truncated,
+    manifest: {
+      kind: manifest.kind,
+      ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
+      ...(manifest.packageVersion ? { packageVersion: manifest.packageVersion } : {}),
+      ...(manifest.bundlePatch ? { bundlePatch: manifest.bundlePatch } : {}),
+      ...(manifest.license ? { license: manifest.license } : {}),
+    },
+    ...(packageSummary ? { packageSummary } : {}),
+    ...(readme ? { readmeExcerpt: boundedPreviewText(readme.content, 2_000) } : {}),
   }
 }
 

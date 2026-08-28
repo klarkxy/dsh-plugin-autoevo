@@ -3,14 +3,90 @@ import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { DshCommandRunner, _testing } from '../../src/process/runner.js'
+import { sha256 } from '../../src/state/hashes.js'
 
 describe('subprocess environment boundary', () => {
+  it('summarizes and hashes both command streams without retaining sensitive raw diagnostics', () => {
+    const stdout = 'Progress\nERR_PNPM_FETCH_500 failed at C:\\Users\\Jane Doe\\cache; token=top-secret\n'
+    const stderr = 'dsh: pnpm failed in profile directory C:\\Users\\Jane Doe\\.dsh\nSee https://example.test/?token=abc\n'
+    const failure = _testing.commandResultFailure('dsh', { exitCode: 1, signal: null, stdout, stderr })
+
+    expect(failure.details).toMatchObject({
+      command: 'dsh',
+      exitCode: 1,
+      diagnosticHash: sha256(JSON.stringify([stdout, stderr])),
+    })
+    expect(failure.details.diagnosticSummary).toContain('ERR_PNPM_FETCH_500')
+    expect(failure.details.diagnosticSummary).toContain('stderr:')
+    expect(JSON.stringify(failure.details)).not.toContain('Jane Doe')
+    expect(JSON.stringify(failure.details)).not.toContain('top-secret')
+    expect(JSON.stringify(failure.details)).not.toContain('example.test')
+    expect(String(failure.details.diagnosticSummary).length).toBeLessThanOrEqual(400)
+    expect(failure.details).not.toHaveProperty('stdout')
+    expect(failure.details).not.toHaveProperty('stderr')
+  })
+
+  it('extracts exact pnpm release-age entries even when a network diagnostic is also present', () => {
+    const stdout = [
+      'ERR_PNPM_META_FETCH_FAIL GET https://registry.npmjs.org/example failed: ECONNRESET',
+      '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 2 lockfile entries failed verification:',
+      '  ds-harness-remote@0.3.35 was published 8 minutes ago',
+      '  @deepseek-ai/dsh-file-viewer@0.2.5 was published 12 minutes ago',
+    ].join('\n')
+    const recovery = _testing.commandFailureRecovery({ exitCode: 1, signal: null, stdout, stderr: '' })
+
+    expect(recovery).toEqual({
+      kind: 'minimum_release_age',
+      owner: 'pnpm',
+      code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION',
+      policyKey: 'minimumReleaseAge',
+      entries: [
+        { packageName: '@deepseek-ai/dsh-file-viewer', version: '0.2.5', reason: 'was published 12 minutes ago' },
+        { packageName: 'ds-harness-remote', version: '0.3.35', reason: 'was published 8 minutes ago' },
+      ],
+    })
+  })
+
+  it('fails closed when a release-age report is malformed instead of treating it as transient', () => {
+    const stderr = [
+      '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 2 lockfile entries failed verification:',
+      '  ds-harness-remote@0.3.35 was published 8 minutes ago',
+      'ERR_PNPM_META_FETCH_FAIL ECONNRESET',
+    ].join('\n')
+    expect(_testing.commandFailureRecovery({ exitCode: 1, signal: null, stdout: '', stderr })).toBeUndefined()
+  })
+
+  it('classifies an allowlisted pnpm network failure for one same-authority retry', () => {
+    expect(_testing.commandFailureRecovery({
+      exitCode: 1,
+      signal: null,
+      stdout: '',
+      stderr: 'ERR_PNPM_FETCH_503 registry unavailable',
+    })).toEqual({ kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_FETCH_503' })
+  })
+
+  it('classifies pnpm store mismatch without retaining either store path', () => {
+    const stdout = [
+      'ERR_PNPM_UNEXPECTED_STORE Unexpected store location',
+      'The dependencies at "C:\\Users\\Jane\\profile\\node_modules" are currently linked from the store at "C:\\old-store".',
+      'pnpm now wants to use the store at "D:\\new-store".',
+    ].join('\n')
+    const recovery = _testing.commandFailureRecovery({ exitCode: 1, signal: null, stdout, stderr: '' })
+
+    expect(recovery).toEqual({
+      kind: 'profile_store_mismatch',
+      owner: 'pnpm',
+      code: 'ERR_PNPM_UNEXPECTED_STORE',
+    })
+    expect(JSON.stringify(recovery)).not.toMatch(/Jane|old-store|new-store/u)
+  })
+
   it('preserves the Windows OS root needed for Node CSPRNG startup', () => {
     expect(_testing.effectiveEnvironment('dsh', { DSH_HOME: 'C:\\dsh' }, {
       SystemRoot: 'C:\\Windows',
       WINDIR: 'C:\\Windows',
       USER_TOKEN: 'do-not-forward',
-    }, 'win32')).toEqual({
+    }, 'win32', '')).toEqual({
       DSH_HOME: 'C:\\dsh',
       SystemRoot: 'C:\\Windows',
       WINDIR: 'C:\\Windows',
@@ -25,11 +101,60 @@ describe('subprocess environment boundary', () => {
     }, {
       SystemRoot: 'C:\\Windows',
       WINDIR: 'C:\\Windows',
-    }, 'win32')).toEqual({
+    }, 'win32', '')).toEqual({
       DSH_HOME: 'C:\\dsh',
       SystemRoot: 'C:\\Windows',
       WINDIR: 'C:\\Windows',
     })
+  })
+
+  it('preserves trusted LOCALAPPDATA so nested pnpm uses the profile store', () => {
+    expect(_testing.effectiveEnvironment('dsh', {
+      DSH_HOME: 'C:\\dsh',
+      localappdata: 'C:\\attacker-controlled',
+    }, {
+      LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local',
+      USERPROFILE: 'C:\\Users\\tester',
+    }, 'win32')).toEqual({
+      DSH_HOME: 'C:\\dsh',
+      LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local',
+    })
+  })
+
+  it('limits trusted LOCALAPPDATA inheritance to DSH commands, including absolute dsh.cmd paths', () => {
+    const parent = { LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local' }
+    expect(_testing.effectiveEnvironment('C:\\tools\\dsh.cmd', {}, parent, 'win32'))
+      .toMatchObject({ LOCALAPPDATA: parent.LOCALAPPDATA })
+    for (const command of ['git', 'gh.exe', 'npm.cmd', 'node.exe']) {
+      expect(_testing.effectiveEnvironment(command, {}, parent, 'win32')).not.toHaveProperty('LOCALAPPDATA')
+    }
+    expect(_testing.effectiveEnvironment(
+      'dsh',
+      { localappdata: 'C:\\untrusted' },
+      {},
+      'win32',
+      'C:\\Users\\tester',
+    )).toMatchObject({ LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local' })
+  })
+
+  it('derives LOCALAPPDATA from the trusted OS home when the Desktop parent omits it', () => {
+    expect(_testing.effectiveEnvironment(
+      'dsh',
+      { localappdata: 'C:\\attacker-controlled' },
+      { SystemRoot: 'C:\\Windows' },
+      'win32',
+      'C:\\Users\\tester',
+    )).toEqual({
+      SystemRoot: 'C:\\Windows',
+      LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local',
+    })
+    expect(_testing.effectiveEnvironment(
+      'dsh',
+      { localappdata: 'C:\\attacker-controlled' },
+      {},
+      'win32',
+      '/not-a-windows-home',
+    )).not.toHaveProperty('LOCALAPPDATA')
   })
 
   it.runIf(process.platform === 'win32')('starts Node with the scrubbed Windows bootstrap environment', () => {

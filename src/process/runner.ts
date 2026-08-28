@@ -1,10 +1,17 @@
+import os from 'node:os'
 import path from 'node:path'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError } from '../errors.js'
 import { sha256 } from '../state/hashes.js'
+import { boundedAgentText } from '../workflow/sanitize.js'
 
 const WINDOWS_CMD_SHIMS = new Set(['.cmd', '.bat'])
+
+function isDshCommand(command: string, platform: NodeJS.Platform): boolean {
+  const commandPath = platform === 'win32' ? path.win32 : path.posix
+  return /^dsh(?:\.cmd|\.exe)?$/iu.test(commandPath.basename(command))
+}
 
 /** Node 24 refuses to spawn a .cmd/.bat without a shell (EINVAL). */
 export function argvForResolvedExecutable(
@@ -47,6 +54,134 @@ export interface CommandResult {
   stderr: string
 }
 
+const DIAGNOSTIC_LINE = /(?:ERR_[A-Z0-9_]+|\b(?:error|failed|failure|not found|timed? out|cannot|unable|denied)\b|\bE(?:PERM|ACCES|NOENT|CONN\w*|TIMEDOUT|NOTFOUND)\b)/iu
+const MINIMUM_RELEASE_AGE_CODE = 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION'
+const UNEXPECTED_STORE_CODE = 'ERR_PNPM_UNEXPECTED_STORE'
+const MAX_POLICY_ENTRIES = 8
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu
+const PACKAGE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/iu
+const TRANSIENT_CODES = new Set([
+  'ERR_PNPM_FETCH_500',
+  'ERR_PNPM_FETCH_502',
+  'ERR_PNPM_FETCH_503',
+  'ERR_PNPM_FETCH_504',
+  'ERR_PNPM_META_FETCH_FAIL',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+export function isTransientPnpmRecoveryCode(value: unknown): value is string {
+  return typeof value === 'string' && TRANSIENT_CODES.has(value)
+}
+
+export type CommandFailureRecovery =
+  | { kind: 'same_authority_once'; owner: 'pnpm'; code: string }
+  | { kind: 'profile_store_mismatch'; owner: 'pnpm'; code: typeof UNEXPECTED_STORE_CODE }
+  | {
+      kind: 'minimum_release_age'
+      owner: 'pnpm'
+      code: typeof MINIMUM_RELEASE_AGE_CODE
+      policyKey: 'minimumReleaseAge'
+      entries: Array<{ packageName: string; version: string; reason: string }>
+    }
+
+function plainDiagnosticLines(value: string): string[] {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+    .split(/\r?\n/gu)
+}
+
+function parseReleaseAgeRecovery(lines: string[]): CommandFailureRecovery | undefined {
+  const headerIndex = lines.findIndex((line) => line.includes(`[${MINIMUM_RELEASE_AGE_CODE}]`))
+  if (headerIndex < 0) return undefined
+  const countMatch = /\]\s+(\d+)\s+lockfile entries failed verification:/u.exec(lines[headerIndex] ?? '')
+  const expectedCount = countMatch ? Number.parseInt(countMatch[1]!, 10) : Number.NaN
+  if (!Number.isSafeInteger(expectedCount) || expectedCount < 1 || expectedCount > MAX_POLICY_ENTRIES) return undefined
+
+  const entries: Array<{ packageName: string; version: string; reason: string }> = []
+  for (const line of lines.slice(headerIndex + 1)) {
+    if (!/^\s{2,}\S/u.test(line)) {
+      if (entries.length > 0) break
+      continue
+    }
+    const match = /^\s{2,}((?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)@([^\s]+)\s+(.+)$/iu.exec(line)
+    if (!match || !NPM_NAME.test(match[1]!) || !PACKAGE_VERSION.test(match[2]!)) return undefined
+    const reason = boundedAgentText(match[3], 220)
+    if (!reason) return undefined
+    entries.push({ packageName: match[1]!, version: match[2]!, reason })
+    if (entries.length > MAX_POLICY_ENTRIES) return undefined
+  }
+  if (entries.length !== expectedCount) return undefined
+  const unique = new Set(entries.map((entry) => `${entry.packageName.toLowerCase()}@${entry.version}`))
+  if (unique.size !== entries.length) return undefined
+  return {
+    kind: 'minimum_release_age',
+    owner: 'pnpm',
+    code: MINIMUM_RELEASE_AGE_CODE,
+    policyKey: 'minimumReleaseAge',
+    entries: entries.sort((left, right) => `${left.packageName}@${left.version}`.localeCompare(`${right.packageName}@${right.version}`)),
+  }
+}
+
+function commandFailureRecovery(result: CommandResult): CommandFailureRecovery | undefined {
+  const lines = [...plainDiagnosticLines(result.stdout), ...plainDiagnosticLines(result.stderr)]
+  const releaseAge = parseReleaseAgeRecovery(lines)
+  if (releaseAge) return releaseAge
+  const text = lines.join('\n')
+  // A truncated or malformed policy report must never be downgraded to a
+  // transient network failure merely because both diagnostics were emitted.
+  if (text.includes(MINIMUM_RELEASE_AGE_CODE)) return undefined
+  if (text.includes(UNEXPECTED_STORE_CODE)) {
+    return { kind: 'profile_store_mismatch', owner: 'pnpm', code: UNEXPECTED_STORE_CODE }
+  }
+  const code = [...TRANSIENT_CODES].find((item) => new RegExp(`(?:^|[^A-Z0-9_])${item}(?:$|[^A-Z0-9_])`, 'u').test(text))
+  return code ? { kind: 'same_authority_once', owner: 'pnpm', code } : undefined
+}
+
+function diagnosticStreamTail(value: string, maxLength: number): string {
+  const lines = plainDiagnosticLines(value)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const diagnosticIndexes = lines.flatMap((line, index) => DIAGNOSTIC_LINE.test(line) ? [index] : [])
+  const selected = new Set<number>()
+  for (const index of diagnosticIndexes) {
+    selected.add(index)
+    for (let offset = 1; offset <= MAX_POLICY_ENTRIES && index + offset < lines.length; offset += 1) {
+      const next = lines[index + offset]!
+      if (!/^(?:@?[a-z0-9]|\s{2,})/iu.test(next)) break
+      selected.add(index + offset)
+    }
+  }
+  const diagnosticLines = [...selected].sort((left, right) => left - right).map((index) => lines[index]!)
+  return boundedAgentText((diagnosticLines.length > 0 ? diagnosticLines : lines).slice(-10).join(' | '), maxLength)
+}
+
+function commandDiagnosticSummary(result: CommandResult): string {
+  const hasStdout = result.stdout.trim().length > 0
+  const hasStderr = result.stderr.trim().length > 0
+  const maxPerStream = hasStdout && hasStderr ? 180 : 360
+  const parts = [
+    ...(hasStdout ? [`stdout: ${diagnosticStreamTail(result.stdout, maxPerStream)}`] : []),
+    ...(hasStderr ? [`stderr: ${diagnosticStreamTail(result.stderr, maxPerStream)}`] : []),
+  ]
+  return boundedAgentText(parts.join(' | '), 400)
+}
+
+/** Create a persistable command failure without retaining either raw output stream. */
+export function commandResultFailure(command: string, result: CommandResult): EvolutionError {
+  const diagnosticSummary = commandDiagnosticSummary(result)
+  const recovery = commandFailureRecovery(result)
+  return new EvolutionError('command_failed', `${command} exited with code ${result.exitCode ?? 'null'}`, {
+    command,
+    exitCode: result.exitCode,
+    ...(diagnosticSummary ? { diagnosticSummary } : {}),
+    ...(recovery ? { recovery } : {}),
+    diagnosticHash: sha256(JSON.stringify([result.stdout, result.stderr])),
+  })
+}
+
 export interface CommandRunner {
   run(request: CommandRequest): Promise<CommandResult>
   resolveExecutable?(command: string, signal?: AbortSignal): Promise<string>
@@ -80,6 +215,7 @@ function effectiveEnvironment(
   requested: NodeJS.ProcessEnv = {},
   parent: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  homeDirectory: string = os.homedir(),
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...requested }
   // A completely scrubbed Windows environment is not sufficient to start
@@ -99,6 +235,21 @@ function effectiveEnvironment(
       }
       const value = inherited ?? requestedValue
       if (value !== undefined) env[name] = value
+    }
+    // Nested pnpm in DSH uses LOCALAPPDATA to select its Windows store. Keep
+    // this trusted parent value only for DSH commands; other subprocesses stay
+    // on the narrower scrubbed environment.
+    if (isDshCommand(command, platform)) {
+      const inherited = Object.entries(parent)
+        .find(([key, value]) => key.toLowerCase() === 'localappdata' && value !== undefined)?.[1]
+      const derived = /^(?:[A-Z]:\\|\\\\)/iu.test(homeDirectory)
+        ? path.win32.join(homeDirectory, 'AppData', 'Local')
+        : undefined
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === 'localappdata') delete env[key]
+      }
+      const localAppData = inherited ?? derived
+      if (localAppData !== undefined) env.LOCALAPPDATA = localAppData
     }
   }
   if (/^gh(?:\.exe)?$/iu.test(command)) {
@@ -200,14 +351,17 @@ export class DshCommandRunner implements CommandRunner {
       stderr: stderrRead?.text ?? '',
     }
     if (!request.allowFailure && outcome.exitCode !== 0) {
-      throw new EvolutionError('command_failed', `${command} exited with code ${outcome.exitCode ?? 'null'}`, {
-        command,
-        exitCode: outcome.exitCode,
-        diagnosticHash: sha256(result.stderr),
-      })
+      throw commandResultFailure(command, result)
     }
     return result
   }
 }
 
-export const _testing = { effectiveEnvironment, argvForResolvedExecutable, signalFailure }
+export const _testing = {
+  commandDiagnosticSummary,
+  commandFailureRecovery,
+  commandResultFailure,
+  effectiveEnvironment,
+  argvForResolvedExecutable,
+  signalFailure,
+}

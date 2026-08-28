@@ -1,10 +1,13 @@
 const STOP_WORDS = new Set([
   'agent', 'ability', 'capability', 'current', 'please', 'plugin', 'support', 'task', 'tool',
-  'want', 'with', 'find', 'install', 'use', 'make', 'need', 'discover', 'review', 'modify', 'new',
+  'want', 'with', 'find', 'install', 'use', 'make', 'need', 'discover', 'modify', 'new',
   'call', 'enable', 'execute', 'invoke', 'provide', 'run', 'take',
   'a', 'an', 'the', 'as', 'at', 'by', 'for', 'from', 'into', 'of', 'on', 'to',
+  'clarification', 'clarify', 'clarified',
   '需要', '希望', '可以', '帮我', '功能', '能力', '插件', '工具', '查找', '安装', '使用', '修改', '新建',
 ])
+const CLARIFICATION_PROTOCOL_RE = /(?:^|\n)\s*clarification\s*:\s*/giu
+const OPTION_ONLY_CLARIFICATION_RE = /^(?:[0-9]{1,2}|[a-d])(?:[.．、:：)）]\s*)?$|^(?:选项|option)\s*[0-9]{1,2}$|^第[一二三四五1-5]个$|^(?:前者|后者)$|^(?:yes|no|y|n|ok|okay)$/iu
 
 const HOST_GENERIC_TERMS = new Set([
   'dsh', 'deepseek', 'harness', 'session', 'cli', 'app', 'user',
@@ -27,6 +30,55 @@ export interface CapabilityAnchor {
 
 export function normalizeSearchText(value: string): string {
   return value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+export function normalizeDiscoveryQueries(values: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const queries: string[] = []
+  for (const value of values) {
+    const normalized = value.normalize('NFKC')
+      .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 120)
+    const identity = normalized.toLocaleLowerCase('en-US')
+    if (normalized.length < 2 || seen.has(identity)) continue
+    seen.add(identity)
+    queries.push(normalized)
+  }
+  return queries
+}
+
+/** Host validates Agent search plans but never rewrites their semantic terms. */
+export function isConciseDiscoveryQuery(value: string): boolean {
+  const normalized = value.normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (normalized.length < 2 || normalized.length > 80) return false
+  if (/\b(?:https?|topic):/iu.test(normalized)) return false
+  const atoms = normalized.match(/[a-z0-9][a-z0-9.+-]*|[\p{Script=Han}]+/giu) ?? []
+  return atoms.length >= 1 && atoms.length <= 2
+}
+
+/** Drop the Host protocol label so it cannot become a GitHub search term. */
+export function stripDiscoveryProtocol(requirement: string): string {
+  return requirement.replace(CLARIFICATION_PROTOCOL_RE, '\n')
+}
+
+export function isOptionOnlyClarification(answer: string): boolean {
+  const normalized = answer.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  return normalized.length > 0 && OPTION_ONLY_CLARIFICATION_RE.test(normalized)
+}
+
+/**
+ * Search text is the original requirement plus one raw clarification answer.
+ * Numbered/option-only replies and the "Clarification:" label are not searchable.
+ */
+export function composeDiscoveryRequirement(requirement: string, clarificationAnswer?: string): string {
+  const answer = clarificationAnswer?.trim() ?? ''
+  if (!answer || isOptionOnlyClarification(answer)) return requirement
+  return `${requirement}\n\n${answer}`
 }
 
 export function isNameDropMention(text: string, alias: string): boolean {
@@ -102,7 +154,7 @@ function boundedRequirementQueries(normalized: string): string[] {
 }
 
 export function capabilityQueries(requirement: string): string[] {
-  const normalized = normalizeSearchText(requirement)
+  const normalized = normalizeSearchText(stripDiscoveryProtocol(requirement))
   return boundedRequirementQueries(normalized)
 }
 
@@ -112,12 +164,12 @@ export function capabilityQueries(requirement: string): string[] {
  * user's word order inside every generated phrase.
  */
 export function marketplaceSearchQueries(requirement: string): string[] {
-  const normalized = normalizeSearchText(requirement)
+  const normalized = normalizeSearchText(stripDiscoveryProtocol(requirement))
   return boundedRequirementQueries(normalized)
 }
 
 export function capabilityTerms(requirement: string): string[] {
-  const normalized = normalizeSearchText(requirement)
+  const normalized = normalizeSearchText(stripDiscoveryProtocol(requirement))
   const terms = new Set<string>()
   for (const query of capabilityQueries(requirement)) {
     terms.add(query)
@@ -131,7 +183,7 @@ export function capabilityTerms(requirement: string): string[] {
 }
 
 export function capabilityAnchors(requirement: string): CapabilityAnchor[] {
-  const normalized = normalizeSearchText(requirement)
+  const normalized = normalizeSearchText(stripDiscoveryProtocol(requirement))
   const rawEnglish = englishTerms(normalized)
   const dynamicTerms = rawEnglish.length > 0 ? rawEnglish : cjkRequirementPhrases(normalized)
   const anchors: CapabilityAnchor[] = []

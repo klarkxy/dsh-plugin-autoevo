@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
-import { _testing } from '../../src/service.js'
+import { CapabilityEvolutionService, _testing } from '../../src/service.js'
 import { hashObject } from '../../src/state/hashes.js'
-import { modificationAttemptsExhausted } from '../../src/workflow/contracts.js'
+import { modificationAttemptsExhausted, type WorkflowExec, type WorkflowPendingInstall, type WorkflowRecord } from '../../src/workflow/contracts.js'
 
 function review(requestedRef: string): ReviewRecord {
   return {
@@ -58,6 +58,57 @@ describe('profile mutation serialization', () => {
     releaseFirst()
     await Promise.all([first, second])
     expect(order).toEqual(['first:start', 'first:end', 'second:start', 'second:end'])
+  })
+
+  it('forwards the Agent-selected Host-sealed recovery plan into InstallInput', async () => {
+    const currentReview = review('main')
+    currentReview.policyVersion = POLICY_VERSION
+    currentReview.manifest = {
+      ...currentReview.manifest,
+      kind: 'bundle',
+      packageName: 'dsh-tool-calculator',
+    }
+    const grant = {
+      id: `recovery_${'f'.repeat(24)}`,
+      operation: 'retry_install' as const,
+      strategy: 'minimum_release_age_exception' as const,
+      sourceInstallationId: `installation_${'b'.repeat(24)}`,
+      diagnosticHash: 'c'.repeat(64),
+      exactPackages: ['ds-harness-remote@0.3.35'],
+      effectScope: 'single_install_command' as const,
+    }
+    const install = vi.fn(async (..._args: unknown[]) => ({ id: `installation_${'d'.repeat(24)}` } as InstallationRecord))
+    const service = {
+      config: { dshHome: 'C:/dsh' },
+      store: { root: 'C:/state' },
+      sources: { receiptForManagedPath: vi.fn() },
+      installer: { install },
+    } as unknown as CapabilityEvolutionService
+    const pending: WorkflowPendingInstall = {
+      targetProfile: 'web',
+      retention: 'persistent',
+      recoveryPlan: grant,
+    }
+    const workflow = {
+      id: `workflow_${'e'.repeat(24)}`,
+      lastInstallationId: grant.sourceInstallationId,
+    } as WorkflowRecord
+    const exec = {
+      callId: 'call-1',
+      agent: { session: { header: { cwd: 'C:/workspace' } } },
+    } as unknown as WorkflowExec
+
+    await CapabilityEvolutionService.prototype.installReviewed.call(
+      service,
+      currentReview,
+      pending,
+      exec,
+      workflow,
+    )
+
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[0]).toMatchObject({ recoveryPlan: grant })
+    expect(install.mock.calls[0]?.[2]).toMatchObject({ recoveryPlan: grant })
   })
 })
 
@@ -531,6 +582,75 @@ describe('resolution authorization state', () => {
       'example-org/dsh-nebula-relay',
       'example-org/dsh-orbit-index',
     ])
+  })
+
+  it('pins exact repositories and fresh search results ahead of a saturated old pool', () => {
+    const old = Array.from({ length: 20 }, (_, index) => ({
+      repository: `old-org/plugin-${index}`,
+      name: `plugin-${index}`,
+      description: 'old result',
+      stars: 1,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+      matchedQueries: ['old query'],
+    }))
+    const fresh = [{
+      repository: 'fresh-org/new-result',
+      name: 'new-result',
+      description: 'fresh result',
+      stars: 2,
+      updatedAt: '2026-08-28T00:00:00Z',
+      topics: ['dsh-plugin'],
+      matchedQueries: ['fresh query'],
+    }]
+    const merged = _testing.mergeRemoteCandidatePool(
+      old,
+      fresh,
+      ['PerryLink/dsh-auto-review'],
+      20,
+    )
+
+    expect(merged).toHaveLength(20)
+    expect(merged[0]).toMatchObject({ repository: 'PerryLink/dsh-auto-review', explicit: true })
+    expect(merged[1]).toMatchObject({ repository: 'fresh-org/new-result', matchedQueries: ['fresh query'] })
+    expect(merged.some((item) => item.repository === 'old-org/plugin-19')).toBe(false)
+  })
+
+  it('merges query evidence and newer metadata without moving an exact repository', () => {
+    const merged = _testing.mergeRemoteCandidatePool([
+      {
+        repository: 'PerryLink/dsh-auto-review', name: 'dsh-auto-review', description: 'old', stars: 1,
+        updatedAt: null, topics: ['dsh-plugin'], matchedQueries: ['auto approval'],
+      },
+    ], [
+      {
+        repository: 'PerryLink/dsh-auto-review', name: 'dsh-auto-review', description: 'new', stars: 112,
+        updatedAt: '2026-08-26T20:21:54Z', topics: ['dsh-plugin', 'auto-review'], matchedQueries: ['auto-review'],
+      },
+    ], ['PerryLink/dsh-auto-review'], 105)
+
+    expect(merged).toEqual([expect.objectContaining({
+      repository: 'PerryLink/dsh-auto-review', explicit: true, description: 'new', stars: 112,
+      matchedQueries: expect.arrayContaining(['auto approval', 'auto-review']),
+    })])
+  })
+
+  it('keeps a historical exact repository pinned through a later saturated search round', () => {
+    const repository = 'PerryLink/dsh-auto-review'
+    const historical = _testing.mergeRemoteCandidatePool([], [{
+      repository, name: 'dsh-auto-review', description: 'exact', stars: 112,
+      updatedAt: null, topics: ['dsh-plugin'],
+    }], [repository], 105)
+    const nextRound = Array.from({ length: 105 }, (_, index) => ({
+      repository: `fresh-org/plugin-${index}`, name: `plugin-${index}`, description: 'fresh', stars: index,
+      updatedAt: null, topics: ['dsh-plugin'],
+    }))
+
+    const merged = _testing.mergeRemoteCandidatePool(historical, nextRound, [], 105)
+
+    expect(merged).toHaveLength(105)
+    expect(merged[0]).toMatchObject({ repository, explicit: true })
+    expect(merged.filter((candidate) => candidate.repository.startsWith('fresh-org/'))).toHaveLength(104)
   })
 
   it('mints action grants only from a recorded human decision', () => {

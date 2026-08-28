@@ -55,7 +55,7 @@ The interactive flow diagrams live in `docs/assets/flowcharts/` and ship in the 
 src/
 ├─ index.ts                    # Cordis/DSH entry and service composition
 ├─ config.ts                   # Public config schema and defaults
-├─ contracts.ts                # Policy V11 public contracts, review/install receipts
+├─ contracts.ts                # Policy V13 public contracts, review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
 ├─ service-resolution.ts       # Resolution, candidate pool entry/exit, authorization flow
 ├─ service-review.ts           # Review orchestration and revalidation
@@ -103,7 +103,7 @@ Prompts and presets are behavioral guidance, not authorization boundaries. AutoE
 
 ## 5. Workflow and the two confirmation gates
 
-Policy is V11. The state machine, the two confirmation gates, and the lifecycle mapping are canonical in [Architecture §4](architecture.md#4-数据与状态); this section only lists the boundaries developers most often trip over:
+Policy is V13. The state machine, the two confirmation gates, and the lifecycle mapping are canonical in [Architecture §4](architecture.md#4-数据与状态); this section only lists the boundaries developers most often trip over:
 
 - Internal graph cursor and public `lifecycleState` must not be mixed. The model only sees the versioned `AgentWorkflowViewV2`; never accept model-supplied repository, review ID, path, or install spec. `use_this` / `modify_this` only bind to candidate IDs from the sealed snapshot.
 - Repeating resume within the same turn grants no new authorization; replay-protection failures do not consume the current valid interrupt.
@@ -112,7 +112,7 @@ Policy is V11. The state machine, the two confirmation gates, and the lifecycle 
 
 ## 6. Resolver and source lineage
 
-Resolution is local-first: Agent-visible tools, skills, bridge capabilities, then Host-owned `topic:dsh-plugin` GitHub search. Remote summaries are always untrusted; the Host only accepts strict GitHub repository identities and bounded summaries.
+Resolution is local-first: Agent-visible tools, skills, bridge capabilities, then Host-owned `topic:dsh-plugin` GitHub search. Remote summaries are always untrusted. The Host validates strict repository identity and objective repository state, bounds and deduplicates the complete search union, and leaves semantic relevance to the Agent. Exact repositories are pinned; only the Agent-sealed 1–5 candidates receive bounded previews.
 
 Installed sources must be resolved from live profile ownership, never inferred from local inventory alone. Replacement applies only to:
 

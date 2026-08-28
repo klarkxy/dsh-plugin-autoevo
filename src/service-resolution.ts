@@ -34,6 +34,7 @@ export function addExplicitCandidate(
     stars: 0,
     updatedAt: null,
     topics: ['dsh-plugin'],
+    explicit: true,
   }
   return {
     candidate,
@@ -42,6 +43,66 @@ export function addExplicitCandidate(
       remoteCandidates: [...resolution.remoteCandidates, candidate],
     },
   }
+}
+
+/**
+ * Keep exact repositories first, then the current search page union, then old
+ * summaries. Updating an existing key never changes its priority position.
+ */
+export function mergeRemoteCandidatePool(
+  existing: readonly RemotePluginCandidate[],
+  discovered: readonly RemotePluginCandidate[],
+  explicitRepositories: readonly string[],
+  limit: number,
+): RemotePluginCandidate[] {
+  const existingByKey = new Map(existing.map((candidate) => [candidate.repository.toLowerCase(), candidate] as const))
+  const discoveredByKey = new Map(discovered.map((candidate) => [candidate.repository.toLowerCase(), candidate] as const))
+  const explicitOrder = [...new Map([
+    ...explicitRepositories.map((repository) => {
+      const normalized = validateGithubRepository(repository)
+      return [normalized.toLowerCase(), normalized] as const
+    }),
+    ...existing.filter((candidate) => candidate.explicit)
+      .map((candidate) => [candidate.repository.toLowerCase(), candidate.repository] as const),
+    ...discovered.filter((candidate) => candidate.explicit)
+      .map((candidate) => [candidate.repository.toLowerCase(), candidate.repository] as const),
+  ]).values()]
+  const explicitKeys = new Set(explicitOrder.map((repository) => repository.toLowerCase()))
+  const merged = new Map<string, RemotePluginCandidate>()
+  const put = (candidate: RemotePluginCandidate, preferIncoming: boolean): void => {
+    const key = candidate.repository.toLowerCase()
+    const prior = merged.get(key)
+    const combined = prior
+      ? preferIncoming ? { ...prior, ...candidate } : { ...candidate, ...prior }
+      : { ...candidate }
+    merged.set(key, {
+      ...combined,
+      ...(explicitKeys.has(key) || prior?.explicit || candidate.explicit ? { explicit: true } : {}),
+      ...((prior?.matchedQueries?.length || candidate.matchedQueries?.length) ? {
+        matchedQueries: [...new Set([...(prior?.matchedQueries ?? []), ...(candidate.matchedQueries ?? [])])],
+      } : {}),
+      ...((prior?.matchedTerms?.length || candidate.matchedTerms?.length) ? {
+        matchedTerms: [...new Set([...(prior?.matchedTerms ?? []), ...(candidate.matchedTerms ?? [])])].slice(0, 6),
+      } : {}),
+    })
+  }
+
+  for (const repository of explicitOrder) {
+    const normalized = validateGithubRepository(repository)
+    const key = normalized.toLowerCase()
+    put(discoveredByKey.get(key) ?? existingByKey.get(key) ?? {
+      repository: normalized,
+      name: normalized.split('/')[1]!,
+      description: '',
+      stars: 0,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+      explicit: true,
+    }, true)
+  }
+  for (const candidate of discovered) put(candidate, true)
+  for (const candidate of existing) put(candidate, false)
+  return [...merged.values()].slice(0, Math.max(0, limit))
 }
 
 export function newResolutionId(requirement: string): string {

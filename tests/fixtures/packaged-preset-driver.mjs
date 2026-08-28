@@ -78,7 +78,7 @@ async function run(ctx, config) {
     const policy = prompt.sections.find((section) => section.name === 'autoevo:reuse-policy')
     if (
       !policy
-      || !/runtime Policy V11/u.test(policy.text)
+      || !/runtime Policy V13/u.test(policy.text)
       || !/original requirement/u.test(policy.text)
       || !/zero candidates is a valid result/u.test(policy.text)
       || !/Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface/u.test(policy.text)
@@ -86,7 +86,7 @@ async function run(ctx, config) {
       || /runtime Policy V7/u.test(policy.text)
       || /independent semantic verifier/u.test(policy.text)
     ) {
-      throw new Error('Policy V11 AutoEvo autonomy contract was not active in the evolution Agent')
+      throw new Error('Policy V13 AutoEvo autonomy contract was not active in the evolution Agent')
     }
     const recover = handle.agent.ctx.tools.schemas().find((tool) => tool.name === 'capability_workflow_recover')
     if (!recover) throw new Error('missing capability_workflow_recover')
@@ -114,7 +114,7 @@ async function run(ctx, config) {
     process.stdout.write(`${JSON.stringify({
       marker: taskResult,
       preset: 'evolution',
-      policyVersion: '11',
+      policyVersion: '13',
       recoverInterruptOptional: recover.parameters.properties.interrupt_id?.required !== true,
       tools: schemas.filter((name) => name.startsWith('capability_workflow') || name === 'plugin_remove'),
       eventTypes,

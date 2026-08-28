@@ -9,6 +9,7 @@ const DIGEST_RE = /^[a-f0-9]{64}$/u
 /** Minimal snapshot context for candidate-digest binding. WorkflowRecord is assignable. */
 export interface ReviewCandidateContext {
   id?: string
+  lastInstallationId?: string
   candidateSnapshot?: ReadonlyArray<{
     id: string
     kind: 'local' | 'remote'
@@ -115,6 +116,7 @@ export interface InstallCommitmentBinding {
   commitment?: ActionCommitment
   receipt?: SelectionReceipt
   retention?: ActionCommitment['retention']
+  recoveryPlan?: ActionCommitment['allowedParameterConstraints']['recoveryPlan']
 }
 
 export function assertDirectUseAllowed(review: ReviewRecord, _workflow?: ReviewCandidateContext): void {

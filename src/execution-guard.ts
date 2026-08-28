@@ -223,21 +223,21 @@ export class ExecutionGuard {
     if (matchesSet(name, PARENT_DENIED_CORDIS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PARENT_DENIED_CORDIS_TOOLS))
       || isNewCordisDefinition(exec)) {
-      return 'Capability Evolution Policy V11 denies Cordis live mutation in the parent session; use the Search-first workflow.'
+      return 'Capability Evolution Policy V13 denies Cordis live mutation in the parent session; use the Search-first workflow.'
     }
     if (matchesSet(name, SEARCH_BYPASS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, SEARCH_BYPASS_TOOLS))) {
-      return 'Capability Evolution Policy V11 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
+      return 'Capability Evolution Policy V13 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
     }
     if (matchesSet(name, SKILL_TOOLS)) {
       const target = skillTargetFromArguments(exec.arguments)
       if (!target || target === 'cordis-plugin-development') {
-        return 'Capability Evolution Policy V11 denies loading cordis-plugin-development in the parent session.'
+        return 'Capability Evolution Policy V13 denies loading cordis-plugin-development in the parent session.'
       }
     }
     if (matchesSet(name, DELEGATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, DELEGATION_TOOLS))) {
-      return 'Capability Evolution Policy V11 denies ordinary model, subagent, agent, and workflow delegation before a managed construction grant.'
+      return 'Capability Evolution Policy V13 denies ordinary model, subagent, agent, and workflow delegation before a managed construction grant.'
     }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PLUGIN_MUTATION_TOOLS))) {
@@ -260,7 +260,7 @@ export class ExecutionGuard {
         return 'AutoEvo parent session denies direct DSH plugin install/remove; use capability_workflow_resume / plugin_remove.'
       }
       if (!isSafeShellCommand(command, SAFE_PARENT_SHELL_RE)) {
-        return 'Capability Evolution Policy V11 permits only allowlisted read-only shell inspection commands before managed construction.'
+        return 'Capability Evolution Policy V13 permits only allowlisted read-only shell inspection commands before managed construction.'
       }
     }
     return undefined

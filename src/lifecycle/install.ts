@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { RuntimeConfig } from '../config.js'
 import type {
+  InstallFailureRecovery,
   InstallationState,
   InstallInput,
   InstallationRecord,
@@ -28,6 +29,7 @@ import {
   selectInstallVerificationLayer,
 } from '../host-verification-driver.js'
 import { assertSafePackageName } from '../package-name.js'
+import { isTransientPnpmRecoveryCode } from '../process/runner.js'
 import { assertDirectUseAllowed, type InstallCommitmentBinding } from '../review/direct-use.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
@@ -40,6 +42,7 @@ import {
 import { requirementHashFor } from '../semantic-reviewer.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 import type { StateStore } from '../state/store.js'
+import { boundedAgentText } from '../workflow/sanitize.js'
 import { assertOwnedTrialPath, type DshLauncher } from './launcher.js'
 import { hotLoadInstalledBundle, type HotReloadAttempt } from './hot-load.js'
 
@@ -139,17 +142,71 @@ function sourceMismatchEvidence(expectedTools: readonly string[]): VerificationE
 
 type InstallFailure = NonNullable<InstallationRecord['installFailure']>
 type InstallFailureStage = NonNullable<InstallFailure['stage']>
+type RecoveryInstallOptions = {
+  minimumReleaseAgeExcludes?: string[]
+  expectedProfileStoreFingerprint?: string
+}
+
+function parsedInstallRecovery(value: unknown): InstallFailureRecovery | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const item = value as Record<string, unknown>
+  if (item.kind === 'same_authority_once'
+    && item.owner === 'pnpm'
+    && isTransientPnpmRecoveryCode(item.code)) {
+    return { kind: 'same_authority_once', owner: 'pnpm', code: item.code }
+  }
+  if (item.kind === 'profile_store_mismatch'
+    && item.owner === 'pnpm'
+    && item.code === 'ERR_PNPM_UNEXPECTED_STORE') {
+    return {
+      kind: 'profile_store_mismatch',
+      owner: 'pnpm',
+      code: 'ERR_PNPM_UNEXPECTED_STORE',
+      scope: 'unknown',
+      reuseEligible: false,
+    }
+  }
+  if (item.kind !== 'minimum_release_age'
+    || item.owner !== 'pnpm'
+    || item.code !== 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION'
+    || item.policyKey !== 'minimumReleaseAge'
+    || !Array.isArray(item.entries)
+    || item.entries.length < 1
+    || item.entries.length > 8) return undefined
+  const entries = item.entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    const record = entry as Record<string, unknown>
+    if (typeof record.packageName !== 'string'
+      || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu.test(record.packageName)
+      || typeof record.version !== 'string'
+      || !/^[0-9a-z][0-9a-z.+_-]*$/iu.test(record.version)
+      || typeof record.reason !== 'string') return []
+    const reason = boundedAgentText(record.reason, 220)
+    return reason ? [{ packageName: record.packageName, version: record.version, reason }] : []
+  })
+  if (entries.length !== item.entries.length
+    || new Set(entries.map((entry) => `${entry.packageName.toLowerCase()}@${entry.version}`)).size !== entries.length) return undefined
+  return {
+    kind: 'minimum_release_age',
+    owner: 'pnpm',
+    code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION',
+    policyKey: 'minimumReleaseAge',
+    entries,
+    scope: 'unknown',
+    exceptionEligible: false,
+  }
+}
 
 function repairHintsFor(stage: InstallFailureStage): string[] {
   switch (stage) {
     case 'preflight':
       return [
-        'Inspect the DSH/pnpm diagnostic identified by diagnosticHash and repair the reviewed source or explicit profile lifecycle policy.',
+        'Inspect the displayed DSH/pnpm diagnostic summary; use diagnosticHash only to correlate the failure evidence.',
         'Resume the workflow so the repaired immutable source is reviewed again before retrying.',
       ]
     case 'install':
       return [
-        'Inspect the current profile dependency and the DSH/pnpm diagnostic identified by diagnosticHash.',
+        'Inspect the displayed DSH/pnpm diagnostic summary and current profile dependency; use diagnosticHash only to correlate the failure evidence.',
         'Repair the reviewed source or profile configuration explicitly, then resume the workflow before retrying.',
       ]
     case 'load':
@@ -197,15 +254,20 @@ function installFailure(error: unknown, stage: InstallFailureStage): InstallFail
       && /^[a-f0-9]{64}$/u.test(error.details.diagnosticHash)
       ? error.details.diagnosticHash
       : undefined
+    const diagnosticSummary = typeof error.details.diagnosticSummary === 'string'
+      ? boundedAgentText(error.details.diagnosticSummary, 400)
+      : undefined
+    const recovery = parsedInstallRecovery(error.details.recovery)
     return {
       stage,
       code: error.code,
-      summary: message,
+      summary: diagnosticSummary || message,
       message,
       retryable: error.code === 'command_failed',
       repairHints: repairHintsFor(stage),
       ...(exitCode !== undefined ? { exitCode } : {}),
       ...(diagnosticHash ? { diagnosticHash } : {}),
+      ...(recovery ? { recovery } : {}),
     }
   }
   const message = (error instanceof Error ? error.message : String(error))
@@ -230,7 +292,7 @@ function failedInstallation(
     reason: (outcome === 'failed_absent'
       ? 'The DSH installation command did not complete successfully and profile reconciliation confirmed the dependency is absent.'
       : 'The DSH installation command did not complete successfully and the target is present, unknown, or unverifiable; recovery is required before retrying.')
-      + ` ${failure.message}.${diagnostic}`,
+      + ` ${failure.summary ?? failure.message}.${diagnostic}`,
   }
 }
 
@@ -246,6 +308,8 @@ function installApprovalReason(input: {
   compatibility: string
   scripts: string
   findings: string
+  releaseAgeExcludes?: string[]
+  reuseProfileStore?: boolean
 }): string {
   const actionPlan = copy(
     input.requirement,
@@ -260,10 +324,24 @@ function installApprovalReason(input: {
         ? `将已审查的 ${input.packageName} 安装到隔离的临时 profile ${input.targetProfile}`
         : `将已审查的 ${input.packageName} 安装到 profile ${input.targetProfile}`,
   )
+  const policyNotice = input.releaseAgeExcludes?.length
+    ? copy(
+        input.requirement,
+        ` This one install command will exempt only these existing profile lock entries from pnpm minimumReleaseAge: ${input.releaseAgeExcludes.join(', ')}. No profile or global pnpm policy file will be changed.`,
+        ` 本次安装命令只会对这些既有 profile 锁文件条目应用 pnpm minimumReleaseAge 精确例外：${input.releaseAgeExcludes.join('、')}。不会修改 profile 或全局 pnpm 策略文件。`,
+      )
+    : ''
+  const storeNotice = input.reuseProfileStore
+    ? copy(
+        input.requirement,
+        ' This retry will reuse the pnpm store already recorded by the target profile for this install command only. No profile or global pnpm configuration file will be changed.',
+        ' 本次重试只会在这一条安装命令中复用目标 profile 已记录的 pnpm store，不会修改 profile 或全局 pnpm 配置文件。',
+      )
+    : ''
   return copy(
     input.requirement,
-    `${input.riskPrefix}${actionPlan} (${input.retention}). Review: fit=${input.fit}, risk=${input.securityRisk}, compatibility=${input.compatibility}, lifecycleScripts=${input.scripts}, findings=${input.findings}.`,
-    `${input.riskPrefix}${actionPlan}（${input.retention}）。审查：匹配=${input.fit}，风险=${input.securityRisk}，兼容性=${input.compatibility}，生命周期脚本=${input.scripts}，发现=${input.findings}。`,
+    `${input.riskPrefix}${actionPlan} (${input.retention}). Review: fit=${input.fit}, risk=${input.securityRisk}, compatibility=${input.compatibility}, lifecycleScripts=${input.scripts}, findings=${input.findings}.${policyNotice}${storeNotice}`,
+    `${input.riskPrefix}${actionPlan}（${input.retention}）。审查：匹配=${input.fit}，风险=${input.securityRisk}，兼容性=${input.compatibility}，生命周期脚本=${input.scripts}，发现=${input.findings}。${policyNotice}${storeNotice}`,
   )
 }
 
@@ -323,6 +401,50 @@ export function assertStrictInstallSpec(review: ReviewRecord): string {
 
 function outcomeAfterCommandFailure(installState: InstallationState): InstallOutcome {
   return installState === 'not_installed' ? 'failed_absent' : 'recovery_required'
+}
+
+function lockfileContainsExactPackage(lockfile: string, packageSpec: string): boolean {
+  return lockfile.split(/\r?\n/gu).some((line) => {
+    const key = line.trim()
+    return key === `${packageSpec}:` || key === `'${packageSpec}':` || key === `"${packageSpec}":`
+  })
+}
+
+function qualifyInstallRecovery(
+  failure: InstallFailure,
+  lockfileBefore: string | undefined,
+  profileStoreFingerprint: string | undefined,
+): InstallFailure {
+  const recovery = failure.recovery
+  if (recovery?.kind === 'minimum_release_age') {
+    const exactPackages = recovery.entries.map((entry) => `${entry.packageName}@${entry.version}`)
+    const exceptionEligible = Boolean(
+      lockfileBefore
+      && exactPackages.length > 0
+      && exactPackages.every((item) => lockfileContainsExactPackage(lockfileBefore, item)),
+    )
+    return {
+      ...failure,
+      retryable: true,
+      recovery: {
+        ...recovery,
+        scope: exceptionEligible ? 'host_profile' : 'unknown',
+        exceptionEligible,
+      },
+    }
+  }
+  if (recovery?.kind !== 'profile_store_mismatch') return failure
+  const reuseEligible = Boolean(profileStoreFingerprint && /^[a-f0-9]{64}$/u.test(profileStoreFingerprint))
+  return {
+    ...failure,
+    retryable: true,
+    recovery: {
+      ...recovery,
+      ...(reuseEligible && profileStoreFingerprint ? { profileStoreFingerprint } : {}),
+      scope: reuseEligible ? 'host_profile' : 'unknown',
+      reuseEligible,
+    },
+  }
 }
 
 function ownedArtifactPath(installSpec: string): string {
@@ -418,6 +540,119 @@ export class PluginInstaller {
     }
   }
 
+  private async assertRecoveryPlanBinding(
+    input: InstallInput,
+    review: ReviewRecord,
+    workflow?: import('../review/direct-use.js').ReviewCandidateContext,
+  ): Promise<RecoveryInstallOptions> {
+    const grant = input.recoveryPlan
+    if (!grant) return {}
+    if (!workflow || !workflow.lastInstallationId || workflow.lastInstallationId !== grant.sourceInstallationId) {
+      throw new EvolutionError('invalid_input', 'Recovery plan is not bound to the workflow latest failed installation')
+    }
+    const prior = await this.store.getInstallation(grant.sourceInstallationId)
+    const recovery = prior.installFailure?.recovery
+    if (prior.workflowId !== workflow.id
+      || prior.reviewId !== review.id
+      || prior.targetProfile !== input.targetProfile
+      || prior.installOutcome !== 'failed_absent'
+      || prior.installed
+      || prior.verification.attempted !== false
+      || grant.operation !== 'retry_install'
+      || grant.effectScope !== 'single_install_command'
+      || prior.installFailure?.diagnosticHash !== grant.diagnosticHash) {
+      throw new EvolutionError('invalid_input', 'Recovery plan no longer matches the sealed failed receipt')
+    }
+    if (grant.strategy === 'minimum_release_age_exception') {
+      const exactPackages = recovery?.kind === 'minimum_release_age'
+        ? recovery.entries.map((entry) => `${entry.packageName}@${entry.version}`).sort()
+        : []
+      const expectedRecoveryId = `recovery_${hashObject({
+        workflowId: workflow.id,
+        installationId: prior.id,
+        reviewId: review.id,
+        diagnosticHash: prior.installFailure?.diagnosticHash,
+        exactPackages,
+      }).slice(0, 24)}`
+      if (grant.id !== expectedRecoveryId
+        || recovery?.kind !== 'minimum_release_age'
+        || recovery.scope !== 'host_profile'
+        || !recovery.exceptionEligible
+        || grant.exactPackages.length < 1
+        || grant.exactPackages.length > 8
+        || JSON.stringify([...grant.exactPackages].sort()) !== JSON.stringify(exactPackages)) {
+        throw new EvolutionError('invalid_input', 'Recovery plan no longer matches the sealed failed receipt')
+      }
+      return { minimumReleaseAgeExcludes: exactPackages }
+    }
+    const expectedRecoveryId = `recovery_${hashObject({
+      workflowId: workflow.id,
+      installationId: prior.id,
+      reviewId: review.id,
+      diagnosticHash: prior.installFailure?.diagnosticHash,
+      profileStoreFingerprint: recovery?.kind === 'profile_store_mismatch'
+        ? recovery.profileStoreFingerprint
+        : undefined,
+    }).slice(0, 24)}`
+    const currentFingerprint = await this.launcher.profileStoreFingerprint(this.config.dshHome, input.targetProfile)
+    if (grant.strategy !== 'profile_store_reuse'
+      || grant.id !== expectedRecoveryId
+      || recovery?.kind !== 'profile_store_mismatch'
+      || recovery.scope !== 'host_profile'
+      || !recovery.reuseEligible
+      || !recovery.profileStoreFingerprint
+      || grant.profileStoreFingerprint !== recovery.profileStoreFingerprint
+      || currentFingerprint !== recovery.profileStoreFingerprint) {
+      throw new EvolutionError('invalid_input', 'Recovery plan no longer matches the sealed failed receipt')
+    }
+    return { expectedProfileStoreFingerprint: recovery.profileStoreFingerprint }
+  }
+
+  private async installWithTransientRetry(input: {
+    dshHome: string
+    profile: string
+    installSpec: string
+    cwd: string
+    packageName: string
+    signal?: AbortSignal
+    options?: {
+      forwardCredentials?: boolean
+      minimumReleaseAgeExcludes?: string[]
+      expectedProfileStoreFingerprint?: string
+    }
+  }): Promise<void> {
+    try {
+      await this.launcher.install(
+        input.dshHome,
+        input.profile,
+        input.installSpec,
+        input.cwd,
+        input.signal,
+        input.options,
+      )
+    } catch (error) {
+      const sealedRecovery = Boolean(input.options?.minimumReleaseAgeExcludes?.length
+        || input.options?.expectedProfileStoreFingerprint)
+      if (sealedRecovery) throw error
+      const failure = installFailure(error, 'install')
+      if (failure.recovery?.kind !== 'same_authority_once') throw error
+      const absent = await this.launcher.profileTargetAbsent(
+        input.dshHome,
+        input.profile,
+        input.packageName,
+      ).catch(() => false)
+      if (!absent) throw error
+      await this.launcher.install(
+        input.dshHome,
+        input.profile,
+        input.installSpec,
+        input.cwd,
+        input.signal,
+        input.options,
+      )
+    }
+  }
+
   private async resolvePredecessor(replacement: ReplacementTarget): Promise<InstallationRecord | undefined> {
     if (replacement.predecessorInstallationId) {
       const named = await this.store.getInstallation(replacement.predecessorInstallationId).catch(() => undefined)
@@ -484,6 +719,7 @@ export class PluginInstaller {
 
     const strictSpec = assertStrictInstallSpec(review)
     assertDirectUseAllowed(review, binding?.workflow)
+    const recoveryInstallOptions = await this.assertRecoveryPlanBinding(input, review, binding?.workflow)
     if (!await this.revalidate(review, exec.signal)) {
       throw new EvolutionError('review_expired', 'The reviewed source changed or could not be revalidated; resume the capability workflow to review again')
     }
@@ -571,6 +807,10 @@ export class PluginInstaller {
           compatibility: review.compatibility.status,
           scripts,
           findings,
+          ...(recoveryInstallOptions.minimumReleaseAgeExcludes?.length
+            ? { releaseAgeExcludes: recoveryInstallOptions.minimumReleaseAgeExcludes }
+            : {}),
+          ...(recoveryInstallOptions.expectedProfileStoreFingerprint ? { reuseProfileStore: true } : {}),
         }),
         'capability_workflow_resume',
       )
@@ -602,6 +842,13 @@ export class PluginInstaller {
       restartRequired: false,
       removed: false,
       verification: pendingVerification(review.manifest.expectedTools),
+      ...(input.recoveryPlan ? {
+        recoveryAttempt: {
+          id: input.recoveryPlan.id,
+          strategy: input.recoveryPlan.strategy,
+          sourceInstallationId: input.recoveryPlan.sourceInstallationId,
+        },
+      } : {}),
       ...(input.replacement ? {
         predecessorInstallationId: input.replacement.predecessorInstallationId,
         replacement: {
@@ -627,14 +874,15 @@ export class PluginInstaller {
       const running: InstallationRecord = { ...provisional, installPhase: 'preflight_running' }
       await this.store.put('installations', running)
       try {
-        await this.launcher.install(
-          preflightHome,
-          this.preflightProfile,
+        await this.installWithTransientRetry({
+          dshHome: preflightHome,
+          profile: this.preflightProfile,
           installSpec,
           cwd,
-          exec.signal,
-          { forwardCredentials: false },
-        )
+          packageName,
+          signal: exec.signal,
+          options: { forwardCredentials: false },
+        })
       } catch (error) {
         const failure = installFailure(error, 'preflight')
         const preflightFailure = failedInstallation(review.manifest.expectedTools, 'failed_absent', failure)
@@ -751,11 +999,29 @@ export class PluginInstaller {
     if (this.preflightProfile && input.retention === 'persistent') {
       await this.store.put('installations', destinationJournal)
     }
+    const lockfileBefore = input.retention === 'persistent'
+      ? await readFile(path.join(dshHome, 'profiles', input.targetProfile, 'pnpm-lock.yaml'), 'utf8').catch(() => undefined)
+      : undefined
 
     try {
-      await this.launcher.install(dshHome, input.targetProfile, installSpec, cwd, exec.signal)
+      await this.installWithTransientRetry({
+        dshHome,
+        profile: input.targetProfile,
+        installSpec,
+        cwd,
+        packageName,
+        signal: exec.signal,
+        ...(recoveryInstallOptions.minimumReleaseAgeExcludes?.length
+          || recoveryInstallOptions.expectedProfileStoreFingerprint
+          ? { options: recoveryInstallOptions }
+          : {}),
+      })
     } catch (error) {
-      const failure = installFailure(error, 'install')
+      const rawFailure = installFailure(error, 'install')
+      const profileStoreFingerprint = rawFailure.recovery?.kind === 'profile_store_mismatch'
+        ? await this.launcher.profileStoreFingerprint(dshHome, input.targetProfile).catch(() => undefined)
+        : undefined
+      const failure = qualifyInstallRecovery(rawFailure, lockfileBefore, profileStoreFingerprint)
       const removed = input.retention === 'temporary'
       if (removed) await this.removeOwnedDirectory(trialRoot, trialsRoot)
       let installState: InstallationState = 'not_installed'

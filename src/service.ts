@@ -54,6 +54,7 @@ import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
   assertDirectUseAllowed,
   isDirectlyUsableReview,
+  previewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
 } from './review/index.js'
@@ -77,6 +78,7 @@ import {
   addExplicitCandidate,
   assertRequirement,
   authorizationForResolution,
+  mergeRemoteCandidatePool,
   newResolutionId,
   waitingAuthorization,
   waitingConfirmation,
@@ -119,9 +121,12 @@ import {
 } from './service-versions.js'
 import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
+import { DISCOVERY_REMOTE_POOL_MAX } from './workflow/candidates.js'
 import { assertBuiltinEnablementBinding } from './workflow/grants.js'
 import type {
   MarketplaceStepResult,
+  CandidatePreview,
+  CandidatePreviewFailure,
   DiscoveryPresentInput,
   DiscoveryRefineInput,
   ValidatedResume,
@@ -328,8 +333,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: ToolRunContext,
     intent: RequestIntent = DEFAULT_REQUEST_INTENT,
     clarificationQuestion?: string,
+    discoveryQueries?: string[],
   ): Promise<WorkflowView> {
-    return this.withWorkspace(exec, () => this.engine.start(requirement, exec, intent, clarificationQuestion))
+    return this.withWorkspace(exec, () => this.engine.start(requirement, exec, intent, clarificationQuestion, discoveryQueries))
   }
 
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
@@ -502,12 +508,17 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return waiting
   }
 
-  async discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord> {
+  async discoverRemote(
+    resolution: ResolutionRecord,
+    exec: WorkflowExec,
+    input: { queries?: string[] } = {},
+  ): Promise<ResolutionRecord> {
     const discovery = await discoverRemoteCandidates({
       runner: this.runner,
       config: this.config,
       cwd: resolution.cwd,
       requirement: resolution.requirement,
+      ...(input.queries ? { queries: input.queries } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
     const decision: ResolutionRecord['decision'] = discovery.candidates.length > 0
@@ -526,7 +537,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const next = withNextStep({
       ...withoutSource,
       decision,
-      remoteCandidates: discovery.candidates.slice(0, this.config.maxCandidates),
+      remoteCandidates: discovery.candidates,
       ...(discovery.source ? { remoteCandidateSource: discovery.source } : {}),
       remoteDiscoveryComplete: discovery.complete,
       authorization,
@@ -552,23 +563,19 @@ export class CapabilityEvolutionService implements WorkflowHost {
           ...(exec.signal ? { signal: exec.signal } : {}),
         })
       : { candidates: [], complete: false, queries: [], reasons: [] }
-    let accumulated = { ...resolution, remoteCandidates: [...resolution.remoteCandidates] }
-    for (const repository of input.repositories) {
-      const added = addExplicitCandidate(accumulated, repository)
-      accumulated = added.resolution
-      const index = accumulated.remoteCandidates.findIndex((item) => item.repository.toLowerCase()
-        === added.candidate.repository.toLowerCase())
-      if (index >= 0) {
-        accumulated.remoteCandidates[index] = {
-          ...accumulated.remoteCandidates[index]!,
-          matchReason: 'Model proposed this repository; Host validated its GitHub identity. Metadata remains unverified until review.',
+    const explicitKeys = new Set(input.repositories.map((repository) => validateGithubRepository(repository).toLowerCase()))
+    const candidates = mergeRemoteCandidatePool(
+      resolution.remoteCandidates,
+      discovery.candidates,
+      input.repositories,
+      DISCOVERY_REMOTE_POOL_MAX,
+    ).map((candidate) => explicitKeys.has(candidate.repository.toLowerCase())
+      ? {
+          ...candidate,
+          explicit: true,
+          matchReason: 'Exact repository proposed by the Agent or user; Host validated its GitHub identity. Semantic fit remains for the Agent to judge.',
         }
-      }
-    }
-    const merged = new Map(accumulated.remoteCandidates
-      .map((candidate) => [candidate.repository.toLowerCase(), candidate] as const))
-    for (const candidate of discovery.candidates) merged.set(candidate.repository.toLowerCase(), candidate)
-    const candidates = [...merged.values()].slice(0, 20)
+      : candidate)
     const complete = resolution.remoteDiscoveryComplete || discovery.complete
     const decision: ResolutionRecord['decision'] = candidates.length > 0 ? 'inspect_remote' : resolution.decision
     const authorization = waitingAuthorization(
@@ -578,7 +585,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       discovery.source ?? resolution.remoteCandidateSource,
     )
     const next = withNextStep({
-      ...accumulated,
+      ...resolution,
       decision,
       remoteCandidates: candidates,
       remoteDiscoveryComplete: complete,
@@ -591,6 +598,50 @@ export class CapabilityEvolutionService implements WorkflowHost {
     })
     await this.store.put('resolutions', next)
     return next
+  }
+
+  async previewGithubCandidates(
+    resolution: ResolutionRecord,
+    candidates: Array<{ candidateId: string; repository: string; ref?: string }>,
+    exec: WorkflowExec,
+  ): Promise<{ previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }> {
+    const selected = [...new Map(candidates.map((candidate) => [candidate.candidateId, candidate] as const)).values()].slice(0, 5)
+    const settled = await Promise.allSettled(selected.map(async (candidate): Promise<CandidatePreview> => {
+      const remote = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === candidate.repository.toLowerCase())
+      if (!remote) throw new EvolutionError('invalid_input', 'Preview candidate is outside the current discovery resolution')
+      const preview = await previewGithubPlugin({
+        runner: this.runner,
+        config: this.config,
+        cwd: resolution.cwd,
+        repository: remote.repository,
+        ref: candidate.ref ?? remote.defaultBranch ?? 'HEAD',
+        ...(exec.signal ? { signal: exec.signal } : {}),
+      })
+      return {
+        candidateId: candidate.candidateId,
+        repository: preview.repository,
+        commit: preview.commit,
+        defaultBranch: preview.defaultBranch,
+        inspectedFiles: preview.inspectedFiles.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes })),
+        truncated: preview.truncated,
+        manifest: preview.manifest,
+        ...(preview.packageSummary ? { packageSummary: preview.packageSummary } : {}),
+        ...(preview.readmeExcerpt ? { readmeExcerpt: preview.readmeExcerpt } : {}),
+      }
+    }))
+    const previews: CandidatePreview[] = []
+    const failures: CandidatePreviewFailure[] = []
+    settled.forEach((result, index) => {
+      const candidate = selected[index]!
+      if (result.status === 'fulfilled') previews.push(result.value)
+      else failures.push({
+        candidateId: candidate.candidateId,
+        repository: candidate.repository,
+        code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
+        message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 300),
+      })
+    })
+    return { previews, failures }
   }
 
   async ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
@@ -943,11 +994,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
         ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
         ...(input.replacement ? { replacement: input.replacement } : {}),
+        ...(input.recoveryPlan ? { recoveryPlan: input.recoveryPlan } : {}),
       }, asToolExec(exec), {
         ...(workflow ? { workflow } : {}),
         ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
         ...(workflow?.selectionReceipt ? { receipt: workflow.selectionReceipt } : {}),
         ...(input.retention ? { retention: input.retention } : {}),
+        ...(input.recoveryPlan ? { recoveryPlan: input.recoveryPlan } : {}),
       }),
     )
     return record
@@ -994,7 +1047,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
         'This older receipt is still parked on marketplace setup. Call capability_workflow again before recording a decision',
       )
     }
-    if (resume.optionId === 'use_this' && (!review || !isDirectlyUsableReview(review, workflow))) {
+    if ((resume.optionId === 'use_this' || resume.optionId === 'apply_recovery')
+      && (!review || !isDirectlyUsableReview(review, workflow))) {
       throw new EvolutionError('review_rejected', 'The selected review is not directly installable', {
         reviewId: review?.id,
       })
@@ -1324,6 +1378,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
 export const _testing = {
   addExplicitCandidate,
+  mergeRemoteCandidatePool,
   assertRequirement,
   authorizationForResolution,
   lineageRootReview,

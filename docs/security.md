@@ -11,7 +11,8 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 一律按
 远端发现是 Host 自己的 scoped GitHub 搜索，不是第三方市场插件：
 
 - 通过 argv-only `gh api` 查询 `topic:dsh-plugin`；不安装 `dsh-find-plugin`，也不降级到无 topic 的全站搜索。
-- 只有严格 `owner/repository` 标识会被归一化为候选，摘要长度受限，且仓库名、名称、描述、topics 或 package name 必须覆盖需求的领域锚点。
+- 只有严格 `owner/repository` 标识且客观可用的非 archived、非 fork、非 disabled 仓库会被归一化为候选，摘要长度受限并去重；语义相关性由 Agent 判断，不是 Host 淘汰条件。
+- Host 只为 Agent 密封的 1–5 个候选读取有界的根 package、README 与 DSH manifest 预览；外部文本始终作为不可信数据展示。
 - 空、畸形或明显无关结果视为没有可复用候选；`gh` 执行失败则发现未完成，不能发放创建权限。
 - 模型不得直接调用 `find_dsh_plugin` 或裸 `gh`。
 

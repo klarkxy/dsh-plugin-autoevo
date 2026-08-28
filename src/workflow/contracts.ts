@@ -4,6 +4,8 @@ import type {
   EvolutionTarget,
   ExecutionLease,
   InstallationRecord,
+  InstallFailureRecovery,
+  InstallRecoveryPlan,
   InstallationRetention,
   NavigationInput,
   RequestIntent,
@@ -113,6 +115,8 @@ export interface WorkflowOption {
   labelZh: string
   /** When present, the action is valid only for these interrupt-bound snapshot candidates. */
   candidateIds?: string[]
+  /** Agent-selectable Host-sealed recovery plans. Only apply_recovery uses these ids. */
+  recoveryIds?: string[]
   /** Presentation group only. Does not change Host authorization. */
   placement?: WorkflowOptionPlacement
 }
@@ -134,6 +138,16 @@ export interface WorkflowPendingInstall {
   verificationTask?: string
   verificationExpectedText?: string
   replacement?: import('../contracts.js').ReplacementTarget
+  /** Host-derived from the sealed interrupt after the Agent selects its id. */
+  recoveryPlan?: InstallRecoveryPlan
+}
+
+export interface RetryableInstallContext {
+  reviewId: string
+  recoveryPlans?: InstallRecoveryPlan[]
+  recovery?: InstallFailureRecovery
+  /** The previous receipt already consumed a sealed recovery; never offer the same install path again. */
+  recoveryExhausted?: true
 }
 
 export interface CandidateSnapshotItem {
@@ -182,9 +196,42 @@ export interface DiscoveryBudget {
   refinementRoundsUsed: number
   refinementQueriesUsed: string[]
   explicitRepositories: string[]
-  maxRefinementRounds: 2
-  maxRefinementQueries: 5
-  maxCandidates: 20
+  activeTurnId?: string
+  activeTurnQueriesUsed: string[]
+  maxQueriesPerTurn: 5
+  /** Legacy persisted fields from schemaVersion 3; no longer global caps. */
+  maxRefinementRounds?: 2
+  maxRefinementQueries?: 5
+  /** Bounded rolling window; semantic relevance never removes an eligible result. */
+  maxCandidates: 113
+}
+
+export interface CandidatePreview {
+  candidateId: string
+  repository: string
+  commit: string
+  defaultBranch: string
+  inspectedFiles: Array<{ path: string; sha256: string; bytes: number }>
+  truncated: boolean
+  manifest: {
+    kind: 'bundle' | 'skill' | 'legacy' | 'unknown'
+    packageName?: string
+    packageVersion?: string
+    bundlePatch?: string
+    license?: string
+  }
+  packageSummary?: {
+    description?: string
+    keywords?: string[]
+  }
+  readmeExcerpt?: string
+}
+
+export interface CandidatePreviewFailure {
+  candidateId: string
+  repository: string
+  code: string
+  message: string
 }
 
 export interface DiscoveryRefineInput {
@@ -396,8 +443,10 @@ export interface WorkflowRecord {
   requirementNormalized?: string
   /** Non-authoritative model summary retained only for diagnostics/search presentation. */
   requestSummary?: string
-  /** Exact Host-owned search input. V10 starts with requirement and appends one raw clarification answer. */
+  /** Exact Host-owned search input: original requirement plus one searchable clarification answer. Option-only replies and the protocol label are omitted. */
   searchRequirement?: string
+  /** Host-normalized LLM search plan for baseline remote discovery. Never part of the authoritative requirement or refinement budget. */
+  discoveryQueries?: string[]
   clarificationQuestion?: string
   clarificationAnswer?: string
   clarifiedIntent?: RequestIntent
@@ -421,6 +470,9 @@ export interface WorkflowRecord {
   forceRemoteDiscovery?: boolean
   /** Host-verified candidates available for model curation before Gate 1. */
   discoveryPool?: CandidateSnapshotItem[]
+  /** Bounded untrusted previews for the shortlist selected by the Agent. */
+  candidatePreviews?: Record<string, CandidatePreview>
+  candidatePreviewFailures?: CandidatePreviewFailure[]
   discoveryBudget?: DiscoveryBudget
   candidateSnapshot?: CandidateSnapshotItem[]
   seenCandidateIds?: string[]
@@ -452,6 +504,96 @@ export interface WorkflowRecord {
   error?: { code: string; message: string }
   intent?: RequestIntent
   pendingReviewedCandidateId?: string
+}
+
+/** Identify one legacy verification entry that was consumed before verification began. */
+export function retryablePreVerificationReviewId(
+  workflow: WorkflowRecord,
+  installation: InstallationRecord,
+): string | undefined {
+  if (workflow.status !== 'interrupted'
+    || workflow.cursor !== 'await_confirmation'
+    || workflow.lastFailure?.stage !== 'install'
+    || workflow.lastFailure.retryable !== true
+    || workflow.lastInstallationId !== installation.id
+    || installation.workflowId !== workflow.id
+    || !installation.reviewId
+    || installation.installOutcome !== 'failed_absent'
+    || installation.installed
+    || installation.installFailure?.stage !== 'install'
+    || installation.installFailure.retryable !== true
+    || installation.verification?.attempted !== false) {
+    return undefined
+  }
+  return installation.reviewId
+}
+
+export function retryableInstallContext(
+  workflow: WorkflowRecord,
+  installation: InstallationRecord,
+): RetryableInstallContext | undefined {
+  const reviewId = retryablePreVerificationReviewId(workflow, installation)
+  if (!reviewId) return undefined
+  const recovery = installation.installFailure?.recovery
+  const diagnosticHash = installation.installFailure?.diagnosticHash
+  if (installation.recoveryAttempt) {
+    return { reviewId, ...(recovery ? { recovery } : {}), recoveryExhausted: true }
+  }
+  if (recovery?.kind === 'profile_store_mismatch') {
+    if (!recovery.reuseEligible
+      || recovery.scope !== 'host_profile'
+      || !recovery.profileStoreFingerprint
+      || !/^[a-f0-9]{64}$/u.test(recovery.profileStoreFingerprint)
+      || !diagnosticHash
+      || !/^[a-f0-9]{64}$/u.test(diagnosticHash)) {
+      return { reviewId, recovery }
+    }
+    const plan: InstallRecoveryPlan = {
+      id: `recovery_${hashObject({
+        workflowId: workflow.id,
+        installationId: installation.id,
+        reviewId,
+        diagnosticHash,
+        profileStoreFingerprint: recovery.profileStoreFingerprint,
+      }).slice(0, 24)}`,
+      operation: 'retry_install',
+      strategy: 'profile_store_reuse',
+      sourceInstallationId: installation.id,
+      diagnosticHash,
+      profileStoreFingerprint: recovery.profileStoreFingerprint,
+      effectScope: 'single_install_command',
+    }
+    return { reviewId, recovery, recoveryPlans: [plan] }
+  }
+  if (recovery?.kind !== 'minimum_release_age') {
+    return { reviewId, ...(recovery ? { recovery } : {}) }
+  }
+  if (!recovery.exceptionEligible
+    || recovery.scope !== 'host_profile'
+    || !diagnosticHash
+    || !/^[a-f0-9]{64}$/u.test(diagnosticHash)) {
+    return { reviewId, recovery }
+  }
+  const plan: InstallRecoveryPlan = {
+    id: `recovery_${hashObject({
+      workflowId: workflow.id,
+      installationId: installation.id,
+      reviewId,
+      diagnosticHash,
+      exactPackages: recovery.entries.map((entry) => `${entry.packageName}@${entry.version}`).sort(),
+    }).slice(0, 24)}`,
+    operation: 'retry_install',
+    strategy: 'minimum_release_age_exception',
+    sourceInstallationId: installation.id,
+    diagnosticHash,
+    exactPackages: recovery.entries.map((entry) => `${entry.packageName}@${entry.version}`).sort(),
+    effectScope: 'single_install_command',
+  }
+  return {
+    reviewId,
+    recovery,
+    recoveryPlans: [plan],
+  }
 }
 
 export type WorkflowViewStatus = 'progressed' | 'parked' | 'invalid_resume'
@@ -498,6 +640,7 @@ export interface ValidatedResume {
   interruptId: string
   snapshotDigest: string
   candidateId?: string
+  recoveryId?: string
   repositories: string[]
   path?: string
   ref?: string
@@ -512,12 +655,21 @@ export interface MarketplaceStepResult {
 
 export interface WorkflowHost {
   bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>
-  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>
+  discoverRemote(
+    resolution: ResolutionRecord,
+    exec: WorkflowExec,
+    input?: { queries?: string[] },
+  ): Promise<ResolutionRecord>
   refineRemote?(
     resolution: ResolutionRecord,
     input: { queries: string[]; repositories: string[] },
     exec: WorkflowExec,
   ): Promise<ResolutionRecord>
+  previewGithubCandidates?(
+    resolution: ResolutionRecord,
+    candidates: Array<{ candidateId: string; repository: string; ref?: string }>,
+    exec: WorkflowExec,
+  ): Promise<{ previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }>
   ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
     resolution: ResolutionRecord
     market: MarketplaceStepResult
@@ -650,6 +802,12 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建', placement: 'advanced' },
   stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
   use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
+  apply_recovery: {
+    id: 'apply_recovery',
+    labelEn: 'Apply the selected recovery plan',
+    labelZh: '执行所选恢复方案',
+    placement: 'primary',
+  },
   modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改', placement: 'advanced' },
   finish_managed_work: { id: 'finish_managed_work', labelEn: 'Continue managed construction', labelZh: '继续托管施工', placement: 'primary' },
 }
@@ -737,7 +895,11 @@ export function confirmationFacts(
   resolution: ResolutionRecord,
   reviews: ReviewRecord[],
   workflow?: WorkflowRecord,
-  extras: { lastFailure?: WorkflowRecord['lastFailure']; installProfiles?: string[] } = {},
+  extras: {
+    lastFailure?: WorkflowRecord['lastFailure']
+    installProfiles?: string[]
+    retryableInstall?: RetryableInstallContext
+  } = {},
 ): Record<string, unknown> {
   const review = reviews[0]
   const builtinEnablement = frozenBuiltinEnablement(workflow)
@@ -795,9 +957,13 @@ export function confirmationFacts(
     selectedRepositories: resolution.selectedRepositories ?? [],
     ...(review ? { license: review.license, compatibility: review.compatibility } : {}),
     ...(extras.lastFailure ? { lastFailure: extras.lastFailure } : {}),
-    verificationAlreadyAttempted: Boolean(
-      review && (workflow?.consumedVerificationAttempts ?? []).some((item) => sameVerificationAttempt(item, review)),
-    ),
+    ...(extras.retryableInstall?.recovery ? { installRecovery: extras.retryableInstall.recovery } : {}),
+    ...(extras.retryableInstall?.recoveryPlans?.length
+      ? { recoveryOptions: extras.retryableInstall.recoveryPlans }
+      : {}),
+    verificationAlreadyAttempted: Boolean(review
+      && review.id !== extras.retryableInstall?.reviewId
+      && (workflow?.consumedVerificationAttempts ?? []).some((item) => sameVerificationAttempt(item, review))),
     modificationAttemptsExhausted: modificationAttemptsExhausted(workflow?.modificationOutcome),
     ...(modificationChecks ? { modificationChecks } : {}),
     ...(creatorAgentFacts(workflow?.creatorRecords) ? { creator: creatorAgentFacts(workflow?.creatorRecords) } : {}),
@@ -832,6 +998,7 @@ export function optionsFor(
   workflow?: WorkflowRecord,
   installProfiles: string[] = [],
   managedActionsAvailable = true,
+  retryableInstall?: RetryableInstallContext,
 ): WorkflowOption[] {
   if (kind === 'await_clarification') return [WORKFLOW_OPTIONS.clarify_requirement, WORKFLOW_OPTIONS.stop]
   if (kind === 'await_modify_work') {
@@ -881,20 +1048,38 @@ export function optionsFor(
       return snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase()
         || item.evolutionTarget?.repository.toLowerCase() === source.repository.toLowerCase())?.id
     }
-    const consumed = workflow?.consumedVerificationAttempts ?? []
     const failedSameSpec = (review: ReviewRecord): boolean => {
       const candidateId = candidateIdFor(review)
       const target = snapshot.find((item) => item.id === candidateId)?.evolutionTarget
       return Boolean(target?.kind === 'failed_install' && review.installSpec === target.dependencySpec)
     }
+    const consumed = workflow?.consumedVerificationAttempts ?? []
+    const hasRecoveryPlans = Boolean(retryableInstall?.recoveryPlans?.length)
+    const suppressRetryReview = hasRecoveryPlans || Boolean(retryableInstall?.recoveryExhausted)
+    const ordinaryRetryReviewId = suppressRetryReview
+      ? undefined
+      : retryableInstall?.reviewId
     const usableIds = reviews.filter((item) => isDirectlyUsableReview(item, workflow)
-      && !consumed.some((attempt) => sameVerificationAttempt(attempt, item))
+      && !(suppressRetryReview && item.id === retryableInstall?.reviewId)
+      && (item.id === ordinaryRetryReviewId
+        || !consumed.some((attempt) => sameVerificationAttempt(attempt, item)))
       && !failedSameSpec(item))
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
     const repairableIds = reviews.filter((item) => item.fit !== 'none' && item.license !== null)
       .map(candidateIdFor).filter((id): id is string => Boolean(id))
     if (usableIds.length > 0 && installProfiles.length > 0) {
       options.push({ ...WORKFLOW_OPTIONS.use_this, candidateIds: usableIds })
+    }
+    if (retryableInstall?.recoveryPlans?.length && installProfiles.length > 0) {
+      const recoveryReview = reviews.find((item) => item.id === retryableInstall.reviewId)
+      const recoveryCandidateId = recoveryReview ? candidateIdFor(recoveryReview) : undefined
+      if (recoveryCandidateId) {
+        options.push({
+          ...WORKFLOW_OPTIONS.apply_recovery,
+          candidateIds: [recoveryCandidateId],
+          recoveryIds: retryableInstall.recoveryPlans.map((plan) => plan.id),
+        })
+      }
     }
     const evolvingInstalled = (workflow?.reviewedCandidateIds ?? []).some((id) => (
       snapshot.find((item) => item.id === id)?.evolutionTarget

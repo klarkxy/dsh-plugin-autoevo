@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
@@ -22,6 +22,69 @@ function config(root: string): RuntimeConfig {
 }
 
 describe('Host-owned launcher verification', () => {
+  it('pins installation to the store that owns the existing profile node_modules tree', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-store-'))
+    temporary.push(directory)
+    const storeDir = path.join(directory, 'pnpm-store', 'v10')
+    const modulesRoot = path.join(directory, 'profiles', 'web', 'node_modules')
+    await mkdir(modulesRoot, { recursive: true })
+    await writeFile(path.join(modulesRoot, '.modules.yaml'), `storeDir: ${JSON.stringify(storeDir)}\n`, 'utf8')
+    let captured: CommandRequest | undefined
+    const runner: CommandRunner = {
+      async run(request) {
+        captured = request
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    }
+
+    await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+    expect(captured?.argv.at(-1)).toBe(`--config.store-dir=${storeDir}`)
+    expect(await new DshLauncher(runner, config(directory)).profileStoreFingerprint(directory, 'web'))
+      .toMatch(/^[a-f0-9]{64}$/u)
+  })
+
+  it('does not trust a relative store path from profile metadata', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-store-relative-'))
+    temporary.push(directory)
+    const modulesRoot = path.join(directory, 'profiles', 'web', 'node_modules')
+    await mkdir(modulesRoot, { recursive: true })
+    await writeFile(path.join(modulesRoot, '.modules.yaml'), 'storeDir: ../unexpected\n', 'utf8')
+    let captured: CommandRequest | undefined
+    const runner: CommandRunner = {
+      async run(request) {
+        captured = request
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    }
+
+    await new DshLauncher(runner, config(directory))
+      .install(directory, 'web', 'github:acme/tool#commit', process.cwd())
+
+    expect(captured?.argv).not.toContain('--store-dir')
+    expect(captured?.argv.some((item) => item.startsWith('--config.store-dir='))).toBe(false)
+  })
+
+  it('fails closed before invoking DSH when the sealed profile store fingerprint drifted', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-store-drift-'))
+    temporary.push(directory)
+    const modulesRoot = path.join(directory, 'profiles', 'web', 'node_modules')
+    await mkdir(modulesRoot, { recursive: true })
+    await writeFile(path.join(modulesRoot, '.modules.yaml'), `storeDir: ${JSON.stringify(path.join(directory, 'store-a'))}\n`, 'utf8')
+    const runner = { run: vi.fn(async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' })) } as CommandRunner
+    const launcher = new DshLauncher(runner, config(directory))
+    const sealed = await launcher.profileStoreFingerprint(directory, 'web')
+    expect(sealed).toMatch(/^[a-f0-9]{64}$/u)
+    if (!sealed) throw new Error('expected a sealed profile store fingerprint')
+    await writeFile(path.join(modulesRoot, '.modules.yaml'), `storeDir: ${JSON.stringify(path.join(directory, 'store-b'))}\n`, 'utf8')
+
+    await expect(launcher.install(directory, 'web', 'github:acme/tool#commit', process.cwd(), undefined, {
+      expectedProfileStoreFingerprint: sealed,
+    })).rejects.toThrow(/store changed/i)
+    expect(runner.run).not.toHaveBeenCalled()
+  })
+
   it('strips configured credentials from isolated preflight installation', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-install-'))
     temporary.push(directory)
@@ -275,7 +338,7 @@ describe('git-hosted install lifecycle ownership', () => {
     return workspacePath
   }
 
-  function scriptedRunner(...outcomes: Array<{ exitCode: number, stderr?: string }>): {
+  function scriptedRunner(...outcomes: Array<{ exitCode: number, stdout?: string, stderr?: string }>): {
     runner: CommandRunner
     requests: CommandRequest[]
   } {
@@ -288,7 +351,7 @@ describe('git-hosted install lifecycle ownership', () => {
           requests.push(request)
           const outcome = outcomes[Math.min(index, outcomes.length - 1)]
           index += 1
-          return { exitCode: outcome?.exitCode ?? 0, signal: null, stdout: '', stderr: outcome?.stderr ?? '' }
+          return { exitCode: outcome?.exitCode ?? 0, signal: null, stdout: outcome?.stdout ?? '', stderr: outcome?.stderr ?? '' }
         },
       },
     }
@@ -299,7 +362,8 @@ describe('git-hosted install lifecycle ownership', () => {
     temporary.push(directory)
     const workspacePath = await seedProfileWorkspace(directory)
     const stderr = pnpmGitPrepareError('acme-tool@0.1.1')
-    const { runner, requests } = scriptedRunner({ exitCode: 1, stderr }, { exitCode: 0 })
+    const stdout = 'ERR_PNPM_PREPARE_PACKAGE failed while preparing acme-tool'
+    const { runner, requests } = scriptedRunner({ exitCode: 1, stdout, stderr }, { exitCode: 0 })
 
     const before = await readFile(workspacePath, 'utf8')
     const failure = await new DshLauncher(runner, config(directory))
@@ -311,7 +375,12 @@ describe('git-hosted install lifecycle ownership', () => {
     expect(failure).toMatchObject({
       code: 'command_failed',
       message: 'dsh exited with code 1',
-      details: { command: 'dsh', exitCode: 1, diagnosticHash: sha256(stderr) },
+      details: {
+        command: 'dsh',
+        exitCode: 1,
+        diagnosticSummary: expect.stringContaining('ERR_PNPM_PREPARE_PACKAGE'),
+        diagnosticHash: sha256(JSON.stringify([stdout, stderr])),
+      },
     })
     expect(await readFile(workspacePath, 'utf8')).toBe(before)
   })
@@ -330,5 +399,47 @@ describe('git-hosted install lifecycle ownership', () => {
     expect(requests).toHaveLength(1)
     expect(failure).toBeInstanceOf(EvolutionError)
     expect(await readFile(workspacePath, 'utf8')).toBe(before)
+  })
+
+  it('passes exact release-age exclusions only on the install command without changing policy files', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-release-age-'))
+    temporary.push(directory)
+    const workspacePath = await seedProfileWorkspace(directory, 'minimumReleaseAge: 1440\n')
+    const before = await readFile(workspacePath, 'utf8')
+    const { runner, requests } = scriptedRunner({ exitCode: 0 })
+
+    await new DshLauncher(runner, config(directory)).install(
+      directory,
+      'web',
+      'github:acme/tool#commit',
+      process.cwd(),
+      undefined,
+      {
+        minimumReleaseAgeExcludes: [
+          'ds-harness-remote@0.3.35',
+          '@deepseek-ai/dsh-file-viewer@0.2.5',
+        ],
+      },
+    )
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.argv).toContain('--config.minimum-release-age-exclude=@deepseek-ai/dsh-file-viewer@0.2.5')
+    expect(requests[0]!.argv).toContain('--config.minimum-release-age-exclude=ds-harness-remote@0.3.35')
+    expect(await readFile(workspacePath, 'utf8')).toBe(before)
+  })
+
+  it('rejects broad or floating release-age exclusions before invoking DSH', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'autoevo-launcher-release-age-invalid-'))
+    temporary.push(directory)
+    const { runner, requests } = scriptedRunner({ exitCode: 0 })
+    await expect(new DshLauncher(runner, config(directory)).install(
+      directory,
+      'web',
+      'github:acme/tool#commit',
+      process.cwd(),
+      undefined,
+      { minimumReleaseAgeExcludes: ['ds-harness-remote@latest'] },
+    )).rejects.toMatchObject({ code: 'invalid_input' })
+    expect(requests).toHaveLength(0)
   })
 })

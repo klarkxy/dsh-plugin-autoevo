@@ -24,6 +24,8 @@ import {
   type WorkflowRecord,
   type WorkflowView,
   type WorkflowViewStatus,
+  retryableInstallContext,
+  reviewSourceIdentity,
 } from './contracts.js'
 import { interruptPayload } from './graph.js'
 import { lifecycleStateFor } from './lifecycle.js'
@@ -107,6 +109,34 @@ export abstract class WorkflowEngineCore {
       }
       return rank(left) - rank(right) || left.createdAt.localeCompare(right.createdAt)
     })
+  }
+
+  protected async retryableInstall(workflow: WorkflowRecord): Promise<import('./contracts.js').RetryableInstallContext | undefined> {
+    if (!workflow.lastInstallationId) return undefined
+    const installation = await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+    return installation ? retryableInstallContext(workflow, installation) : undefined
+  }
+
+  protected async clearErroneousVerificationAttempt(
+    workflow: WorkflowRecord,
+    review: ReviewRecord,
+  ): Promise<void> {
+    if (!workflow.lastInstallationId) return
+    const installation = await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+    if (!installation || retryableInstallContext(workflow, installation)?.reviewId !== review.id) return
+    const attempts = workflow.consumedVerificationAttempts ?? []
+    const layer = review.runtimeSurface?.verificationLayer ?? installation.verification.layer ?? 'unspecified'
+    const fixtureDigest = installation.verification.fixtureDigest
+    const sourceIdentity = reviewSourceIdentity(review)
+    const index = attempts.findIndex((attempt) => attempt.reviewId === review.id
+      && attempt.sourceIdentity === sourceIdentity
+      && attempt.layer === layer
+      && attempt.fixtureDigest === fixtureDigest)
+    if (index < 0) return
+    const next = [...attempts]
+    next.splice(index, 1)
+    if (next.length > 0) workflow.consumedVerificationAttempts = next
+    else delete workflow.consumedVerificationAttempts
   }
 
   protected async reviewForAuthorization(
@@ -213,12 +243,16 @@ export abstract class WorkflowEngineCore {
       || workflow.cursor === 'await_selection'
       ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
       : true
+    const retryableInstall = workflow.cursor === 'await_confirmation'
+      ? await this.retryableInstall(workflow)
+      : undefined
     const base = interruptPayload(workflow.cursor, resolution, reviews, {
       ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
       ...(installProfiles.length > 0 ? { installProfiles } : {}),
       ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
       workflow,
       managedActionsAvailable,
+      ...(retryableInstall ? { retryableInstall } : {}),
     })
     const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
     if (!sessionId) {

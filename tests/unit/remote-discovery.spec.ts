@@ -66,6 +66,14 @@ describe('scoped GitHub discovery', () => {
     expect(scopedGithubQuery('')).toBe('topic:dsh-plugin')
   })
 
+  it('does not search GitHub for a clarification protocol label', () => {
+    const phrases = _testing.githubSearchPhrases(
+      '我需要一个能autoreview的能力，类似于codex的「替我审批」\n\nClarification:\n1',
+    )
+    expect(phrases.join(' ')).not.toMatch(/clarification/i)
+    expect(phrases).toEqual(expect.arrayContaining(['autoreview', 'codex', '替我审批']))
+  })
+
   it('searches GitHub with scoped queries and keeps updated metadata', async () => {
     const runner = runnerFor((query) => {
       expect(query).toContain('topic:dsh-plugin')
@@ -98,6 +106,64 @@ describe('scoped GitHub discovery', () => {
       updatedAt: '2026-07-01T00:00:00Z',
       topics: expect.arrayContaining(['dsh-plugin', 'quasar-ledger']),
     })])
+  })
+
+  it('executes model-planned baseline queries and records only actual attempts', async () => {
+    const runner = runnerFor((query) => ({ items: query.includes('auto review')
+      ? [searchItem({
+          full_name: 'PerryLink/dsh-auto-review',
+          description: 'Automatic approval review for DSH',
+          topics: ['dsh-plugin', 'auto-review'],
+        })]
+      : [] }))
+    const result = await discoverRemoteCandidates({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      requirement: 'generic capability request',
+      queries: ['auto review'],
+    })
+
+    expect(result.queries).toEqual(['auto review'])
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ repository: 'PerryLink/dsh-auto-review' }),
+    ])
+    expect(runner.run).toHaveBeenCalledTimes(1)
+  })
+
+  it('executes Agent-planned queries exactly without Host synthesis', async () => {
+    const planned = [
+      'auto approve',
+      'approval automation',
+      'sandbox approval',
+      'permission approval',
+      'codex approval',
+    ]
+    const phrases = _testing.githubSearchPhrases('我需要一个类似于codex的「替我审批」', planned)
+
+    expect(phrases).toEqual(planned)
+
+    const runner = runnerFor((query) => ({ items: query === 'auto approve topic:dsh-plugin'
+      ? [searchItem({
+          full_name: 'Jiao-XXX/dsh-auto-approve',
+          description: 'Automatically approve DSH permission requests',
+          stars: 11,
+          topics: ['dsh-plugin', 'auto-approve'],
+        })]
+      : [] }))
+    const result = await discoverRemoteCandidates({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      requirement: '我需要一个类似于codex的「替我审批」',
+      queries: planned,
+    })
+
+    expect(runner.run).toHaveBeenCalledTimes(5)
+    expect(result.source).toBe('github')
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ repository: 'Jiao-XXX/dsh-auto-approve', stars: 11 }),
+    ])
   })
 
   it('does not emit an unscoped dsh fallback query', async () => {
@@ -180,6 +246,19 @@ describe('scoped GitHub discovery', () => {
     ])
   })
 
+  it('uses model-planned discovery queries as temporary relevance evidence', () => {
+    const candidate = {
+      repository: 'acme/dsh-quasar-relay',
+      name: 'dsh-quasar-relay',
+      description: 'Call the quasar relay from DSH',
+      stars: 1,
+      updatedAt: null,
+      topics: ['dsh-plugin'],
+    }
+    expect(_testing.relevantRemoteCandidates('generic capability', [candidate], ['quasar relay']))
+      .toEqual([expect.objectContaining({ repository: candidate.repository })])
+  })
+
   it('uses bilingual operation evidence for a remote shortlist without naming exceptions', () => {
     const candidates = [
       {
@@ -199,8 +278,8 @@ describe('scoped GitHub discovery', () => {
         topics: ['dsh-plugin'],
       },
     ]
-    expect(_testing.relevantRemoteCandidates('在 DSH 会话里搜索扩展', candidates))
-      .toEqual([expect.objectContaining({ repository: 'acme/extension-index' })])
+    expect(_testing.relevantRemoteCandidates('在 DSH 会话里搜索扩展', candidates).map((item) => item.repository))
+      .toEqual(['acme/extension-index', 'acme/theme-pack'])
   })
 
   it('prefers a low-star specific match over a popular generic catalogue', () => {
@@ -226,6 +305,7 @@ describe('scoped GitHub discovery', () => {
       [popularButWrong, exact],
     )).toEqual([
       expect.objectContaining({ repository: 'example-org/dsh-quasar-ledger', stars: 2 }),
+      expect.objectContaining({ repository: 'example-org/dsh-adapter-catalogue', stars: 680 }),
     ])
   })
 
@@ -254,9 +334,32 @@ describe('scoped GitHub discovery', () => {
 
     expect(runner.run.mock.calls.length).toBeGreaterThan(1)
     expect(result.source).toBe('github')
-    expect(result.candidates).toEqual([expect.objectContaining({
-      repository: 'example-org/dsh-quasar-relay',
-    })])
+    expect(result.candidates.map((item) => item.repository)).toEqual([
+      'example-org/dsh-quasar-relay',
+      'example-org/adapter-catalogue',
+    ])
+  })
+
+  it('keeps the complete bounded union from five result pages for Agent curation', async () => {
+    const planned = ['alpha', 'beta', 'gamma', 'delta', 'epsilon']
+    const runner = runnerFor((query) => {
+      const prefix = query.split(' ')[0]!
+      return { items: Array.from({ length: 20 }, (_, index) => searchItem({
+        full_name: `${prefix}-org/plugin-${index}`,
+        description: index === 19 ? 'No semantic overlap with the request' : `${prefix} capability`,
+      })) }
+    })
+    const result = await discoverRemoteCandidates({
+      runner,
+      config: { ...config, maxCandidates: 5 },
+      cwd: 'C:/workspace',
+      requirement: 'specific capability',
+      queries: planned,
+    })
+
+    expect(result.candidates).toHaveLength(100)
+    expect(new Set(result.candidates.map((item) => item.repository)).size).toBe(100)
+    expect(result.candidates.every((item) => item.matchedQueries?.length === 1)).toBe(true)
   })
 
   it('keeps discovery incomplete when only some queries succeed', async () => {

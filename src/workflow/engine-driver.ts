@@ -4,8 +4,11 @@ import {
   DEFAULT_REQUEST_INTENT,
   POLICY_VERSION,
   type RequestIntent,
+  type ResolutionRecord,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { validateGithubRepository } from '../github/index.js'
+import { isConciseDiscoveryQuery, normalizeDiscoveryQueries } from '../resolver/keywords.js'
 import { hashObject } from '../state/hashes.js'
 import {
   newInterruptId,
@@ -19,6 +22,7 @@ import {
   MODEL_CONTROL_NODES,
   TERMINAL_NODES,
   type DiagnosticFact,
+  type DiscoveryBudget,
   type DiscoveryPresentInput,
   type DiscoveryRefineInput,
   type WorkflowDiagnoseInput,
@@ -31,17 +35,40 @@ import { executeNode, interruptPayload } from './graph.js'
 import { boundedAgentText as boundedDiagnosticText } from './sanitize.js'
 import {
   DISCOVERY_POOL_MAX,
+  activeDiscoveryQueriesUsed,
   SEALED_SHORTLIST_MAX,
   candidateId,
   candidateSnapshotFor,
   discoveryBudget,
+  discoveryQueriesPerTurn,
   excludedCandidateIds,
   newWorkflowId,
-  normalizeRefinementQuery,
   registerReviewedCandidate,
   snapshotDigestFor,
 } from './candidates.js'
 import { WorkflowEngineCore } from './engine-core.js'
+
+const GITHUB_REPOSITORY_ROOT = /^https:\/\/github\.com\/(?<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}))\/(?<name>[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/iu
+
+export interface PreparedDiscoveryRefinement {
+  queries: string[]
+  repositories: string[]
+  nextBudget: DiscoveryBudget
+}
+
+function normalizeRefinementRepository(value: string, allowGithubRootUrl: boolean): string {
+  const normalized = value.normalize('NFKC').trim()
+  if (!allowGithubRootUrl || !/^https?:\/\//iu.test(normalized)) {
+    return validateGithubRepository(normalized)
+  }
+  const match = GITHUB_REPOSITORY_ROOT.exec(normalized)
+  if (!match) {
+    throw new EvolutionError('invalid_input', 'GitHub repository URL must be an exact https://github.com/owner/repository root URL', {
+      repository: value,
+    })
+  }
+  return validateGithubRepository(`${match.groups?.owner}/${match.groups?.name}`)
+}
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -55,6 +82,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     exec: ToolRunContext,
     intent: RequestIntent = DEFAULT_REQUEST_INTENT,
     clarificationQuestion?: string,
+    discoveryQueries?: string[],
   ): Promise<WorkflowView> {
     const requestSummary = normalizeRequirement(requirement)
     if (!requestSummary || requestSummary.length > 2_000) {
@@ -70,6 +98,10 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     if (question && question.length > 300) {
       throw new EvolutionError('invalid_input', 'clarification_question must contain at most 300 characters')
     }
+    if (question && (discoveryQueries?.length ?? 0) > 0) {
+      throw new EvolutionError('invalid_input', 'queries must be omitted until the fresh clarification answer is available')
+    }
+    const plannedQueries = this.normalizeBaselineDiscoveryQueries(discoveryQueries)
     const sessionId = ownerSessionId(exec.agent)
     if (!sessionId) {
       throw new EvolutionError('invalid_input', 'A live Agent session identity is required to start a workflow')
@@ -117,6 +149,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     const startedTurnId = this.creationGuard.currentTurnId(exec.agent)
     return await this.startFresh(originalRequirement, normalized, sessionId, cwd, exec, intent, undefined, workflowId, {
       requestSummary,
+      ...(plannedQueries ? { discoveryQueries: plannedQueries } : {}),
       ...(question ? { clarificationQuestion: question } : {}),
       ...(startedTurnId ? { startedTurnId } : {}),
     })
@@ -164,6 +197,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     workflowId = newWorkflowId(requirement),
     startOptions: {
       requestSummary?: string
+      discoveryQueries?: string[]
       clarificationQuestion?: string
       startedTurnId?: string
     } = {},
@@ -179,6 +213,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       requirementNormalized: normalized,
       requestSummary: startOptions.requestSummary ?? normalized,
       searchRequirement: requirement,
+      ...(startOptions.discoveryQueries ? { discoveryQueries: startOptions.discoveryQueries } : {}),
       ...(startOptions.clarificationQuestion ? { clarificationQuestion: startOptions.clarificationQuestion } : {}),
       ...(startOptions.startedTurnId ? { startedTurnId: startOptions.startedTurnId } : {}),
       cwd,
@@ -196,58 +231,36 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     return await this.withLock(workflow.id, () => this.runUntilPark(workflow, exec, guardGeneration))
   }
 
+  protected normalizeBaselineDiscoveryQueries(input?: string[]): string[] | undefined {
+    if (!input || input.length === 0) return undefined
+    const invalidQueries = input.filter((query) => !isConciseDiscoveryQuery(query))
+    if (invalidQueries.length > 0) {
+      throw new EvolutionError('invalid_input', 'Each discovery query must contain one or two exact search terms, not a prose request', {
+        invalidQueries: invalidQueries.slice(0, 5),
+      })
+    }
+    const queries = normalizeDiscoveryQueries(input)
+    if (queries.length > 5) {
+      throw new EvolutionError('invalid_input', 'Baseline discovery accepts at most five unique queries')
+    }
+    if (queries.length === 0) {
+      throw new EvolutionError('invalid_input', 'Baseline discovery requires at least one query containing two or more characters')
+    }
+    return queries
+  }
+
   async refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView> {
     return await this.withLock(input.workflowId, async () => {
       const workflow = await this.store.getWorkflow(input.workflowId)
       this.assertDiscoveryControl(workflow, exec)
       if (!workflow.resolutionId) throw new EvolutionError('invalid_input', 'Discovery workflow has no resolution')
-      if (!this.host.refineRemote) throw new EvolutionError('invalid_input', 'This workflow host does not support autonomous refinement')
-      const budget = workflow.discoveryBudget ?? discoveryBudget()
-      if (budget.refinementRoundsUsed >= budget.maxRefinementRounds) {
-        throw new EvolutionError('invalid_input', 'Discovery refinement round budget is exhausted')
-      }
-      const usedQueries = new Set(budget.refinementQueriesUsed.map((item) => item.toLowerCase()))
-      const queries = [...new Set((input.queries ?? [])
-        .map(normalizeRefinementQuery)
-        .filter((item) => item.length >= 2 && !usedQueries.has(item.toLowerCase())))]
-      if (budget.refinementQueriesUsed.length + queries.length > budget.maxRefinementQueries) {
-        throw new EvolutionError('invalid_input', 'Discovery refinement query budget would be exceeded', {
-          remaining: budget.maxRefinementQueries - budget.refinementQueriesUsed.length,
-        })
-      }
-      const usedRepositories = new Set(budget.explicitRepositories.map((item) => item.toLowerCase()))
-      const repositories = [...new Set((input.repositories ?? [])
-        .map((item) => item.normalize('NFKC').trim())
-        .filter((item) => item && !usedRepositories.has(item.toLowerCase())))]
-        .slice(0, 5)
-      if (queries.length === 0 && repositories.length === 0) {
-        throw new EvolutionError('invalid_input', 'Refinement requires at least one new query or repository')
-      }
+      const refinement = this.prepareDiscoveryRefinement(workflow, input, {
+        turnId: this.creationGuard.currentTurnId(exec.agent) ?? workflow.startedTurnId ?? 'turn_unknown',
+      })
       const resolution = await this.host.getResolution(workflow.resolutionId)
-      const nextResolution = await this.host.refineRemote(resolution, { queries, repositories }, exec as WorkflowExec)
-      delete workflow.lastDiagnosis
-      workflow.discoveryBudget = {
-        ...budget,
-        refinementRoundsUsed: budget.refinementRoundsUsed + 1,
-        refinementQueriesUsed: [...budget.refinementQueriesUsed, ...queries],
-        explicitRepositories: [...budget.explicitRepositories, ...repositories],
-      }
-      workflow.discoveryPool = candidateSnapshotFor(
-        nextResolution,
-        excludedCandidateIds(workflow),
-        DISCOVERY_POOL_MAX,
-      )
-      const refinementExhausted = workflow.discoveryBudget.refinementRoundsUsed
-        >= workflow.discoveryBudget.maxRefinementRounds
-      const hasReviewableCandidate = workflow.discoveryPool.some((candidate) => (
-        candidate.kind === 'remote' || (candidate.kind === 'local' && candidate.fit === 'full')
-      ))
+      const nextResolution = await this.applyDiscoveryRefinement(workflow, resolution, refinement, exec)
       workflow.generation += 1
-      if (refinementExhausted && !hasReviewableCandidate) {
-        workflow.cursor = 'await_confirmation'
-        workflow.status = 'running'
-        workflow.candidateSnapshot = []
-        delete workflow.interrupt
+      if (this.parkIfDiscoveryTurnExhausted(workflow, refinement.nextBudget)) {
         await this.checkpoint(workflow)
         return await this.runUntilPark(workflow, exec, undefined, nextResolution)
       }
@@ -255,6 +268,88 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       this.syncGuard(workflow, exec, undefined, nextResolution)
       return await this.view(workflow, nextResolution)
     })
+  }
+
+  protected prepareDiscoveryRefinement(
+    workflow: WorkflowRecord,
+    input: Pick<DiscoveryRefineInput, 'queries' | 'repositories'>,
+    options: { allowGithubRootUrl?: boolean; turnId?: string } = {},
+  ): PreparedDiscoveryRefinement {
+    if (!this.host.refineRemote) throw new EvolutionError('invalid_input', 'This workflow host does not support autonomous refinement')
+    const budget = workflow.discoveryBudget ?? discoveryBudget()
+    const turnId = options.turnId ?? budget.activeTurnId ?? 'turn_unknown'
+    const turnQueriesUsed = budget.activeTurnId === turnId ? activeDiscoveryQueriesUsed(budget) : []
+    const queryLimit = discoveryQueriesPerTurn(budget)
+    const invalidQueries = (input.queries ?? []).filter((query) => !isConciseDiscoveryQuery(query))
+    if (invalidQueries.length > 0) {
+      throw new EvolutionError('invalid_input', 'Each discovery query must contain one or two exact search terms, not a prose request', {
+        invalidQueries: invalidQueries.slice(0, 5),
+      })
+    }
+    const usedQueries = new Set(budget.refinementQueriesUsed.map((item) => item.toLowerCase()))
+    const queries = normalizeDiscoveryQueries(input.queries ?? [])
+      .filter((item) => !usedQueries.has(item.toLowerCase()))
+    if (turnQueriesUsed.length + queries.length > queryLimit) {
+      throw new EvolutionError('invalid_input', 'Discovery refinement query budget for this user turn would be exceeded', {
+        remaining: queryLimit - turnQueriesUsed.length,
+      })
+    }
+    const usedRepositories = new Set(budget.explicitRepositories.map((item) => item.toLowerCase()))
+    const repositories = [...new Set((input.repositories ?? [])
+      .map((item) => normalizeRefinementRepository(item, options.allowGithubRootUrl === true))
+      .filter((item) => !usedRepositories.has(item.toLowerCase())))]
+    if (repositories.length > 5) {
+      throw new EvolutionError('invalid_input', 'Discovery refinement accepts at most five new repositories')
+    }
+    if (queries.length === 0 && repositories.length === 0) {
+      throw new EvolutionError('invalid_input', 'Refinement requires at least one new query or repository')
+    }
+    return {
+      queries,
+      repositories,
+      nextBudget: {
+        ...budget,
+        refinementRoundsUsed: budget.refinementRoundsUsed + 1,
+        refinementQueriesUsed: [...budget.refinementQueriesUsed, ...queries],
+        explicitRepositories: [...budget.explicitRepositories, ...repositories],
+        activeTurnId: turnId,
+        activeTurnQueriesUsed: [...turnQueriesUsed, ...queries],
+        maxQueriesPerTurn: 5,
+      },
+    }
+  }
+
+  protected parkIfDiscoveryTurnExhausted(workflow: WorkflowRecord, budget: DiscoveryBudget): boolean {
+    const exhausted = activeDiscoveryQueriesUsed(budget).length >= discoveryQueriesPerTurn(budget)
+    const hasReviewableCandidate = (workflow.discoveryPool ?? []).some((candidate) => (
+      candidate.kind === 'remote' || (candidate.kind === 'local' && candidate.fit === 'full')
+    ))
+    if (!exhausted || hasReviewableCandidate) return false
+    workflow.cursor = 'await_confirmation'
+    workflow.status = 'running'
+    workflow.candidateSnapshot = []
+    delete workflow.interrupt
+    return true
+  }
+
+  protected async applyDiscoveryRefinement(
+    workflow: WorkflowRecord,
+    resolution: ResolutionRecord,
+    refinement: PreparedDiscoveryRefinement,
+    exec: ToolRunContext,
+  ): Promise<ResolutionRecord> {
+    const nextResolution = await this.host.refineRemote!(resolution, {
+      queries: refinement.queries,
+      repositories: refinement.repositories,
+    }, exec as WorkflowExec)
+    delete workflow.lastDiagnosis
+    workflow.discoveryBudget = refinement.nextBudget
+    workflow.discoveryPool = candidateSnapshotFor(
+      nextResolution,
+      excludedCandidateIds(workflow),
+      DISCOVERY_POOL_MAX,
+    )
+    return nextResolution
   }
 
   async present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView> {
@@ -272,6 +367,23 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       const selected = ids.map((id) => pool.find((item) => item.id === id))
       if (selected.some((item) => !item)) {
         throw new EvolutionError('invalid_input', 'Presented candidate is outside the Host discovery pool')
+      }
+      const previewTargets = selected.flatMap((item) => {
+        if (item?.kind !== 'remote' || !item.repository) return []
+        return [{
+          candidateId: item.id,
+          repository: item.repository,
+        }]
+      })
+      if (previewTargets.length > 0 && this.host.previewGithubCandidates) {
+        const resolution = workflow.resolutionId ? await this.host.getResolution(workflow.resolutionId) : undefined
+        if (!resolution) throw new EvolutionError('invalid_input', 'Discovery preview requires the current resolution')
+        const result = await this.host.previewGithubCandidates(resolution, previewTargets, exec as WorkflowExec)
+        workflow.candidatePreviews = Object.fromEntries(result.previews.map((preview) => [preview.candidateId, preview]))
+        workflow.candidatePreviewFailures = result.failures
+      } else {
+        delete workflow.candidatePreviews
+        delete workflow.candidatePreviewFailures
       }
       workflow.candidateSnapshot = selected.map((item, index) => ({ ...item!, index: index + 1 }))
       workflow.cursor = 'await_selection'
@@ -357,7 +469,8 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
                 ? 'pass'
                 : 'failed',
             code: installation?.installFailure?.code ?? installation?.installOutcome ?? 'installation_missing',
-            summary: boundedDiagnosticText(installation?.installFailure?.message
+            summary: boundedDiagnosticText(installation?.installFailure?.summary
+              ?? installation?.installFailure?.message
               ?? installation?.verification.reason
               ?? 'No installation record is linked.'),
             observed: Boolean(installation),
@@ -366,9 +479,24 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
               : {}),
             ...(installation ? { facts: {
               installState: installation.installState ?? 'unknown',
+              targetProfile: installation.targetProfile,
+              failureStage: installation.installFailure?.stage ?? 'install',
+              exitCode: installation.installFailure?.exitCode ?? -1,
+              retryable: installation.installFailure?.retryable ?? false,
+              ...(installation.installFailure?.recovery
+                ? {
+                    recoveryKind: installation.installFailure.recovery.kind,
+                    recoveryCode: installation.installFailure.recovery.code,
+                    ...(installation.installFailure.recovery.kind === 'minimum_release_age'
+                      ? { recoveryPackages: installation.installFailure.recovery.entries
+                          .map((entry) => `${entry.packageName}@${entry.version}`) }
+                      : {}),
+                  }
+                : {}),
               removed: installation.removed,
               loaded: installation.loaded,
               verified: installation.verified,
+              verificationAttempted: installation.verification.attempted,
             } } : {}),
           })
         } else if (probe === 'verification') {
@@ -472,7 +600,10 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             excludedCandidateIds(workflow),
             DISCOVERY_POOL_MAX,
           )
-          workflow.discoveryBudget ??= discoveryBudget()
+          workflow.discoveryBudget ??= discoveryBudget(
+            workflow.startedTurnId ?? 'turn_unknown',
+            workflow.discoveryQueries ?? resolution.queries,
+          )
           delete workflow.candidateSnapshot
           this.clearWorkflowGrant(workflow)
           this.creationGuard.setConstructionRoot(exec.agent, undefined)
@@ -501,7 +632,8 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           }
           if (workflow.cursor === 'await_selection' || workflow.cursor === 'await_confirmation') {
             this.creationGuard.invalidateExecutionLease(exec.agent)
-            if (workflow.actionCommitment?.requestedAction === 'use_this') {
+            if (workflow.actionCommitment?.requestedAction === 'use_this'
+              || workflow.actionCommitment?.requestedAction === 'apply_recovery') {
               this.clearWorkflowGrant(workflow)
             }
           }
@@ -514,12 +646,16 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             || workflow.cursor === 'await_selection'
             ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
             : true
+          const retryableInstall = workflow.cursor === 'await_confirmation'
+            ? await this.retryableInstall(workflow)
+            : undefined
           const base = interruptPayload(workflow.cursor, resolution, reviews, {
             ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
             ...(installProfiles.length > 0 ? { installProfiles } : {}),
             ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
             workflow,
             managedActionsAvailable,
+            ...(retryableInstall ? { retryableInstall } : {}),
           })
           const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
           if (!sessionId) {
@@ -590,7 +726,10 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             excludedCandidateIds(workflow),
             DISCOVERY_POOL_MAX,
           )
-          workflow.discoveryBudget ??= discoveryBudget()
+          workflow.discoveryBudget ??= discoveryBudget(
+            workflow.startedTurnId ?? 'turn_unknown',
+            workflow.discoveryQueries ?? result.resolution.queries,
+          )
         } else if (result.node === 'review_github' && result.resolution && !workflow.candidateSnapshot) {
           workflow.candidateSnapshot = candidateSnapshotFor(result.resolution, excludedCandidateIds(workflow))
         }

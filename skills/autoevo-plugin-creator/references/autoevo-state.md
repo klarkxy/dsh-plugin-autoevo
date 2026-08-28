@@ -5,7 +5,7 @@
 | Result | Meaning | Safe next step |
 | --- | --- | --- |
 | `waiting_clarification` | One material ambiguity blocks useful search. No search or action grant exists yet. | Present the single Host-sealed question and stop. A fresh top-level answer may resume only with `clarify_requirement`; it changes read-only search classification and grants no selection, creation, modification, installation, or execution authority. |
-| `discovering` | Host returned a verified candidate pool without a user gate. | Refine within the returned rounds/query/candidate budget or seal 1–5 pool IDs with `capability_workflow_present`. Do not invent candidates. |
+| `discovering` | Host returned the complete bounded, objectively eligible candidate pool without a user gate. | Inspect every compact card; ranking is only reading order. Refine within the returned query budget or seal 1–5 pool IDs with `capability_workflow_present`. Exact repositories are pinned. Do not invent candidates. |
 | `no_candidates` | Host completed read-only search and found no sealed candidate. | Offer only continued search, creating a new capability, or stopping. Creation still requires a fresh top-level final decision. |
 | `reuse_local` | The user chose a scoped local tool or skill. | Reuse it; do not define a Cordis Plugin unless they later choose create new. |
 | `selection_required` | Discovery finished or is waiting. No action grant yet. | Present each candidate in chat. Do not pop `ask_user` to pick a candidate. Same-turn resume is a no-op park. After the user replies, call `capability_workflow_resume`. Inspect exactly one selected repository at a time. |
@@ -23,7 +23,7 @@
 
 The grant belongs to the current Agent and current resolution. Starting another workflow revokes it. Managed construction remains bound to the current work order and source receipt. Do not retry after an approval rejection without a new user decision.
 
-Policy-mismatched unfinished state is not executable; start a fresh Policy V11 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself or treat a semantic reviewer as an authorization gate.
+Policy-mismatched unfinished state is not executable; start a fresh Policy V13 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself or treat a semantic reviewer as an authorization gate.
 
 `capability_workflow_diagnose` is read-only and available only after an incomplete or failed stage. It returns redacted facts under a per-failure budget; it never retries, installs, edits, or cleans up. Repeated identical invalid resumes are blocked for the remainder of the current user turn without consuming authorization. After repeated verification or modify failure, present a human decision or diagnosis exit instead of looping.
 

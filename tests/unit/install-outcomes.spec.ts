@@ -9,6 +9,7 @@ import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
+import { EvolutionError } from '../../src/errors.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
@@ -20,7 +21,7 @@ import {
   type SemanticVerifierHost,
 } from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
-import { sha256 } from '../../src/state/hashes.js'
+import { hashObject, sha256 } from '../../src/state/hashes.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
@@ -145,7 +146,11 @@ describe('fail-closed install outcomes', () => {
   it('returns failed_absent when the install command fails and the target is confirmed absent', async () => {
     const { root, store, ctx } = await setup(review())
     const launcher = {
-      install: async () => { throw new Error('dsh exited with code 1') },
+      install: async () => { throw new EvolutionError('command_failed', 'dsh exited with code 1', {
+        exitCode: 1,
+        diagnosticSummary: 'ERR_PNPM_EPERM failed at C:\\Users\\Jane Doe\\profile; token=top-secret',
+        diagnosticHash: 'a'.repeat(64),
+      }) },
       profileTargetAbsent: async () => true,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
@@ -160,7 +165,304 @@ describe('fail-closed install outcomes', () => {
       installState: 'not_installed',
       installed: false,
       verified: false,
+      installFailure: {
+        summary: 'ERR_PNPM_EPERM failed at [path]; [credential]',
+        message: 'dsh exited with code 1',
+        exitCode: 1,
+        diagnosticHash: 'a'.repeat(64),
+      },
     })
+    expect(JSON.stringify(result)).not.toContain('Jane Doe')
+    expect(JSON.stringify(result)).not.toContain('top-secret')
+  })
+
+  it('binds a release-age exception to the failed receipt and applies it only after fresh approval', async () => {
+    const currentReview = review()
+    const { root, store } = await setup(currentReview)
+    const workflowId = `workflow_${'6'.repeat(24)}`
+    const diagnosticHash = 'a'.repeat(64)
+    const exactPackages = ['@deepseek-ai/dsh-file-viewer@0.2.5', 'ds-harness-remote@0.3.35']
+    const dshHome = path.join(root, 'persistent-dsh-home')
+    const profileRoot = path.join(dshHome, 'profiles', 'persistent')
+    await mkdir(profileRoot, { recursive: true })
+    await writeFile(path.join(profileRoot, 'pnpm-lock.yaml'), [
+      "'@deepseek-ai/dsh-file-viewer@0.2.5':",
+      "'ds-harness-remote@0.3.35':",
+    ].join('\n'))
+    const firstCtx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const failingLauncher = {
+      install: async () => { throw new EvolutionError('command_failed', 'dsh exited with code 1', {
+        exitCode: 1,
+        diagnosticHash,
+        recovery: {
+          kind: 'minimum_release_age', owner: 'pnpm', code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION',
+          policyKey: 'minimumReleaseAge',
+          entries: [
+            { packageName: 'ds-harness-remote', version: '0.3.35', reason: 'published recently' },
+            { packageName: '@deepseek-ai/dsh-file-viewer', version: '0.2.5', reason: 'published recently' },
+          ],
+        },
+      }) },
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher
+    const failed = await new PluginInstaller(firstCtx, config(root), store, failingLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution(), { workflow: { id: workflowId } })
+    expect(failed.installFailure?.recovery).toMatchObject({
+      kind: 'minimum_release_age', scope: 'host_profile', exceptionEligible: true,
+    })
+
+    const approvalReasons: string[] = []
+    const retryCtx = {
+      get: () => ({ request: async (request: { reason: string }) => {
+        approvalReasons.push(request.reason)
+        return 'allowed-once'
+      } }),
+    } as unknown as Context
+    const install = vi.fn(async (..._args: unknown[]) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const retryLauncher = {
+      install,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => hostPassedEvidence,
+    } as unknown as DshLauncher
+    const retried = await new PluginInstaller(retryCtx, config(root), store, retryLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+      recoveryPlan: {
+        id: `recovery_${hashObject({
+          workflowId,
+          installationId: failed.id,
+          reviewId: currentReview.id,
+          diagnosticHash,
+          exactPackages,
+        }).slice(0, 24)}`,
+        operation: 'retry_install',
+        strategy: 'minimum_release_age_exception',
+        sourceInstallationId: failed.id,
+        diagnosticHash,
+        exactPackages,
+        effectScope: 'single_install_command',
+      },
+    }, execution(), { workflow: { id: workflowId, lastInstallationId: failed.id } })
+
+    expect(retried.id).not.toBe(failed.id)
+    expect(retried.installOutcome).toBe('awaiting_user_test')
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[5]).toEqual({ minimumReleaseAgeExcludes: exactPackages })
+    expect(approvalReasons).toHaveLength(1)
+    expect(approvalReasons[0]).toContain(exactPackages[0])
+    expect(approvalReasons[0]).toContain(exactPackages[1])
+    expect(approvalReasons[0]).toMatch(/one install command|本次安装命令/u)
+    expect((await store.getInstallation(failed.id)).installOutcome).toBe('failed_absent')
+  })
+
+  it('parks a pnpm store mismatch and retries only with the unchanged Host-read profile store', async () => {
+    const currentReview = review()
+    const { root, store } = await setup(currentReview)
+    const workflowId = `workflow_${'7'.repeat(24)}`
+    const diagnosticHash = 'b'.repeat(64)
+    const profileStoreFingerprint = 'c'.repeat(64)
+    const firstCtx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const failingLauncher = {
+      install: async () => { throw new EvolutionError('command_failed', 'dsh exited with code 1', {
+        exitCode: 1,
+        diagnosticHash,
+        recovery: {
+          kind: 'profile_store_mismatch', owner: 'pnpm', code: 'ERR_PNPM_UNEXPECTED_STORE',
+        },
+      }) },
+      profileStoreFingerprint: async () => profileStoreFingerprint,
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher
+    const failed = await new PluginInstaller(firstCtx, config(root), store, failingLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution(), { workflow: { id: workflowId } })
+    expect(failed.installFailure?.recovery).toEqual({
+      kind: 'profile_store_mismatch',
+      owner: 'pnpm',
+      code: 'ERR_PNPM_UNEXPECTED_STORE',
+      profileStoreFingerprint,
+      scope: 'host_profile',
+      reuseEligible: true,
+    })
+
+    const approvalReasons: string[] = []
+    const retryCtx = {
+      get: () => ({ request: async (request: { reason: string }) => {
+        approvalReasons.push(request.reason)
+        return 'allowed-once'
+      } }),
+    } as unknown as Context
+    const install = vi.fn(async (..._args: unknown[]) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const retryLauncher = {
+      install,
+      profileStoreFingerprint: async () => profileStoreFingerprint,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => hostPassedEvidence,
+    } as unknown as DshLauncher
+    const retried = await new PluginInstaller(retryCtx, config(root), store, retryLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+      recoveryPlan: {
+        id: `recovery_${hashObject({
+          workflowId,
+          installationId: failed.id,
+          reviewId: currentReview.id,
+          diagnosticHash,
+          profileStoreFingerprint,
+        }).slice(0, 24)}`,
+        operation: 'retry_install',
+        strategy: 'profile_store_reuse',
+        sourceInstallationId: failed.id,
+        diagnosticHash,
+        profileStoreFingerprint,
+        effectScope: 'single_install_command',
+      },
+    }, execution(), { workflow: { id: workflowId, lastInstallationId: failed.id } })
+
+    expect(retried.installOutcome).toBe('awaiting_user_test')
+    expect(retried.recoveryAttempt).toMatchObject({
+      strategy: 'profile_store_reuse',
+      sourceInstallationId: failed.id,
+    })
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(install.mock.calls[0]?.[5]).toEqual({ expectedProfileStoreFingerprint: profileStoreFingerprint })
+    expect(approvalReasons).toHaveLength(1)
+    expect(approvalReasons[0]).toMatch(/reuse the pnpm store|复用目标 profile/u)
+    expect(approvalReasons[0]).not.toMatch(/--store-dir|config\.store-dir/u)
+    expect((await store.getInstallation(failed.id)).installOutcome).toBe('failed_absent')
+  })
+
+  it('does not auto-retry a transient failure during a sealed profile-store recovery', async () => {
+    const currentReview = review()
+    const { root, store } = await setup(currentReview)
+    const workflowId = `workflow_${'8'.repeat(24)}`
+    const diagnosticHash = 'd'.repeat(64)
+    const profileStoreFingerprint = 'e'.repeat(64)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const failed = await new PluginInstaller(ctx, config(root), store, {
+      install: async () => { throw new EvolutionError('command_failed', 'dsh exited with code 1', {
+        exitCode: 1,
+        diagnosticHash,
+        recovery: {
+          kind: 'profile_store_mismatch', owner: 'pnpm', code: 'ERR_PNPM_UNEXPECTED_STORE',
+        },
+      }) },
+      profileStoreFingerprint: async () => profileStoreFingerprint,
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution(), { workflow: { id: workflowId } })
+
+    const install = vi.fn(async (..._args: unknown[]) => {
+      throw new EvolutionError('command_failed', 'temporary registry failure', {
+        recovery: { kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_FETCH_503' },
+      })
+    })
+    const retried = await new PluginInstaller(ctx, config(root), store, {
+      install,
+      profileStoreFingerprint: async () => profileStoreFingerprint,
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+      recoveryPlan: {
+        id: `recovery_${hashObject({
+          workflowId,
+          installationId: failed.id,
+          reviewId: currentReview.id,
+          diagnosticHash,
+          profileStoreFingerprint,
+        }).slice(0, 24)}`,
+        operation: 'retry_install',
+        strategy: 'profile_store_reuse',
+        sourceInstallationId: failed.id,
+        diagnosticHash,
+        profileStoreFingerprint,
+        effectScope: 'single_install_command',
+      },
+    }, execution(), { workflow: { id: workflowId, lastInstallationId: failed.id } })
+
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(retried.installOutcome).toBe('failed_absent')
+    expect(retried.recoveryAttempt).toMatchObject({
+      strategy: 'profile_store_reuse',
+      sourceInstallationId: failed.id,
+    })
+    expect((await store.getInstallation(failed.id)).installOutcome).toBe('failed_absent')
+  })
+
+  it('retries an allowlisted transient install failure once with the same authority', async () => {
+    const currentReview = review()
+    const { root, store, ctx } = await setup(currentReview)
+    let attempts = 0
+    const install = vi.fn(async (..._args: unknown[]) => {
+      attempts += 1
+      if (attempts === 1) {
+        throw new EvolutionError('command_failed', 'temporary registry failure', {
+          recovery: { kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_FETCH_503' },
+        })
+      }
+      return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+    })
+    const launcher = {
+      install,
+      profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => true,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+      verifyHost: async () => hostPassedEvidence,
+    } as unknown as DshLauncher
+    const result = await new PluginInstaller(ctx, config(root), store, launcher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution())
+
+    expect(install).toHaveBeenCalledTimes(2)
+    expect(install.mock.calls[1]).toEqual(install.mock.calls[0])
+    expect(result.installOutcome).toBe('awaiting_user_test')
+  })
+
+  it('does not retry a forged same-authority recovery code outside the pnpm allowlist', async () => {
+    const currentReview = review()
+    const { root, store, ctx } = await setup(currentReview)
+    const install = vi.fn(async (..._args: unknown[]) => {
+      throw new EvolutionError('command_failed', 'not a transient pnpm failure', {
+        recovery: { kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_ARBITRARY' },
+      })
+    })
+    const launcher = {
+      install,
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher
+    const result = await new PluginInstaller(ctx, config(root), store, launcher, async () => true).install({
+      reviewId: currentReview.id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+      verificationTask: 'test calculator',
+    }, execution())
+
+    expect(install).toHaveBeenCalledTimes(1)
+    expect(result.installFailure?.recovery).toBeUndefined()
+    expect(result.installOutcome).toBe('failed_absent')
   })
 
   it('returns recovery_required when the install command fails but the target is present', async () => {

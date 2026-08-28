@@ -121,6 +121,8 @@ Diagnosis is read-only, bounded, and redacted: it does not retry, and it does no
 
 Failure recovery is bound to the current sealed interrupt. Use a fresh message to confirm reconciliation, cleanup, or retry among the legal options the Agent presents; do not manually stitch old workflow, review, or installation IDs together.
 
+If pnpm's store conflicts with dependencies already linked in the target profile and the Host confirms that the selected plugin was not installed at all, AutoEvo stays on the current candidate and offers an explicit “fix the install environment, then retry this candidate” choice. After confirmation, the Host reuses the store already recorded by that profile for this install command only. The path is not exposed to the model, and no profile or global pnpm configuration is changed. This recovery is not offered when store metadata is missing, changed, or untrusted.
+
 Cleaning up a completed install and starting over is a separate flow that requires a new top-level message:
 
 > Clean up this completed installation and start discovery from scratch.

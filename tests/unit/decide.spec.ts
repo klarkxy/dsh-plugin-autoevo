@@ -12,6 +12,7 @@ import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/cont
 
 const candidateId = `candidate_${'c'.repeat(24)}`
 const repository = 'anonymous-lab/dsh-plugin-alpha'
+const recoveryId = `recovery_${'d'.repeat(24)}`
 
 const agent = {
   id: 'session-decide',
@@ -26,12 +27,25 @@ function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload 
     bootId: 'boot_decide',
     validAfterTurnId: `turn_${'0'.repeat(24)}`,
     snapshotDigest: 'b'.repeat(64),
-    options: ids.map((id) => id === 'use_this' || id === 'modify_this'
-      ? { ...WORKFLOW_OPTIONS[id], candidateIds: [candidateId] }
+    options: ids.map((id) => id === 'use_this' || id === 'modify_this' || id === 'apply_recovery'
+      ? {
+          ...WORKFLOW_OPTIONS[id],
+          candidateIds: [candidateId],
+          ...(id === 'apply_recovery' ? { recoveryIds: [recoveryId] } : {}),
+        }
       : WORKFLOW_OPTIONS[id]),
     facts: {
       installProfiles: ['web'],
       candidateSnapshot: [{ id: candidateId, index: 2, kind: 'remote', repository }],
+      recoveryOptions: [{
+        id: recoveryId,
+        operation: 'retry_install',
+        strategy: 'minimum_release_age_exception',
+        sourceInstallationId: `installation_${'e'.repeat(24)}`,
+        diagnosticHash: 'f'.repeat(64),
+        exactPackages: ['ds-harness-remote@0.3.35'],
+        effectScope: 'single_install_command',
+      }],
     },
   }
 }
@@ -125,6 +139,87 @@ describe('resume validation', () => {
     })).toMatchObject({
       optionId: 'use_this',
       install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'synthetic-model' },
+    })
+  })
+
+  it('accepts only a sealed recovery id and never accepts recovery parameters on other actions', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['apply_recovery', 'stop'])
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '按这个恢复方案继续' }] })
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'apply_recovery', candidateId },
+      requirement: 'synthetic-model',
+    })).toThrow(/requires recovery_id/i)
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'apply_recovery', candidateId, recoveryId: `recovery_${'a'.repeat(24)}` },
+      requirement: 'synthetic-model',
+    })).toThrow(/not allowed/i)
+    expect(() => resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'stop', recoveryId },
+      requirement: 'synthetic-model',
+    })).toThrow(/does not accept recovery_id/i)
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'apply_recovery', candidateId, recoveryId },
+      requirement: 'synthetic-model',
+    })).toMatchObject({
+      optionId: 'apply_recovery',
+      candidateId,
+      recoveryId,
+      install: {
+        recoveryPlan: {
+          id: recoveryId,
+          operation: 'retry_install',
+          strategy: 'minimum_release_age_exception',
+          exactPackages: ['ds-harness-remote@0.3.35'],
+          effectScope: 'single_install_command',
+        },
+      },
+    })
+  })
+
+  it('reconstructs a profile-store repair only from the sealed recovery id', () => {
+    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
+    const current = interrupt(['apply_recovery', 'stop'])
+    current.facts.recoveryOptions = [{
+      id: recoveryId,
+      operation: 'retry_install',
+      strategy: 'profile_store_reuse',
+      sourceInstallationId: `installation_${'e'.repeat(24)}`,
+      diagnosticHash: 'f'.repeat(64),
+      profileStoreFingerprint: 'a'.repeat(64),
+      effectScope: 'single_install_command',
+    }]
+    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '先修复安装环境，再继续这个候选' }] })
+
+    expect(resolveDecisionFromModel({
+      guard,
+      agent,
+      interrupt: current,
+      decision: { action: 'apply_recovery', candidateId, recoveryId },
+      requirement: 'synthetic-model',
+    })).toMatchObject({
+      optionId: 'apply_recovery',
+      candidateId,
+      recoveryId,
+      install: {
+        recoveryPlan: {
+          strategy: 'profile_store_reuse',
+          profileStoreFingerprint: 'a'.repeat(64),
+          effectScope: 'single_install_command',
+        },
+      },
     })
   })
 

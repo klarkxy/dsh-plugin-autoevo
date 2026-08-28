@@ -43,6 +43,7 @@ const TRANSITIONS: Partial<Record<WorkflowNodeId, Partial<Record<WorkflowOptionI
   },
   await_confirmation: {
     use_this: 'install_verify',
+    apply_recovery: 'install_verify',
     modify_this: 'prepare_modify',
     create_new: 'prepare_create',
     stop: 'stopped',
@@ -78,6 +79,7 @@ export function interruptPayload(
     pendingPath?: string
     workflow?: WorkflowRecord
     managedActionsAvailable?: boolean
+    retryableInstall?: import('./contracts.js').RetryableInstallContext
   } = {},
 ): Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'> {
   if (cursor === 'await_clarification') {
@@ -109,7 +111,7 @@ export function interruptPayload(
     return {
       kind: 'await_confirmation',
       options: optionsFor('await_confirmation', resolution, reviews, extras.workflow, extras.installProfiles,
-        extras.managedActionsAvailable ?? true),
+        extras.managedActionsAvailable ?? true, extras.retryableInstall),
       facts: confirmationFacts(resolution, reviews, extras.workflow, extras),
     }
   }
@@ -241,7 +243,10 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
   const current = await requireResolution(ctx)
   let resolution: ResolutionRecord
   try {
-    resolution = await ctx.host.discoverRemote(current, ctx.exec)
+    const baselineQueries = current.queries.length === 0 ? ctx.workflow.discoveryQueries : undefined
+    resolution = await ctx.host.discoverRemote(current, ctx.exec, {
+      ...(baselineQueries ? { queries: baselineQueries } : {}),
+    })
     if (ctx.workflow.lastFailure?.stage === 'discovery') delete ctx.workflow.lastFailure
   } catch (error) {
     ctx.workflow.lastFailure = {
@@ -426,7 +431,9 @@ function projectLinkedInstallation(
   review: ReviewRecord,
   installation: InstallationRecord,
 ): NodeExecutionResult {
-  recordVerificationAttempt(ctx.workflow, review, installation)
+  if (installation.verification?.attempted) {
+    recordVerificationAttempt(ctx.workflow, review, installation)
+  }
   const successNode = successTerminalNode(installation)
   if (successNode) {
     return { kind: 'done', node: successNode, resolution: current, review, installation }
@@ -522,7 +529,9 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
       if (installation.workflowId !== ctx.workflow.id) {
         throw new EvolutionError('invalid_input', 'Recovery receipt is not owned by the current workflow')
       }
-      recordVerificationAttempt(ctx.workflow, review, installation)
+      if (installation.verification?.attempted) {
+        recordVerificationAttempt(ctx.workflow, review, installation)
+      }
       return { kind: 'done', node: 'recovery_required', resolution: current, review, installation }
     }
     if (!retryable) recordVerificationAttempt(ctx.workflow, review)

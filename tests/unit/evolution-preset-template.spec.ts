@@ -70,7 +70,7 @@ describe('evolution preset template', () => {
   })
 
   it('trusts only the exact current clean-slate template', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('15')
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('17')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[0]).toEqual({
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,
@@ -81,6 +81,11 @@ describe('evolution preset template', () => {
       },
     })
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[1]?.templateVersion).toBe('14')
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[2]?.templateVersion).toBe('15')
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[3]).toMatchObject({
+      templateVersion: '16',
+      files: { 'agent.cordis.yml': '334f46d87e6f071a9db0da7b334010b1ff20e59996584ba27564f3cb77eb0d86' },
+    })
     expect(managedFileHash('agent.cordis.yml')).toMatch(/^[a-f0-9]{64}$/u)
     expect(managedFileHash('preset.yml')).toMatch(/^[a-f0-9]{64}$/u)
     expect(managedFileHash('skills/cordis-plugin-development/SKILL.md')).toBe('01811d3ee9c03a466abae12d54d229e7de7bd74ca6b730c54ce9d5e696b294aa')

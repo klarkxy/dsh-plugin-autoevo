@@ -505,8 +505,9 @@ export class CreationGuard {
     if (commitment.selectionReceiptId !== receipt.id || commitment.snapshotDigest !== receipt.snapshotDigest) {
       throw new EvolutionError('review_rejected', 'Install commitment is not bound to the current selection receipt')
     }
-    if (commitment.requestedAction !== 'use_this' || receipt.kind !== 'use_this') {
-      throw new EvolutionError('review_rejected', 'Install commitment is not a use_this grant', {
+    const installActions = new Set(['use_this', 'apply_recovery'])
+    if (!installActions.has(commitment.requestedAction) || !installActions.has(receipt.kind)) {
+      throw new EvolutionError('review_rejected', 'Install commitment is not an approved install grant', {
         requestedAction: commitment.requestedAction,
       })
     }
@@ -542,6 +543,18 @@ export class CreationGuard {
         expected: commitment.retention,
         actual: binding.retention,
       })
+    }
+    if (commitment.requestedAction === 'apply_recovery') {
+      const plan = commitment.allowedParameterConstraints.recoveryPlan
+      if (!plan || !receipt.recoveryId || receipt.recoveryId !== plan.id || commitment.recoveryId !== plan.id) {
+        throw new EvolutionError('review_rejected', 'Install recovery is not bound to the selected recovery receipt')
+      }
+    } else if (receipt.recoveryId || commitment.recoveryId || commitment.allowedParameterConstraints.recoveryPlan) {
+      throw new EvolutionError('review_rejected', 'Ordinary install grant must not contain recovery authority')
+    }
+    if (hashObject(binding?.recoveryPlan ?? null)
+      !== hashObject(commitment.allowedParameterConstraints.recoveryPlan ?? null)) {
+      throw new EvolutionError('review_rejected', 'Install recovery plan does not match the Host commitment')
     }
     assertDirectUseAllowed(review, binding?.workflow)
     assertUseThisReceipt(review, resolution)

@@ -6,6 +6,7 @@ import type {
   DecisionReceipt,
   EvolutionTarget,
   ResolutionAuthorization,
+  InstallRecoveryPlan,
   ReviewRecord,
   VerificationLayerKind,
   WorkflowOptionId,
@@ -46,7 +47,7 @@ export function assertUseThisReceipt(
   const identity = reviewIdentity(review)
   if (
     !decision
-    || decision.action !== 'use_this'
+    || (decision.action !== 'use_this' && decision.action !== 'apply_recovery')
     || decision.reviewId !== review.id
     || decision.reviewIdentity !== identity
   ) {
@@ -142,7 +143,7 @@ export function authorizationFromDecision(
       reason: 'The user allowed one new plugin to be created in a managed source.',
     }
   }
-  if (action === 'use_this' && review) {
+  if ((action === 'use_this' || action === 'apply_recovery') && review) {
     return {
       state: 'use_review',
       resolutionId,
@@ -195,15 +196,19 @@ export function resolveDecisionTarget(
   assertOptionAllowed(interrupt, decision.action)
   const suppliedRetention = (decision as AuthorizationDecisionInput & { retention?: unknown }).retention
   if (suppliedRetention !== undefined) {
-    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V11')
+    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V13')
   }
   const option = interrupt.options.find((item) => item.id === decision.action)!
   const needsCandidate = decision.action === 'use_this'
+    || decision.action === 'apply_recovery'
     || decision.action === 'modify_this'
     || decision.action === 'enable_builtin'
   if (!needsCandidate) {
     if (decision.candidateId) {
       throw new EvolutionError('invalid_input', `${decision.action} does not accept candidate_id`)
+    }
+    if (decision.recoveryId) {
+      throw new EvolutionError('invalid_input', `${decision.action} does not accept recovery_id`)
     }
     return { repositories: [] }
   }
@@ -217,6 +222,20 @@ export function resolveDecisionTarget(
       candidateId,
       allowedCandidateIds: option.candidateIds ?? [],
     })
+  }
+  if (decision.action === 'apply_recovery') {
+    const recoveryId = decision.recoveryId?.trim()
+    if (!recoveryId) {
+      throw new EvolutionError('invalid_input', 'apply_recovery requires recovery_id from the current option')
+    }
+    if (!option.recoveryIds?.includes(recoveryId)) {
+      throw new EvolutionError('invalid_input', 'recovery_id is not allowed for this recovery action', {
+        recoveryId,
+        allowedRecoveryIds: option.recoveryIds ?? [],
+      })
+    }
+  } else if (decision.recoveryId) {
+    throw new EvolutionError('invalid_input', `${decision.action} does not accept recovery_id`)
   }
   const snapshot = Array.isArray(interrupt.facts.candidateSnapshot)
     ? interrupt.facts.candidateSnapshot as Array<{ id?: unknown; repository?: unknown }>
@@ -267,10 +286,73 @@ function resolveInstallFromDecision(
     )
   }
   const retention = 'persistent' as const
+  let recoveryPlan: InstallRecoveryPlan | undefined
+  if (decision.action === 'apply_recovery') {
+    const sealed = Array.isArray(interrupt.facts.recoveryOptions)
+      ? interrupt.facts.recoveryOptions.find((item) => (
+          item && typeof item === 'object' && !Array.isArray(item)
+          && (item as Record<string, unknown>).id === decision.recoveryId
+        ))
+      : undefined
+    if (!sealed || typeof sealed !== 'object' || Array.isArray(sealed)) {
+      throw new EvolutionError('invalid_input', 'The selected recovery plan is not present in the current sealed interrupt')
+    }
+    const record = sealed as Record<string, unknown>
+    if (typeof record.id !== 'string'
+      || !/^recovery_[a-f0-9]{24}$/u.test(record.id)
+      || record.id !== decision.recoveryId
+      || record.operation !== 'retry_install'
+      || record.effectScope !== 'single_install_command'
+      || typeof record.sourceInstallationId !== 'string'
+      || !/^installation_[a-f0-9]{16,64}$/u.test(record.sourceInstallationId)
+      || typeof record.diagnosticHash !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(record.diagnosticHash)) {
+      throw new EvolutionError('invalid_input', 'The sealed recovery plan is malformed')
+    }
+    if (record.strategy === 'minimum_release_age_exception') {
+      const exactPackages = Array.isArray(record.exactPackages)
+        ? record.exactPackages.filter((item): item is string => typeof item === 'string')
+        : []
+      if (exactPackages.length < 1
+        || exactPackages.length > 8
+        || exactPackages.length !== (record.exactPackages as unknown[] | undefined)?.length
+        || exactPackages.some((item) => !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/iu.test(item))) {
+        throw new EvolutionError('invalid_input', 'The sealed recovery plan is malformed')
+      }
+      recoveryPlan = {
+        id: record.id,
+        operation: 'retry_install',
+        strategy: 'minimum_release_age_exception',
+        sourceInstallationId: record.sourceInstallationId,
+        diagnosticHash: record.diagnosticHash,
+        exactPackages: [...new Set(exactPackages)].sort(),
+        effectScope: 'single_install_command',
+      }
+      if (recoveryPlan.exactPackages.length !== exactPackages.length) {
+        throw new EvolutionError('invalid_input', 'The sealed recovery plan contains duplicate packages')
+      }
+    } else if (record.strategy === 'profile_store_reuse'
+      && typeof record.profileStoreFingerprint === 'string'
+      && /^[a-f0-9]{64}$/u.test(record.profileStoreFingerprint)
+      && record.exactPackages === undefined) {
+      recoveryPlan = {
+        id: record.id,
+        operation: 'retry_install',
+        strategy: 'profile_store_reuse',
+        sourceInstallationId: record.sourceInstallationId,
+        diagnosticHash: record.diagnosticHash,
+        profileStoreFingerprint: record.profileStoreFingerprint,
+        effectScope: 'single_install_command',
+      }
+    } else {
+      throw new EvolutionError('invalid_input', 'The sealed recovery plan is malformed')
+    }
+  }
   return {
     targetProfile,
     retention,
     verificationTask: requirement,
+    ...(recoveryPlan ? { recoveryPlan } : {}),
     ...(liveReplacement && evolutionTarget ? {
       replacement: {
         profile: evolutionTarget.profile,
@@ -297,7 +379,7 @@ export function resolveDecisionFromModel(input: {
   verificationLayer?: VerificationLayerKind
 }): ValidatedResume {
   const target = resolveDecisionTarget(input.decision, input.interrupt)
-  const install = input.decision.action === 'use_this'
+  const install = input.decision.action === 'use_this' || input.decision.action === 'apply_recovery'
     ? resolveInstallFromDecision(input.interrupt, input.decision, input.requirement, input.verificationLayer)
     : undefined
   const preview = input.guard.previewDecisionTurn(input.agent, input.interrupt)
@@ -313,6 +395,7 @@ export function resolveDecisionFromModel(input: {
     interruptId: input.interrupt.interruptId,
     snapshotDigest: input.interrupt.snapshotDigest,
     ...(target.candidateId ? { candidateId: target.candidateId } : {}),
+    ...(input.decision.recoveryId ? { recoveryId: input.decision.recoveryId } : {}),
     repositories: target.repositories,
     ...(input.reviewId ? { reviewId: input.reviewId } : {}),
     ...(install ? { install } : {}),

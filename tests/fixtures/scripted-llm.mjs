@@ -34,6 +34,16 @@ function firstCandidate(card) {
   return card?.facts?.candidates?.[0]
 }
 
+function plannedSearchQueries(requirement) {
+  const atoms = requirement.normalize('NFKC')
+    .match(/[a-z0-9][a-z0-9.+-]*|[\p{Script=Han}]+/giu) ?? []
+  const queries = []
+  for (let index = 0; index < atoms.length && queries.length < 5; index += 2) {
+    queries.push(atoms.slice(index, index + 2).join(' '))
+  }
+  return queries.length > 0 ? queries : ['capability search']
+}
+
 class ScriptedAdapter extends LlmAdapter {
   constructor(config) {
     super()
@@ -65,7 +75,7 @@ class ScriptedAdapter extends LlmAdapter {
   nextAction(pairs) {
     if (this.config.scenario === 'resolve-local') {
       if (pairs.length === 0) {
-        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
+        return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, queries: plannedSearchQueries(this.config.localRequirement), intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
       }
       const card = viewCard(pairs.at(-1)?.result)
       if (card?.state === 'discovering' && firstCandidate(card)) {
@@ -108,7 +118,7 @@ class ScriptedAdapter extends LlmAdapter {
         || definitionText.includes('UNKNOWN_TOOL')) {
         return { kind: 'text', text: `E2E_ADVERSARIAL_DEFINE_ERROR unexpected definition result ${definitionText}` }
       }
-      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
+      return { kind: 'tool', name: 'capability_workflow', arguments: { requirement: this.config.localRequirement, queries: plannedSearchQueries(this.config.localRequirement), intent: { operation: 'discover_or_reuse', required_surface: 'any' } } }
     }
 
     const card = viewCard(pairs.at(-1)?.result)
@@ -129,7 +139,7 @@ class ScriptedAdapter extends LlmAdapter {
       return {
         kind: 'tool',
         name: 'capability_workflow',
-        arguments: { requirement: this.config.canaryRequirement, intent: { operation: 'discover_or_reuse', required_surface: 'any' } },
+        arguments: { requirement: this.config.canaryRequirement, queries: plannedSearchQueries(this.config.canaryRequirement), intent: { operation: 'discover_or_reuse', required_surface: 'any' } },
       }
     }
     const last = pairs.at(-1)

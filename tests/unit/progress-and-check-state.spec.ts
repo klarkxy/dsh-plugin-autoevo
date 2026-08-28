@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { testResolution } from '../helpers/records.js'
 import { rememberRequirementLanguage, _testing as i18nTesting } from '../../src/i18n.js'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
@@ -287,6 +288,55 @@ describe('tool pending presentation', () => {
       properties: { decision: { properties: { action: { enum: string[] } } } }
     }
     expect(parameters.properties.decision.properties.action.enum).toContain('enable_builtin')
+  })
+
+  it('exposes bounded search-more hints in the real tool schema', () => {
+    const parameters = tool('capability_workflow_resume').parameters as unknown as {
+      properties: { navigation: { properties: Record<string, unknown> } }
+    }
+    expect(parameters.properties.navigation.properties).toHaveProperty('queries')
+    expect(parameters.properties.navigation.properties).toHaveProperty('repositories')
+  })
+
+  it('exposes model-planned baseline queries in the initial workflow schema', () => {
+    const parameters = tool('capability_workflow').parameters as unknown as {
+      properties: Record<string, unknown>
+    }
+    expect(parameters.properties).toHaveProperty('queries')
+  })
+
+  it('forwards model-planned baseline queries through the initial workflow tool', async () => {
+    const start = vi.fn(async () => ({
+      workflow: {
+        schemaVersion: 3 as const,
+        id: WORKFLOW_ID,
+        policyVersion: POLICY_VERSION,
+        createdAt: '2026-08-28T00:00:00.000Z',
+        updatedAt: '2026-08-28T00:00:00.000Z',
+        requirement: 'auto review',
+        status: 'interrupted' as const,
+        cursor: 'await_discovery' as const,
+        generation: 1,
+      },
+      lifecycleState: 'discovering' as const,
+    }))
+    const definition = createTools({ start } as unknown as CapabilityEvolutionService)
+      .find((item) => item.name === 'capability_workflow')!
+    const run = {} as ToolRunContext
+
+    await definition.execute({
+      requirement: 'automatic approval review',
+      queries: ['auto review', 'automatic approval'],
+      intent: { operation: 'discover_or_reuse', required_surface: 'native_dsh_plugin' },
+    }, run)
+
+    expect(start).toHaveBeenCalledWith(
+      'automatic approval review',
+      run,
+      { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      undefined,
+      ['auto review', 'automatic approval'],
+    )
   })
 
   it('shows Chinese pending titles for a Chinese requirement', () => {

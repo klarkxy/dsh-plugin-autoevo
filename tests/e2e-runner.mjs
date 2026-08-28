@@ -200,24 +200,24 @@ async function runScenario() {
     assert.match(result.stdout, /E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL/u)
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"11"/u)
+    assert.match(result.stdout, /"policy_version":"13"/u)
     assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     return {
       scenario,
       marker: expectedMarker,
       guard: 'allowed live cordis_define(kind:new) outside Capability Evolution mode',
       workflow: 'autonomous discovery sealed at Gate 1',
-      policyVersion: '11',
+      policyVersion: '13',
     }
   }
 
   if (scenario === 'resolve-local') {
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"11"/u)
+    assert.match(result.stdout, /"policy_version":"13"/u)
     assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)
-    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '11' }
+    return { scenario, marker: expectedMarker, remoteSearchSkipped: true, policyVersion: '13' }
   }
 
   if (scenario === 'marketplace-flow') {

@@ -1,5 +1,5 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '11'
+export const POLICY_VERSION = '13'
 
 export const TOOL_NAMES = [
   'capability_workflow',
@@ -34,6 +34,7 @@ export type AuthorizationAction =
   | 'create_new'
   | 'stop'
   | 'use_this'
+  | 'apply_recovery'
   | 'modify_this'
   | 'enable_builtin'
 export type NavigationKind =
@@ -100,6 +101,10 @@ export interface NavigationInput {
   kind: NavigationKind
   candidateIds?: string[]
   reviewMode?: ReviewMode
+  /** Fresh bounded search terms. Legal with clarify_requirement or search_more. */
+  queries?: string[]
+  /** Strict owner/repository identities or exact GitHub repository root URLs. Legal only with search_more. */
+  repositories?: string[]
   /** Read-only reclassification after one Host-captured clarification answer. */
   clarifiedIntent?: RequestIntent
 }
@@ -179,6 +184,10 @@ export interface RemotePluginCandidate {
   packageName?: string
   defaultBranch?: string
   matchedTerms?: string[]
+  /** Search phrases whose bounded GitHub result page contained this repository. */
+  matchedQueries?: string[]
+  /** Host-validated exact repository supplied during the current refinement. */
+  explicit?: boolean
   matchReason?: string
 }
 
@@ -591,6 +600,14 @@ export interface InstallationRecord {
     repairHints?: string[]
     exitCode?: number | null
     diagnosticHash?: string
+    /** Host-parsed recovery evidence. Agent/user input can never populate this object. */
+    recovery?: InstallFailureRecovery
+  }
+  /** Audit-only proof that this receipt was produced by one already-consumed sealed recovery plan. */
+  recoveryAttempt?: {
+    id: string
+    strategy: InstallRecoveryPlan['strategy']
+    sourceInstallationId: string
   }
   contributionAdvice?: {
     eligible: boolean
@@ -600,6 +617,71 @@ export interface InstallationRecord {
   supersededByInstallationId?: string
   replacement?: ReplacementJournal
 }
+
+export interface ReleaseAgePolicyEntry {
+  packageName: string
+  version: string
+  /** Bounded, redacted pnpm reason. Never raw command output. */
+  reason: string
+}
+
+export type InstallFailureRecovery =
+  | {
+      kind: 'same_authority_once'
+      owner: 'pnpm'
+      code: string
+    }
+  | {
+      kind: 'minimum_release_age'
+      owner: 'pnpm'
+      code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION'
+      policyKey: 'minimumReleaseAge'
+      entries: ReleaseAgePolicyEntry[]
+      /** Host sets this only after checking the target lockfile that existed before the attempted install. */
+      scope: 'host_profile' | 'unknown'
+      exceptionEligible: boolean
+    }
+  | {
+      kind: 'profile_store_mismatch'
+      owner: 'pnpm'
+      code: 'ERR_PNPM_UNEXPECTED_STORE'
+      /** Hash of the Host-read absolute store path; the path itself is never persisted or model-visible. */
+      profileStoreFingerprint?: string
+      scope: 'host_profile' | 'unknown'
+      reuseEligible: boolean
+    }
+
+export interface ReleaseAgeExceptionGrant {
+  kind: 'minimum_release_age'
+  sourceInstallationId: string
+  diagnosticHash: string
+  exactPackages: string[]
+}
+
+/**
+ * Host-sealed semantic recovery plan. The Agent chooses only `id`; concrete
+ * executor constraints are recovered from the current interrupt.
+ */
+export type InstallRecoveryPlan =
+  | {
+      id: string
+      operation: 'retry_install'
+      strategy: 'minimum_release_age_exception'
+      sourceInstallationId: string
+      diagnosticHash: string
+      exactPackages: string[]
+      effectScope: 'single_install_command'
+    }
+  | {
+      id: string
+      operation: 'retry_install'
+      strategy: 'profile_store_reuse'
+      sourceInstallationId: string
+      diagnosticHash: string
+      /** Binds retry to the unchanged Host-read store without disclosing its path. */
+      profileStoreFingerprint: string
+      effectScope: 'single_install_command'
+    }
 
 export interface InstallInput {
   /** Host-minted before any external side effect; never accepted from model tool arguments. */
@@ -614,6 +696,8 @@ export interface InstallInput {
   expectedArtifactSha256?: string
   /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
   replacement?: ReplacementTarget
+  /** Host-derived from a sealed failed receipt and the Agent-selected recovery id. */
+  recoveryPlan?: InstallRecoveryPlan
 }
 
 export interface RemoveInput {
@@ -640,6 +724,8 @@ export interface AuthorizationDecisionInput {
   action: AuthorizationAction
   /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
   candidateId?: string
+  /** Required only for apply_recovery; must identify a plan in the current sealed option. */
+  recoveryId?: string
 }
 
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
@@ -667,6 +753,7 @@ export interface SelectionReceipt {
   kind: NavigationKind | AuthorizationAction
   candidateIds: string[]
   candidateDigests: Record<string, string>
+  recoveryId?: string
   hostTurnId: string
   ownerSessionId: string
   bootId: string
@@ -698,11 +785,14 @@ export interface ActionCommitment {
   candidateDigest?: string
   frozenIdentity: FrozenCandidateIdentity | { kind: 'none' }
   requestedAction: NavigationKind | AuthorizationAction
+  recoveryId?: string
   retention?: InstallationRetention
   endpoint: ExecutionEndpoint
   allowedParameterConstraints: {
     /** Exact bridge/tool target; tool_search/tool_call may not widen past this name. */
     exactTarget?: string
+    /** Exact semantic recovery plan derived from a sealed failed receipt. */
+    recoveryPlan?: InstallRecoveryPlan
   }
   createdAt: string
   /** Host-frozen review identity. Reviewer output cannot mint these fields. */

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { POLICY_VERSION, type MechanicalFacts, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord, type MechanicalFacts, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
 import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import { executeNode, interruptPayload, type NodeExecutionResult, transition } from '../../src/workflow/graph.js'
 import { candidateSnapshotFor } from '../../src/workflow/candidates.js'
-import type { WorkflowExec, WorkflowHost, WorkflowNodeId, WorkflowRecord } from '../../src/workflow/contracts.js'
+import { retryableInstallContext, retryablePreVerificationReviewId, type WorkflowExec, type WorkflowHost, type WorkflowNodeId, type WorkflowRecord } from '../../src/workflow/contracts.js'
 
 function resolution(): ResolutionRecord {
   const id = `resolution_${'b'.repeat(24)}`
@@ -264,6 +264,26 @@ describe('workflow graph transitions', () => {
 })
 
 describe('workflow graph nodes', () => {
+  it('uses the model baseline query plan only before the first recorded remote attempt', async () => {
+    const inputs: Array<{ queries?: string[] } | undefined> = []
+    const host = {
+      async discoverRemote(current: ResolutionRecord, _exec: WorkflowExec, input?: { queries?: string[] }) {
+        inputs.push(input)
+        return current
+      },
+    } as unknown as WorkflowHost
+    const record = workflow('discover_remote')
+    record.discoveryQueries = ['auto review']
+    const first = resolution()
+    first.queries = []
+    const later = { ...resolution(), queries: ['auto review'] }
+
+    await runNode('discover_remote', { host, resolution: first, workflow: record })
+    await runNode('discover_remote', { host, resolution: later, workflow: record })
+
+    expect(inputs).toEqual([{ queries: ['auto review'] }, {}])
+  })
+
   it('returns control to autonomous discovery before the model seals a shortlist', async () => {
     const current = resolution()
     const host = {
@@ -698,6 +718,13 @@ describe('workflow graph nodes', () => {
       verified: false,
       removed: true,
       verification: {
+        attempted: true,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
         reason: 'failed',
         status: 'failed' as const,
         layer: 'tool_roundtrip',
@@ -926,6 +953,347 @@ describe('workflow graph nodes', () => {
     })
     const result = await runNode('install_verify', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'done', node: 'restart_required' })
+  })
+
+  it('does not consume verification eligibility when installation fails before verification starts', async () => {
+    const current = resolution()
+    const record = workflow('install_verify')
+    let installs = 0
+    const failedInstallation = {
+      id: `installation_${'b'.repeat(24)}`,
+      workflowId: record.id,
+      installOutcome: 'failed_absent' as const,
+      installed: false,
+      verified: false,
+      removed: true,
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'install command failed before verification',
+      },
+      installFailure: {
+        stage: 'install' as const,
+        code: 'command_failed',
+        message: 'pnpm failed',
+        retryable: true,
+      },
+    }
+    const host = installVerifyHost({
+      async installReviewed() {
+        installs += 1
+        return failedInstallation
+      },
+    })
+
+    const first = await runNode('install_verify', { host, resolution: current, workflow: record })
+
+    expect(first).toMatchObject({ kind: 'next', node: 'await_confirmation' })
+    expect(installs).toBe(1)
+    expect(record.consumedVerificationAttempts).toBeUndefined()
+
+    record.cursor = 'await_confirmation'
+    record.reviewedCandidateIds = [record.candidateSnapshot![0]!.id]
+    record.reviewIdsByCandidate = { [record.candidateSnapshot![0]!.id]: review().id }
+    const approved = withApprovedVerdict(review(), record)
+    const confirmation = interruptPayload('await_confirmation', current, [approved], {
+      workflow: record,
+      installProfiles: ['web'],
+      lastFailure: record.lastFailure,
+      retryableInstall: { reviewId: approved.id },
+    })
+    expect(confirmation.options.map((item) => item.id)).toContain('use_this')
+    expect(confirmation.facts).toMatchObject({ verificationAlreadyAttempted: false })
+  })
+
+  it('repairs retry options for persisted pre-verification install failures', () => {
+    const confirmationWorkflow = workflow('await_confirmation')
+    confirmationWorkflow.reviewedCandidateIds = [confirmationWorkflow.candidateSnapshot![0]!.id]
+    confirmationWorkflow.reviewIdsByCandidate = {
+      [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
+    }
+    confirmationWorkflow.consumedVerificationAttempts = [{
+      reviewId: review().id,
+      sourceIdentity: `github:acme/one#${'c'.repeat(40)}`,
+      layer: 'unspecified',
+    }]
+    confirmationWorkflow.lastFailure = {
+      stage: 'install',
+      code: 'command_failed',
+      message: 'pnpm failed before verification',
+      retryable: true,
+    }
+    const approved = withApprovedVerdict(review(), confirmationWorkflow)
+
+    const confirmation = interruptPayload('await_confirmation', resolution(), [approved], {
+      workflow: confirmationWorkflow,
+      installProfiles: ['web'],
+      lastFailure: confirmationWorkflow.lastFailure,
+      retryableInstall: { reviewId: approved.id },
+    })
+
+    expect(confirmation.options.map((item) => item.id)).toContain('use_this')
+    expect(confirmation.facts).toMatchObject({ verificationAlreadyAttempted: false })
+  })
+
+  it('exempts only the receipt-bound review when another candidate already consumed verification', () => {
+    const confirmationWorkflow = workflow('await_confirmation')
+    const candidateA = confirmationWorkflow.candidateSnapshot![0]!
+    const reviewA = withApprovedVerdict(review(), confirmationWorkflow)
+    const candidateB = {
+      ...candidateA,
+      id: `candidate_${'9'.repeat(24)}`,
+      name: 'two',
+      identity: 'acme/two',
+      repository: 'acme/two',
+      digest: '8'.repeat(64),
+    }
+    const rawReviewB = {
+      ...review(),
+      id: `review_${'9'.repeat(64)}`,
+      installSpec: `github:acme/two#${'8'.repeat(40)}`,
+      sourceSnapshot: {
+        ...review().sourceSnapshot,
+        repository: 'acme/two',
+        commit: '8'.repeat(40),
+      } as ReviewRecord['sourceSnapshot'],
+    }
+    confirmationWorkflow.candidateSnapshot = [candidateA, candidateB]
+    confirmationWorkflow.reviewedCandidateIds = [candidateA.id, candidateB.id]
+    confirmationWorkflow.reviewIdsByCandidate = {
+      [candidateA.id]: reviewA.id,
+      [candidateB.id]: rawReviewB.id,
+    }
+    const reviewB = withApprovedVerdict(rawReviewB, confirmationWorkflow)
+    confirmationWorkflow.consumedVerificationAttempts = [reviewA, reviewB].map((item) => ({
+      reviewId: item.id,
+      sourceIdentity: item.sourceSnapshot.kind === 'github'
+        ? `github:${item.sourceSnapshot.repository.toLowerCase()}#${item.sourceSnapshot.commit}`
+        : `local:${item.sourceSnapshot.statusHash}`,
+      layer: 'unspecified',
+    }))
+
+    const confirmation = interruptPayload('await_confirmation', resolution(), [reviewA, reviewB], {
+      workflow: confirmationWorkflow,
+      installProfiles: ['web'],
+      retryableInstall: { reviewId: reviewA.id },
+    })
+
+    expect(confirmation.options.find((item) => item.id === 'use_this')?.candidateIds).toEqual([candidateA.id])
+  })
+
+  it('recognizes retryable pre-verification receipts only when every binding matches', () => {
+    const record = workflow('await_confirmation')
+    record.status = 'interrupted'
+    const installation: InstallationRecord = {
+      schemaVersion: 1,
+      id: `installation_${'7'.repeat(24)}`,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      workflowId: record.id,
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: 'C:/dsh',
+      packageName: 'dsh-one',
+      installSpec: review().installSpec!,
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'install failed',
+      },
+      installFailure: {
+        stage: 'install',
+        code: 'command_failed',
+        message: 'pnpm failed',
+        retryable: true,
+      },
+    }
+    record.lastInstallationId = installation.id
+    record.lastFailure = { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true }
+    expect(retryablePreVerificationReviewId(record, installation)).toBe(installation.reviewId)
+
+    const withoutReview = { ...installation }
+    delete withoutReview.reviewId
+    expect(retryablePreVerificationReviewId(record, withoutReview)).toBeUndefined()
+
+    const invalid = [
+      { workflowId: `workflow_${'8'.repeat(24)}` },
+      { installOutcome: 'recovery_required' as const },
+      { installed: true },
+      { installFailure: { ...installation.installFailure!, stage: 'verify' as const } },
+      { installFailure: { ...installation.installFailure!, retryable: false } },
+      { verification: { ...installation.verification, attempted: true } },
+    ]
+    for (const change of invalid) {
+      expect(retryablePreVerificationReviewId(record, { ...installation, ...change })).toBeUndefined()
+    }
+  })
+
+  it('offers only the receipt-bound exact release-age exception for the failed candidate', () => {
+    const record = workflow('await_confirmation')
+    record.status = 'interrupted'
+    const approved = withApprovedVerdict(review(), record)
+    const candidateId = record.candidateSnapshot![0]!.id
+    record.reviewedCandidateIds = [candidateId]
+    record.reviewIdsByCandidate = { [candidateId]: approved.id }
+    const installation: InstallationRecord = {
+      schemaVersion: 1,
+      id: `installation_${'d'.repeat(24)}`,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      workflowId: record.id,
+      reviewId: approved.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: 'C:/dsh',
+      packageName: 'dsh-one',
+      installSpec: approved.installSpec!,
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: false, expectedTools: [], calledTools: [], resultTools: [], failedTools: [],
+        sessionFiles: [], taskResultObserved: false, reason: 'install failed',
+      },
+      installFailure: {
+        stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true,
+        diagnosticHash: 'e'.repeat(64),
+        recovery: {
+          kind: 'minimum_release_age', owner: 'pnpm', code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION',
+          policyKey: 'minimumReleaseAge', scope: 'host_profile', exceptionEligible: true,
+          entries: [
+            { packageName: 'ds-harness-remote', version: '0.3.35', reason: 'published recently' },
+            { packageName: '@deepseek-ai/dsh-file-viewer', version: '0.2.5', reason: 'published recently' },
+          ],
+        },
+      },
+    }
+    record.lastInstallationId = installation.id
+    record.lastFailure = { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true }
+    const context = retryableInstallContext(record, installation)
+    expect(context?.recoveryPlans).toEqual([expect.objectContaining({
+      id: expect.stringMatching(/^recovery_[a-f0-9]{24}$/u),
+      operation: 'retry_install', strategy: 'minimum_release_age_exception', sourceInstallationId: installation.id,
+      diagnosticHash: 'e'.repeat(64),
+      exactPackages: ['@deepseek-ai/dsh-file-viewer@0.2.5', 'ds-harness-remote@0.3.35'],
+      effectScope: 'single_install_command',
+    })])
+
+    const confirmation = interruptPayload('await_confirmation', resolution(), [approved], {
+      workflow: record, installProfiles: ['web'], retryableInstall: context!,
+    })
+    expect(confirmation.options.find((item) => item.id === 'use_this')).toBeUndefined()
+    expect(confirmation.options.find((item) => item.id === 'apply_recovery')?.candidateIds)
+      .toEqual([candidateId])
+    expect(confirmation.options.find((item) => item.id === 'apply_recovery')?.recoveryIds)
+      .toEqual([context?.recoveryPlans?.[0]?.id])
+    expect(confirmation.facts).toMatchObject({
+      recoveryOptions: [{
+        sourceInstallationId: installation.id,
+        exactPackages: ['@deepseek-ai/dsh-file-viewer@0.2.5', 'ds-harness-remote@0.3.35'],
+      }],
+    })
+  })
+
+  it('offers a sealed pause-and-fix retry for a confirmed-absent profile store mismatch', () => {
+    const record = workflow('await_confirmation')
+    record.status = 'interrupted'
+    const approved = withApprovedVerdict(review(), record)
+    const candidateId = record.candidateSnapshot![0]!.id
+    record.reviewedCandidateIds = [candidateId]
+    record.reviewIdsByCandidate = { [candidateId]: approved.id }
+    const installation: InstallationRecord = {
+      schemaVersion: 1,
+      id: `installation_${'e'.repeat(24)}`,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      workflowId: record.id,
+      reviewId: approved.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: 'C:/dsh',
+      packageName: 'dsh-one',
+      installSpec: approved.installSpec!,
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: false, expectedTools: [], calledTools: [], resultTools: [], failedTools: [],
+        sessionFiles: [], taskResultObserved: false, reason: 'install failed',
+      },
+      installFailure: {
+        stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true,
+        diagnosticHash: 'f'.repeat(64),
+        recovery: {
+          kind: 'profile_store_mismatch', owner: 'pnpm', code: 'ERR_PNPM_UNEXPECTED_STORE',
+          profileStoreFingerprint: 'a'.repeat(64), scope: 'host_profile', reuseEligible: true,
+        },
+      },
+    }
+    record.lastInstallationId = installation.id
+    record.lastFailure = { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true }
+    const context = retryableInstallContext(record, installation)
+
+    expect(context?.recoveryPlans).toEqual([expect.objectContaining({
+      id: expect.stringMatching(/^recovery_[a-f0-9]{24}$/u),
+      operation: 'retry_install',
+      strategy: 'profile_store_reuse',
+      sourceInstallationId: installation.id,
+      diagnosticHash: 'f'.repeat(64),
+      profileStoreFingerprint: 'a'.repeat(64),
+      effectScope: 'single_install_command',
+    })])
+    const confirmation = interruptPayload('await_confirmation', resolution(), [approved], {
+      workflow: record, installProfiles: ['web'], retryableInstall: context!,
+    })
+    expect(confirmation.options.find((item) => item.id === 'use_this')).toBeUndefined()
+    expect(confirmation.options.find((item) => item.id === 'apply_recovery')).toMatchObject({
+      candidateIds: [candidateId],
+      recoveryIds: [context?.recoveryPlans?.[0]?.id],
+    })
+    expect(confirmation.facts).toMatchObject({
+      recoveryOptions: [{ strategy: 'profile_store_reuse', sourceInstallationId: installation.id }],
+    })
+
+    const exhaustedInstallation: InstallationRecord = {
+      ...installation,
+      id: `installation_${'1'.repeat(24)}`,
+      recoveryAttempt: {
+        id: context!.recoveryPlans![0]!.id,
+        strategy: 'profile_store_reuse',
+        sourceInstallationId: installation.id,
+      },
+    }
+    record.lastInstallationId = exhaustedInstallation.id
+    const exhausted = retryableInstallContext(record, exhaustedInstallation)
+    const afterRepeatedFailure = interruptPayload('await_confirmation', resolution(), [approved], {
+      workflow: record, installProfiles: ['web'], retryableInstall: exhausted!,
+    })
+    expect(exhausted).toMatchObject({ reviewId: approved.id, recoveryExhausted: true })
+    expect(afterRepeatedFailure.options.map((item) => item.id)).not.toContain('apply_recovery')
+    expect(afterRepeatedFailure.options.map((item) => item.id)).not.toContain('use_this')
   })
 
   it('completes built-in enablement without restart when the mount was already present', async () => {

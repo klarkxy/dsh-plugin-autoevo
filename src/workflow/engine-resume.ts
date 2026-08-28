@@ -9,6 +9,7 @@ import {
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { normalizeRequirement, ownerSessionId } from '../host-identity.js'
+import { composeDiscoveryRequirement } from '../resolver/keywords.js'
 import { assertOptionAllowed, resolveDecisionFromModel, resolveDecisionTarget } from '../lifecycle/decide.js'
 import {
   INTERRUPT_NODES,
@@ -29,6 +30,14 @@ import {
   mintSelectionReceipt,
 } from './grants.js'
 import { WorkflowEngineRecovery } from './engine-recovery.js'
+import type { PreparedDiscoveryRefinement } from './engine-driver.js'
+
+const EXACT_GITHUB_REPOSITORY_URL = /^https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})\/[A-Za-z0-9_.-]+?(?:\.git)?\/?$/iu
+
+function exactGithubRepositoryUrl(message: string): string | undefined {
+  const value = message.normalize('NFKC').trim()
+  return EXACT_GITHUB_REPOSITORY_URL.test(value) ? value : undefined
+}
 
 function assertResumeDoesNotForgeHostFacts(input: ResumeInput): void {
   const record = input as unknown as Record<string, unknown>
@@ -122,18 +131,23 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         if (input.navigation.kind !== 'clarify_requirement' || !input.navigation.clarifiedIntent) {
           return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification requires clarify_requirement with clarified_intent')
         }
-        if (input.navigation.candidateIds?.length || input.navigation.reviewMode) {
-          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification does not accept candidate_ids or review_mode')
+        if (input.navigation.candidateIds?.length || input.navigation.reviewMode
+          || input.navigation.repositories?.length) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification does not accept candidate_ids, review_mode, or repositories')
         }
         const turn = this.creationGuard.previewDecisionTurn(exec.agent, workflow.interrupt)
         const normalizedAnswer = normalizeRequirement(turn.message)
         if (!normalizedAnswer || normalizedAnswer.length > 2_000) {
           return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification answer must contain 1 to 2000 characters')
         }
+        const discoveryQueries = this.normalizeBaselineDiscoveryQueries(input.navigation.queries)
         this.creationGuard.consumeDecisionTurn(exec.agent, workflow.interrupt)
         workflow.clarificationAnswer = turn.message
         workflow.clarifiedIntent = input.navigation.clarifiedIntent
-        workflow.searchRequirement = `${workflow.requirement}\n\nClarification:\n${turn.message}`
+        workflow.searchRequirement = composeDiscoveryRequirement(workflow.requirement, turn.message)
+        workflow.startedTurnId = turn.turnId
+        if (discoveryQueries) workflow.discoveryQueries = discoveryQueries
+        else delete workflow.discoveryQueries
         workflow.generation += 1
         workflow.status = 'running'
         workflow.consumedInterruptIds = [...(workflow.consumedInterruptIds ?? []), input.interruptId]
@@ -212,7 +226,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       let resume
       try {
         resolveDecisionTarget(input.decision, workflow.interrupt)
-        decisionReview = input.decision.action === 'use_this' || input.decision.action === 'modify_this'
+        decisionReview = input.decision.action === 'use_this'
+          || input.decision.action === 'apply_recovery'
+          || input.decision.action === 'modify_this'
           ? await this.reviewForAuthorization(workflow, reviews, input.decision.candidateId)
           : undefined
         resume = resolveDecisionFromModel({
@@ -235,6 +251,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       const latest = await this.store.getWorkflow(workflow.id)
       if (latest.generation !== workflow.generation || latest.status !== 'interrupted') {
         throw new EvolutionError('invalid_input', 'This workflow is already running or has moved on')
+      }
+      if ((resume.optionId === 'use_this' || resume.optionId === 'apply_recovery') && decisionReview) {
+        await this.clearErroneousVerificationAttempt(latest, decisionReview)
       }
       latest.generation += 1
       latest.status = 'running'
@@ -341,6 +360,23 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     }
     assertOptionAllowed(interrupt, navigation.kind)
 
+    if (navigation.kind !== 'search_more'
+      && ((navigation.queries?.length ?? 0) > 0 || (navigation.repositories?.length ?? 0) > 0)) {
+      throw new EvolutionError('invalid_input', 'queries and repositories are legal only for search_more')
+    }
+    let refinement: PreparedDiscoveryRefinement | undefined
+    if (navigation.kind === 'search_more') {
+      const freshTurn = this.creationGuard.previewDecisionTurn(exec.agent, interrupt)
+      const repositoryFromTurn = exactGithubRepositoryUrl(freshTurn.message)
+      const repositories = [...(navigation.repositories ?? []), ...(repositoryFromTurn ? [repositoryFromTurn] : [])]
+      if ((navigation.queries?.length ?? 0) > 0 || repositories.length > 0) {
+        refinement = this.prepareDiscoveryRefinement(latest, {
+          ...(navigation.queries ? { queries: navigation.queries } : {}),
+          repositories,
+        }, { allowGithubRootUrl: true, turnId: freshTurn.turnId })
+      }
+    }
+
     let repositories: string[] = []
     let pendingReviewIds: string[] = []
     let reuseCandidate: CandidateSnapshotItem | undefined
@@ -441,14 +477,16 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       const currentIds = snapshot.map((item) => item.id)
       latest.seenCandidateIds = [...new Set([...(latest.seenCandidateIds ?? []), ...currentIds])]
       latest.rejectedCandidateIds = [...new Set([...(latest.rejectedCandidateIds ?? []), ...currentIds])]
-      latest.forceRemoteDiscovery = true
+      latest.forceRemoteDiscovery = refinement ? false : true
       this.clearWorkflowGrant(latest)
       delete latest.candidateSnapshot
       delete latest.discoveryPool
+      delete latest.candidatePreviews
+      delete latest.candidatePreviewFailures
       delete latest.reviewPlan
       delete latest.reviewQueue
       delete latest.pendingRepositories
-      latest.cursor = 'discover_remote'
+      latest.cursor = refinement ? 'await_discovery' : 'discover_remote'
     } else if (navigation.kind === 'reuse_local') {
       const candidate = reuseCandidate!
       const endpoint = endpointForLocalReuse(candidate)
@@ -506,7 +544,35 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     if (!this.host.applyNavigation) {
       throw new EvolutionError('invalid_input', 'This workflow host does not support read-only navigation')
     }
-    const nextResolution = await this.host.applyNavigation(resolution, navigation, repositories)
+    let nextResolution: ResolutionRecord
+    try {
+      nextResolution = await this.host.applyNavigation(resolution, navigation, repositories)
+      if (refinement) {
+        nextResolution = await this.applyDiscoveryRefinement(latest, nextResolution, refinement, exec)
+        this.parkIfDiscoveryTurnExhausted(latest, refinement.nextBudget)
+      }
+    } catch (error) {
+      if (navigation.kind !== 'search_more') throw error
+
+      // The fresh user turn is already consumed. Persist a new retry gate instead
+      // of leaving the previous interrupt replayable or the workflow half-running.
+      const currentResolution = await this.host.getResolution(resolution.id).catch(() => resolution)
+      const incompleteResolution = { ...currentResolution, remoteDiscoveryComplete: false }
+      await this.store.put('resolutions', incompleteResolution)
+      latest.lastFailure = {
+        stage: 'discovery',
+        code: error instanceof EvolutionError ? error.code : 'command_failed',
+        message: error instanceof Error ? error.message : String(error),
+        retryable: true,
+      }
+      latest.forceRemoteDiscovery = false
+      latest.status = 'running'
+      latest.cursor = 'await_selection'
+      latest.candidateSnapshot = []
+      delete latest.discoveryPool
+      delete latest.interrupt
+      return await this.runUntilPark(latest, exec, undefined, incompleteResolution)
+    }
     return await this.runUntilPark(latest, exec, undefined, nextResolution)
   }
 
@@ -523,6 +589,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     }
     const snapshot = input.workflow.candidateSnapshot ?? []
     const needsCandidate = input.resume.optionId === 'use_this'
+      || input.resume.optionId === 'apply_recovery'
       || input.resume.optionId === 'modify_this'
       || input.resume.optionId === 'enable_builtin'
     const candidate = input.resume.candidateId
@@ -533,7 +600,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         candidateId: input.resume.candidateId,
       })
     }
-    if ((input.resume.optionId === 'use_this' || input.resume.optionId === 'modify_this') && !input.review) {
+    if ((input.resume.optionId === 'use_this'
+      || input.resume.optionId === 'apply_recovery'
+      || input.resume.optionId === 'modify_this') && !input.review) {
       throw new EvolutionError('invalid_input', 'Final use/modify commitment requires the selected review', {
         candidateId: input.resume.candidateId,
       })
@@ -550,6 +619,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       phase: 'gate2',
       kind: input.resume.optionId,
       candidateIds: candidate ? [candidate.id] : [],
+      ...(input.resume.recoveryId ? { recoveryId: input.resume.recoveryId } : {}),
       snapshot,
       hostTurnId: input.resume.hostTurnId,
     })
@@ -558,11 +628,14 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       action: input.resume.optionId,
       ...(candidate ? { candidate } : {}),
       endpoint: builtinBinding?.endpoint ?? { kind: 'none' },
-      ...(input.resume.optionId === 'use_this' && input.resume.install?.retention
+      ...((input.resume.optionId === 'use_this' || input.resume.optionId === 'apply_recovery') && input.resume.install?.retention
         ? { retention: input.resume.install.retention }
         : {}),
-      ...(input.resume.optionId === 'use_this' && input.resume.install?.targetProfile
+      ...((input.resume.optionId === 'use_this' || input.resume.optionId === 'apply_recovery') && input.resume.install?.targetProfile
         ? { targetProfile: input.resume.install.targetProfile }
+        : {}),
+      ...(input.resume.optionId === 'apply_recovery' && input.resume.install?.recoveryPlan
+        ? { recoveryPlan: input.resume.install.recoveryPlan }
         : {}),
       ...(builtinBinding ? { targetProfile: builtinBinding.endpoint.targetProfile } : {}),
       ...(needsCandidate && input.review ? { review: input.review } : {}),

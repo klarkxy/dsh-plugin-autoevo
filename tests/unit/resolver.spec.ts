@@ -5,10 +5,22 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { capabilityAnchors, capabilityQueries, capabilityTerms, marketplaceSearchQueries, isNameDropMention } from '../../src/resolver/keywords.js'
+import { capabilityAnchors, capabilityQueries, capabilityTerms, composeDiscoveryRequirement, marketplaceSearchQueries, isNameDropMention, normalizeDiscoveryQueries } from '../../src/resolver/keywords.js'
 import { resolveLocalCapabilities, _testing } from '../../src/resolver/local.js'
 
 describe('capability query generation', () => {
+  it('normalizes model-planned queries with bounded case-insensitive deduplication', () => {
+    const long = `quasar ${'x'.repeat(150)}`
+    const queries = normalizeDiscoveryQueries([
+      '  Auto\u0000  Review  ',
+      'AUTO REVIEW',
+      '１',
+      long,
+    ])
+    expect(queries).toEqual(['Auto Review', long.slice(0, 120)])
+    expect(queries.every((query) => query.length <= 120)).toBe(true)
+  })
+
   it('derives ordered adjacent phrases from arbitrary identifiers', () => {
     const queries = marketplaceSearchQueries('enable quasar ledger replay archive')
     expect(queries).toContain('quasar ledger replay')
@@ -36,6 +48,21 @@ describe('capability query generation', () => {
     expect(queries).toContain('dsh')
     expect(queries).toContain('quasar ledger replay')
     expect(queries.indexOf('quasar ledger replay')).toBeLessThan(queries.indexOf('dsh'))
+  })
+
+  it('does not let a numbered clarification answer or protocol label crowd out capability phrases', () => {
+    const original = '我需要一个能autoreview的能力，类似于codex的「替我审批」'
+    const polluted = `${original}\n\nClarification:\n1`
+    const queries = marketplaceSearchQueries(polluted)
+    expect(queries.join(' ')).not.toMatch(/clarification/i)
+    expect(queries).toEqual(expect.arrayContaining(['autoreview', 'codex', '替我审批']))
+    expect(marketplaceSearchQueries(original)).toEqual(queries)
+    expect(capabilityAnchors(polluted).map((anchor) => anchor.key)).not.toContain('clarification')
+    expect(composeDiscoveryRequirement(original, '1')).toBe(original)
+    expect(composeDiscoveryRequirement(original, '2.')).toBe(original)
+    expect(composeDiscoveryRequirement(original, '第一个')).toBe(original)
+    expect(composeDiscoveryRequirement(original, '是公历转农历，保留原格式。'))
+      .toBe(`${original}\n\n是公历转农历，保留原格式。`)
   })
 })
 

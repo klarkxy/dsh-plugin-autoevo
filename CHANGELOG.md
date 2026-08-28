@@ -2,6 +2,20 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
+## Unreleased
+
+- Move the public Policy contract to V12 so unfinished release-specific recovery actions restart safely while completed historical receipts remain readable.
+- Preserve a bounded, redacted summary from both stdout and stderr when DSH/pnpm installation fails, and expose its exit code and structured state to users, agents, and diagnosis probes.
+- Preserve trusted Windows `LOCALAPPDATA` for DSH subprocesses so nested pnpm installs reuse the Web profile's existing store instead of failing with `ERR_PNPM_UNEXPECTED_STORE`.
+- Keep a retryable install-stage failure eligible for a fresh user-confirmed attempt when capability verification never started, including persisted workflows affected by the earlier bookkeeping error.
+- Classify bounded pnpm failures for one same-authority transient retry, or expose Host-sealed semantic recovery choices that the Agent diagnoses, compares, and selects by opaque ID; the current dependency-age executor still exempts only exact existing lockfile versions for one install command without changing pnpm policy files.
+- When pnpm reports `ERR_PNPM_UNEXPECTED_STORE` and the target is confirmed absent, park at the existing confirmation gate and offer an explicit Host-sealed “fix the install environment and retry this candidate” choice; the retry reuses only the unchanged store recorded by that profile for one command and never exposes paths or edits pnpm configuration.
+- Accept model-planned baseline discovery queries as a bounded field separate from the Host-captured requirement, with deterministic extraction only as a compatibility fallback.
+- Keep numbered or option-only clarification answers and the Host `Clarification:` label out of GitHub search phrases so discovery still uses the original capability terms.
+- Preserve meaningful clarification wording verbatim while using normalization only for classification.
+- Carry fresh search-more terms and exact GitHub repository roots through the existing bounded Host refinement path before consuming the user turn.
+- Return the complete bounded union of five GitHub searches to the Agent, use relevance only as reading order, pin exact repositories, and preview only the Agent-sealed shortlist before formal review.
+
 ## 1.0.0
 
 - Establish AutoEvo as a lightweight DSH capability discovery, review, and installation workflow.

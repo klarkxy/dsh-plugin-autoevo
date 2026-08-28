@@ -58,6 +58,7 @@ export function mintSelectionReceipt(input: {
   phase: DecisionPhase
   kind: SelectionReceipt['kind']
   candidateIds: string[]
+  recoveryId?: string
   snapshot: CandidateSnapshotItem[]
   hostTurnId: string
 }): SelectionReceipt {
@@ -76,6 +77,7 @@ export function mintSelectionReceipt(input: {
       kind: input.kind,
       candidateIds: input.candidateIds,
       candidateDigests,
+      recoveryId: input.recoveryId,
       hostTurnId: input.hostTurnId,
       createdAt,
     }).slice(0, 24)}`,
@@ -86,6 +88,7 @@ export function mintSelectionReceipt(input: {
     kind: input.kind,
     candidateIds: input.candidateIds,
     candidateDigests,
+    ...(input.recoveryId ? { recoveryId: input.recoveryId } : {}),
     hostTurnId: input.hostTurnId,
     ownerSessionId: input.interrupt.ownerSessionId,
     bootId: input.interrupt.bootId,
@@ -144,6 +147,7 @@ export function mintActionCommitment(input: {
   endpoint: ExecutionEndpoint
   retention?: ActionCommitment['retention']
   targetProfile?: string
+  recoveryPlan?: ActionCommitment['allowedParameterConstraints']['recoveryPlan']
   review?: ReviewRecord
   workflow?: WorkflowRecord
 }): ActionCommitment {
@@ -170,6 +174,7 @@ export function mintActionCommitment(input: {
       reviewSnapshot,
       reviewerRequestId,
       reviewerVerdictDigest,
+      recoveryPlan: input.recoveryPlan,
       createdAt,
     }).slice(0, 24)}`,
     selectionReceiptId: input.receipt.id,
@@ -178,12 +183,14 @@ export function mintActionCommitment(input: {
     ...(candidateDigest ? { candidateDigest } : {}),
     frozenIdentity: input.candidate ? frozenIdentityFor(input.candidate) : { kind: 'none' },
     requestedAction: input.action,
+    ...(input.receipt.recoveryId ? { recoveryId: input.receipt.recoveryId } : {}),
     ...(input.retention ? { retention: input.retention } : {}),
     ...(input.targetProfile ? { targetProfile: input.targetProfile } : {}),
     endpoint: input.endpoint,
-    allowedParameterConstraints: input.endpoint.kind === 'bridge'
-      ? { exactTarget: input.endpoint.target }
-      : {},
+    allowedParameterConstraints: {
+      ...(input.endpoint.kind === 'bridge' ? { exactTarget: input.endpoint.target } : {}),
+      ...(input.recoveryPlan ? { recoveryPlan: input.recoveryPlan } : {}),
+    },
     createdAt,
     ...(review ? { reviewId: review.id } : {}),
     ...(reviewSnapshot ? { reviewSnapshotDigest: reviewSnapshot } : {}),

@@ -3,7 +3,7 @@ import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.
 import { errorMessage } from '../errors.js'
 import { searchGithubRepositories, validateGithubRepository } from '../github/index.js'
 import type { CommandRunner } from '../process/runner.js'
-import { capabilityQueries, marketplaceSearchQueries } from '../resolver/keywords.js'
+import { capabilityQueries, marketplaceSearchQueries, normalizeDiscoveryQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
 
 const REMOTE_OPERATION_ALIASES = [
@@ -26,12 +26,15 @@ function boundedText(value: unknown, maxLength: number): string {
 export function annotateRemoteCandidate(
   requirement: string,
   candidate: RemotePluginCandidate,
+  queryHints: readonly string[] = [],
 ): RemotePluginCandidate {
   const haystack = `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''} ${candidate.description} ${candidate.topics.join(' ')}`
     .toLowerCase()
   const matchedTerms = [...new Set([
-    ...marketplaceSearchQueries(requirement),
-    ...capabilityQueries(requirement),
+    ...[requirement, ...queryHints].flatMap((text) => [
+      ...marketplaceSearchQueries(text),
+      ...capabilityQueries(text),
+    ]),
   ])]
     .map((term) => term.trim())
     .filter((term) => term.length >= 2 && haystack.includes(term.toLowerCase()))
@@ -41,36 +44,41 @@ export function annotateRemoteCandidate(
     ...(matchedTerms.length > 0 ? { matchedTerms } : {}),
     matchReason: matchedTerms.length > 0
       ? `matched ${matchedTerms.join(', ')}`
-      : 'GitHub summary matched the request',
+      : 'Eligible GitHub topic result; semantic fit is for the Agent to judge',
   }
 }
 
+/**
+ * Rank eligible summaries for reading order only. Semantic confidence is not
+ * an eligibility boundary: every objectively valid result remains visible to
+ * the Agent inside the bounded discovery window.
+ */
 function relevantRemoteCandidates(
   requirement: string,
   candidates: readonly RemotePluginCandidate[],
+  queryHints: readonly string[] = [],
 ): RemotePluginCandidate[] {
-  const normalizedRequirement = requirement.normalize('NFKC').toLocaleLowerCase('en-US')
+  const relevanceInputs = [requirement, ...queryHints]
   return candidates
     .map((candidate) => ({
       candidate,
-      confidence: Math.max(
+      confidence: Math.max(...relevanceInputs.flatMap((text) => [
         matchConfidence(
-          requirement,
+          text,
           `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''}`,
           `${candidate.description} ${candidate.topics.join(' ')}`,
         ),
         remoteOperationEvidence(
-          normalizedRequirement,
+          text.normalize('NFKC').toLocaleLowerCase('en-US'),
           `${candidate.repository} ${candidate.name} ${candidate.packageName ?? ''} ${candidate.description} ${candidate.topics.join(' ')}`,
         ),
-      ),
+      ])),
     }))
-    .filter(({ confidence }) => confidence >= 0.3)
     .sort((left, right) => right.confidence - left.confidence
       || (right.candidate.updatedAt ?? '').localeCompare(left.candidate.updatedAt ?? '')
       || right.candidate.stars - left.candidate.stars
       || left.candidate.repository.localeCompare(right.candidate.repository))
-    .map(({ candidate }) => annotateRemoteCandidate(requirement, candidate))
+    .map(({ candidate }) => annotateRemoteCandidate(requirement, candidate, queryHints))
 }
 
 function remoteOperationEvidence(normalizedRequirement: string, candidateText: string): number {
@@ -83,10 +91,7 @@ function remoteOperationEvidence(normalizedRequirement: string, candidateText: s
 
 export function githubSearchPhrases(requirement: string, extra?: readonly string[]): string[] {
   const planned = extra
-    ? [...new Set(extra
-        .map((query) => boundedText(query, 120))
-        .filter((query) => query.length >= 2))]
-        .slice(0, 5)
+    ? normalizeDiscoveryQueries(extra).slice(0, 5)
     : marketplaceSearchQueries(requirement)
   if (planned.length > 0) return planned
   const fallback = capabilityQueries(requirement)[0] ?? boundedText(requirement, 120)
@@ -113,7 +118,7 @@ export async function discoverRemoteCandidates(options: {
     return { candidates: [], complete: true, queries: [], reasons }
   }
 
-  const poolLimit = Math.min(20, Math.max(10, options.config.maxCandidates * 3))
+  const poolLimit = 20
   const merged = new Map<string, RemotePluginCandidate>()
   let succeeded = 0
   let failed = 0
@@ -134,9 +139,14 @@ export async function discoverRemoteCandidates(options: {
       for (const candidate of batch) {
         const key = candidate.repository.toLowerCase()
         const prior = merged.get(key)
-        if (!prior || candidate.stars > prior.stars || (candidate.updatedAt ?? '') > (prior.updatedAt ?? '')) {
-          merged.set(key, candidate)
-        }
+        const preferCandidate = !prior
+          || candidate.stars > prior.stars
+          || (candidate.updatedAt ?? '') > (prior.updatedAt ?? '')
+        const metadata = preferCandidate ? candidate : prior
+        merged.set(key, {
+          ...metadata,
+          matchedQueries: [...new Set([...(prior?.matchedQueries ?? []), phrase])],
+        })
       }
     } catch (error) {
       failed += 1
@@ -149,8 +159,7 @@ export async function discoverRemoteCandidates(options: {
     return { candidates: [], complete: false, queries, reasons }
   }
 
-  const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()])
-    .slice(0, options.config.maxCandidates)
+  const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()], options.queries)
   if (candidates.length === 0) {
     reasons.push('Scoped GitHub topic search returned no valid reusable candidates.')
   }

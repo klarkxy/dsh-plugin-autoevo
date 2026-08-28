@@ -52,7 +52,7 @@ declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
-declare const POLICY_VERSION = "11";
+declare const POLICY_VERSION = "13";
 declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
@@ -61,7 +61,7 @@ type CandidateAvailability = 'available' | 'available_via_tool_search' | 'instal
 type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
-type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'modify_this' | 'enable_builtin';
+type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'apply_recovery' | 'modify_this' | 'enable_builtin';
 type NavigationKind = 'clarify_requirement' | 'review_candidates' | 'review_existing' | 'search_more' | 'reuse_local' | 'enable_builtin' | 'stop' | 'finish_managed_work';
 type ReviewMode = 'fixed' | 'adaptive';
 type WorkflowOptionId = AuthorizationAction | NavigationKind;
@@ -106,6 +106,10 @@ interface NavigationInput {
   kind: NavigationKind;
   candidateIds?: string[];
   reviewMode?: ReviewMode;
+  /** Fresh bounded search terms. Legal with clarify_requirement or search_more. */
+  queries?: string[];
+  /** Strict owner/repository identities or exact GitHub repository root URLs. Legal only with search_more. */
+  repositories?: string[];
   /** Read-only reclassification after one Host-captured clarification answer. */
   clarifiedIntent?: RequestIntent;
 }
@@ -181,6 +185,10 @@ interface RemotePluginCandidate {
   packageName?: string;
   defaultBranch?: string;
   matchedTerms?: string[];
+  /** Search phrases whose bounded GitHub result page contained this repository. */
+  matchedQueries?: string[];
+  /** Host-validated exact repository supplied during the current refinement. */
+  explicit?: boolean;
   matchReason?: string;
 }
 interface ResolutionRecord {
@@ -528,6 +536,14 @@ interface InstallationRecord {
     repairHints?: string[];
     exitCode?: number | null;
     diagnosticHash?: string;
+    /** Host-parsed recovery evidence. Agent/user input can never populate this object. */
+    recovery?: InstallFailureRecovery;
+  };
+  /** Audit-only proof that this receipt was produced by one already-consumed sealed recovery plan. */
+  recoveryAttempt?: {
+    id: string;
+    strategy: InstallRecoveryPlan['strategy'];
+    sourceInstallationId: string;
   };
   contributionAdvice?: {
     eligible: boolean;
@@ -537,6 +553,56 @@ interface InstallationRecord {
   supersededByInstallationId?: string;
   replacement?: ReplacementJournal;
 }
+interface ReleaseAgePolicyEntry {
+  packageName: string;
+  version: string;
+  /** Bounded, redacted pnpm reason. Never raw command output. */
+  reason: string;
+}
+type InstallFailureRecovery = {
+  kind: 'same_authority_once';
+  owner: 'pnpm';
+  code: string;
+} | {
+  kind: 'minimum_release_age';
+  owner: 'pnpm';
+  code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION';
+  policyKey: 'minimumReleaseAge';
+  entries: ReleaseAgePolicyEntry[];
+  /** Host sets this only after checking the target lockfile that existed before the attempted install. */
+  scope: 'host_profile' | 'unknown';
+  exceptionEligible: boolean;
+} | {
+  kind: 'profile_store_mismatch';
+  owner: 'pnpm';
+  code: 'ERR_PNPM_UNEXPECTED_STORE';
+  /** Hash of the Host-read absolute store path; the path itself is never persisted or model-visible. */
+  profileStoreFingerprint?: string;
+  scope: 'host_profile' | 'unknown';
+  reuseEligible: boolean;
+};
+/**
+ * Host-sealed semantic recovery plan. The Agent chooses only `id`; concrete
+ * executor constraints are recovered from the current interrupt.
+ */
+type InstallRecoveryPlan = {
+  id: string;
+  operation: 'retry_install';
+  strategy: 'minimum_release_age_exception';
+  sourceInstallationId: string;
+  diagnosticHash: string;
+  exactPackages: string[];
+  effectScope: 'single_install_command';
+} | {
+  id: string;
+  operation: 'retry_install';
+  strategy: 'profile_store_reuse';
+  sourceInstallationId: string;
+  diagnosticHash: string;
+  /** Binds retry to the unchanged Host-read store without disclosing its path. */
+  profileStoreFingerprint: string;
+  effectScope: 'single_install_command';
+};
 interface InstallInput {
   /** Host-minted before any external side effect; never accepted from model tool arguments. */
   installationId?: string;
@@ -550,6 +616,8 @@ interface InstallInput {
   expectedArtifactSha256?: string;
   /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
   replacement?: ReplacementTarget;
+  /** Host-derived from a sealed failed receipt and the Agent-selected recovery id. */
+  recoveryPlan?: InstallRecoveryPlan;
 }
 interface RemoveInput {
   installationId: string;
@@ -571,6 +639,8 @@ interface AuthorizationDecisionInput {
   action: AuthorizationAction;
   /** Required for use_this / modify_this; must belong to the action's interrupt-bound candidate set. */
   candidateId?: string;
+  /** Required only for apply_recovery; must identify a plan in the current sealed option. */
+  recoveryId?: string;
 }
 /** Public resume input keeps model interpretation separate from Host-owned facts. */
 interface ResumeInput {
@@ -596,6 +666,7 @@ interface SelectionReceipt {
   kind: NavigationKind | AuthorizationAction;
   candidateIds: string[];
   candidateDigests: Record<string, string>;
+  recoveryId?: string;
   hostTurnId: string;
   ownerSessionId: string;
   bootId: string;
@@ -637,11 +708,14 @@ interface ActionCommitment {
     kind: 'none';
   };
   requestedAction: NavigationKind | AuthorizationAction;
+  recoveryId?: string;
   retention?: InstallationRetention;
   endpoint: ExecutionEndpoint;
   allowedParameterConstraints: {
     /** Exact bridge/tool target; tool_search/tool_call may not widen past this name. */
     exactTarget?: string;
+    /** Exact semantic recovery plan derived from a sealed failed receipt. */
+    recoveryPlan?: InstallRecoveryPlan;
   };
   createdAt: string;
   /** Host-frozen review identity. Reviewer output cannot mint these fields. */
@@ -681,6 +755,7 @@ declare const FORGED_RESUME_HOST_KEYS: readonly ["selectionReceipt", "actionComm
 /** Minimal snapshot context for candidate-digest binding. WorkflowRecord is assignable. */
 interface ReviewCandidateContext {
   id?: string;
+  lastInstallationId?: string;
   candidateSnapshot?: ReadonlyArray<{
     id: string;
     kind: 'local' | 'remote';
@@ -695,6 +770,7 @@ interface InstallCommitmentBinding {
   commitment?: ActionCommitment;
   receipt?: SelectionReceipt;
   retention?: ActionCommitment['retention'];
+  recoveryPlan?: ActionCommitment['allowedParameterConstraints']['recoveryPlan'];
 }
 //#endregion
 //#region src/process/runner.d.ts
@@ -799,6 +875,8 @@ interface WorkflowOption {
   labelZh: string;
   /** When present, the action is valid only for these interrupt-bound snapshot candidates. */
   candidateIds?: string[];
+  /** Agent-selectable Host-sealed recovery plans. Only apply_recovery uses these ids. */
+  recoveryIds?: string[];
   /** Presentation group only. Does not change Host authorization. */
   placement?: WorkflowOptionPlacement;
 }
@@ -818,6 +896,8 @@ interface WorkflowPendingInstall {
   verificationTask?: string;
   verificationExpectedText?: string;
   replacement?: ReplacementTarget;
+  /** Host-derived from the sealed interrupt after the Agent selects its id. */
+  recoveryPlan?: InstallRecoveryPlan;
 }
 interface CandidateSnapshotItem {
   id: string;
@@ -862,9 +942,44 @@ interface DiscoveryBudget {
   refinementRoundsUsed: number;
   refinementQueriesUsed: string[];
   explicitRepositories: string[];
-  maxRefinementRounds: 2;
-  maxRefinementQueries: 5;
-  maxCandidates: 20;
+  activeTurnId?: string;
+  activeTurnQueriesUsed: string[];
+  maxQueriesPerTurn: 5;
+  /** Legacy persisted fields from schemaVersion 3; no longer global caps. */
+  maxRefinementRounds?: 2;
+  maxRefinementQueries?: 5;
+  /** Bounded rolling window; semantic relevance never removes an eligible result. */
+  maxCandidates: 113;
+}
+interface CandidatePreview {
+  candidateId: string;
+  repository: string;
+  commit: string;
+  defaultBranch: string;
+  inspectedFiles: Array<{
+    path: string;
+    sha256: string;
+    bytes: number;
+  }>;
+  truncated: boolean;
+  manifest: {
+    kind: 'bundle' | 'skill' | 'legacy' | 'unknown';
+    packageName?: string;
+    packageVersion?: string;
+    bundlePatch?: string;
+    license?: string;
+  };
+  packageSummary?: {
+    description?: string;
+    keywords?: string[];
+  };
+  readmeExcerpt?: string;
+}
+interface CandidatePreviewFailure {
+  candidateId: string;
+  repository: string;
+  code: string;
+  message: string;
 }
 interface DiscoveryRefineInput {
   workflowId: string;
@@ -980,8 +1095,10 @@ interface WorkflowRecord {
   requirementNormalized?: string;
   /** Non-authoritative model summary retained only for diagnostics/search presentation. */
   requestSummary?: string;
-  /** Exact Host-owned search input. V10 starts with requirement and appends one raw clarification answer. */
+  /** Exact Host-owned search input: original requirement plus one searchable clarification answer. Option-only replies and the protocol label are omitted. */
   searchRequirement?: string;
+  /** Host-normalized LLM search plan for baseline remote discovery. Never part of the authoritative requirement or refinement budget. */
+  discoveryQueries?: string[];
   clarificationQuestion?: string;
   clarificationAnswer?: string;
   clarifiedIntent?: RequestIntent;
@@ -1005,6 +1122,9 @@ interface WorkflowRecord {
   forceRemoteDiscovery?: boolean;
   /** Host-verified candidates available for model curation before Gate 1. */
   discoveryPool?: CandidateSnapshotItem[];
+  /** Bounded untrusted previews for the shortlist selected by the Agent. */
+  candidatePreviews?: Record<string, CandidatePreview>;
+  candidatePreviewFailures?: CandidatePreviewFailure[];
   discoveryBudget?: DiscoveryBudget;
   candidateSnapshot?: CandidateSnapshotItem[];
   seenCandidateIds?: string[];
@@ -1080,6 +1200,7 @@ interface ValidatedResume {
   interruptId: string;
   snapshotDigest: string;
   candidateId?: string;
+  recoveryId?: string;
   repositories: string[];
   path?: string;
   ref?: string;
@@ -1092,11 +1213,21 @@ interface MarketplaceStepResult {
 }
 interface WorkflowHost {
   bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
-  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
+  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec, input?: {
+    queries?: string[];
+  }): Promise<ResolutionRecord>;
   refineRemote?(resolution: ResolutionRecord, input: {
     queries: string[];
     repositories: string[];
   }, exec: WorkflowExec): Promise<ResolutionRecord>;
+  previewGithubCandidates?(resolution: ResolutionRecord, candidates: Array<{
+    candidateId: string;
+    repository: string;
+    ref?: string;
+  }>, exec: WorkflowExec): Promise<{
+    previews: CandidatePreview[];
+    failures: CandidatePreviewFailure[];
+  }>;
   ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
     resolution: ResolutionRecord;
     market: MarketplaceStepResult;
@@ -1442,8 +1573,13 @@ declare class DshLauncher {
   materializeLocal(review: ReviewRecord, artifactRoot: string, signal?: AbortSignal): Promise<MaterializedLocalPackage>;
   private argv;
   private childEnv;
+  /** Read the store that owns the profile's existing node_modules tree once. */
+  private existingProfileStore;
+  profileStoreFingerprint(dshHome: string, profile: string): Promise<string | undefined>;
   install(dshHome: string, profile: string, spec: string, cwd: string, signal?: AbortSignal, options?: {
     forwardCredentials?: boolean;
+    minimumReleaseAgeExcludes?: string[];
+    expectedProfileStoreFingerprint?: string;
   }): Promise<CommandResult>;
   remove(dshHome: string, profile: string, packageName: string, cwd: string, signal?: AbortSignal): Promise<CommandResult>;
   /** Compose the profile tree without booting it; fails loudly on unresolvable mount rows. */
@@ -1796,6 +1932,8 @@ declare class PluginInstaller {
   private removeOwnedDirectory;
   private assertPersistentDestination;
   private assertReplacementBinding;
+  private assertRecoveryPlanBinding;
+  private installWithTransientRetry;
   private resolvePredecessor;
   private reconcileReplacement;
   install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;
@@ -2102,7 +2240,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   private managedWorkDeps;
   private withWorkspace;
-  start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string): Promise<WorkflowView>;
+  start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string, discoveryQueries?: string[]): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
   present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -2118,11 +2256,21 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private versionTrackingDeps;
   cleanupInstallation(installationId: string, exec: WorkflowExec): Promise<RemovalResult>;
   bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
-  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec): Promise<ResolutionRecord>;
+  discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec, input?: {
+    queries?: string[];
+  }): Promise<ResolutionRecord>;
   refineRemote(resolution: ResolutionRecord, input: {
     queries: string[];
     repositories: string[];
   }, exec: WorkflowExec): Promise<ResolutionRecord>;
+  previewGithubCandidates(resolution: ResolutionRecord, candidates: Array<{
+    candidateId: string;
+    repository: string;
+    ref?: string;
+  }>, exec: WorkflowExec): Promise<{
+    previews: CandidatePreview[];
+    failures: CandidatePreviewFailure[];
+  }>;
   ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
     resolution: ResolutionRecord;
     market: MarketplaceStepResult;

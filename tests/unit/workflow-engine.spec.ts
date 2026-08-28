@@ -16,6 +16,7 @@ import {
 import { CreationGuard } from '../../src/creation-guard.js'
 import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
+import { candidateSnapshotFor, DISCOVERY_POOL_MAX } from '../../src/workflow/candidates.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 import type { WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
@@ -59,6 +60,25 @@ function resolution(requirement = 'calculator'): ResolutionRecord {
     reasons: ['local hit'],
   }
 }
+
+it('preserves all 105 bounded remote candidates alongside local discovery evidence', () => {
+  const record = resolution('find a plugin')
+  record.localCandidates[0]!.fit = 'partial'
+  record.remoteCandidates = Array.from({ length: 105 }, (_, index) => ({
+    repository: `remote-org/plugin-${index}`,
+    name: `plugin-${index}`,
+    description: 'remote candidate',
+    stars: index,
+    updatedAt: null,
+    topics: ['dsh-plugin'],
+  }))
+
+  const snapshot = candidateSnapshotFor(record, new Set(), DISCOVERY_POOL_MAX)
+
+  expect(snapshot.filter((candidate) => candidate.kind === 'local')).toHaveLength(1)
+  expect(snapshot.filter((candidate) => candidate.kind === 'remote')).toHaveLength(105)
+  expect(snapshot).toHaveLength(106)
+})
 
 function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
   return {
@@ -229,11 +249,60 @@ describe('workflow engine autonomous discovery', () => {
       refinementRoundsUsed: 0,
       refinementQueriesUsed: [],
       explicitRepositories: [],
-      maxRefinementRounds: 2,
-      maxRefinementQueries: 5,
-      maxCandidates: 20,
+      activeTurnId: 'turn_unknown',
+      activeTurnQueriesUsed: [],
+      maxQueriesPerTurn: 5,
+      maxCandidates: 113,
     })
     expect((await store.getWorkflow(view.workflow.id)).resolutionId).toBe(resolution().id)
+  })
+
+  it('keeps model-planned baseline queries separate from the Host-captured requirement', async () => {
+    const record = resolution('summary only')
+    record.decision = 'none'
+    record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
+    record.remoteDiscoveryComplete = false
+    const { guard, workflowHost, engine } = await makeEngine(record, 'baseline-queries')
+    const discoverRemote = vi.fn(async (current: ResolutionRecord) => current)
+    workflowHost.discoverRemote = discoverRemote
+    const turn = exec('session-baseline-queries')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '我需要一个自动审批代码审查的能力' }] })
+
+    const view = await engine.start(
+      'automatic approval review',
+      turn,
+      { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      undefined,
+      [' auto review ', 'automatic approval', 'auto review'],
+    )
+
+    expect(view.workflow.requirement).toBe('我需要一个自动审批代码审查的能力')
+    expect(view.workflow.searchRequirement).toBe('我需要一个自动审批代码审查的能力')
+    expect(view.workflow.discoveryQueries).toEqual(['auto review', 'automatic approval'])
+    expect(view.workflow.discoveryBudget).toBeUndefined()
+    expect(discoverRemote).toHaveBeenCalledWith(expect.anything(), turn, {
+      queries: ['auto review', 'automatic approval'],
+    })
+  })
+
+  it('rejects invalid baseline query plans before starting discovery', async () => {
+    const { workflowHost, engine } = await makeEngine(resolution(), 'baseline-query-invalid')
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    await expect(engine.start(
+      'calculator',
+      exec(),
+      undefined,
+      undefined,
+      ['one', 'two', 'three', 'four', 'five', 'six'],
+    )).rejects.toThrow(/at most five .*queries/i)
+    await expect(engine.start(
+      'calculator',
+      exec(),
+      undefined,
+      undefined,
+      ['codex approve for me auto approval agent permissions'],
+    )).rejects.toThrow(/one or two exact search terms/i)
+    expect(bootstrap).not.toHaveBeenCalled()
   })
 
   it('binds profile install/configuration evidence into local candidate snapshots', async () => {
@@ -290,6 +359,47 @@ describe('workflow engine autonomous discovery', () => {
     }, turn)
     expect(parked).toMatchObject({ status: 'parked', alreadyWaiting: true })
     expect(parked.workflow.consumedInterruptIds).toEqual([])
+  })
+
+  it('previews only the Agent-selected remote shortlist before sealing Gate 1', async () => {
+    const record = resolution('automatic approval review')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = [{
+      repository: 'PerryLink/dsh-auto-review', name: 'dsh-auto-review', description: 'Second-model review',
+      stars: 112, updatedAt: '2026-08-26T20:21:54Z', topics: ['dsh-plugin', 'auto-review'], defaultBranch: 'main',
+    }]
+    const { workflowHost, engine } = await makeEngine(record, 'present-preview')
+    const previewGithubCandidates: NonNullable<WorkflowHost['previewGithubCandidates']> = vi.fn(async (
+      _resolution: Parameters<NonNullable<WorkflowHost['previewGithubCandidates']>>[0],
+      candidates: Parameters<NonNullable<WorkflowHost['previewGithubCandidates']>>[1],
+    ) => ({
+      previews: candidates.map((candidate) => ({
+        candidateId: candidate.candidateId,
+        repository: candidate.repository,
+        commit: 'a'.repeat(40),
+        defaultBranch: 'main',
+        inspectedFiles: [{ path: 'package.json', sha256: 'b'.repeat(64), bytes: 200 }],
+        truncated: false,
+        manifest: { kind: 'bundle' as const, packageName: 'dsh-auto-review', packageVersion: '0.7.0' },
+        packageSummary: { description: 'Second-model review', keywords: ['auto-review'] },
+      })),
+      failures: [],
+    }))
+    workflowHost.previewGithubCandidates = previewGithubCandidates
+    const turn = exec('session-present-preview')
+    const discovery = await engine.start(record.requirement, turn)
+    const candidate = discovery.workflow.discoveryPool!.find((item) => item.repository === 'PerryLink/dsh-auto-review')!
+    const selection = await engine.present({ workflowId: discovery.workflow.id, candidateIds: [candidate.id] }, turn)
+
+    expect(previewGithubCandidates).toHaveBeenCalledWith(expect.anything(), [{
+      candidateId: candidate.id,
+      repository: 'PerryLink/dsh-auto-review',
+    }], turn)
+    expect(selection.workflow.candidatePreviews?.[candidate.id]).toMatchObject({
+      repository: 'PerryLink/dsh-auto-review', commit: 'a'.repeat(40), manifest: { packageName: 'dsh-auto-review' },
+    })
+    expect(selection.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([candidate.id])
   })
 
   it('seals a zero-candidate result and accepts only a later fresh create decision', async () => {
@@ -367,7 +477,7 @@ describe('workflow engine autonomous discovery', () => {
     expect((await store.getWorkflow(discovery.workflow.id)).cursor).toBe('await_discovery')
   })
 
-  it('refines only at discovery, records its budget, and fails closed at the round cap', async () => {
+  it('refines only at discovery and records history without a workflow-wide round cap', async () => {
     const record = resolution()
     record.decision = 'inspect_remote'
     const { store, workflowHost, engine } = await makeEngine(record, 'refine')
@@ -385,16 +495,18 @@ describe('workflow engine autonomous discovery', () => {
     const started = await engine.start('calculator', turn)
     const first = await engine.refine({ workflowId: started.workflow.id, queries: ['calculator plugin'] }, turn)
     const second = await engine.refine({ workflowId: started.workflow.id, repositories: ['acme/calculator'] }, turn)
+    const third = await engine.refine({ workflowId: first.workflow.id, queries: ['one more'] }, turn)
 
-    expect(refineRemote).toHaveBeenCalledTimes(2)
-    expect(second.workflow).toMatchObject({ cursor: 'await_discovery', status: 'interrupted' })
-    expect(second.workflow.discoveryBudget).toMatchObject({
-      refinementRoundsUsed: 2,
-      refinementQueriesUsed: ['calculator plugin'],
+    expect(refineRemote).toHaveBeenCalledTimes(3)
+    expect(third.workflow).toMatchObject({ cursor: 'await_discovery', status: 'interrupted' })
+    expect(third.workflow.discoveryBudget).toMatchObject({
+      refinementRoundsUsed: 3,
+      refinementQueriesUsed: ['calculator plugin', 'one more'],
       explicitRepositories: ['acme/calculator'],
+      activeTurnQueriesUsed: ['calculator plugin', 'one more'],
+      maxQueriesPerTurn: 5,
     })
     expect(second.workflow.discoveryPool).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'remote' })]))
-    await expect(engine.refine({ workflowId: first.workflow.id, queries: ['one more'] }, turn)).rejects.toThrow(/round budget/i)
   })
 
   it('enforces the five-query discovery budget before calling the Host', async () => {
@@ -408,22 +520,37 @@ describe('workflow engine autonomous discovery', () => {
     expect(refineRemote).toHaveBeenCalledTimes(1)
   })
 
-  it('opens a stop/search gate when refinement is exhausted without a reviewable candidate', async () => {
+  it('replenishes five queries after a fresh user request to continue searching', async () => {
     const record = resolution()
     record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
     record.remoteDiscoveryComplete = false
-    const { workflowHost, engine } = await makeEngine(record, 'exhausted-empty')
+    const { guard, workflowHost, engine } = await makeEngine(record, 'exhausted-empty')
     const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
     workflowHost.refineRemote = refineRemote
     const turn = exec()
     const started = await engine.start('calculator', turn)
 
-    await engine.refine({ workflowId: started.workflow.id, queries: ['first'] }, turn)
-    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['second'] }, turn)
+    await engine.refine({ workflowId: started.workflow.id, queries: ['first', 'second'] }, turn)
+    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['third', 'fourth', 'fifth'] }, turn)
 
     expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
     expect(exhausted.workflow.candidateSnapshot).toEqual([])
     expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toEqual(['search_more', 'stop'])
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '扩大范围，再继续找一轮' }] })
+
+    const continued = await engine.resume({
+      workflowId: exhausted.workflow.id,
+      interruptId: exhausted.workflow.interrupt!.interruptId,
+      navigation: { kind: 'search_more', queries: ['sixth', 'seventh', 'eighth', 'ninth', 'tenth'] },
+    }, turn)
+
+    expect(continued.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
+    expect(continued.workflow.discoveryBudget).toMatchObject({
+      refinementRoundsUsed: 3,
+      refinementQueriesUsed: ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'],
+      activeTurnQueriesUsed: ['sixth', 'seventh', 'eighth', 'ninth', 'tenth'],
+      maxQueriesPerTurn: 5,
+    })
   })
 
   it('returns search_more from Gate 1 to autonomous discovery without retaining the sealed snapshot', async () => {
@@ -450,6 +577,123 @@ describe('workflow engine autonomous discovery', () => {
     expect(more.workflow.candidateSnapshot).toBeUndefined()
     expect(more.workflow.seenCandidateIds).toEqual(expect.arrayContaining(firstIds))
     expect(more.workflow.rejectedCandidateIds).toEqual(expect.arrayContaining(firstIds))
+  })
+
+  it('refines search_more with fresh terms and an exact GitHub root before consuming the turn', async () => {
+    const record = resolution('review capability')
+    record.decision = 'inspect_remote'
+    record.remoteCandidates = [
+      { repository: 'acme/old-review', name: 'old-review', description: '', stars: 1, updatedAt: null, topics: [] },
+    ]
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'search-more-hints')
+    const refineRemote = vi.fn(async (current: ResolutionRecord, input: { queries: string[]; repositories: string[] }) => {
+      const next = {
+        ...current,
+        queries: [...current.queries, ...input.queries],
+        remoteCandidates: [
+          ...current.remoteCandidates,
+          { repository: input.repositories[0]!, name: 'dsh-auto-review', description: 'Auto review approvals', stars: 3, updatedAt: null, topics: ['dsh-plugin'] },
+        ],
+      }
+      await store.put('resolutions', next)
+      return next
+    })
+    workflowHost.refineRemote = refineRemote
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'review capability', turn)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: 'https://github.com/PerryLink/dsh-auto-review' }] })
+
+    const more = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: { kind: 'search_more', queries: ['auto review'] },
+    }, turn)
+
+    expect(refineRemote).toHaveBeenCalledWith(expect.anything(), {
+      queries: ['auto review'],
+      repositories: ['PerryLink/dsh-auto-review'],
+    }, expect.anything())
+    expect(more.workflow.discoveryBudget).toMatchObject({
+      refinementRoundsUsed: 1,
+      refinementQueriesUsed: ['auto review'],
+      explicitRepositories: ['PerryLink/dsh-auto-review'],
+    })
+    expect(more.workflow.discoveryPool).toEqual(expect.arrayContaining([
+      expect.objectContaining({ repository: 'PerryLink/dsh-auto-review' }),
+    ]))
+    expect(more.workflow.consumedInterruptIds).toContain(selection.workflow.interrupt!.interruptId)
+  })
+
+  it('parks a fresh retry gate when hinted search_more fails after consuming the turn', async () => {
+    const record = resolution('review capability')
+    record.decision = 'inspect_remote'
+    record.remoteCandidates = [
+      { repository: 'acme/old-review', name: 'old-review', description: '', stars: 1, updatedAt: null, topics: [] },
+    ]
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'search-more-failure')
+    const refineRemote = vi.fn(async () => {
+      throw new EvolutionError('github_unavailable', 'temporary GitHub failure')
+    })
+    workflowHost.refineRemote = refineRemote
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'review capability', turn)
+    const consumedInterruptId = selection.workflow.interrupt!.interruptId
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '换个词继续找' }] })
+
+    const failed = await engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: consumedInterruptId,
+      navigation: { kind: 'search_more', queries: ['review automation'] },
+    }, turn)
+
+    expect(refineRemote).toHaveBeenCalledTimes(1)
+    expect(failed.workflow).toMatchObject({
+      status: 'interrupted',
+      cursor: 'await_selection',
+      candidateSnapshot: [],
+      lastFailure: {
+        stage: 'discovery',
+        code: 'github_unavailable',
+        retryable: true,
+      },
+    })
+    expect(failed.workflow.interrupt?.interruptId).not.toBe(consumedInterruptId)
+    expect(failed.workflow.interrupt?.options.map((option) => option.id)).toEqual(['search_more', 'stop'])
+    expect(failed.workflow.consumedInterruptIds).toContain(consumedInterruptId)
+    expect(failed.workflow.discoveryBudget).toMatchObject({ refinementRoundsUsed: 0 })
+    expect(failed.resolution?.remoteDiscoveryComplete).toBe(false)
+
+    const persisted = await store.getWorkflow(selection.workflow.id)
+    expect(persisted.interrupt?.interruptId).toBe(failed.workflow.interrupt?.interruptId)
+    expect(persisted.consumedInterruptIds).toContain(consumedInterruptId)
+  })
+
+  it('rejects a non-root GitHub refinement URL without consuming the interrupt', async () => {
+    const record = resolution()
+    record.decision = 'inspect_remote'
+    record.remoteCandidates = [
+      { repository: 'acme/review', name: 'review', description: '', stars: 1, updatedAt: null, topics: [] },
+    ]
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'search-more-invalid-url')
+    const refineRemote = vi.fn(async (current: ResolutionRecord) => current)
+    workflowHost.refineRemote = refineRemote
+    const turn = exec()
+    const { selection } = await startAndPresent(engine, 'calculator', turn)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '再找找' }] })
+
+    await expect(engine.resume({
+      workflowId: selection.workflow.id,
+      interruptId: selection.workflow.interrupt!.interruptId,
+      navigation: {
+        kind: 'search_more',
+        repositories: ['https://github.com/acme/review/tree/main'],
+      },
+    }, turn)).rejects.toThrow(/exact https:\/\/github\.com\/owner\/repository root URL/i)
+
+    const unchanged = await store.getWorkflow(selection.workflow.id)
+    expect(unchanged.status).toBe('interrupted')
+    expect(unchanged.consumedInterruptIds).not.toContain(selection.workflow.interrupt!.interruptId)
+    expect(refineRemote).not.toHaveBeenCalled()
   })
 
   it('permits local reuse only after Gate 1 and binds the receipt and lease to the sealed candidate', async () => {
@@ -795,6 +1039,67 @@ describe('workflow engine autonomous discovery', () => {
       .rejects.toThrow(/call budget is exhausted/i)
   })
 
+  it('diagnoses an installation from its bounded summary and structured failure facts', async () => {
+    const { store, engine } = await makeEngine(resolution(), 'diagnose-installation')
+    const started = await engine.start('calculator', exec())
+    const workflow = await store.getWorkflow(started.workflow.id)
+    const installationId = `installation_${'9'.repeat(24)}`
+    workflow.lastInstallationId = installationId
+    await store.put('workflows', workflow)
+    await store.put('installations', {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      reviewId: `review_${'8'.repeat(24)}`,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: 'C:/Users/test/.dsh',
+      packageName: 'dsh-plugin-demo',
+      installSpec: 'github:acme/demo#commit',
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      installFailure: {
+        stage: 'install',
+        code: 'command_failed',
+        summary: 'stdout: ERR_PNPM_EPERM operation not permitted',
+        message: 'dsh exited with code 1',
+        retryable: true,
+        exitCode: 1,
+        diagnosticHash: 'a'.repeat(64),
+      },
+      verification: {
+        attempted: false,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'installation failed before verification',
+      },
+    } satisfies InstallationRecord)
+
+    const diagnosed = await engine.diagnose({ workflowId: workflow.id, probes: ['installation'] }, exec())
+    expect(diagnosed.diagnosis?.facts).toEqual([expect.objectContaining({
+      probe: 'installation',
+      status: 'failed',
+      summary: 'stdout: ERR_PNPM_EPERM operation not permitted',
+      evidenceHash: 'a'.repeat(64),
+      facts: expect.objectContaining({
+        targetProfile: 'web',
+        failureStage: 'install',
+        exitCode: 1,
+        retryable: true,
+        verificationAttempted: false,
+      }),
+    })])
+  })
+
   it('diagnoses a prepare_create managed-child failure without a linked review', async () => {
     const record = resolution()
     record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
@@ -812,8 +1117,8 @@ describe('workflow engine autonomous discovery', () => {
     }
     const turn = exec()
     const started = await engine.start('calculator', turn)
-    await engine.refine({ workflowId: started.workflow.id, queries: ['first'] }, turn)
-    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['second'] }, turn)
+    await engine.refine({ workflowId: started.workflow.id, queries: ['first', 'second'] }, turn)
+    const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['third', 'fourth', 'fifth'] }, turn)
     expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
     expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toContain('create_new')
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '没有合适的，新建一个' }] })
@@ -974,8 +1279,11 @@ describe('workflow engine autonomous discovery', () => {
       operation: 'discover_or_reuse',
       requiredSurface: 'native_dsh_plugin',
     })
-    await engine.refine({ workflowId: discovery.workflow.id, queries: ['first search'] }, turn)
-    const started = await engine.refine({ workflowId: discovery.workflow.id, queries: ['second search'] }, turn)
+    await engine.refine({ workflowId: discovery.workflow.id, queries: ['first search', 'second search'] }, turn)
+    const started = await engine.refine({
+      workflowId: discovery.workflow.id,
+      queries: ['third search', 'fourth search', 'fifth search'],
+    }, turn)
     expect(started.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '创建新的能力' }] })
     const constructing = await engine.resume({
@@ -1872,9 +2180,14 @@ describe('workflow engine autonomous discovery', () => {
   })
 
   it('captures the original wording, clarifies once, and searches only after a fresh answer', async () => {
-    const { engine, guard, workflowHost } = await makeEngine(resolution('summary'), 'clarification')
+    const record = resolution('summary')
+    record.decision = 'none'
+    record.localCandidates[0] = { ...record.localCandidates[0]!, fit: 'partial' }
+    record.remoteDiscoveryComplete = false
+    const { engine, guard, workflowHost } = await makeEngine(record, 'clarification')
     const turn = exec('session-clarification')
     const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const discoverRemote = vi.spyOn(workflowHost, 'discoverRemote')
     guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '  帮我处理日期，但先别猜  ' }] })
     const started = await engine.start('date conversion summary', turn, {
       operation: 'discover_or_reuse',
@@ -1904,13 +2217,64 @@ describe('workflow engine autonomous discovery', () => {
       interruptId: started.workflow.interrupt!.interruptId,
       navigation: {
         kind: 'clarify_requirement',
+        queries: ['gregorian lunar', '保留日期格式'],
         clarifiedIntent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
       },
     }, turn)
     expect(searched.workflow.clarificationAnswer).toBe('是公历转农历，保留原格式。')
+    expect(searched.workflow.discoveryQueries).toEqual(['gregorian lunar', '保留日期格式'])
     expect(searched.workflow.actionCommitment).toBeUndefined()
     expect(bootstrap).toHaveBeenCalledWith(
-      '  帮我处理日期，但先别猜  \n\nClarification:\n是公历转农历，保留原格式。',
+      '  帮我处理日期，但先别猜  \n\n是公历转农历，保留原格式。',
+      turn,
+      { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+    )
+    expect(discoverRemote).toHaveBeenCalledWith(expect.anything(), turn, {
+      queries: ['gregorian lunar', '保留日期格式'],
+    })
+  })
+
+  it('rejects pre-clarification queries so they cannot become a stale search plan', async () => {
+    const { engine } = await makeEngine(resolution('summary'), 'stale-pre-clarification-query')
+    await expect(engine.start(
+      'date conversion summary',
+      exec('session-stale-pre-clarification-query'),
+      { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      '你需要哪一种日历转换？',
+      ['date conversion'],
+    )).rejects.toThrow(/queries must be omitted until the fresh clarification answer/i)
+  })
+
+  it('does not append an option-only clarification answer into search text', async () => {
+    const { engine, guard, workflowHost } = await makeEngine(resolution('summary'), 'option-clarification')
+    const turn = exec('session-option-clarification')
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '  帮我处理日期，但先别猜  ' }] })
+    const started = await engine.start('date conversion summary', turn, {
+      operation: 'discover_or_reuse',
+      requiredSurface: 'native_dsh_plugin',
+    }, '你需要哪一种日历转换？')
+    const sameTurn = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      navigation: {
+        kind: 'clarify_requirement',
+        clarifiedIntent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      },
+    }, turn)
+    expect(sameTurn.alreadyWaiting).toBe(true)
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '1' }] })
+    const searched = await engine.resume({
+      workflowId: started.workflow.id,
+      interruptId: started.workflow.interrupt!.interruptId,
+      navigation: {
+        kind: 'clarify_requirement',
+        clarifiedIntent: { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
+      },
+    }, turn)
+    expect(searched.workflow.clarificationAnswer).toBe('1')
+    expect(bootstrap).toHaveBeenCalledWith(
+      '  帮我处理日期，但先别猜  ',
       turn,
       { operation: 'discover_or_reuse', requiredSurface: 'native_dsh_plugin' },
     )
@@ -1929,5 +2293,168 @@ describe('workflow engine autonomous discovery', () => {
       cursor: 'superseded',
       supersededByWorkflowId: second.workflow.id,
     })
+  })
+
+  it('retries a legacy pre-verification install only after a fresh receipt-bound decision', async () => {
+    const record = resolution('calculator')
+    const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'legacy-preverify-retry')
+    await store.put('resolutions', record)
+    const workflowId = `workflow_${'6'.repeat(24)}`
+    const reviewId = `review_${'7'.repeat(64)}`
+    const candidateId = `candidate_${'8'.repeat(24)}`
+    const installationId = `installation_${'9'.repeat(24)}`
+    const repository = 'acme/retryable'
+    const commit = 'a'.repeat(40)
+    const inspected: ReviewRecord = {
+      schemaVersion: 1,
+      id: reviewId,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      resolutionId: record.id,
+      requirement: 'calculator',
+      sourceSnapshot: { kind: 'github', repository, requestedRef: commit, commit, defaultBranch: 'main' },
+      inspectedFiles: [],
+      manifest: {
+        kind: 'bundle',
+        packageName: 'dsh-plugin-retryable',
+        scripts: [],
+        dependencies: [],
+        peerDependencies: {},
+        expectedTools: [],
+      },
+      fit: 'full',
+      confidence: 0.9,
+      securityRisk: 'low',
+      maintained: true,
+      license: 'MIT',
+      compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: '0.1.0-rc.6' },
+      missingCapabilities: [],
+      findings: [],
+      recommendation: 'use',
+      installSpec: `github:${repository}#${commit}`,
+      runtimeSurface: {
+        llmDependency: false,
+        llmRegistered: false,
+        credentialsDependency: false,
+        credentialsRegistered: false,
+        networkSignal: false,
+        environmentSignal: false,
+        processSignal: false,
+        skillOnly: false,
+        unsafeTools: false,
+        expectedTools: [],
+        toolFixtures: [],
+        verificationLayer: 'manual_runtime',
+      },
+    }
+    await store.put('reviews', inspected)
+    const failed: InstallationRecord = {
+      schemaVersion: 1,
+      id: installationId,
+      createdAt: '2026-08-28T00:00:01.000Z',
+      reviewId,
+      workflowId,
+      targetProfile: 'web',
+      retention: 'persistent',
+      dshHome: root,
+      packageName: 'dsh-plugin-retryable',
+      installSpec: inspected.installSpec!,
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: false,
+        expectedTools: [], calledTools: [], resultTools: [], failedTools: [], sessionFiles: [],
+        taskResultObserved: false,
+        reason: 'install failed before verification',
+      },
+      installFailure: { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true },
+    }
+    await store.put('installations', failed)
+    const stored: WorkflowRecord = {
+      schemaVersion: 2,
+      id: workflowId,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      updatedAt: '2026-08-28T00:00:01.000Z',
+      requirement: 'calculator',
+      requirementNormalized: 'calculator',
+      cwd: root,
+      ownerSessionId: 'session-1',
+      bootId: 'boot_previous',
+      resolutionId: record.id,
+      status: 'interrupted',
+      cursor: 'await_confirmation',
+      generation: 2,
+      intent: { operation: 'discover_or_reuse', requiredSurface: 'any' },
+      candidateSnapshot: [{
+        id: candidateId, index: 1, kind: 'remote', name: 'retryable', identity: repository,
+        repository, digest: 'b'.repeat(64),
+      }],
+      reviewedCandidateIds: [candidateId],
+      reviewIdsByCandidate: { [candidateId]: reviewId },
+      lastReviewId: reviewId,
+      lineageTipReviewId: reviewId,
+      lastInstallationId: installationId,
+      consumedVerificationAttempts: [
+        { reviewId, sourceIdentity: `github:${repository}#${commit}`, layer: 'manual_runtime' },
+        { reviewId, sourceIdentity: `github:${repository}#${commit}`, layer: 'tool_roundtrip' },
+      ],
+      lastFailure: { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true },
+      interrupt: {
+        kind: 'await_confirmation', options: [], facts: {},
+        interruptId: `interrupt_${'1'.repeat(24)}`,
+        ownerSessionId: 'session-1', bootId: 'boot_previous',
+        validAfterTurnId: `turn_${'2'.repeat(24)}`, snapshotDigest: '3'.repeat(64),
+      },
+    }
+    await store.put('workflows', stored)
+    workflowHost.listInstallProfiles = async () => ['web']
+    workflowHost.latestReview = async () => inspected
+    const installCalls: WorkflowRecord[] = []
+    workflowHost.installReviewed = async (_review, input, _exec, activeWorkflow) => {
+      if (!activeWorkflow) throw new Error('expected workflow binding')
+      installCalls.push(structuredClone(activeWorkflow))
+      return {
+        ...failed,
+        id: activeWorkflow.pendingInstallationId!,
+        createdAt: '2026-08-28T00:00:03.000Z',
+        installState: 'installed',
+        installOutcome: 'awaiting_user_test',
+        installed: true,
+        loaded: true,
+        removed: false,
+        targetProfile: input.targetProfile,
+        retention: input.retention,
+        verification: { ...failed.verification, attempted: true, status: 'pending_user_test', reason: 'await user test' },
+        installFailure: undefined,
+      } as unknown as InstallationRecord
+    }
+    const turn = exec('session-1', root)
+
+    const reissued = await engine.start('calculator', turn)
+    expect(reissued.workflow.interrupt?.options.find((item) => item.id === 'use_this')?.candidateIds)
+      .toEqual([candidateId])
+    expect(installCalls).toHaveLength(0)
+
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '重试安装这个候选' }] })
+    const retried = await engine.resume({
+      workflowId,
+      interruptId: reissued.workflow.interrupt!.interruptId,
+      decision: { action: 'use_this', candidateId },
+    }, turn)
+
+    expect(installCalls).toHaveLength(1)
+    expect(installCalls[0]!.actionCommitment).toBeDefined()
+    expect(installCalls[0]!.consumedVerificationAttempts).toEqual([{
+      reviewId,
+      sourceIdentity: `github:${repository}#${commit}`,
+      layer: 'tool_roundtrip',
+    }])
+    expect(retried.workflow.cursor).toBe('awaiting_user_test')
   })
 })

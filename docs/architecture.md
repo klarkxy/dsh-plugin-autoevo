@@ -19,7 +19,7 @@ capability_workflow
    └─ discover_remote
                   │
         AgentWorkflowViewV2: discovering
-        Host pool ≤20; model refine ≤2 rounds / ≤5 supplemental queries
+        Host complete bounded union ≤105; model-led queries ≤5 per user turn
                   │ model seals 1–5 candidate IDs with present
                   ▼
                  Gate 1 (sealed real snapshot shortlist)
@@ -84,11 +84,12 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 ### 远端发现
 
 - Host 直接调用 `gh api /search/repositories`，每条查询强制带 `topic:dsh-plugin`；不安装 `dsh-find-plugin`，也不回退到无 topic 的全站搜索。
-- 结果只接受严格 `owner/repository` 标识和有界摘要；仓库名、名称、描述、topics 或 package name 还必须覆盖至少一个需求领域锚点。
+- 结果只接受严格 `owner/repository` 标识、有界摘要和客观可用的非 archived、非 fork 仓库；Host 不再用语义分数淘汰候选。
+- 五条查询的有界结果完整去重后交给 Agent。匹配分数只决定阅读顺序；用户给出的精确仓库固定置顶，不会被旧候选或池容量挤掉。
 - 空结果视为没有可复用插件：Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。
 - 只有用户在对话里选中、并由 resume 记入回执的仓库才进入 exact-commit 审查门禁。
 
-发现结果先进入无 interrupt 的模型控制检查点：模型只看 Host 验证身份、派生匹配信号、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户要比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
+发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会读取有界的根 `package.json`、README 与 DSH manifest 预览，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
 
 ## 4. 数据与状态
 
@@ -127,7 +128,7 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
 - 最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不用关键词或正则重做语义理解。
 - `use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`；Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供的 repository、path、review id 或 install spec。
 - Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
-- 当前 Policy 为 V11（`POLICY_VERSION = 11`）。任何旧 Policy 的未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease，Host 要求从当前顶层用户原文重开；已完成安装与历史 receipt 仍可读取和显式删除。
+- 当前 Policy 为 V13（`POLICY_VERSION = 13`）。任何旧 Policy 的未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease，Host 要求从当前顶层用户原文重开；已完成安装与历史 receipt 仍可读取和显式删除。
 
 ### 验证与安装语义
 

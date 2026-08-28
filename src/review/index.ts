@@ -10,7 +10,9 @@ export {
 } from './direct-use.js'
 export {
   needsSemanticReviewer,
+  previewGithubPlugin,
   reviewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
+  type GithubPluginPreview,
 } from './review.js'

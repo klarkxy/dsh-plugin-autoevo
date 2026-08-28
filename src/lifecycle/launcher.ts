@@ -20,20 +20,11 @@ import {
 } from '../host-verification-driver.js'
 import { EvolutionError } from '../errors.js'
 import { assertSafePackageName } from '../package-name.js'
-import type { CommandResult, CommandRunner } from '../process/runner.js'
+import { commandResultFailure, type CommandResult, type CommandRunner } from '../process/runner.js'
 import { sha256 } from '../state/hashes.js'
 import { resolveStateRoot } from '../workspace-layout.js'
 import { activationTargetsFromPatch } from './bundle-activation.js'
 import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
-
-/** Mirror the EvolutionError shape DshCommandRunner throws for a non-zero exit. */
-function commandFailure(command: string, result: CommandResult): EvolutionError {
-  return new EvolutionError('command_failed', `${command} exited with code ${result.exitCode ?? 'null'}`, {
-    command,
-    exitCode: result.exitCode,
-    diagnosticHash: sha256(result.stderr),
-  })
-}
 
 interface SessionFile {
   path: string
@@ -55,6 +46,11 @@ interface ReceiptEvidence {
   sourceMatched?: boolean
   executedCount?: number
   completeReason?: string
+}
+
+interface ProfileStoreIdentity {
+  storeDir: string
+  fingerprint: string
 }
 
 /** Host mechanical verification truth. Substring expectation is never used here. */
@@ -270,24 +266,63 @@ export class DshLauncher {
     return env
   }
 
+  /** Read the store that owns the profile's existing node_modules tree once. */
+  private async existingProfileStore(dshHome: string, profile: string): Promise<ProfileStoreIdentity | undefined> {
+    const modulesManifest = path.join(dshHome, 'profiles', profile, 'node_modules', '.modules.yaml')
+    try {
+      const value: unknown = parse(await readFile(modulesManifest, 'utf8'))
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+      const storeDir = (value as { storeDir?: unknown }).storeDir
+      if (typeof storeDir !== 'string' || !path.isAbsolute(storeDir)) return undefined
+      const resolved = path.resolve(storeDir)
+      const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved
+      return { storeDir: resolved, fingerprint: sha256(normalized) }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      // A stale or malformed pnpm metadata file should still be diagnosed by
+      // the actual install command instead of preventing DSH from running it.
+      return undefined
+    }
+  }
+
+  async profileStoreFingerprint(dshHome: string, profile: string): Promise<string | undefined> {
+    return (await this.existingProfileStore(dshHome, profile))?.fingerprint
+  }
+
   async install(
     dshHome: string,
     profile: string,
     spec: string,
     cwd: string,
     signal?: AbortSignal,
-    options?: { forwardCredentials?: boolean },
+    options?: {
+      forwardCredentials?: boolean
+      minimumReleaseAgeExcludes?: string[]
+      expectedProfileStoreFingerprint?: string
+    },
   ): Promise<CommandResult> {
     await mkdir(dshHome, { recursive: true })
+    const profileStore = await this.existingProfileStore(dshHome, profile)
+    if (options?.expectedProfileStoreFingerprint
+      && profileStore?.fingerprint !== options.expectedProfileStoreFingerprint) {
+      throw new EvolutionError('review_expired', 'The target profile pnpm store changed after the recovery plan was sealed')
+    }
+    const storeArgs = profileStore ? [`--config.store-dir=${profileStore.storeDir}`] : []
+    const minimumReleaseAgeExcludes = [...new Set(options?.minimumReleaseAgeExcludes ?? [])].sort()
+    if (minimumReleaseAgeExcludes.length > 8 || minimumReleaseAgeExcludes.some((item) => !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/iu.test(item))) {
+      throw new EvolutionError('invalid_input', 'Host release-age exclusions must be exact package versions')
+    }
+    const releaseAgeArgs = minimumReleaseAgeExcludes
+      .map((item) => `--config.minimum-release-age-exclude=${item}`)
     const request = {
-      argv: this.argv('plugin', '--profile', profile, 'add', '--save-exact', spec),
+      argv: this.argv('plugin', '--profile', profile, 'add', '--save-exact', spec, ...storeArgs, ...releaseAgeArgs),
       cwd,
       env: this.childEnv(dshHome, options?.forwardCredentials !== false),
       timeoutMs: Math.max(this.config.commandTimeoutMs, 120_000),
       allowFailure: true as const,
     }
     const result = await this.runner.run(signal ? { ...request, signal } : request)
-    if (result.exitCode !== 0) throw commandFailure(this.config.dshCommand, result)
+    if (result.exitCode !== 0) throw commandResultFailure(this.config.dshCommand, result)
     return result
   }
 

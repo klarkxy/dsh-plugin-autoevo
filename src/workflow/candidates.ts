@@ -14,7 +14,10 @@ function localCandidateIdentity(item: ResolutionRecord['localCandidates'][number
 }
 
 export const MIXED_SNAPSHOT_MAX = 8
-export const DISCOVERY_POOL_MAX = 20
+/** Five bounded GitHub pages plus five exact repositories in one user turn. */
+export const DISCOVERY_REMOTE_POOL_MAX = 105
+/** Preserve the complete remote union without letting the bounded local set consume its slots. */
+export const DISCOVERY_POOL_MAX = 113 as const
 export const SEALED_SHORTLIST_MAX = 5
 
 export function candidateId(
@@ -250,17 +253,30 @@ export function isUnfinished(status: WorkflowRecord['status']): boolean {
   return status === 'interrupted' || status === 'running'
 }
 
-export function discoveryBudget(): NonNullable<WorkflowRecord['discoveryBudget']> {
+export const DISCOVERY_QUERIES_PER_TURN = 5
+
+export function discoveryQueriesPerTurn(budget: NonNullable<WorkflowRecord['discoveryBudget']>): number {
+  return budget.maxQueriesPerTurn ?? budget.maxRefinementQueries ?? DISCOVERY_QUERIES_PER_TURN
+}
+
+export function activeDiscoveryQueriesUsed(
+  budget: NonNullable<WorkflowRecord['discoveryBudget']>,
+): string[] {
+  if (budget.activeTurnQueriesUsed) return budget.activeTurnQueriesUsed
+  return budget.refinementQueriesUsed.slice(-discoveryQueriesPerTurn(budget))
+}
+
+export function discoveryBudget(
+  activeTurnId?: string,
+  activeTurnQueriesUsed: readonly string[] = [],
+): NonNullable<WorkflowRecord['discoveryBudget']> {
   return {
     refinementRoundsUsed: 0,
     refinementQueriesUsed: [],
     explicitRepositories: [],
-    maxRefinementRounds: 2,
-    maxRefinementQueries: 5,
-    maxCandidates: 20,
+    ...(activeTurnId ? { activeTurnId } : {}),
+    activeTurnQueriesUsed: [...activeTurnQueriesUsed].slice(0, DISCOVERY_QUERIES_PER_TURN),
+    maxQueriesPerTurn: DISCOVERY_QUERIES_PER_TURN,
+    maxCandidates: DISCOVERY_POOL_MAX,
   }
-}
-
-export function normalizeRefinementQuery(value: string): string {
-  return value.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 120)
 }

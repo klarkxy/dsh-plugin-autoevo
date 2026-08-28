@@ -20,7 +20,7 @@ export const EVOLUTION_MODE_PROTOCOL_VERSION = 1 as const
 export const EVOLUTION_PRESET_MANIFEST_FILENAME = '.autoevo-preset.json' as const
 
 /** Template version for the bundled `presets/evolution` tree. */
-export const EVOLUTION_PRESET_TEMPLATE_VERSION = '15' as const
+export const EVOLUTION_PRESET_TEMPLATE_VERSION = '17' as const
 
 /** Manifest schema version for `.autoevo-preset.json`. */
 export const EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION = 1 as const
@@ -72,9 +72,35 @@ export const EVOLUTION_PRESET_V14_MANIFEST: EvolutionPresetManifest = Object.fre
   }),
 })
 
+export const EVOLUTION_PRESET_V15_MANIFEST: EvolutionPresetManifest = Object.freeze({
+  owner: EVOLUTION_MODE_OWNER,
+  schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+  templateVersion: '15',
+  files: Object.freeze({
+    'agent.cordis.yml': '8727d922f5b320fd143d47d92d9b90ac191c28c42acbdafd67975775516e7d88',
+    'preset.yml': '366df26e794b478a9de0391fa640d1ae684dcdcbedbb5a08d9cf1b7339bd2e1e',
+    'skills/cordis-plugin-development/SKILL.md': '01811d3ee9c03a466abae12d54d229e7de7bd74ca6b730c54ce9d5e696b294aa',
+    'skills/editing-cordis-compositions/SKILL.md': 'b223233e9df5c8cbedeb7dee8d38ddc47d545af54b323abe3830f4748b688f6c',
+  }),
+})
+
+export const EVOLUTION_PRESET_V16_MANIFEST: EvolutionPresetManifest = Object.freeze({
+  owner: EVOLUTION_MODE_OWNER,
+  schemaVersion: EVOLUTION_PRESET_MANIFEST_SCHEMA_VERSION,
+  templateVersion: '16',
+  files: Object.freeze({
+    'agent.cordis.yml': '334f46d87e6f071a9db0da7b334010b1ff20e59996584ba27564f3cb77eb0d86',
+    'preset.yml': '366df26e794b478a9de0391fa640d1ae684dcdcbedbb5a08d9cf1b7339bd2e1e',
+    'skills/cordis-plugin-development/SKILL.md': '01811d3ee9c03a466abae12d54d229e7de7bd74ca6b730c54ce9d5e696b294aa',
+    'skills/editing-cordis-compositions/SKILL.md': 'b223233e9df5c8cbedeb7dee8d38ddc47d545af54b323abe3830f4748b688f6c',
+  }),
+})
+
 export const EVOLUTION_PRESET_KNOWN_MANIFESTS: readonly EvolutionPresetManifest[] = Object.freeze([
   EVOLUTION_PRESET_V13_MANIFEST,
   EVOLUTION_PRESET_V14_MANIFEST,
+  EVOLUTION_PRESET_V15_MANIFEST,
+  EVOLUTION_PRESET_V16_MANIFEST,
 ])
 
 export interface EvolutionModeMarker {

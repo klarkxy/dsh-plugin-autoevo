@@ -13,7 +13,7 @@ This packaged skill is compatibility guidance for the Capability Evolution prese
 
 Call `capability_workflow` with the user's original capability wording. Do not replace the requirement with an implementation proposal.
 
-During `discovering`, use only Host-returned candidates and budgets. Refine when evidence would change the shortlist, then seal 1–5 pool candidate IDs with `capability_workflow_present`. Do not invent a candidate or call `find_dsh_plugin` / raw `gh` yourself.
+During `discovering`, use only Host-returned candidates and budgets. For an unambiguous initial request, generate 1–5 concise semantic GitHub search phrases and pass them through `capability_workflow.queries`; the Host keeps them separate from the authoritative requirement. The Host returns the complete bounded union after objective repository validation and deduplication. Inspect every compact candidate card: score and order are hints, not semantic eligibility. Exact GitHub repositories supplied by the user are pinned first and must not be discarded. If clarification is necessary, omit initial queries and generate replacement `navigation.queries` only after the fresh answer. Refine when evidence would change the shortlist, then seal 1–5 pool candidate IDs with `capability_workflow_present`; only that shortlist receives bounded root package, README, and DSH manifest previews, all marked as untrusted data. When a fresh user reply asks to search again with new terms or supplies an exact GitHub repository, carry those terms through `navigation.queries` or that repository through `navigation.repositories`; the Host validates and budgets them before consuming the turn. Do not invent a candidate or call `find_dsh_plugin` / raw `gh` yourself.
 
 Two fresh user messages are separate gates:
 
@@ -51,7 +51,7 @@ After `modify_review` or `create_authorized`, the Host prepares a Git source und
 4. Use only the child-permitted filesystem, shell, build, test, and skill tools. Do not install dependencies, start nested collaboration, mutate plugins, run Git, or publish. Record actual checks and results; do not claim an unobserved test.
 5. Complete the WorkOrder in the managed child. The Host validates Git state, commits without hooks/signing, re-reviews the exact source, freezes an owned artifact, and returns to a fresh install decision. Do not pass an arbitrary checkout path or edit from the parent session.
 
-Never call Cordis live mutation, directly install/remove a package, silently switch to a same-named substitute, publish/release/deploy, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception.
+Never call Cordis live mutation, directly install/remove a package, silently switch to a same-named substitute, publish/release/deploy, or work outside the managed source. In Capability Evolution, even a temporary experiment starts with the same Search-first workflow; parent-session live repair is not an exception. Repair of AutoEvo itself must use `evolve_existing` with Host-derived source provenance; if that provenance is unavailable, return a tested source candidate to an ordinary external controller instead of building, installing, or editing the active profile from the parent.
 
 ## 4. Report outcomes exactly
 
@@ -66,6 +66,8 @@ An isolated minimal-DSH preflight, model judgment, semantic verifier, `installed
 ## 5. Diagnose, recover, and clean up
 
 Use `capability_workflow_diagnose` only after a failed or incomplete stage. It is bounded and read-only; it does not retry, install, edit, or clean up.
+
+Unexpected failures remain yours to interpret. Treat Host-returned facts as evidence, compare the visible recovery, modification, continued-search, and stop paths, and explain the tradeoff in natural language. A recovery choice includes its semantic effect, evidence, consequence, and opaque recovery ID. After a fresh user decision, submit only one current recovery ID. Never submit or invent package lists, command text, environment changes, pnpm flags, or other executor parameters; Host retrieves the sealed typed plan and revalidates it against the failed receipt before execution. If no supported recovery choice exists, use another visible path rather than guessing a Host workaround.
 
 Sealed failure recovery and completed-install cleanup/restart are distinct Host paths. The failure path uses the current interrupt. Completed cleanup requires a new top-level user request and uses the workflow-owned installation receipt. `plugin_remove` removes only the receipt-owned installed capability and artifact; it does not remove AutoEvo or the managed source.
 
