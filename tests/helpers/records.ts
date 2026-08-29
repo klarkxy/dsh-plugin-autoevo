@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 
 export function testResolution(overrides: Partial<ResolutionRecord> = {}): ResolutionRecord {
@@ -24,6 +25,8 @@ export function testResolution(overrides: Partial<ResolutionRecord> = {}): Resol
 }
 
 export function testReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
+  const artifactRoot = path.resolve('review-artifacts', 'review-default')
+  const artifactPath = path.join(artifactRoot, 'package', 'dsh-tool-calculator.tgz')
   return {
     schemaVersion: 1,
     id: `review_${'a'.repeat(64)}`,
@@ -57,12 +60,12 @@ export function testReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord 
     missingCapabilities: [],
     findings: [],
     recommendation: 'use',
-    installSpec: 'file:C:/workspace/review-artifacts/review-default/package/dsh-tool-calculator.tgz',
+    installSpec: `file:${artifactPath.replaceAll('\\', '/')}`,
     artifact: {
       sha256: 'f'.repeat(64),
       bytes: 8,
       entryCount: 1,
-      ownedRoot: 'C:/workspace/review-artifacts/review-default',
+      ownedRoot: artifactRoot,
     },
     ...overrides,
   }
