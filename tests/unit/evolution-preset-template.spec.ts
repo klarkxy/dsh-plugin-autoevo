@@ -70,7 +70,7 @@ describe('evolution preset template', () => {
   })
 
   it('trusts only the exact current clean-slate template', () => {
-    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('17')
+    expect(EVOLUTION_PRESET_TEMPLATE_VERSION).toBe('18')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[0]).toEqual({
       owner: 'dsh-plugin-autoevo',
       schemaVersion: 1,
@@ -86,9 +86,13 @@ describe('evolution preset template', () => {
       templateVersion: '16',
       files: { 'agent.cordis.yml': '334f46d87e6f071a9db0da7b334010b1ff20e59996584ba27564f3cb77eb0d86' },
     })
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[4]).toMatchObject({
+      templateVersion: '17',
+      files: { 'agent.cordis.yml': 'b0cbe8d0a90bbfd1a554c9df94d050d0dc5d04da0c908a04636657eba8c2b508' },
+    })
     expect(managedFileHash('agent.cordis.yml')).toMatch(/^[a-f0-9]{64}$/u)
     expect(managedFileHash('preset.yml')).toMatch(/^[a-f0-9]{64}$/u)
-    expect(managedFileHash('skills/cordis-plugin-development/SKILL.md')).toBe('01811d3ee9c03a466abae12d54d229e7de7bd74ca6b730c54ce9d5e696b294aa')
-    expect(managedFileHash('skills/editing-cordis-compositions/SKILL.md')).toBe('b223233e9df5c8cbedeb7dee8d38ddc47d545af54b323abe3830f4748b688f6c')
+    expect(managedFileHash('skills/cordis-plugin-development/SKILL.md')).toBe('5b2f44c10d88b4fc1612454798f8f95cec477686260e52e4277fc436be905d7b')
+    expect(managedFileHash('skills/editing-cordis-compositions/SKILL.md')).toBe('2b7101ad02046396fe2ef594703bc7bd5489310272a8048876972dcf91abb890')
   })
 })

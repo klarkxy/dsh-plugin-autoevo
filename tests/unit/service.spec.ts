@@ -286,6 +286,8 @@ describe('managed modification instruction', () => {
     expect(order.blockers.map((item) => item.summary).join(' ')).toContain('multi-part capture')
     expect(order.blockers.map((item) => item.summary).join(' ')).toContain('unsafe_script at package.json: install script is present')
     expect(order.acceptanceTargets.join(' ')).toContain('choose the implementation path')
+    expect(order.acceptanceTargets.join(' ')).toContain('Materializing declared dependencies with pnpm install --ignore-scripts')
+    expect(order.acceptanceTargets.join(' ')).toContain('pnpm add/update/remove/dlx, npx, and publishing remain denied')
     expect(JSON.stringify(order)).not.toContain('edit package.json')
   })
 
@@ -409,7 +411,7 @@ describe('managed modification instruction', () => {
     })
   })
 
-  it('does not allow a third automatic modification after the existing two-attempt bound', () => {
+  it('does not allow another modification after the three-attempt bound', () => {
     const attempt = {
       attempt: 1,
       childSessionId: 'child',
@@ -425,10 +427,10 @@ describe('managed modification instruction', () => {
       policyVersion: POLICY_VERSION,
       baselineReviewId: 'review-before',
       baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
+      maxAttempts: 3,
       automaticCorrectionUsed: true,
       status: 'unresolved',
-      attempts: [attempt, { ...attempt, attempt: 2 }],
+      attempts: [attempt, { ...attempt, attempt: 2 }, { ...attempt, attempt: 3 }],
       resolvedBlockers: [],
       unresolvedBlockers: [{ key: 'compat', kind: 'compatibility', summary: 'still incompatible' }],
       introducedBlockers: [],
@@ -438,7 +440,20 @@ describe('managed modification instruction', () => {
       policyVersion: POLICY_VERSION,
       baselineReviewId: 'review-before',
       baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
+      maxAttempts: 3,
+      automaticCorrectionUsed: true,
+      status: 'unresolved',
+      attempts: [attempt, { ...attempt, attempt: 2 }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [{ key: 'compat', kind: 'compatibility', summary: 'still incompatible' }],
+      introducedBlockers: [],
+    })).toBe(false)
+    expect(modificationAttemptsExhausted({
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 3,
       automaticCorrectionUsed: false,
       status: 'unresolved',
       attempts: [attempt],
@@ -451,7 +466,7 @@ describe('managed modification instruction', () => {
       policyVersion: POLICY_VERSION,
       baselineReviewId: 'review-before',
       baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
+      maxAttempts: 3,
       automaticCorrectionUsed: false,
       status: 'resolved',
       attempts: [attempt],
@@ -459,6 +474,36 @@ describe('managed modification instruction', () => {
       unresolvedBlockers: [],
       introducedBlockers: [],
     })).toBe(false)
+  })
+
+  it('classifies Host-observed shell checks over child prose', () => {
+    expect(_testing.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED', [{
+      command: 'pnpm test',
+      exitCode: 0,
+      matchesAcceptance: true,
+    }])).toMatchObject({
+      source: 'host_observed',
+      status: 'passed',
+      summary: expect.stringMatching(/Host observed pnpm test exit 0/i),
+    })
+    expect(_testing.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED', [{
+      command: 'pnpm test',
+      exitCode: 1,
+      matchesAcceptance: true,
+    }])).toMatchObject({
+      source: 'host_observed',
+      status: 'failed',
+      summary: expect.stringMatching(/Host observed pnpm test exit 1/i),
+    })
+    expect(_testing.childCheckEvidence('Tests passed.\nAUTOEVO_CHILD_COMPLETED', [{
+      command: 'git status',
+      exitCode: 0,
+      matchesAcceptance: false,
+    }])).toMatchObject({
+      source: 'child_reported',
+      status: 'passed',
+      hostObservedChecks: [{ command: 'git status', exitCode: 0, matchesAcceptance: false }],
+    })
   })
 })
 

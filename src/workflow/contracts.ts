@@ -17,7 +17,7 @@ import type {
   VerificationLayerKind,
   WorkflowOptionId,
 } from '../contracts.js'
-import { creatorAgentFacts, type CreatorRecord } from '../creator-foundation.js'
+import { creatorAgentFacts, type CreatorRecord, type HostObservedCheck } from '../creator-foundation.js'
 import { EvolutionError } from '../errors.js'
 import { isDirectlyUsableReview, isManagedModificationEligibleReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
@@ -25,7 +25,7 @@ import { hashObject } from '../state/hashes.js'
 import { boundedAgentText } from './sanitize.js'
 import type { WorkflowLifecycleState } from './lifecycle.js'
 
-export type { CreatorRecord }
+export type { CreatorRecord, HostObservedCheck }
 
 export type { WorkflowLifecycleState }
 
@@ -333,6 +333,7 @@ export interface ModificationCheckEvidence {
   source: 'host_observed' | 'child_reported' | 'unknown'
   status: ModificationCheckStatus
   summary: string
+  hostObservedChecks?: HostObservedCheck[]
 }
 
 export interface ModificationAttemptEvidence {
@@ -346,11 +347,21 @@ export interface ModificationAttemptEvidence {
   checks: ModificationCheckEvidence
 }
 
+function compactObservedChecks(checks: readonly HostObservedCheck[] | undefined): Record<string, unknown>[] | undefined {
+  if (!checks?.length) return undefined
+  return checks.slice(0, 8).map((item) => ({
+    command: boundedAgentText(item.command, 180),
+    exit_code: item.exitCode,
+    matches_acceptance: item.matchesAcceptance,
+  }))
+}
+
 /** Compact/interrupt facts for a child or Host check. Distinguishes unavailable tools from assertion failure. */
 export function modificationCheckModelFacts(
   checks: ModificationCheckEvidence | undefined,
 ): Record<string, unknown> | undefined {
   if (!checks) return undefined
+  const observed = compactObservedChecks(checks.hostObservedChecks)
   return {
     source: checks.source,
     status: checks.status,
@@ -358,8 +369,12 @@ export function modificationCheckModelFacts(
     ...(checks.status === 'unavailable' ? {
       meaning: 'Checks could not run because the local toolchain was unavailable; the plugin is not verified.',
     } : {}),
+    ...(observed ? { host_observed_checks: observed } : {}),
   }
 }
+
+/** Host-minted modification attempt ceiling. Legacy receipts may still store 2. */
+export const MODIFICATION_MAX_ATTEMPTS = 3
 
 export interface ModificationOutcome {
   contractVersion: 1
@@ -367,7 +382,7 @@ export interface ModificationOutcome {
   baselineReviewId: string
   instructionHash?: string
   baselineRuntimeVersion: string | null
-  maxAttempts: 2
+  maxAttempts: 2 | 3
   automaticCorrectionUsed: boolean
   status: 'resolved' | 'unresolved' | 'indeterminate'
   attempts: ModificationAttemptEvidence[]

@@ -526,7 +526,7 @@ describe('AgentWorkflowViewV2', () => {
       policyVersion: POLICY_VERSION,
       baselineReviewId: 'review-before',
       baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
+      maxAttempts: 3,
       automaticCorrectionUsed: true,
       status: 'unresolved',
       attempts: [{
@@ -557,6 +557,56 @@ describe('AgentWorkflowViewV2', () => {
     expect(JSON.stringify(card)).not.toContain('private-child-session')
   })
 
+  it('surfaces Host-observed child shell checks separately from child-reported claims', () => {
+    const workflow = baseWorkflow('await_confirmation')
+    workflow.modificationOutcome = {
+      contractVersion: 1,
+      policyVersion: POLICY_VERSION,
+      baselineReviewId: 'review-before',
+      baselineRuntimeVersion: '0.1.0-rc.6',
+      maxAttempts: 3,
+      automaticCorrectionUsed: false,
+      status: 'indeterminate',
+      attempts: [{
+        attempt: 1,
+        childSessionId: 'private-child-session',
+        commit: 'c'.repeat(40),
+        changedFiles: ['src/index.ts'],
+        changedFilesTruncated: false,
+        postReviewId: 'review-after',
+        completionMarkerObserved: true,
+        checks: {
+          source: 'host_observed',
+          status: 'passed',
+          summary: 'Host observed pnpm test exit 0.',
+          hostObservedChecks: [
+            { command: 'pnpm test', exitCode: 0, matchesAcceptance: true, stdoutTail: 'secret-output' },
+          ],
+        },
+      }],
+      resolvedBlockers: [],
+      unresolvedBlockers: [],
+      introducedBlockers: [],
+    }
+    const card = compactAgentView({ workflow, resolution: resolution(), lifecycleState: 'awaiting_confirmation' })
+    expect(card.facts.modification).toMatchObject({
+      host_verified_attempts: [{
+        checks: {
+          source: 'host_observed',
+          status: 'passed',
+          summary: 'Host observed pnpm test exit 0.',
+          host_observed_checks: [{
+            command: 'pnpm test',
+            exit_code: 0,
+            matches_acceptance: true,
+          }],
+        },
+      }],
+    })
+    expect(JSON.stringify(card)).not.toContain('secret-output')
+    expect(JSON.stringify(card)).not.toContain('private-child-session')
+  })
+
   it('keeps committed modification evidence visible while Host re-review is pending repair', () => {
     const workflow = baseWorkflow('await_modify_work')
     workflow.pendingPath = 'D:/managed/source'
@@ -571,7 +621,7 @@ describe('AgentWorkflowViewV2', () => {
       policyVersion: POLICY_VERSION,
       baselineReviewId: 'review-before',
       baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
+      maxAttempts: 3,
       automaticCorrectionUsed: false,
       status: 'indeterminate',
       attempts: [{

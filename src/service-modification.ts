@@ -1,11 +1,17 @@
 import { satisfies, valid, validRange } from 'semver'
 import type { ResolutionRecord, ReviewRecord } from './contracts.js'
-import { createCreatorWorkOrder, type CreatorWorkOrder } from './creator-foundation.js'
+import {
+  createCreatorWorkOrder,
+  isAcceptanceCheckCommand,
+  type CreatorWorkOrder,
+  type HostObservedCheck,
+} from './creator-foundation.js'
 import { hostDirectUseBoundary } from './review/index.js'
 import { hashObject } from './state/hashes.js'
 import type {
   ModificationAttemptEvidence,
   ModificationBlocker,
+  ModificationCheckEvidence,
   ModificationOutcome,
 } from './workflow/contracts.js'
 
@@ -155,33 +161,128 @@ function reportsGenuineTestFailure(report: string): boolean {
   return false
 }
 
-export function childCheckEvidence(taskResult: string): ModificationAttemptEvidence['checks'] {
+const MAX_PERSISTED_OBSERVED_CHECKS = 24
+
+function boundObservedChecks(observed: readonly HostObservedCheck[] | undefined): HostObservedCheck[] {
+  return (observed ?? []).slice(0, MAX_PERSISTED_OBSERVED_CHECKS).map((item) => {
+    const bounded: HostObservedCheck = {
+      command: item.command,
+      exitCode: item.exitCode,
+      matchesAcceptance: item.matchesAcceptance,
+    }
+    if (item.stdoutTail) bounded.stdoutTail = item.stdoutTail
+    return bounded
+  })
+}
+
+function quotedCommand(command: string): string {
+  return command.length <= 80 ? command : `${command.slice(0, 79)}…`
+}
+
+function lastMatching(
+  items: readonly HostObservedCheck[],
+  predicate: (item: HostObservedCheck) => boolean,
+): HostObservedCheck | undefined {
+  return items.filter(predicate).at(-1)
+}
+
+function classifyHostObservedChecks(observed: readonly HostObservedCheck[]): ModificationCheckEvidence | undefined {
+  const matching = observed.filter((item) => item.matchesAcceptance || isAcceptanceCheckCommand(item.command))
+  if (matching.length === 0) return undefined
+  const isTest = (item: HostObservedCheck) => /(?:\btest\b|\bvitest\b)/iu.test(item.command)
+  const isBuild = (item: HostObservedCheck) => /(?:\bbuild\b|\btsc\b|\btypecheck\b)/iu.test(item.command) && !isTest(item)
+  const primary = lastMatching(matching, (item) => isTest(item) && item.exitCode !== 0 && item.exitCode !== null)
+    ?? lastMatching(matching, (item) => isTest(item) && item.exitCode === 0)
+    ?? lastMatching(matching, (item) => isBuild(item) && item.exitCode !== 0 && item.exitCode !== null)
+    ?? lastMatching(matching, (item) => isBuild(item) && item.exitCode === 0)
+    ?? matching.at(-1)
+  if (!primary) return undefined
+  const command = quotedCommand(primary.command)
+  const tail = primary.stdoutTail ?? ''
+  if (primary.exitCode === 0) {
+    return {
+      source: 'host_observed',
+      status: 'passed',
+      summary: `Host observed ${command} exit 0.`,
+    }
+  }
+  if (tail && reportsUnavailableLocalToolchain(tail)) {
+    return {
+      source: 'host_observed',
+      status: 'unavailable',
+      summary: `Host observed ${command} but the local toolchain was unavailable; the plugin is not verified.`,
+    }
+  }
+  if (primary.exitCode === null) {
+    return {
+      source: 'host_observed',
+      status: 'unknown',
+      summary: `Host observed ${command} without a recorded exit code.`,
+    }
+  }
+  return {
+    source: 'host_observed',
+    status: 'failed',
+    summary: `Host observed ${command} exit ${primary.exitCode}.`,
+  }
+}
+
+function attachObservedChecks(
+  evidence: ModificationCheckEvidence,
+  observed: HostObservedCheck[],
+): ModificationCheckEvidence {
+  return observed.length > 0 ? { ...evidence, hostObservedChecks: observed } : evidence
+}
+
+export function childCheckEvidence(
+  taskResult: string,
+  observed?: readonly HostObservedCheck[],
+): ModificationAttemptEvidence['checks'] {
+  const bounded = boundObservedChecks(observed)
+  const host = classifyHostObservedChecks(bounded)
+  if (host) return attachObservedChecks(host, bounded)
   const report = taskResult.replace(/\s*AUTOEVO_CHILD_COMPLETED\s*$/u, '')
   if (reportsGenuineTestFailure(report)) {
-    return {
+    return attachObservedChecks({
       source: 'child_reported',
       status: 'failed',
       summary: 'The managed child reported that tests failed; Host did not independently observe the command result.',
-    }
+    }, bounded)
   }
   // Command failures caused only by missing local tools are not assertion failures.
   if (reportsUnavailableLocalToolchain(report)) {
-    return {
+    return attachObservedChecks({
       source: 'child_reported',
       status: 'unavailable',
       summary: 'Checks could not run because the local toolchain was unavailable; the plugin is not verified. The managed child reported missing local test tools; Host did not independently observe the command result.',
-    }
+    }, bounded)
   }
   if (/skipped (?:the )?(?:test|tests|test run)|tests? (?:were )?not run|未运行测试|跳过测试/iu.test(report)) {
-    return { source: 'child_reported', status: 'skipped', summary: 'The managed child reported that tests were skipped.' }
+    return attachObservedChecks({
+      source: 'child_reported',
+      status: 'skipped',
+      summary: 'The managed child reported that tests were skipped.',
+    }, bounded)
   }
   if (/(?:tests?|test run).{0,60}(?:passed|successful)|测试.{0,40}通过/iu.test(report)) {
-    return { source: 'child_reported', status: 'passed', summary: 'The managed child reported that tests passed; Host did not independently observe the command result.' }
+    return attachObservedChecks({
+      source: 'child_reported',
+      status: 'passed',
+      summary: 'The managed child reported that tests passed; Host did not independently observe the command result.',
+    }, bounded)
   }
   if (new RegExp(TEST_FAILURE, 'iu').test(report)) {
-    return { source: 'child_reported', status: 'failed', summary: 'The managed child reported that tests failed; Host did not independently observe the command result.' }
+    return attachObservedChecks({
+      source: 'child_reported',
+      status: 'failed',
+      summary: 'The managed child reported that tests failed; Host did not independently observe the command result.',
+    }, bounded)
   }
-  return { source: 'unknown', status: 'unknown', summary: 'Host did not independently observe a test command result.' }
+  return attachObservedChecks({
+    source: 'unknown',
+    status: 'unknown',
+    summary: 'Host did not independently observe a test command result.',
+  }, bounded)
 }
 
 export function authenticatedModificationInstruction(resolution: ResolutionRecord, review: ReviewRecord): string | undefined {
@@ -225,6 +326,7 @@ export function modificationWorkOrder(
       'Host re-review must not introduce a new blocking target',
       'Preserve package identity and choose the implementation path without expanding scope',
       'Leave package.json-declared runtime entrypoints and generated build artifacts present; Host packages with lifecycle scripts disabled',
+      'Materializing declared dependencies with pnpm install --ignore-scripts inside the managed root is allowed; pnpm add/update/remove/dlx, npx, and publishing remain denied',
       ...(repairFiber
         ? ['Host re-review and later install must produce a Loader-visible wrapping Fiber; do not reinstall the failed specification unchanged']
         : []),

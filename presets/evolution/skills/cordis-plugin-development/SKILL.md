@@ -3,6 +3,12 @@ name: cordis-plugin-development
 description: Create, modify, debug, or extend dynamic Cordis Plugins, including Host Services and Events, Client Slot and theme UI, Package-private Client-to-Host calls, dynamic Tools, version updates, approval failures, and runtime diagnostics. Use this Skill to route a user request to the correct platform and Inspect Provider, then define, run, repair, or roll back the Plugin.
 ---
 
+## AutoEvo managed-child override
+
+Inside an AutoEvo Host-owned managed construction child, the execution guard denies `cordis_define`, `cordis_run`, mount/unmount/undefine, `pnpm add/update/remove/dlx`, `npx`, Git commands, nested collaboration/delegation, and `find_dsh_plugin`. Editing `package.json` and running `pnpm install --ignore-scripts` (bare, no package arguments) inside the managed root is allowed so declared dependencies can be materialized for builds and tests.
+
+The sections below that teach live define/run/mount lifecycles are background reading for writing correct plugin source code only. Deliver source files in the managed root and let the Host build, review, and install.
+
 # Develop Dynamic Cordis Plugins
 
 First determine whether a capability belongs on Host or Client, then query the real interface before writing code. Never infer a complete API from a Service name, Event payload, Slot props, theme token, or example.

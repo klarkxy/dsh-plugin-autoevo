@@ -73,6 +73,15 @@ describe('parent execution boundaries', () => {
     expect(parent.guard(exec('pwsh', { command: 'Get-Content (Remove-Item notes.txt -PassThru)' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('pwsh', { command: 'Get-Content notes.txt & whoami' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('pwsh', { command: 'pnpm test' }))).toMatch(/read-only shell/i)
+    expect(parent.guard(exec('pwsh', { command: 'node --version' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'node -v' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'pnpm --version' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'pnpm -v' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'npm --version' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'git --version' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'where node' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'Get-Command pnpm' }))).toBeUndefined()
+    expect(parent.guard(exec('pwsh', { command: 'node evil.js' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('bash', { command: 'rg --pre dangerous needle .' }))).toMatch(/read-only shell/i)
     expect(parent.guard(exec('pwsh', { command: 'git diff --output=outside.patch' }))).toMatch(/read-only shell/i)
     const protectedParent = new ExecutionGuard({ role: 'parent', cwd: 'C:/workspace', protectedRoots: ['C:/workspace/.autoevo'] })
@@ -191,10 +200,18 @@ describe('child execution boundaries', () => {
     expect(child.guard(exec('pwsh', { command: 'pnpm version patch' }))).toMatch(/publication|version|release|deploy|install/i)
     expect(child.guard(exec('bash', { command: 'pnpm run release' }))).toMatch(/publication|version|release|deploy|install/i)
     expect(child.guard(exec('pwsh', { command: 'dsh deploy' }))).toMatch(/publication|version|release|deploy|install/i)
-    expect(child.guard(exec('pwsh', { command: 'pnpm install --store-dir .pnpm-store' }))).toMatch(/dependency installation/i)
-    expect(child.guard(exec('pwsh', { command: 'C:\\tools\\pnpm.cmd add left-pad' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm install --store-dir .pnpm-store' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('pwsh', { command: 'C:\\tools\\pnpm.cmd add left-pad' }))).toMatch(/CLI dependency mutation/i)
     expect(child.guard(exec('pwsh', { command: 'C:\\tools\\dsh.cmd plugin add unsafe' }))).toMatch(/plugin install\/remove/i)
-    expect(child.guard(exec('bash', { command: 'npx vitest run' }))).toMatch(/dependency installation/i)
+    expect(child.guard(exec('bash', { command: 'npx vitest run' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm install --ignore-scripts' }))).toBeUndefined()
+    expect(child.guard(exec('pwsh', { command: 'C:\\tools\\pnpm.cmd install --ignore-scripts --offline' }))).toBeUndefined()
+    expect(child.guard(exec('pwsh', { command: 'pnpm i --ignore-scripts --prefer-offline' }))).toBeUndefined()
+    expect(child.guard(exec('pwsh', { command: 'pnpm install --ignore-scripts && pnpm test' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm install --ignore-scripts left-pad' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm install' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('pwsh', { command: 'pnpm add x' }))).toMatch(/CLI dependency mutation/i)
+    expect(child.guard(exec('bash', { command: 'npx anything' }))).toMatch(/CLI dependency mutation/i)
     expect(child.guard(exec('skill', { name: 'autoevo-plugin-creator' }))).toMatch(/official Creator skills/i)
     expect(child.guard(exec('skill', { name: 'some-other-skill' }))).toMatch(/official Creator skills/i)
     expect(child.guard(exec('external_mutator'))).toMatch(/unrecognized tool/i)
@@ -206,6 +223,7 @@ describe('child execution boundaries', () => {
       exec('write'),
       exec('read'),
       exec('pwsh', { command: 'pnpm test' }),
+      exec('pwsh', { command: 'pnpm install --ignore-scripts' }),
       exec('pwsh', { command: 'pnpm run build' }),
       exec('bash', { command: 'cargo test' }),
       exec('bash', { command: 'git diff --check' }),

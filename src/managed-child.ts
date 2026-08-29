@@ -7,27 +7,50 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import { setSandboxMode, type SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
+import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
   CREATOR_PRESET_ID,
   assertChildCreatorCatalog,
   assertWorkOrderScope,
+  commandMatchesAcceptanceTarget,
   compositionSha256,
   formatCreatorWorkOrder,
+  isCreatorShellTool,
   mintCreatorReceipt,
   preflightCreatorFoundation,
   type CreatorFoundationPreflight,
   type CreatorFoundationReceipt,
   type CreatorWorkOrder,
+  type HostObservedCheck,
 } from './creator-foundation.js'
 import { EvolutionError } from './errors.js'
 import { ExecutionGuard } from './execution-guard.js'
+import { isPathInside, isRecord } from './internal-utils.js'
 import type { CommandRunner } from './process/runner.js'
 import { probeWorkspaceWriteSandbox } from './sandbox-probe.js'
 
 const CHILD_RESULT_MARKER = 'AUTOEVO_CHILD_COMPLETED'
-const CHILD_SOFT_STEP_LIMIT = 48
-const CHILD_HARD_STEP_LIMIT = 52
+const CHILD_SOFT_STEP_LIMIT = 72
+const CHILD_HARD_STEP_LIMIT = 80
+const CHILD_SOFT_STEP_CAP = 112
+const CHILD_HARD_STEP_CAP = 120
 const CHILD_BUDGET_DENIAL = 'Managed child execution budget is exhausted; stop calling tools and return the final result marker now.'
+const MAX_HOST_OBSERVED_CHECKS = 24
+const MAX_OBSERVED_COMMAND = 180
+const MAX_OBSERVED_STDOUT_TAIL = 160
+
+export interface ChildStepBudget {
+  soft: number
+  hard: number
+}
+
+export function childStepBudgetFor(workOrder: CreatorWorkOrder): ChildStepBudget {
+  const extra = Math.max(0, workOrder.acceptanceTargets.length - 3) * 4
+  return {
+    soft: Math.min(CHILD_SOFT_STEP_LIMIT + extra, CHILD_SOFT_STEP_CAP),
+    hard: Math.min(CHILD_HARD_STEP_LIMIT + extra, CHILD_HARD_STEP_CAP),
+  }
+}
 
 function childBudgetMessage(): UserMessage {
   return createUserMessage({
@@ -42,17 +65,22 @@ function childBudgetMessage(): UserMessage {
 class ChildTurnBudget {
   private forcingFinal = false
 
+  constructor(private readonly limits: ChildStepBudget = {
+    soft: CHILD_SOFT_STEP_LIMIT,
+    hard: CHILD_HARD_STEP_LIMIT,
+  }) {}
+
   async preStep(
     step: number,
     messages: UserMessage[],
     next: () => Promise<PreStepDecision>,
   ): Promise<PreStepDecision> {
-    if (step >= CHILD_HARD_STEP_LIMIT) {
+    if (step >= this.limits.hard) {
       this.forcingFinal = true
       return { kind: 'reject' }
     }
     const decision = await next()
-    if (decision.kind === 'reject' || step < CHILD_SOFT_STEP_LIMIT) return decision
+    if (decision.kind === 'reject' || step < this.limits.soft) return decision
     this.forcingFinal = true
     return { kind: 'enter', messages: [...decision.messages, childBudgetMessage()] }
   }
@@ -75,6 +103,7 @@ export interface ManagedChildResult {
   taskResult: string
   sandbox: Awaited<ReturnType<typeof probeWorkspaceWriteSandbox>>
   creator: CreatorFoundationReceipt
+  hostObservedChecks?: HostObservedCheck[]
 }
 
 export interface ManagedChildHost {
@@ -130,7 +159,7 @@ function assertCompletedTurn(agent: Agent): void {
   }
 }
 
-function childInstruction(cwd: string, workOrder: CreatorWorkOrder): string {
+function childInstruction(cwd: string, workOrder: CreatorWorkOrder, budget = childStepBudgetFor(workOrder)): string {
   return `You are the AutoEvo managed-source implementation child on the official Creator (cordis) preset.
 
 Your exact workspace is: ${JSON.stringify(cwd)}
@@ -143,15 +172,140 @@ Rules enforced by the Host:
 - Use cordis_inspect_list, cordis_inspect_query, and cordis_inspect_self when you need live runtime facts. Never call cordis_define, cordis_run, cordis_stop, cordis_undefine, cordis_mount, or cordis_unmount.
 - Work only inside the exact workspace. Do not inspect or change sibling paths.
 - Spend at most 12 model steps inspecting and make the first source edit before step 16. Do not substitute broad installed-package/runtime exploration for implementing the smallest in-repository solution.
-- Do not call AutoEvo decision tools, nested delegation, plugin install/remove, gh, git writes, dependency mutation, version, publish, release, deploy, or install commands.
-- Run appropriate local tests when available. Do not run package install/add/ci/dlx/exec commands or install new dependencies from the network; the Host rejects dependency mutation.
+- Do not call AutoEvo decision tools, nested delegation, plugin install/remove, gh, git writes, CLI dependency mutation (\`pnpm add/update/remove/dlx\`, \`npx\`), version, publish, or release/deploy commands.
+- You may declare dependencies in package.json and materialize them with \`pnpm install --ignore-scripts\` (no package arguments), then genuinely run builds and tests.
 - Keep verification bounded: attempt the project's normal test command at most once, then one build or typecheck that does not hit the same sandbox denial.
 - On Windows, a test runner that reports spawn EPERM because confined processes cannot open piped stdio is a final sandbox limitation. Do not retry it, create alternate runners/configs, or modify test infrastructure to work around it; report the skipped test and continue to the final diff review.
-- The Host enforces a ${CHILD_SOFT_STEP_LIMIT}-step soft budget. Finish before it; after that the Host denies further tools and requires the final marker.
+- The Host enforces a ${budget.soft}-step soft budget. Finish before it; after that the Host denies further tools and requires the final marker.
 - Do not commit; the Host performs the reviewed hookless unsigned commit after you return.
-- Do not install or claim success; Host re-review and freeze decide that.
+- Do not publish or claim success; Host re-review and freeze decide that.
 - Finish with a short result whose final line is exactly ${CHILD_RESULT_MARKER}.
 `
+}
+
+function sanitizeObservedCommand(command: string): string {
+  const normalized = command.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  if (normalized.length <= MAX_OBSERVED_COMMAND) return normalized
+  return `${normalized.slice(0, MAX_OBSERVED_COMMAND - 1)}…`
+}
+
+function shellCommandFromArguments(args: unknown): string {
+  if (!isRecord(args)) return ''
+  for (const key of ['command', 'cmd', 'script']) {
+    const value = args[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  const argv = args.argv
+  if (Array.isArray(argv) && argv.every((item) => typeof item === 'string')) {
+    return argv.join(' ')
+  }
+  return ''
+}
+
+function shellCwdFromArguments(args: unknown, sessionCwd: string): string {
+  if (!isRecord(args)) return sessionCwd
+  for (const key of ['cwd', 'working_directory', 'workdir', 'workingDirectory']) {
+    const value = args[key]
+    if (typeof value === 'string' && value.trim()) {
+      return path.resolve(sessionCwd, value)
+    }
+  }
+  return sessionCwd
+}
+
+function contentText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content.flatMap((block) => {
+    if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') return []
+    return [block.text]
+  }).join('\n')
+}
+
+function integerOrNull(value: unknown): number | null | undefined {
+  if (value === null) return null
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  return undefined
+}
+
+function exitCodeFromUnknown(value: unknown): number | null | undefined {
+  const direct = integerOrNull(value)
+  if (direct !== undefined) return direct
+  if (!isRecord(value)) return undefined
+  for (const key of ['exitCode', 'exit_code', 'code', 'status']) {
+    const found = integerOrNull(value[key])
+    if (found !== undefined) return found
+  }
+  if ('outcome' in value) {
+    const nested = exitCodeFromUnknown(value.outcome)
+    if (nested !== undefined) return nested
+  }
+  return undefined
+}
+
+function stdoutTailFromUnknown(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!isRecord(value)) return ''
+  for (const key of ['stdout', 'output', 'stderr']) {
+    const text = value[key]
+    if (typeof text === 'string' && text.trim()) return text
+  }
+  return ''
+}
+
+function exitCodeFromResult(result: Readonly<ToolExecutionResult>): number | null {
+  if (!result.isError) {
+    const fromValue = exitCodeFromUnknown(result.value)
+    if (fromValue !== undefined) return fromValue
+  }
+  const fromMeta = exitCodeFromUnknown(result.meta)
+  if (fromMeta !== undefined) return fromMeta
+  const fromContent = /exit(?:\s+code)?[:\s]+(-?\d+)/iu.exec(contentText(result.content))
+  if (fromContent) return Number(fromContent[1])
+  return result.isError ? 1 : 0
+}
+
+function stdoutTailFromResult(result: Readonly<ToolExecutionResult>): string | undefined {
+  const chunks = [
+    result.isError ? '' : stdoutTailFromUnknown(result.value),
+    stdoutTailFromUnknown(result.meta),
+    contentText(result.content),
+  ].filter((item) => item.length > 0)
+  if (chunks.length === 0) return undefined
+  const combined = chunks.join('\n').normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  if (!combined) return undefined
+  return combined.length <= MAX_OBSERVED_STDOUT_TAIL
+    ? combined
+    : combined.slice(-MAX_OBSERVED_STDOUT_TAIL)
+}
+
+class ChildShellObserver {
+  private readonly observed: HostObservedCheck[] = []
+
+  constructor(
+    private readonly root: string,
+    private readonly workOrder: CreatorWorkOrder,
+  ) {}
+
+  noteResult(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): void {
+    if (!isCreatorShellTool(exec.name)) return
+    const command = sanitizeObservedCommand(shellCommandFromArguments(exec.arguments))
+    if (!command) return
+    const cwd = shellCwdFromArguments(exec.arguments, this.root)
+    if (!isPathInside(this.root, cwd)) return
+    if (this.observed.length >= MAX_HOST_OBSERVED_CHECKS) return
+    const check: HostObservedCheck = {
+      command,
+      exitCode: exitCodeFromResult(result),
+      matchesAcceptance: commandMatchesAcceptanceTarget(command, this.workOrder.acceptanceTargets),
+    }
+    const stdoutTail = stdoutTailFromResult(result)
+    if (stdoutTail) check.stdoutTail = stdoutTail
+    this.observed.push(check)
+  }
+
+  snapshot(): HostObservedCheck[] {
+    return [...this.observed]
+  }
 }
 
 /** Real Host-owned DSH child lifecycle. */
@@ -181,7 +335,9 @@ export class DshManagedChildHost implements ManagedChildHost {
     })
     const expectedChildCompositionSha256 = compositionSha256(await services.agentPresets.read(CREATOR_PRESET_ID))
     const childGuard = new ExecutionGuard({ role: 'child' })
-    const childBudget = new ChildTurnBudget()
+    const budgetLimits = childStepBudgetFor(request.workOrder)
+    const childBudget = new ChildTurnBudget(budgetLimits)
+    const shellObserver = new ChildShellObserver(cwd, request.workOrder)
     const sessionId = SessionId(`autoevo-child-${randomUUID()}`)
     const handle = await parentAgents.create({
       sessionId,
@@ -217,6 +373,9 @@ export class DshManagedChildHost implements ManagedChildHost {
           const budgetDenial = childBudget.denialReason()
           return budgetDenial ? Promise.resolve({ kind: 'deny', reason: budgetDenial }) : childGuard.preExecute(exec, next)
         })
+        agentCtx.on('tools/result', (exec, result) => {
+          shellObserver.noteResult(exec, result)
+        })
         agentCtx.tools.guard((exec) => childGuard.guard(exec))
         agentCtx.systemPrompt.section({
           name: 'autoevo:managed-child-boundary',
@@ -248,7 +407,7 @@ export class DshManagedChildHost implements ManagedChildHost {
 
       handle.agent.followup(createUserMessage({
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
-        content: [{ type: 'text', text: childInstruction(cwd, request.workOrder) }],
+        content: [{ type: 'text', text: childInstruction(cwd, request.workOrder, budgetLimits) }],
       }))
       await waitForIdleOrAbort(handle, request.signal, dispose)
       assertCompletedTurn(handle.agent)
@@ -262,6 +421,7 @@ export class DshManagedChildHost implements ManagedChildHost {
         taskResult,
         sandbox,
         creator: mintCreatorReceipt(preflight, childSessionId),
+        hostObservedChecks: shellObserver.snapshot(),
       }
     } finally {
       await dispose()
@@ -274,11 +434,19 @@ export const _testing = {
   assertCompletedTurn,
   childInstruction,
   childBudgetMessage,
+  childStepBudgetFor,
   ChildTurnBudget,
+  ChildShellObserver,
   CHILD_RESULT_MARKER,
   CHILD_SOFT_STEP_LIMIT,
   CHILD_HARD_STEP_LIMIT,
+  CHILD_SOFT_STEP_CAP,
+  CHILD_HARD_STEP_CAP,
   CHILD_BUDGET_DENIAL,
+  MAX_HOST_OBSERVED_CHECKS,
+  MAX_OBSERVED_COMMAND,
+  shellCommandFromArguments,
+  exitCodeFromResult,
   waitForIdleOrAbort,
 }
 

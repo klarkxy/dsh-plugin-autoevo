@@ -630,7 +630,7 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
         : 'modify_attempts_exhausted',
       message: ctx.workflow.modificationOutcome?.introducedBlockers.length
         ? 'Host re-review found new blocking modification targets; another construction round will not be started.'
-        : 'Modification already used its two Host-bounded attempts. Diagnose or choose a different reviewed action; Host will not start another construction round.',
+        : 'Modification already used all of its Host-bounded attempts. Diagnose or choose a different reviewed action; Host will not start another construction round.',
       retryable: false,
     }
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }

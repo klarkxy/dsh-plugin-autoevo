@@ -87,6 +87,10 @@ function runtime(cwd: string, owned = true, lifecycle: {
   whenIdle?: () => Promise<void>
   onDispose?: () => void
   childCwd?: string
+  emitShell?: (emit: (exec: {
+    name: string
+    arguments: unknown
+  }, result: { isError: boolean; value?: unknown; content: unknown[]; meta?: unknown }) => void) => Promise<void> | void
 } = {}) {
   const modes: string[] = []
   const services = sandboxServices(cwd, modes)
@@ -95,6 +99,8 @@ function runtime(cwd: string, owned = true, lifecycle: {
   const followups: UserMessage[] = []
   let createOptions: CreateAgentOptions | undefined
   let preExecuteInstalled = false
+  let resultInstalled = false
+  let resultHandler: ((exec: unknown, result: unknown) => void) | undefined
   let guardInstalled = false
   let composedPreset: string | undefined
   const agents = {
@@ -120,7 +126,12 @@ function runtime(cwd: string, owned = true, lifecycle: {
         options: options.agentOptions ?? {},
         session,
         followup(message: UserMessage) { followups.push(message) },
-        async whenIdle() { await lifecycle.whenIdle?.() },
+        async whenIdle() {
+          if (lifecycle.emitShell && resultHandler) {
+            await lifecycle.emitShell((exec, result) => resultHandler?.(exec, result))
+          }
+          await lifecycle.whenIdle?.()
+        },
       } as unknown as Agent
       try {
         await options.setup?.({
@@ -130,7 +141,13 @@ function runtime(cwd: string, owned = true, lifecycle: {
             if (name === 'skills') return catalog.skills
             return undefined
           },
-          on: (name: string) => { if (name === 'tools/pre-execute') preExecuteInstalled = true },
+          on: (name: string, handler?: (...args: unknown[]) => unknown) => {
+            if (name === 'tools/pre-execute') preExecuteInstalled = true
+            if (name === 'tools/result') {
+              resultInstalled = true
+              resultHandler = handler as (exec: unknown, result: unknown) => void
+            }
+          },
           tools: { ...catalog.tools, guard: () => { guardInstalled = true } },
           skills: catalog.skills,
           systemPrompt: { section: () => undefined },
@@ -172,6 +189,7 @@ function runtime(cwd: string, owned = true, lifecycle: {
     modes,
     get createOptions() { return createOptions },
     get preExecuteInstalled() { return preExecuteInstalled },
+    get resultInstalled() { return resultInstalled },
     get guardInstalled() { return guardInstalled },
   }
 }
@@ -187,6 +205,19 @@ function childRequest(cwd: string) {
 }
 
 describe('real Host-managed child lifecycle', () => {
+  it('instructs the child to materialize declared dependencies with a safe pnpm install', () => {
+    const instruction = managedChildTesting.childInstruction('/managed', testingCreatorWorkOrder('/managed'))
+    expect(instruction).toContain('pnpm install --ignore-scripts')
+    expect(instruction).toContain('no package arguments')
+    expect(instruction).toContain('pnpm add/update/remove/dlx')
+    expect(instruction).toContain('npx')
+    expect(instruction).toMatch(/genuinely run builds and tests/)
+    expect(instruction).toMatch(/72-step soft budget/)
+    expect(instruction).not.toMatch(/Host rejects dependency mutation/)
+    expect(instruction).not.toMatch(/Do not run package install/)
+    expect(instruction).not.toMatch(/Do not install or claim success/)
+  })
+
   it('injects a final-only instruction at the soft budget and rejects the hard-limit step', async () => {
     const budget = new managedChildTesting.ChildTurnBudget()
     const next = vi.fn(async () => ({ kind: 'enter' as const, messages: [] }))
@@ -204,6 +235,27 @@ describe('real Host-managed child lifecycle', () => {
     expect(budget.denialReason()).toBe(managedChildTesting.CHILD_BUDGET_DENIAL)
     await expect(budget.preStep(managedChildTesting.CHILD_HARD_STEP_LIMIT, [], next))
       .resolves.toEqual({ kind: 'reject' })
+  })
+
+  it('scales the step budget with extra acceptance targets and caps it', () => {
+    const base = testingCreatorWorkOrder('/managed')
+    expect(managedChildTesting.childStepBudgetFor(base)).toEqual({
+      soft: managedChildTesting.CHILD_SOFT_STEP_LIMIT,
+      hard: managedChildTesting.CHILD_HARD_STEP_LIMIT,
+    })
+    const scaled = managedChildTesting.childStepBudgetFor({
+      ...base,
+      acceptanceTargets: Array.from({ length: 8 }, (_, index) => `target ${index + 1}`),
+    })
+    expect(scaled).toEqual({ soft: 92, hard: 100 })
+    const capped = managedChildTesting.childStepBudgetFor({
+      ...base,
+      acceptanceTargets: Array.from({ length: 40 }, (_, index) => `target ${index + 1}`),
+    })
+    expect(capped).toEqual({
+      soft: managedChildTesting.CHILD_SOFT_STEP_CAP,
+      hard: managedChildTesting.CHILD_HARD_STEP_CAP,
+    })
   })
 
   it('creates an owned child whose real session cwd and sandbox root are the managed repository', async () => {
@@ -225,11 +277,40 @@ describe('real Host-managed child lifecycle', () => {
     expect(live.modes).toEqual(['workspace-write'])
     expect(result.sandbox).toMatchObject({ cwd, mode: 'workspace-write' })
     expect(live.preExecuteInstalled).toBe(true)
+    expect(live.resultInstalled).toBe(true)
     expect(live.guardInstalled).toBe(true)
     expect(live.followups).toHaveLength(1)
     expect(result.taskResult).toMatch(/AUTOEVO_CHILD_COMPLETED$/u)
+    expect(result.hostObservedChecks).toEqual([])
     expect(result.creator).toEqual(request.expectedReceipt(result.sessionId))
     expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('records Host-observed shell command results from the child tools/result stream', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-observe-'))
+    temporary.push(cwd)
+    const live = runtime(cwd, true, {
+      emitShell(emit) {
+        emit(
+          { name: 'pwsh', arguments: { command: 'pnpm test', cwd } },
+          { isError: false, value: { exitCode: 0, stdout: '1 passed' }, content: [] },
+        )
+        emit(
+          { name: 'pwsh', arguments: { command: 'git status', cwd } },
+          { isError: false, value: { exitCode: 0 }, content: [] },
+        )
+        emit(
+          { name: 'read', arguments: { path: 'package.json' } },
+          { isError: false, value: '{}', content: [] },
+        )
+      },
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    const result = await host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) })
+    expect(result.hostObservedChecks).toEqual([
+      { command: 'pnpm test', exitCode: 0, matchesAcceptance: true, stdoutTail: '1 passed' },
+      { command: 'git status', exitCode: 0, matchesAcceptance: false },
+    ])
   })
 
   it('fails closed and disposes when the created session cwd drifts from the managed root', async () => {

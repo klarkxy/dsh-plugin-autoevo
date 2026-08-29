@@ -4,6 +4,7 @@ import {
   assertCreatorReceipt,
   assertWorkOrderScope,
   createCreatorWorkOrder,
+  type CreatorCheckEvidence,
   type CreatorFoundation,
   type CreatorFoundationPreflight,
   type CreatorFoundationReceipt,
@@ -39,6 +40,7 @@ import type {
   WorkflowExec,
   WorkflowRecord,
 } from './workflow/contracts.js'
+import { MODIFICATION_MAX_ATTEMPTS } from './workflow/contracts.js'
 
 export interface ManagedWorkDeps extends ReviewOrchestrationDeps {
   creatorFoundation: CreatorFoundation
@@ -62,12 +64,14 @@ export function rememberCreator(
   operation: CreatorOperation,
   status: 'verified' | 'unavailable',
   receipt?: CreatorFoundationReceipt,
+  checks?: CreatorCheckEvidence,
 ): void {
   workflow.creatorRecords = appendCreatorRecord(workflow.creatorRecords, {
     operation,
     status,
     createdAt: new Date().toISOString(),
     ...(receipt ? { receipt } : {}),
+    ...(checks ? { checks } : {}),
   })
 }
 
@@ -288,7 +292,7 @@ export async function prepareManagedCreation(
       acceptanceTargets: [
         'Implement the requirement on the trusted scaffold as a complete DSH plugin bundle',
         'Add focused tests or self-checks where practical',
-        'Do not install, publish, or claim success from this construction phase',
+        'You may declare package.json dependencies and materialize them with pnpm install --ignore-scripts; do not publish or claim success from this construction phase',
       ],
     })
     const parent = requireParentAgent(exec)
@@ -358,7 +362,7 @@ async function acceptReviewedModification(
     baselineReviewId: outcomeBaseline.id,
     ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
     baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
-    maxAttempts: 2,
+    maxAttempts: MODIFICATION_MAX_ATTEMPTS,
     automaticCorrectionUsed: lastAttempt.attempt > 1,
     status: acceptance.status,
     attempts,
@@ -486,7 +490,13 @@ export async function finishManagedWork(
   if (childResult.creator.childSessionId !== childResult.sessionId) {
     throw new EvolutionError('invalid_input', 'Managed child Creator receipt is not bound to the completed child session')
   }
-  rememberCreator(workflow, workOrder.operation, 'verified', childResult.creator)
+  rememberCreator(
+    workflow,
+    workOrder.operation,
+    'verified',
+    childResult.creator,
+    childCheckEvidence(childResult.taskResult, childResult.hostObservedChecks),
+  )
   let childCommitRecorded = false
   let finalized: Awaited<ReturnType<typeof reviewAndFreezeManagedSource>>
   try {
@@ -524,7 +534,7 @@ export async function finishManagedWork(
           changedFiles: committed.changedFiles,
           changedFilesTruncated: committed.changedFilesTruncated,
           completionMarkerObserved: true,
-          checks: childCheckEvidence(childResult.taskResult),
+          checks: childCheckEvidence(childResult.taskResult, childResult.hostObservedChecks),
         },
       ]
       workflow.modificationOutcome = {
@@ -533,7 +543,7 @@ export async function finishManagedWork(
         baselineReviewId: outcomeBaseline.id,
         ...(meaningfulInstruction ? { instructionHash: hashObject(instruction) } : {}),
         baselineRuntimeVersion: outcomeBaseline.compatibility.runtimeVersion,
-        maxAttempts: 2,
+        maxAttempts: MODIFICATION_MAX_ATTEMPTS,
         automaticCorrectionUsed: attempt > 1,
         status: 'indeterminate',
         attempts,

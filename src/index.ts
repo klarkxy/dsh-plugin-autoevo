@@ -1,8 +1,9 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
+import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
 import { Config as ConfigSchema, normalizeConfig, type Config as ConfigShape } from './config.js'
 import {
   installCordisInspectCompatibility,
@@ -138,27 +139,57 @@ function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void {
   })
 }
 
-export const _testing = { createIsEvolutionMode, installCordisInspectCompatibilityWhenAvailable }
+interface ReceiptRootCacheEntry {
+  mtimeMs: number
+  size: number
+  roots: string[]
+}
+
+const receiptOwnedRootCache = new Map<string, ReceiptRootCacheEntry>()
+
+function parseOwnedArtifactRoots(filePath: string): string[] {
+  const record = JSON.parse(readFileSync(filePath, 'utf8')) as { ownedArtifactRoot?: unknown }
+  return typeof record.ownedArtifactRoot === 'string' && record.ownedArtifactRoot.trim()
+    ? [path.resolve(record.ownedArtifactRoot)]
+    : []
+}
 
 function receiptOwnedRoots(stateRoot: string): string[] {
   const directory = path.join(stateRoot, 'installations')
   try {
-    return readdirSync(directory)
+    const listed = readdirSync(directory)
       .filter((entry) => /^installation_[a-f0-9]{16,64}\.json$/u.test(entry))
-      .flatMap((entry) => {
-        try {
-          const record = JSON.parse(readFileSync(path.join(directory, entry), 'utf8')) as { ownedArtifactRoot?: unknown }
-          return typeof record.ownedArtifactRoot === 'string' && record.ownedArtifactRoot.trim()
-            ? [path.resolve(record.ownedArtifactRoot)]
-            : []
-        } catch {
-          return []
+      .map((entry) => path.join(directory, entry))
+    const seen = new Set(listed)
+    for (const cachedPath of [...receiptOwnedRootCache.keys()]) {
+      if (path.dirname(cachedPath) === directory && !seen.has(cachedPath)) {
+        receiptOwnedRootCache.delete(cachedPath)
+      }
+    }
+    return listed.flatMap((filePath) => {
+      try {
+        const stats = statSync(filePath)
+        const cached = receiptOwnedRootCache.get(filePath)
+        if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+          return cached.roots
         }
-      })
+        const roots = parseOwnedArtifactRoots(filePath)
+        receiptOwnedRootCache.set(filePath, { mtimeMs: stats.mtimeMs, size: stats.size, roots })
+        return roots
+      } catch {
+        receiptOwnedRootCache.delete(filePath)
+        return []
+      }
+    })
   } catch {
+    for (const cachedPath of [...receiptOwnedRootCache.keys()]) {
+      if (path.dirname(cachedPath) === directory) receiptOwnedRootCache.delete(cachedPath)
+    }
     return []
   }
 }
+
+export const _testing = { createIsEvolutionMode, installCordisInspectCompatibilityWhenAvailable, receiptOwnedRoots }
 
 export function apply(ctx: Context, input: Config): void {
   const config = normalizeConfig(input)
@@ -186,7 +217,13 @@ export function apply(ctx: Context, input: Config): void {
     log.warn(`AutoEvo evolution preset materialization failed: ${detail}`)
   })
 
-  ctx.systemPrompt.section({ name: 'autoevo:reuse-policy', order: 118, text: POLICY })
+  ctx.systemPrompt.section({
+    name: 'autoevo:reuse-policy',
+    order: 118,
+    text: (context: AssembleContext) => (
+      context.agent && isEvolutionMode(context.agent) ? POLICY : ''
+    ),
+  })
   ctx.on('agent/inbox/claimed', (payload) => {
     if (isTrustedTopLevelUserMessage(payload.message)) {
       creationGuard.rememberUserMessage(payload.agent, payload.message)

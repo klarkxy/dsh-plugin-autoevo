@@ -336,7 +336,7 @@ try {
   assert.equal(evidence.recoverInterruptOptional, true)
 
   const manifest = JSON.parse(await readFile(path.join(dshHome, '.agent-presets', 'evolution', '.autoevo-preset.json'), 'utf8'))
-  assert.equal(manifest.templateVersion, '17')
+  assert.equal(manifest.templateVersion, '18')
   process.stdout.write(`${JSON.stringify({
     status: 'passed',
     installedFrom: path.basename(tarball),

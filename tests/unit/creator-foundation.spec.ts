@@ -263,6 +263,15 @@ describe('Creator records and legacy workflow JSON', () => {
     expect(records).toHaveLength(5)
     expect(records!.map((item) => item.operation)).toEqual(['create', 'modify', 'correct', 'modify', 'correct'])
   })
+
+  it('matches well-known WorkOrder check commands as acceptance commands', () => {
+    expect(creatorTesting.isAcceptanceCheckCommand('pnpm test')).toBe(true)
+    expect(creatorTesting.isAcceptanceCheckCommand('pnpm install --ignore-scripts')).toBe(true)
+    expect(creatorTesting.isAcceptanceCheckCommand('pnpm run typecheck')).toBe(true)
+    expect(creatorTesting.isAcceptanceCheckCommand('git status')).toBe(false)
+    expect(creatorTesting.commandMatchesAcceptanceTarget('pnpm test', ['Add focused tests'])).toBe(true)
+    expect(creatorTesting.commandMatchesAcceptanceTarget('git status', ['Add focused tests'])).toBe(false)
+  })
 })
 
 describe('installed DSH Creator compositions', () => {

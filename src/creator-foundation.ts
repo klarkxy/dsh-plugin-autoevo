@@ -66,11 +66,27 @@ export interface CreatorFoundationReceipt {
   childSessionId: string
 }
 
+/** Bounded Host-observed child shell execution. JSON-serializable; no full stdout. */
+export interface HostObservedCheck {
+  command: string
+  exitCode: number | null
+  matchesAcceptance: boolean
+  stdoutTail?: string
+}
+
+export interface CreatorCheckEvidence {
+  source: 'host_observed' | 'child_reported' | 'unknown'
+  status: 'passed' | 'failed' | 'skipped' | 'unknown' | 'unavailable'
+  summary: string
+  hostObservedChecks?: HostObservedCheck[]
+}
+
 export interface CreatorRecord {
   operation: CreatorOperation
   status: CreatorStatus
   createdAt: string
   receipt?: CreatorFoundationReceipt
+  checks?: CreatorCheckEvidence
 }
 
 export interface CreatorCatalog {
@@ -186,10 +202,27 @@ export function requiredToolCatalogDigest(catalog: CreatorCatalog = requiredCrea
 
 export function creatorAgentFacts(
   records: readonly CreatorRecord[] | undefined,
-): { status: CreatorStatus } | undefined {
+): { status: CreatorStatus; checks?: Record<string, unknown> } | undefined {
   const latest = records?.at(-1)
   if (!latest) return undefined
-  return { status: latest.status }
+  const checks = latest.checks
+  return {
+    status: latest.status,
+    ...(checks ? {
+      checks: {
+        source: checks.source,
+        status: checks.status,
+        summary: checks.summary.slice(0, 300),
+        ...(checks.hostObservedChecks?.length ? {
+          host_observed_checks: checks.hostObservedChecks.slice(0, 8).map((item) => ({
+            command: item.command.slice(0, 180),
+            exit_code: item.exitCode,
+            matches_acceptance: item.matchesAcceptance,
+          })),
+        } : {}),
+      },
+    } : {}),
+  }
 }
 
 export function appendCreatorRecord(
@@ -220,11 +253,39 @@ export function createCreatorWorkOrder(input: {
   }
 }
 
+const ACCEPTANCE_TEST_RE = /(?:^|[\s"'=/`])(?:(?:pnpm|npm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:test|run\s+(?:test|tests|vitest))\b|\bvitest\b|\bnpm(?:\.cmd|\.exe)?\s+test\b)/iu
+const ACCEPTANCE_BUILD_RE = /(?:^|[\s"'=/`])(?:(?:pnpm|npm|yarn|bun)(?:\.cmd|\.exe)?\s+(?:run\s+)?(?:build|typecheck)\b|\btsc\b|\btypecheck\b)/iu
+const ACCEPTANCE_INSTALL_RE = /(?:^|[\s"'=/`])pnpm(?:\.cmd|\.exe)?\s+(?:install|i)\b/iu
+
+export function isCreatorShellTool(name: string): boolean {
+  return catalogHas(new Set([name]), SHELL_ALIASES)
+}
+
+/** Well-known WorkOrder verification commands the child is allowed to run. */
+export function isAcceptanceCheckCommand(command: string): boolean {
+  const text = command.normalize('NFKC')
+  if (ACCEPTANCE_TEST_RE.test(text) || ACCEPTANCE_BUILD_RE.test(text)) return true
+  return ACCEPTANCE_INSTALL_RE.test(text) && /--ignore-scripts/iu.test(text)
+}
+
+export function commandMatchesAcceptanceTarget(
+  command: string,
+  targets: readonly string[] = [],
+): boolean {
+  if (isAcceptanceCheckCommand(command)) return true
+  const needle = command.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase()
+  if (needle.length < 6) return false
+  return targets.some((target) => {
+    const haystack = target.normalize('NFKC').toLowerCase()
+    return haystack.includes(needle) || needle.includes(haystack.slice(0, 48).trim())
+  })
+}
+
 function defaultAcceptanceTargets(operation: CreatorOperation): readonly string[] {
   if (operation === 'create') {
     return [
       'Host local re-review must produce an installable managed snapshot',
-      'Do not install, publish, or claim success from this construction phase',
+      'Do not publish, claim Host installation success, or run pnpm add/update/remove/dlx from this construction phase; materializing declared dependencies with pnpm install --ignore-scripts inside the managed root is allowed',
     ]
   }
   if (operation === 'correct') {
@@ -568,4 +629,7 @@ export const _testing = {
   rejectCodePreset,
   assertNotCodePresetId,
   TESTING_CORDIS_COMPOSITION,
+  isCreatorShellTool,
+  isAcceptanceCheckCommand,
+  commandMatchesAcceptanceTarget,
 }

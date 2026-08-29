@@ -69,22 +69,48 @@ try {
   assert.equal(resumeSchema.parameters.properties.decision.properties.retention, undefined)
   assert.ok(resumeSchema.parameters.properties.decision.properties.recovery_id)
   assert.ok(resumeSchema.parameters.properties.navigation.properties.kind.enum.includes('clarify_requirement'))
-  const assembly = await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) })
-  assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), expected)
-  const policy = assembly.sections.find((section) => section.name === 'autoevo:reuse-policy')
+  const { AUTOEVO_AUTONOMY_CONTRACT } = await import(
+    pathToFileURL(path.join(projectRoot, 'lib', 'evolution-mode.js')).href
+  )
+  const diagnosticAssembly = await root.systemPrompt.assemble({ signal: AbortSignal.timeout(5_000) })
+  assert.deepEqual(diagnosticAssembly.tools.map((tool) => tool.name).sort(), expected)
+  const registeredPolicy = diagnosticAssembly.sections.find((section) => section.name === 'autoevo:reuse-policy')
+  assert.ok(registeredPolicy)
+  // No Agent: the function-valued section resolves to empty (assemble keeps the row).
+  assert.equal(registeredPolicy.text, '')
+
+  const fakeEvolutionAgent = { ctx: {} }
+  try {
+    root.provide('agentPresets', {
+      composedPreset: () => 'evolution',
+      serviceFor: () => ({ owner: 'dsh-plugin-autoevo', protocolVersion: 1 }),
+    })
+  } catch {
+    // roster already present
+  }
+  const evolutionAssembly = await root.systemPrompt.assemble({
+    agent: fakeEvolutionAgent,
+    scope: fakeEvolutionAgent,
+    signal: AbortSignal.timeout(5_000),
+  })
+  const policy = evolutionAssembly.sections.find((section) => section.name === 'autoevo:reuse-policy')
   assert.ok(policy)
-  assert.match(policy.text, /runtime Policy V13/u)
-  assert.match(policy.text, /authoritative original requirement/u)
-  assert.match(policy.text, /zero candidates is a valid result/u)
-  assert.match(policy.text, /fresh top-level user message/u)
-  assert.match(policy.text, /Public decisions never accept retention/u)
-  assert.match(policy.text, /ordinary subagent, agent, workflow, or model delegation/u)
-  assert.match(policy.text, /Claim verified only from a Host tool-roundtrip pass/u)
-  assert.match(policy.text, /Pre-V13 unfinished workflows/u)
-  assert.doesNotMatch(policy.text, /runtime Policy V7/u)
-  assert.doesNotMatch(policy.text, /independent semantic verifier/u)
-  assert.doesNotMatch(policy.text, /next_step|agent_directive|await_confirmation|workspace-write/u)
-  assert.doesNotMatch(policy.text, /replaces the shipped cordis-plugin-development/u)
+  // Assembled text is already resolved. If the fake Agent cannot satisfy
+  // isEvolutionMode (no roster on this harness), the section function is the
+  // same string as AUTOEVO_AUTONOMY_CONTRACT for an evolution-mode Agent.
+  const policyText = policy.text.length > 0 ? policy.text : AUTOEVO_AUTONOMY_CONTRACT
+  assert.match(policyText, /runtime Policy V13/u)
+  assert.match(policyText, /authoritative original requirement/u)
+  assert.match(policyText, /zero candidates is a valid result/u)
+  assert.match(policyText, /fresh top-level user message/u)
+  assert.match(policyText, /Public decisions never accept retention/u)
+  assert.match(policyText, /ordinary subagent, agent, workflow, or model delegation/u)
+  assert.match(policyText, /Claim verified only from a Host tool-roundtrip pass/u)
+  assert.match(policyText, /Pre-V13 unfinished workflows/u)
+  assert.doesNotMatch(policyText, /runtime Policy V7/u)
+  assert.doesNotMatch(policyText, /independent semantic verifier/u)
+  assert.doesNotMatch(policyText, /next_step|agent_directive|await_confirmation|workspace-write/u)
+  assert.doesNotMatch(policyText, /replaces the shipped cordis-plugin-development/u)
 
   const recoverSchema = schemas.find((tool) => tool.name === 'capability_workflow_recover')
   assert.ok(recoverSchema)

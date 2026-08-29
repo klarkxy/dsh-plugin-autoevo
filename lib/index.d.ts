@@ -836,11 +836,25 @@ interface CreatorFoundationReceipt {
   /** Parent session identity. Field name kept for V8 JSON compatibility. */
   childSessionId: string;
 }
+/** Bounded Host-observed child shell execution. JSON-serializable; no full stdout. */
+interface HostObservedCheck {
+  command: string;
+  exitCode: number | null;
+  matchesAcceptance: boolean;
+  stdoutTail?: string;
+}
+interface CreatorCheckEvidence {
+  source: 'host_observed' | 'child_reported' | 'unknown';
+  status: 'passed' | 'failed' | 'skipped' | 'unknown' | 'unavailable';
+  summary: string;
+  hostObservedChecks?: HostObservedCheck[];
+}
 interface CreatorRecord {
   operation: CreatorOperation;
   status: CreatorStatus;
   createdAt: string;
   receipt?: CreatorFoundationReceipt;
+  checks?: CreatorCheckEvidence;
 }
 interface CreatorCatalog {
   tools: string[];
@@ -1069,6 +1083,7 @@ interface ModificationCheckEvidence {
   source: 'host_observed' | 'child_reported' | 'unknown';
   status: ModificationCheckStatus;
   summary: string;
+  hostObservedChecks?: HostObservedCheck[];
 }
 interface ModificationAttemptEvidence {
   attempt: number;
@@ -1086,7 +1101,7 @@ interface ModificationOutcome {
   baselineReviewId: string;
   instructionHash?: string;
   baselineRuntimeVersion: string | null;
-  maxAttempts: 2;
+  maxAttempts: 2 | 3;
   automaticCorrectionUsed: boolean;
   status: 'resolved' | 'unresolved' | 'indeterminate';
   attempts: ModificationAttemptEvidence[];
@@ -1955,6 +1970,17 @@ declare class PluginInstaller {
   private resolvePredecessor;
   private reconcileReplacement;
   install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;
+  private beginInstallAttempt;
+  private assertReviewedArtifactUnchanged;
+  private requestInstallApproval;
+  private assertArtifactUnchangedAfterApproval;
+  private writeProvisionalReceipt;
+  private runIsolatedPreflight;
+  private prepareDestinationMutation;
+  private runDestinationInstall;
+  private verifyInstalledSource;
+  private activateInstalledBundle;
+  private persistInstallOutcome;
   private attachSemanticVerification;
 }
 //#endregion
@@ -2017,6 +2043,7 @@ interface ManagedChildResult {
   taskResult: string;
   sandbox: Awaited<ReturnType<typeof probeWorkspaceWriteSandbox>>;
   creator: CreatorFoundationReceipt;
+  hostObservedChecks?: HostObservedCheck[];
 }
 interface ManagedChildHost {
   run(request: ManagedChildRequest): Promise<ManagedChildResult>;
@@ -2078,6 +2105,11 @@ declare class SourceManager {
     signal?: AbortSignal;
   }): Promise<SourceReceipt | undefined>;
   writeReceipt(receipt: SourceReceipt): Promise<void>;
+  /**
+   * Ignore install trees via Git-native exclude (not a working-tree .gitignore)
+   * so later Host commits neither add node_modules nor trip the untracked-entry guard.
+   */
+  private ensureHostSourceExcludes;
   private git;
   private gitConfigHash;
   private disabledHooksPath;
@@ -2356,9 +2388,11 @@ type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
 declare function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean;
 declare function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void;
+declare function receiptOwnedRoots(stateRoot: string): string[];
 declare const _testing: {
   createIsEvolutionMode: typeof createIsEvolutionMode;
   installCordisInspectCompatibilityWhenAvailable: typeof installCordisInspectCompatibilityWhenAvailable;
+  receiptOwnedRoots: typeof receiptOwnedRoots;
 };
 declare function apply(ctx: Context, input: Config): void;
 //#endregion

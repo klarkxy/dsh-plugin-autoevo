@@ -421,8 +421,50 @@ describe('SourceManager defaults and provenance', () => {
     expect(reclaimed.pid).toBe(process.pid)
   })
 
+  it('commits when node_modules exists but is excluded via .git/info/exclude', async () => {
+    const root = await tempRoot('autoevo-source-exclude-', temporary)
+    const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
+      head: 'c'.repeat(40), branch: 'main', dirty: '',
+    }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const workflowId = `workflow_${'a'.repeat(24)}`
+    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
+    const exclude = await readFile(path.join(receipt.path, '.git', 'info', 'exclude'), 'utf8')
+    expect(exclude).toContain('node_modules/')
+    expect(exclude).toContain('.pnpm-store/')
+    await mkdir(path.join(receipt.path, 'node_modules', 'left-pad'), { recursive: true })
+    await writeFile(path.join(receipt.path, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1\n', 'utf8')
+    await writeFile(path.join(receipt.path, 'lib.js'), 'export const ready = true\n', 'utf8')
+    // Git status omits excluded install trees; the Host still commits honest source/lockfile edits.
+    state.dirty = '?? lib.js\n?? pnpm-lock.yaml\n'
+    const committed = await manager.finalizeChildCommit({
+      sourceId: receipt.sourceId,
+      workflowId,
+      reviewId: review().id,
+      message: 'feat: child change with materialized deps',
+    })
+    expect(committed.headCommit).not.toBe(receipt.headCommit)
+    expect(state.commits).toHaveLength(1)
+  })
+
+  it('writes Host install excludes when scaffolding a create source', async () => {
+    const root = await tempRoot('autoevo-source-scaffold-exclude-', temporary)
+    const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
+      head: '0'.repeat(40), branch: 'main', dirty: '?? package.json\n',
+    }
+    const manager = new SourceManager(config(root), scriptedGit(state))
+    const receipt = await manager.initializeCreateSource({
+      resolutionId: `resolution_${'c'.repeat(24)}`,
+      workflowId: `workflow_${'d'.repeat(24)}`,
+    })
+    const exclude = await readFile(path.join(receipt.path, '.git', 'info', 'exclude'), 'utf8')
+    expect(exclude).toContain('node_modules/')
+    expect(exclude).toContain('.pnpm-store/')
+  })
+
   it('rejects untracked dependency stores before Host git add', async () => {
     expect(sourceTesting.forbiddenUntrackedPath('?? .pnpm-store/v10/files/cache\n')).toBe('.pnpm-store/v10/files/cache')
+    expect(sourceTesting.forbiddenUntrackedPath('?? node_modules/\n')).toBe('node_modules/')
     const root = await tempRoot('autoevo-source-cache-', temporary)
     const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
       head: 'c'.repeat(40), branch: 'main', dirty: '',

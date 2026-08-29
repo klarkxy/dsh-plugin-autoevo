@@ -178,7 +178,7 @@ describe('managed modify closure', () => {
     expect(workflow.modificationOutcome).toMatchObject({
       contractVersion: 1,
       policyVersion: POLICY_VERSION,
-      maxAttempts: 2,
+      maxAttempts: 3,
       automaticCorrectionUsed: true,
       status: 'resolved',
       attempts: [

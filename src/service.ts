@@ -60,7 +60,6 @@ import {
   reviewLocalPlugin,
 } from './review/index.js'
 import { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
-import type { ContentFile } from './review/review.js'
 import {
   childCheckEvidence,
   modificationAcceptance,
@@ -700,7 +699,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
-    const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+    const review = await this.persistReviewed(evidence.record)
     const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
@@ -830,7 +829,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     if (evidence.record.manifest.packageName && evidence.record.manifest.packageName !== target.packageName) {
       throw new EvolutionError('invalid_input', 'Reviewed package name does not match the frozen installed package')
     }
-    const review = await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+    const review = await this.persistReviewed(evidence.record)
     const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
     const waiting = withNextStep(waitingConfirmation({ ...resolution, selectedRepositories: selected }, review, workflow))
     await this.store.put('resolutions', waiting)
@@ -873,7 +872,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ...(runtimeVersion ? { runtimeVersion } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
-      return await this.persistReviewed(evidence.record, evidence.files, exec, workflow)
+      return await this.persistReviewed(evidence.record)
     }
     const runBatch = async (batch: string[]): Promise<void> => {
       const settled = await Promise.allSettled(batch.map(reviewOne))
@@ -947,7 +946,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
       throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
     }
-    const review = await this.persistReviewed(local.record, local.files, exec, workflow)
+    const review = await this.persistReviewed(local.record)
     const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
@@ -1340,15 +1339,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     })
   }
 
-  private async persistReviewed(
-    record: ReviewRecord,
-    files: readonly ContentFile[],
-    exec: WorkflowExec,
-    workflow?: WorkflowRecord,
-  ): Promise<ReviewRecord> {
-    void files
-    void exec
-    void workflow
+  private async persistReviewed(record: ReviewRecord): Promise<ReviewRecord> {
     await this.store.put('reviews', record)
     return record
   }

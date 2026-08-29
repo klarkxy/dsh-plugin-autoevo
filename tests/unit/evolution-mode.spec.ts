@@ -58,6 +58,8 @@ describe('evolution-mode entry', () => {
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Public decisions never accept retention')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Dependency mutation, nested collaboration, Git writes, plugin mutation, publication/release/deploy')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('When the Agent supplies no queries and no clarification is pending')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Materializing declared dependencies with `pnpm install --ignore-scripts`')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V13 unfinished workflows')
 
     expect(provide).toHaveBeenCalledTimes(1)

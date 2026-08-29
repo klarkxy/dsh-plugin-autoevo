@@ -4,56 +4,57 @@
     {
       "id": "reuse-local-capability",
       "prompt": "In this DSH session, add a scientific-notation calculator. A scoped calculator skill is already available. Please make it usable now.",
-      "expected_output": "Calls capability_workflow for the concrete calculator need, follows reuse_local by using the scoped calculator capability, and does not create a dynamic Cordis Plugin.",
+      "expected_output": "Calls capability_workflow for the concrete calculator need, follows reuse_local by using the scoped calculator capability unchanged, and does not construct, define, or mount a replacement in the parent session.",
       "assertions": [
-        "Calls capability_workflow before proposing a new dynamic Plugin.",
-        "Does not call cordis_define with plugin.kind new when local reuse is available."
+        "Calls capability_workflow before proposing a new plugin.",
+        "Does not call cordis_define, cordis_run, cordis_mount, or find_dsh_plugin when local reuse is available."
       ]
     },
     {
       "id": "scratch-authorized-host-tool",
       "prompt": "Create a live, session-only Cordis Plugin that adds a model-callable tool returning the current UTC time. No matching local capability or acceptable reviewed candidate exists; capability_workflow has returned create_authorized.",
-      "expected_output": "Uses only the exact Host/Builtin/Tool inspection needed for the tool in the current session's guarded construction workflow, performs one authorized new definition there, runs the returned package, and verifies a real tool call/result.",
+      "expected_output": "Keeps the parent Capability Evolution session read-only. Completes the WorkOrder only inside the Host-owned managed child, using the exact Host/Builtin/Tool inspection needed for that tool. Host commits, re-reviews, freezes, and returns a fresh install decision. Claims verified only from a Host tool-roundtrip pass.",
       "assertions": [
-        "Uses the current create_authorized grant in the current session without dispatching a separate construction session.",
-        "Avoids broad inspect/list calls.",
-        "Reports a real dynamic Tool verification, not only successful definition."
+        "Does not call cordis_define, cordis_run, cordis_mount, or find_dsh_plugin from the parent session.",
+        "Constructs only inside the Host-owned managed child after create_authorized.",
+        "Does not treat definition or Host activation alone as verified."
       ]
     },
     {
       "id": "existing-plugin-update",
       "prompt": "Update @weather_panel so it shows the last refresh time next to the existing status. Keep its Host implementation unchanged unless necessary.",
-      "expected_output": "Inspects the exact existing package, preserves the unaffected half, defines an immutable package with plugin.kind existing, activates it with the appropriate mode, and verifies the change without capability_workflow.",
+      "expected_output": "Calls capability_workflow with evolve_existing and the named target. The Host-owned managed child edits the known source while the parent stays read-only. Host commits, re-reviews, and returns a fresh install decision. Does not mint a second plugin identity.",
       "assertions": [
-        "Does not call capability_workflow for the named existing Plugin.",
-        "Does not create a second Plugin id.",
-        "Uses exact self-inspection before modification."
+        "Calls capability_workflow with evolve_existing for the named existing plugin.",
+        "Does not call cordis_define or find_dsh_plugin.",
+        "Does not create a second Plugin id."
       ]
     },
     {
       "id": "client-slot-ui",
       "prompt": "Create a live dynamic Cordis Plugin that adds a compact refresh button to the current conversation footer. capability_workflow has returned create_authorized. The button should invoke the package's private Host refresh method and show the returned timestamp.",
-      "expected_output": "Performs exact inspection of the selected Client Slot and the minimum Host/Client contracts, uses private JSON RPC, defines and activates the one authorized new Plugin, and verifies an actual Client render and click interaction.",
+      "expected_output": "After create_authorized, inspects the exact Client Slot contract inside the Host-owned managed child, registers an additive Slot contribution there, and verifies a real Client render and click. The parent session remains read-only and does not call Cordis define/run/mount.",
       "assertions": [
         "Inspects the exact target Slot protocol and props before Client registration.",
         "Uses an additive Slot contribution rather than a guessed global DOM selector.",
-        "Does not accept Host activation alone as UI verification."
+        "Does not accept Host activation alone as UI verification.",
+        "Does not call cordis_define from the parent session."
       ]
     },
     {
       "id": "repair-and-rollback",
       "prompt": "Repair @alerts_panel: its latest update fails because the selected event listener has the wrong parameters. If the correction still fails, roll it back to the known current package; do not make a new Plugin.",
-      "expected_output": "Reads exact failed-package diagnostics, re-inspects only the implicated Event contract, appends a corrected existing-package version and activates it; if needed explicitly runs currentPackageId to roll back. It never resolves a new capability.",
+      "expected_output": "Calls capability_workflow with evolve_existing (repair) and the named target. The Host-owned managed child applies the Event-contract fix; Host commits and re-reviews. If the correction still fails, uses capability_rollback to the known current package. Never skips the workflow or mints a new Plugin id.",
       "assertions": [
-        "Does not call capability_workflow or cordis_define(kind:new).",
-        "Uses cordis_inspect_self for the failed package and exact Event inspection for repair.",
-        "Describes explicit rollback to currentPackageId instead of assuming failed update recovery."
+        "Calls capability_workflow with evolve_existing for the failed package.",
+        "Does not call cordis_define(kind:new) or find_dsh_plugin.",
+        "Uses capability_rollback for rollback instead of assuming failed update recovery."
       ]
     },
     {
       "id": "near-miss-static-package-release",
       "prompt": "Package my Cordis helper as an npm module, publish it to our registry, and open a release PR with the generated changelog.",
-      "expected_output": "Does not trigger the dynamic AutoEvo Plugin workflow. It routes the static packaging/release request to the appropriate repository and publication workflow, requiring the relevant user authorization for publication.",
+      "expected_output": "Does not trigger the AutoEvo capability workflow. Routes the static packaging/release request to the appropriate repository and publication workflow, requiring the relevant user authorization for publication.",
       "assertions": [
         "Calls zero AutoEvo plugin tools.",
         "Calls zero Cordis Plugin lifecycle or inspection tools.",

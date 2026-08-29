@@ -64,6 +64,16 @@ const FORBIDDEN_UNTRACKED_PREFIXES = [
   '.nyc_output',
 ] as const
 
+const HOST_SOURCE_EXCLUDES = ['node_modules/', '.pnpm-store/'] as const
+
+/**
+ * Detects untracked dependency/cache artifacts from `git status --porcelain`.
+ * Host writes `node_modules/` and `.pnpm-store/` into `.git/info/exclude` when
+ * creating a managed source, so a legitimate child `pnpm install --ignore-scripts`
+ * does not appear here. This scan is defense-in-depth if exclude is missing:
+ * npm pack (see lifecycle/package-artifact.ts freezePackedSource) excludes
+ * node_modules by default, so a stray tree cannot enter the frozen artifact.
+ */
 function forbiddenUntrackedPath(status: string): string | undefined {
   for (const line of status.split(/\r?\n/u)) {
     if (!line.startsWith('?? ')) continue
@@ -291,6 +301,28 @@ export class SourceManager {
     const temporary = `${target}.${randomUUID()}.tmp`
     await writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
     await rename(temporary, target)
+  }
+
+  /**
+   * Ignore install trees via Git-native exclude (not a working-tree .gitignore)
+   * so later Host commits neither add node_modules nor trip the untracked-entry guard.
+   */
+  private async ensureHostSourceExcludes(root: string): Promise<void> {
+    const infoDir = path.join(root, '.git', 'info')
+    await mkdir(infoDir, { recursive: true })
+    const excludePath = path.join(infoDir, 'exclude')
+    const existing = await readFile(excludePath, 'utf8').catch((error: unknown) => {
+      if (isNotFound(error)) return ''
+      throw error
+    })
+    const present = new Set(existing.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean))
+    const needed = HOST_SOURCE_EXCLUDES.filter((line) => !present.has(line))
+    if (needed.length === 0) return
+    const prefix = existing && !existing.endsWith('\n') ? '\n' : ''
+    const header = existing.includes('AutoEvo Host')
+      ? ''
+      : '# AutoEvo Host: install artifacts stay untracked. npm pack excludes node_modules by default.\n'
+    await writeFile(excludePath, `${existing}${prefix}${header}${needed.join('\n')}\n`, 'utf8')
   }
 
   private async git(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
@@ -523,6 +555,7 @@ export class SourceManager {
       }
       await mkdir(path.join(root, 'lib'), { recursive: true })
       await this.git(root, ['init'], input.signal)
+      await this.ensureHostSourceExcludes(root)
       const branch = `autoevo/${input.workflowId}`
       await this.git(root, ['checkout', '-B', branch], input.signal)
       const files = SourceManager.trustedScaffoldFiles(input.packageName ?? `dsh-plugin-${sourceId.slice(-8)}`)
@@ -594,6 +627,7 @@ export class SourceManager {
         await this.git(root, ['init'], input.signal)
         await this.git(root, ['remote', 'add', 'origin', `https://github.com/${repository}.git`], input.signal)
       }
+      await this.ensureHostSourceExcludes(root)
       await this.git(root, ['fetch', '--depth=1', 'origin', commit], input.signal)
       const branch = `autoevo/${input.workflowId}`
       await this.git(root, ['checkout', '-B', branch, commit], input.signal)
@@ -827,6 +861,9 @@ export class SourceManager {
       throw new EvolutionError('invalid_input', 'Managed source lock is not owned by this workflow instance')
     }
     const root = await this.assertPathContainment(sourceId)
+    // Sources created before host-managed excludes existed gain them on resume,
+    // so a child install of declared dependencies stays commit-safe.
+    await this.ensureHostSourceExcludes(root)
     const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
     const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
     const gitSecurityHash = await this.gitConfigHash(sourceId)
@@ -871,4 +908,5 @@ export const _testing = {
   sourceIdForCreate,
   hashObject,
   forbiddenUntrackedPath,
+  HOST_SOURCE_EXCLUDES,
 }

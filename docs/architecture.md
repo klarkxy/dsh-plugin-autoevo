@@ -74,10 +74,10 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
-- `systemPrompt`：注入固定复用策略；
+- `systemPrompt`：仅向能力进化会话注入复用策略合同；
 - `agentPresets`：确认父会话使用能力进化 preset，并为受管施工子会话挂载受信任的系统级 Creator preset。
 
-父会话保持决策与治理边界，不在托管源内直接施工。获批的创建/修改由 Host 创建 cwd 精确绑定到单个托管源的短生命周期子会话；DSH Core 以该不可变 cwd 作为 `workspace-write` 根，AutoEvo 再限制发布、插件变更、Cordis 运行时变更与嵌套委派。提示词不是授权边界。
+父会话保持决策与治理边界，不在托管源内直接施工。获批的创建/修改由 Host 创建 cwd 精确绑定到单个托管源的短生命周期子会话；DSH Core 以该不可变 cwd 作为 `workspace-write` 根，AutoEvo 再限制发布、插件变更、Cordis 运行时变更、嵌套委派，以及 `pnpm add/update/remove/dlx` 与 `npx`。托管根内落实已声明依赖的 `pnpm install --ignore-scripts`（无包参数）是允许的。提示词不是授权边界。
 
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`；安装和移除另需 live approval service 和当前 Agent turn。
 
@@ -85,6 +85,7 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 
 - Host 直接调用 `gh api /search/repositories`，每条查询强制带 `topic:dsh-plugin`；不安装 `dsh-find-plugin`，也不回退到无 topic 的全站搜索。
 - 结果只接受严格 `owner/repository` 标识、有界摘要和客观可用的非 archived、非 fork 仓库；Host 不再用语义分数淘汰候选。
+- Agent 提供查询时 Host 只规范化、校验、加 scope 并执行，从不改写 Agent 短语。Agent 未提供查询且没有待澄清时，Host 可从权威需求派生互补兜底检索短语。
 - 五条查询的有界结果完整去重后交给 Agent。匹配分数只决定阅读顺序；用户给出的精确仓库固定置顶，不会被旧候选或池容量挤掉。
 - 空结果视为没有可复用插件：Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。
 - 只有用户在对话里选中、并由 resume 记入回执的仓库才进入 exact-commit 审查门禁。
@@ -174,7 +175,7 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 
 ## 6. 部分适配
 
-用户选择 `modify` 时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 交给 cwd 精确绑定到该仓库的受管施工子会话。子会话可编辑并运行有界构建/测试，但不能发布、改动 DSH 插件/profile、提交 Git 或逃出托管根；完成后 Host 校验当前内容、无 hook 提交、重新审查并固定实际安装包。
+用户选择 `modify` 时，Host 从精确 commit 建立 `sourceDir` 下的普通 Git 仓库和 `autoevo/<workflow-id>` 分支，再把结构化 WorkOrder 交给 cwd 精确绑定到该仓库的受管施工子会话。子会话可编辑、运行有界构建/测试，并在托管根内用无参数的 `pnpm install --ignore-scripts` 落实已声明依赖；`pnpm add/update/remove/dlx`、`npx`、发布、改动 DSH 插件/profile、提交 Git 或逃出托管根仍被拒绝。完成后 Host 校验当前内容、无 hook 提交、重新审查并固定实际安装包。
 
 - Local review 绑定除 `.git` 与 `node_modules` 外的完整文件集，包括二进制。
 - 无法形成有效安装描述或快照不完整时不可安装，其余风险与适配差异作为建议展示。
@@ -227,5 +228,5 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 
 - `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
 - `src/resolver/local.ts`：本地工具、技能和 tool-search 桥。
-- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。
+- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。Agent 未提供查询且无待澄清时，可从权威需求派生互补兜底短语，但不改写 Agent 已给短语。
 - `src/github/discovery.ts`：严格 `owner/repository` 标识校验，以及 `topic:dsh-plugin` 的 `gh api` 搜索。

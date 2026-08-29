@@ -7,7 +7,7 @@ export const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
 export const OFFICIAL_CREATOR_SKILL_NAME = 'cordis-plugin-development'
 export const OFFICIAL_COMPOSITION_SKILL_NAME = 'editing-cordis-compositions'
 export const CREATOR_SKILL_PROVIDER = 'dsh-plugin-autoevo'
-export const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v1'
+export const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v2'
 
 const CREATOR_SKILL_DIRECTORY = fileURLToPath(new URL('../skills/autoevo-plugin-creator/', import.meta.url))
 const CREATOR_SKILL_PATH = fileURLToPath(new URL('../skills/autoevo-plugin-creator/SKILL.md', import.meta.url))

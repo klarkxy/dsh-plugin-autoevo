@@ -472,6 +472,44 @@ async function readOwnedReviewedArtifact(review: ReviewRecord, installSpec: stri
   return readFile(resolvedArtifact)
 }
 
+type InstallAttemptContext = {
+  input: InstallInput
+  exec: ToolRunContext
+  binding: InstallCommitmentBinding | undefined
+  review: ReviewRecord
+  packageName: string
+  upstreamRepository: string | undefined
+  recoveryInstallOptions: RecoveryInstallOptions
+  frozenLayer: VerificationLayerKind
+  originallyAutomatic: boolean
+  scripts: string
+  findings: string
+  riskPrefix: string
+  id: string
+  createdAt: string
+  trialRoot: string
+  trialsRoot: string
+  dshHome: string
+  cwd: string
+  installSpec: string
+  artifactSha256?: string
+  provisional?: InstallationRecord
+  destinationJournal?: InstallationRecord
+  lockfileBefore?: string | undefined
+  sourceMatched?: boolean
+  verification?: VerificationEvidence
+  selectedLayer?: VerificationLayerKind
+  automaticVerificationDegraded?: boolean
+  verified?: boolean
+  activated?: boolean
+  awaitingUserTest?: boolean
+  nonFailure?: boolean
+  mechanicallyLoaded?: boolean
+  hotReloadAttempt?: HotReloadAttempt | undefined
+  runtimeRecoveryRequired?: boolean
+  failedTemporaryTrialRemoved?: boolean
+}
+
 export class PluginInstaller {
   private readonly hotLoader: ProfileHotLoader
 
@@ -733,6 +771,26 @@ export class PluginInstaller {
     exec: ToolRunContext,
     binding?: InstallCommitmentBinding,
   ): Promise<InstallationRecord> {
+    const attempt = await this.beginInstallAttempt(input, exec, binding)
+    await this.assertReviewedArtifactUnchanged(attempt)
+    await this.requestInstallApproval(attempt)
+    await this.assertArtifactUnchangedAfterApproval(attempt)
+    await this.writeProvisionalReceipt(attempt)
+    const preflightFailure = await this.runIsolatedPreflight(attempt)
+    if (preflightFailure) return preflightFailure
+    await this.prepareDestinationMutation(attempt)
+    const installFailureRecord = await this.runDestinationInstall(attempt)
+    if (installFailureRecord) return installFailureRecord
+    await this.verifyInstalledSource(attempt)
+    await this.activateInstalledBundle(attempt)
+    return await this.persistInstallOutcome(attempt)
+  }
+
+  private async beginInstallAttempt(
+    input: InstallInput,
+    exec: ToolRunContext,
+    binding?: InstallCommitmentBinding,
+  ): Promise<InstallAttemptContext> {
     validateProfile(input.targetProfile)
     const task = verificationTask(input)
     verificationExpectation(input, task)
@@ -788,8 +846,31 @@ export class PluginInstaller {
     const trialsRoot = path.join(this.store.root, 'trials')
     const dshHome = input.retention === 'temporary' ? path.join(trialRoot, 'dsh-home') : this.config.dshHome
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
+    return {
+      input,
+      exec,
+      binding,
+      review,
+      packageName,
+      upstreamRepository,
+      recoveryInstallOptions,
+      frozenLayer,
+      originallyAutomatic,
+      scripts,
+      findings,
+      riskPrefix,
+      id,
+      createdAt,
+      trialRoot,
+      trialsRoot,
+      dshHome,
+      cwd,
+      installSpec: strictSpec,
+    }
+  }
 
-    const installSpec = strictSpec
+  private async assertReviewedArtifactUnchanged(attempt: InstallAttemptContext): Promise<void> {
+    const { review, installSpec, input } = attempt
     const artifactSha256 = review.artifact!.sha256
     const currentArtifactBytes = await readOwnedReviewedArtifact(review, installSpec)
     const currentArtifactSha256 = sha256(currentArtifactBytes)
@@ -811,7 +892,11 @@ export class PluginInstaller {
         actualArtifactSha256: artifactSha256,
       })
     }
+    attempt.artifactSha256 = artifactSha256
+  }
 
+  private async requestInstallApproval(attempt: InstallAttemptContext): Promise<void> {
+    const { input, exec, review, packageName, recoveryInstallOptions, riskPrefix, scripts, findings, trialRoot, trialsRoot } = attempt
     try {
       await requestApproval(
         this.ctx,
@@ -839,7 +924,10 @@ export class PluginInstaller {
       if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
       throw error
     }
+  }
 
+  private async assertArtifactUnchangedAfterApproval(attempt: InstallAttemptContext): Promise<void> {
+    const { review, installSpec, artifactSha256 } = attempt
     // Approval can remain open while the filesystem changes. Recheck before
     // the reviewed bytes can execute even in the isolated preflight profile.
     const approvedArtifactBytes = await readOwnedReviewedArtifact(review, installSpec)
@@ -852,7 +940,22 @@ export class PluginInstaller {
         actualArtifactSha256: approvedArtifactSha256,
       })
     }
+  }
 
+  private async writeProvisionalReceipt(attempt: InstallAttemptContext): Promise<void> {
+    const {
+      input,
+      binding,
+      review,
+      id,
+      createdAt,
+      packageName,
+      installSpec,
+      artifactSha256,
+      dshHome,
+      trialRoot,
+      trialsRoot,
+    } = attempt
     const provisional: InstallationRecord = {
       schemaVersion: 1,
       id,
@@ -864,7 +967,7 @@ export class PluginInstaller {
       dshHome,
       packageName,
       installSpec,
-      artifactSha256,
+      artifactSha256: artifactSha256!,
       installPhase: 'prepared',
       installState: 'unknown',
       installOutcome: 'pending',
@@ -897,123 +1000,130 @@ export class PluginInstaller {
       if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
       throw error
     }
+    attempt.provisional = provisional
+    attempt.destinationJournal = provisional
+  }
 
-    let destinationJournal = provisional
-    if (this.preflightProfile && input.retention === 'persistent') {
-      const preflightHome = path.join(trialRoot, 'preflight-dsh-home')
-      await mkdir(preflightHome, { recursive: true })
-      const running: InstallationRecord = { ...provisional, installPhase: 'preflight_running' }
-      await this.store.put('installations', running)
-      try {
-        await this.installWithTransientRetry({
-          dshHome: preflightHome,
-          profile: this.preflightProfile,
-          installSpec,
-          cwd,
-          packageName,
-          signal: exec.signal,
-          options: { forwardCredentials: false },
-        })
-      } catch (error) {
-        const failure = installFailure(error, 'preflight')
-        const preflightFailure = failedInstallation(review.manifest.expectedTools, 'failed_absent', failure)
-        await this.removeOwnedDirectory(trialRoot, trialsRoot)
-        const failedRecord: InstallationRecord = {
-          ...running,
-          installPhase: 'completed',
-          installState: 'not_installed',
-          installOutcome: 'failed_absent',
-          installed: false,
-          removed: true,
-          installFailure: failure,
-          preflight: {
-            profile: this.preflightProfile,
-            passed: false,
-            sourceMatched: false,
-            verification: preflightFailure,
-          },
-          verification: preflightFailure,
-        }
-        await this.store.put('installations', failedRecord)
-        return failedRecord
-      }
-
-      const preflightSourceMatched = await this.launcher.profileSourceMatches(
-        preflightHome,
-        this.preflightProfile,
-        packageName,
+  private async runIsolatedPreflight(attempt: InstallAttemptContext): Promise<InstallationRecord | undefined> {
+    const { input, exec, review, packageName, installSpec, trialRoot, trialsRoot, cwd, provisional } = attempt
+    if (!(this.preflightProfile && input.retention === 'persistent')) return undefined
+    const preflightHome = path.join(trialRoot, 'preflight-dsh-home')
+    await mkdir(preflightHome, { recursive: true })
+    const running: InstallationRecord = { ...provisional!, installPhase: 'preflight_running' }
+    await this.store.put('installations', running)
+    try {
+      await this.installWithTransientRetry({
+        dshHome: preflightHome,
+        profile: this.preflightProfile,
         installSpec,
-      ).catch(() => false)
-      let preflightVerification: VerificationEvidence
-      let preflightLayer: Exclude<VerificationLayerKind, 'manual_runtime'> = 'bundle_activation'
-      if (!preflightSourceMatched) {
-        preflightVerification = sourceMismatchEvidence(review.manifest.expectedTools)
-      } else {
-        let declaredFixtures: Record<string, unknown> = {}
-        try {
-          declaredFixtures = await this.launcher.readInstalledVerificationFixtures(
-            preflightHome,
-            this.preflightProfile,
-            packageName,
-          )
-        } catch {
-          declaredFixtures = {}
-        }
-        const selection = selectInstallVerificationLayer({ review, declaredFixtures })
-        preflightLayer = selection.layer === 'manual_runtime' ? 'bundle_activation' : selection.layer
-        try {
-          preflightVerification = await this.launcher.verifyHost({
-            dshHome: preflightHome,
-            profile: this.preflightProfile,
-            cwd,
-            layer: preflightLayer,
-            packageName,
-            expectedTools: selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
-            fixtures: selection.layer === 'manual_runtime' ? [] : selection.fixtures,
-            fixtureDigest: selection.layer === 'manual_runtime' ? fixtureDigestFor([]) : selection.fixtureDigest,
-            ...(review.manifest.activatedFibers ? { activatedFibers: review.manifest.activatedFibers } : {}),
-            ...(exec.signal ? { signal: exec.signal } : {}),
-          })
-        } catch {
-          preflightVerification = interruptedVerification(
-            selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
-            preflightLayer,
-          )
-        }
-      }
-      const preflightPassed = preflightSourceMatched && hostLayerSuccess({
-        sourceMatched: preflightSourceMatched,
-        layer: preflightLayer,
-        verification: preflightVerification,
+        cwd,
+        packageName,
+        signal: exec.signal,
+        options: { forwardCredentials: false },
       })
+    } catch (error) {
+      const failure = installFailure(error, 'preflight')
+      const preflightFailure = failedInstallation(review.manifest.expectedTools, 'failed_absent', failure)
       await this.removeOwnedDirectory(trialRoot, trialsRoot)
-      const preflightRecord: InstallationRecord = {
+      const failedRecord: InstallationRecord = {
         ...running,
-        installPhase: preflightPassed ? 'preflight_passed' : 'completed',
-        ...(preflightPassed ? {} : { installState: 'not_installed' as const, installOutcome: 'failed_absent' as const }),
-        removed: !preflightPassed,
-        ...(preflightPassed ? {} : {
-          installFailure: lifecycleFailure(
-            'preflight',
-            preflightSourceMatched ? 'verification_failed' : 'source_mismatch',
-            preflightSourceMatched
-              ? 'Isolated preflight did not prove the frozen verification layer.'
-              : 'Isolated preflight did not activate the exact reviewed source.',
-          ),
-        }),
+        installPhase: 'completed',
+        installState: 'not_installed',
+        installOutcome: 'failed_absent',
+        installed: false,
+        removed: true,
+        installFailure: failure,
         preflight: {
           profile: this.preflightProfile,
-          passed: preflightPassed,
-          sourceMatched: preflightSourceMatched,
-          verification: preflightVerification,
+          passed: false,
+          sourceMatched: false,
+          verification: preflightFailure,
         },
-        verification: preflightPassed ? running.verification : preflightVerification,
+        verification: preflightFailure,
       }
-      await this.store.put('installations', preflightRecord)
-      if (!preflightPassed) return preflightRecord
-      destinationJournal = preflightRecord
+      await this.store.put('installations', failedRecord)
+      return failedRecord
     }
 
+    const preflightSourceMatched = await this.launcher.profileSourceMatches(
+      preflightHome,
+      this.preflightProfile,
+      packageName,
+      installSpec,
+    ).catch(() => false)
+    let preflightVerification: VerificationEvidence
+    let preflightLayer: Exclude<VerificationLayerKind, 'manual_runtime'> = 'bundle_activation'
+    if (!preflightSourceMatched) {
+      preflightVerification = sourceMismatchEvidence(review.manifest.expectedTools)
+    } else {
+      let declaredFixtures: Record<string, unknown> = {}
+      try {
+        declaredFixtures = await this.launcher.readInstalledVerificationFixtures(
+          preflightHome,
+          this.preflightProfile,
+          packageName,
+        )
+      } catch {
+        declaredFixtures = {}
+      }
+      const selection = selectInstallVerificationLayer({ review, declaredFixtures })
+      preflightLayer = selection.layer === 'manual_runtime' ? 'bundle_activation' : selection.layer
+      try {
+        preflightVerification = await this.launcher.verifyHost({
+          dshHome: preflightHome,
+          profile: this.preflightProfile,
+          cwd,
+          layer: preflightLayer,
+          packageName,
+          expectedTools: selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
+          fixtures: selection.layer === 'manual_runtime' ? [] : selection.fixtures,
+          fixtureDigest: selection.layer === 'manual_runtime' ? fixtureDigestFor([]) : selection.fixtureDigest,
+          ...(review.manifest.activatedFibers ? { activatedFibers: review.manifest.activatedFibers } : {}),
+          ...(exec.signal ? { signal: exec.signal } : {}),
+        })
+      } catch {
+        preflightVerification = interruptedVerification(
+          selection.layer === 'manual_runtime' ? [] : selection.expectedTools,
+          preflightLayer,
+        )
+      }
+    }
+    const preflightPassed = preflightSourceMatched && hostLayerSuccess({
+      sourceMatched: preflightSourceMatched,
+      layer: preflightLayer,
+      verification: preflightVerification,
+    })
+    await this.removeOwnedDirectory(trialRoot, trialsRoot)
+    const preflightRecord: InstallationRecord = {
+      ...running,
+      installPhase: preflightPassed ? 'preflight_passed' : 'completed',
+      ...(preflightPassed ? {} : { installState: 'not_installed' as const, installOutcome: 'failed_absent' as const }),
+      removed: !preflightPassed,
+      ...(preflightPassed ? {} : {
+        installFailure: lifecycleFailure(
+          'preflight',
+          preflightSourceMatched ? 'verification_failed' : 'source_mismatch',
+          preflightSourceMatched
+            ? 'Isolated preflight did not prove the frozen verification layer.'
+            : 'Isolated preflight did not activate the exact reviewed source.',
+        ),
+      }),
+      preflight: {
+        profile: this.preflightProfile,
+        passed: preflightPassed,
+        sourceMatched: preflightSourceMatched,
+        verification: preflightVerification,
+      },
+      verification: preflightPassed ? running.verification : preflightVerification,
+    }
+    await this.store.put('installations', preflightRecord)
+    if (!preflightPassed) return preflightRecord
+    attempt.destinationJournal = preflightRecord
+    return undefined
+  }
+
+  private async prepareDestinationMutation(attempt: InstallAttemptContext): Promise<void> {
+    const { input, review, installSpec, artifactSha256, packageName } = attempt
     const destinationArtifactSha256 = sha256(await readOwnedReviewedArtifact(review, installSpec))
     if (destinationArtifactSha256 !== artifactSha256) {
       throw new EvolutionError('review_expired', 'The frozen reviewed package bytes changed between isolated preflight and destination install', {
@@ -1024,14 +1134,30 @@ export class PluginInstaller {
     // The isolated phase can take minutes. Recheck ownership and absence at
     // the actual destination mutation boundary to close profile/TOCTOU drift.
     await this.assertPersistentDestination(input, packageName)
-    destinationJournal = { ...destinationJournal, installPhase: 'destination_installing' }
+    attempt.destinationJournal = { ...attempt.destinationJournal!, installPhase: 'destination_installing' }
     if (this.preflightProfile && input.retention === 'persistent') {
-      await this.store.put('installations', destinationJournal)
+      await this.store.put('installations', attempt.destinationJournal)
     }
-    const lockfileBefore = input.retention === 'persistent'
-      ? await readFile(path.join(dshHome, 'profiles', input.targetProfile, 'pnpm-lock.yaml'), 'utf8').catch(() => undefined)
+    attempt.lockfileBefore = input.retention === 'persistent'
+      ? await readFile(path.join(attempt.dshHome, 'profiles', input.targetProfile, 'pnpm-lock.yaml'), 'utf8').catch(() => undefined)
       : undefined
+  }
 
+  private async runDestinationInstall(attempt: InstallAttemptContext): Promise<InstallationRecord | undefined> {
+    const {
+      input,
+      exec,
+      review,
+      dshHome,
+      installSpec,
+      cwd,
+      packageName,
+      recoveryInstallOptions,
+      destinationJournal,
+      lockfileBefore,
+      trialRoot,
+      trialsRoot,
+    } = attempt
     try {
       await this.installWithTransientRetry({
         dshHome,
@@ -1065,7 +1191,7 @@ export class PluginInstaller {
       }
       const installOutcome = outcomeAfterCommandFailure(installState)
       const failedRecord: InstallationRecord = {
-        ...destinationJournal,
+        ...destinationJournal!,
         installPhase: 'completed',
         installState,
         installOutcome,
@@ -1077,6 +1203,11 @@ export class PluginInstaller {
       await this.store.put('installations', failedRecord)
       return failedRecord
     }
+    return undefined
+  }
+
+  private async verifyInstalledSource(attempt: InstallAttemptContext): Promise<void> {
+    const { input, exec, review, dshHome, installSpec, cwd, packageName, frozenLayer, originallyAutomatic } = attempt
     const sourceMatched = await this.launcher.profileSourceMatches(
       dshHome,
       input.targetProfile,
@@ -1135,23 +1266,43 @@ export class PluginInstaller {
         }
       }
     }
-    const layer = verification.layer ?? selectedLayer
-    const status: VerificationStatus = verification.status
+    attempt.sourceMatched = sourceMatched
+    attempt.verification = verification
+    attempt.selectedLayer = selectedLayer
+    attempt.automaticVerificationDegraded = automaticVerificationDegraded
+  }
+
+  private async activateInstalledBundle(attempt: InstallAttemptContext): Promise<void> {
+    const {
+      input,
+      exec,
+      review,
+      dshHome,
+      packageName,
+      sourceMatched,
+      verification,
+      selectedLayer,
+      automaticVerificationDegraded,
+      trialRoot,
+      trialsRoot,
+    } = attempt
+    const layer = verification!.layer ?? selectedLayer!
+    const status: VerificationStatus = verification!.status
       ?? (layer === 'manual_runtime' ? 'pending_user_test' : 'uncertain')
-    const mechanical = sourceMatched && (
+    const mechanical = sourceMatched! && (
       layer === 'manual_runtime'
         ? status === 'pending_user_test'
-        : hostLayerSuccess({ sourceMatched, layer, verification })
+        : hostLayerSuccess({ sourceMatched: sourceMatched!, layer, verification: verification! })
     )
     const verified = mechanical && layer === 'tool_roundtrip' && status === 'passed'
     const activated = mechanical && layer === 'bundle_activation' && status === 'passed'
     const awaitingUserTest = mechanical && layer === 'manual_runtime' && status === 'pending_user_test'
     const nonFailure = verified || activated || awaitingUserTest
-    const mechanicallyLoaded = sourceMatched && (
+    const mechanicallyLoaded = sourceMatched! && (
       verified
       || activated
       || awaitingUserTest
-      || (verification.attempted && verification.exitCode === 0)
+      || (verification!.attempted && verification!.exitCode === 0)
     )
     // A manual-runtime candidate is not mechanically proven against the live
     // profile state. Loading third-party startup code into the serving DSH
@@ -1178,15 +1329,48 @@ export class PluginInstaller {
             ...(exec.agent ? { agent: exec.agent } : {}),
           })
         : undefined
-    const hotReload = hotReloadAttempt?.evidence
     const runtimeRecoveryRequired = Boolean(nonFailure && hotReloadAttempt?.rollbackFailed === true)
     const failedTemporaryTrialRemoved = input.retention === 'temporary'
       && !nonFailure
       && (
-        (verification.attempted && status !== 'pending_user_test')
-        || automaticVerificationDegraded
+        (verification!.attempted && status !== 'pending_user_test')
+        || automaticVerificationDegraded!
       )
     if (failedTemporaryTrialRemoved) await this.removeOwnedDirectory(trialRoot, trialsRoot)
+    attempt.verified = verified
+    attempt.activated = activated
+    attempt.awaitingUserTest = awaitingUserTest
+    attempt.nonFailure = nonFailure
+    attempt.mechanicallyLoaded = mechanicallyLoaded
+    attempt.hotReloadAttempt = hotReloadAttempt
+    attempt.runtimeRecoveryRequired = runtimeRecoveryRequired
+    attempt.failedTemporaryTrialRemoved = failedTemporaryTrialRemoved
+  }
+
+  private async persistInstallOutcome(attempt: InstallAttemptContext): Promise<InstallationRecord> {
+    const input = attempt.input
+    const review = attempt.review
+    const runtimeRecoveryRequired = attempt.runtimeRecoveryRequired!
+    const verified = attempt.verified!
+    const activated = attempt.activated!
+    const awaitingUserTest = attempt.awaitingUserTest!
+    const failedTemporaryTrialRemoved = attempt.failedTemporaryTrialRemoved!
+    const nonFailure = attempt.nonFailure!
+    const destinationJournal = attempt.destinationJournal!
+    const dshHome = attempt.dshHome
+    const packageName = attempt.packageName
+    const installSpec = attempt.installSpec
+    const createdAt = attempt.createdAt
+    const hotReloadAttempt = attempt.hotReloadAttempt
+    const hotReload = hotReloadAttempt?.evidence
+    const sourceMatched = attempt.sourceMatched!
+    const verification = attempt.verification!
+    const mechanicallyLoaded = attempt.mechanicallyLoaded!
+    const upstreamRepository = attempt.upstreamRepository
+    const provisional = attempt.provisional!
+    const trialRoot = attempt.trialRoot
+    const trialsRoot = attempt.trialsRoot
+    const id = attempt.id
 
     // Workflow maps `verified` to the installed/restart_required success nodes;
     // `activated` and `awaiting_user_test` (Host install outcomes for

@@ -2,7 +2,7 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
-## Unreleased
+## 1.1.0
 
 - After a discovered GitHub capability installs successfully, preserve its Host-validated upstream lineage and present the canonical project URL with a voluntary Star invitation; never perform the Star or show the prompt for failed installs.
 - Freeze remote and managed-local candidates once with `npm pack --ignore-scripts`, inspect the complete tgz entry set selected by npm (including glob and `.npmignore` semantics), and install that same Host-owned `file:` artifact only after SHA-256 rechecks.

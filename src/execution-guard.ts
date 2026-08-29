@@ -59,7 +59,18 @@ const RELEASE_DEPLOY_INSTALL_RE = /(?:^|[\\/\s;&|("'`])(?:(?:npm|pnpm|yarn|bun)(
 const INDIRECT_SHELL_EXECUTION_RE = /(?:\b(?:invoke-expression|iex|start-process|set-alias|new-alias)\b|(?:^|[\s;&|])(?:cmd(?:\.exe)?\s+\/[ck]|(?:pwsh|powershell|bash|sh)(?:\.exe)?\s+(?:-[^\s]+\s+)*-(?:command|c)\b|(?:node|python\d*|ruby|perl)(?:\.exe)?\s+-(?:e|c)\b)|&\s*(?:\$|\(|\{))/iu
 const SHELL_CONTROL_RE = /(?:&&|\|\||[;&|<>`$(){}@^]|\r|\n)/u
 const SAFE_PARENT_SHELL_RE = /^\s*(?:(?:pwd|ls|dir|cat|type|rg)(?:\.exe|\.cmd)?\b|(?:get-location|get-childitem|get-content|select-string|resolve-path|test-path)\b|git(?:\.exe|\.cmd)?(?:\s+-C\s+(?:"[^"]+"|'[^']+'|\S+))?\s+(?:status|diff|show|log|rev-parse)\b)/iu
+const SAFE_PARENT_PROBE_RE = /^\s*(?:(?:node|pnpm)(?:\.exe|\.cmd)?\s+(?:--version|-v)|npm(?:\.exe|\.cmd)?\s+--version|git(?:\.exe|\.cmd)?\s+--version|where(?:\.exe)?\s+[\w.-]+|Get-Command\s+[\w.-]+)\s*$/iu
 const UNSAFE_READ_OPTION_RE = /(?:^|\s)(?:--pre(?:-glob)?|--output|--ext-diff|--textconv)(?:=|\s|$)/iu
+const SAFE_PNPM_INSTALL_FLAGS = new Set([
+  '--ignore-scripts',
+  '--prefer-offline',
+  '--offline',
+  '--no-frozen-lockfile',
+  '--frozen-lockfile',
+  '--silent',
+  '--reporter=append-only',
+])
+const CHILD_DEPENDENCY_DENIAL = 'Managed source child session denies CLI dependency mutation (add/update/remove/dlx/npx); pnpm install --ignore-scripts with no package arguments is allowed.'
 
 function shellCommandText(args: unknown): string {
   if (!isRecord(args)) return ''
@@ -173,6 +184,35 @@ function isSafeShellCommand(command: string, allowed: RegExp): boolean {
     && allowed.test(command)
 }
 
+function isSafeParentShell(command: string): boolean {
+  return isSafeShellCommand(command, SAFE_PARENT_SHELL_RE)
+    || isSafeShellCommand(command, SAFE_PARENT_PROBE_RE)
+}
+
+function commandBasename(token: string): string {
+  return token.replaceAll('\\', '/').split('/').pop() ?? ''
+}
+
+/** Bare `pnpm install`/`pnpm i` that only materializes package.json, never CLI package mutation. */
+function isSafeBarePnpmInstall(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed || SHELL_CONTROL_RE.test(trimmed) || /['"]/u.test(trimmed)) return false
+  const tokens = trimmed.split(/\s+/u)
+  if (tokens.length < 3) return false
+  if (!/^(?:pnpm)(?:\.exe|\.cmd)?$/iu.test(commandBasename(tokens[0]!))) return false
+  if (!/^(?:install|i)$/iu.test(tokens[1]!)) return false
+  let hasIgnoreScripts = false
+  for (const token of tokens.slice(2)) {
+    if (token === '--ignore-scripts') {
+      hasIgnoreScripts = true
+      continue
+    }
+    if (SAFE_PNPM_INSTALL_FLAGS.has(token)) continue
+    return false
+  }
+  return hasIgnoreScripts
+}
+
 function isFinishManagedWorkResume(exec: Readonly<ToolExecution>): boolean {
   if (normalizeEndpointName(exec.name) !== 'capability_workflow_resume' || !isRecord(exec.arguments)) return false
   if (exec.arguments.decision !== undefined || !isRecord(exec.arguments.navigation)) return false
@@ -259,7 +299,7 @@ export class ExecutionGuard {
       if (DSH_PLUGIN_MUTATION_RE.test(command)) {
         return 'AutoEvo parent session denies direct DSH plugin install/remove; use capability_workflow_resume / plugin_remove.'
       }
-      if (!isSafeShellCommand(command, SAFE_PARENT_SHELL_RE)) {
+      if (!isSafeParentShell(command)) {
         return 'Capability Evolution Policy V13 permits only allowlisted read-only shell inspection commands before managed construction.'
       }
     }
@@ -331,7 +371,8 @@ export class ExecutionGuard {
         return 'Managed source child session denies package publication, version, release, deploy, and install commands.'
       }
       if (PACKAGE_DEPENDENCY_MUTATION_RE.test(command)) {
-        return 'Managed source child session denies dependency installation or mutation; use only the reviewed repository inputs already present.'
+        if (isSafeBarePnpmInstall(command)) return undefined
+        return CHILD_DEPENDENCY_DENIAL
       }
       if (INDIRECT_SHELL_EXECUTION_RE.test(command)) {
         return 'Managed source child session denies indirect or dynamically resolved shell execution; invoke ordinary build and test commands directly.'
@@ -368,9 +409,13 @@ export const _testing = {
   RELEASE_DEPLOY_INSTALL_RE,
   INDIRECT_SHELL_EXECUTION_RE,
   SAFE_PARENT_SHELL_RE,
+  SAFE_PARENT_PROBE_RE,
+  SAFE_PNPM_INSTALL_FLAGS,
   SHELL_CONTROL_RE,
   UNSAFE_READ_OPTION_RE,
   isSafeShellCommand,
+  isSafeParentShell,
+  isSafeBarePnpmInstall,
   isFinishManagedWorkResume,
   matchesSet,
   shellCommandText,
