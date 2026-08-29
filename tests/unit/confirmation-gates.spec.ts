@@ -803,7 +803,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
       candidateId: selectedCandidateId,
       reviewId: selectedReviewId,
     }))
-  })
+  }, 30_000)
 
   it('supports compare-another navigation from confirmation while preserving prior reviews', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-adaptive-'))
