@@ -199,6 +199,7 @@ describe('fail-closed install outcomes', () => {
         diagnosticHash: 'a'.repeat(64),
       },
     })
+    expect(result.upstreamProject).toBeUndefined()
     expect(JSON.stringify(result)).not.toContain('Jane Doe')
     expect(JSON.stringify(result)).not.toContain('top-secret')
   })
@@ -580,6 +581,7 @@ describe('fail-closed install outcomes', () => {
       loaded: true,
       verified: true,
       restartRequired: false,
+      upstreamProject: { repository: 'acme/calculator' },
     })
   })
 

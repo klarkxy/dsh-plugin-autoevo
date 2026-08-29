@@ -623,6 +623,10 @@ export interface InstallationRecord {
     eligible: boolean
     reason: string
   }
+  /** Host-derived canonical GitHub lineage for a successfully installed discovered capability. */
+  upstreamProject?: {
+    repository: string
+  }
   predecessorInstallationId?: string
   supersededByInstallationId?: string
   replacement?: ReplacementJournal

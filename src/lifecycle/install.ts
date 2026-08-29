@@ -19,7 +19,9 @@ import type {
   VerificationVerdict,
   VerifierRequest,
 } from '../contracts.js'
+import { validateGithubRepository } from '../github/discovery.js'
 import { dependencySpecDigest } from '../resolver/installed-origin.js'
+import { managedSnapshotRootReview } from '../resolver/lineage.js'
 import { EvolutionError } from '../errors.js'
 import { copy } from '../i18n.js'
 import {
@@ -552,6 +554,15 @@ export class PluginInstaller {
     }
   }
 
+  private async upstreamRepository(review: ReviewRecord): Promise<string | undefined> {
+    if (review.sourceSnapshot.kind === 'github') return validateGithubRepository(review.sourceSnapshot.repository)
+    const reviews = await this.store.listReviews(review.resolutionId)
+    const root = managedSnapshotRootReview(review, new Map(reviews.map((item) => [item.id, item])))
+    return root?.sourceSnapshot.kind === 'github'
+      ? validateGithubRepository(root.sourceSnapshot.repository)
+      : undefined
+  }
+
   private async assertRecoveryPlanBinding(
     input: InstallInput,
     review: ReviewRecord,
@@ -727,6 +738,7 @@ export class PluginInstaller {
     verificationExpectation(input, task)
     const review = await this.store.getReview(input.reviewId)
     const packageName = assertSafePackageName(review.manifest.packageName)
+    const upstreamRepository = await this.upstreamRepository(review)
     if (this.authorizeInstall) await this.authorizeInstall(review, exec, binding)
 
     const strictSpec = assertStrictInstallSpec(review)
@@ -1276,6 +1288,7 @@ export class PluginInstaller {
             },
           }
         : {}),
+      ...(success && upstreamRepository ? { upstreamProject: { repository: upstreamRepository } } : {}),
     }
     try {
       await this.store.put('installations', record)

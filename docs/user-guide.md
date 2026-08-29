@@ -109,6 +109,8 @@ AutoEvo 为每个包保留安装回执链，配套四个工具：
 
 AutoEvo 在目标 profile 的真实安装结果上分别记录 installed、loaded、activated 与 verified，不会用私有预检结果代替真实证据。
 
+如果成功安装的是发现到的 GitHub 项目，最终结果还会给出 Host 从已审查来源链确认的项目地址，并礼貌邀请你在确实受益时点一个 Star。这只是对上游作者的署名与支持提示；AutoEvo 不会替你打开页面、登录或执行 Star，也不会在安装失败时展示该提示。
+
 遇到 `activated` 或 `awaiting_user_test` 时，在安装目标 profile 中发起一个最小、可核验、无副作用的真实请求，并记录实际工具调用和结果。模型说“看起来成功”不等于 Host 的 `verified` 回执。
 
 ## 6. 诊断与恢复

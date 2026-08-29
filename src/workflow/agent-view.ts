@@ -1,5 +1,6 @@
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type WorkflowOptionId } from '../contracts.js'
 import { prefersChinese, rememberRequirementLanguage } from '../i18n.js'
+import { validateGithubRepository } from '../github/discovery.js'
 import { hostDirectUseBoundary, isDirectlyUsableReview } from '../review/direct-use.js'
 import { needsSemanticReviewer } from '../review/review.js'
 import { creatorAgentFacts } from '../creator-foundation.js'
@@ -118,6 +119,7 @@ const HARD_CONSTRAINTS = [
   'Modification commits, changed files, and review deltas are Host-verified facts; check evidence states whether it is Host-observed, parent-reported, or unknown.',
   'Authorized modify or create runs in a Host-owned, cwd-bound managed child. Use only its bounded filesystem, shell, build, test, and skill surface; do not mutate dependencies, start nested collaboration, run Git, mutate plugins, or publish. The Host completes validation, commit, re-review, and freezing without a new user decision.',
   'After a completed local install, only Host installation.contribution.eligible may prompt asking whether to contribute upstream. Ask in natural language; do not fork, push, or run GitHub CLI until a separate explicit approval. Never invent eligibility.',
+  'After a completed successful install, when installation.upstream_project is present, include its canonical project URL and politely invite the user to Star it if the capability helped. This is attribution, not permission to open a browser, authenticate, or Star on the user\'s behalf. Never invent a project URL and never show this prompt for a failed or absent installation.',
 ]
 
 function safeDependencySpec(value: string): string {
@@ -127,6 +129,20 @@ function safeDependencySpec(value: string): string {
   if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/u.test(bounded)) return '[local-reference]'
   if (/^(?:https?|git\+https?):\/\//iu.test(bounded)) return '[remote-reference]'
   return boundedText(bounded, 500)
+}
+
+function upstreamProjectFacts(installation: NonNullable<WorkflowView['installation']>): Record<string, string> | undefined {
+  if (!installation.installed || !installation.upstreamProject) return undefined
+  try {
+    const repository = validateGithubRepository(installation.upstreamProject.repository)
+    return {
+      repository,
+      url: `https://github.com/${repository}`,
+      suggested_support: 'star',
+    }
+  } catch {
+    return undefined
+  }
 }
 
 function installationEvidence(input: NonNullable<CandidateSnapshotItem['installation']>): NonNullable<AgentCandidateEvidence['installation']> {
@@ -656,6 +672,7 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
 function completionInstallationFacts(view: WorkflowView): Record<string, unknown> {
   const installation = view.installation!
   const outcome = installation.installOutcome
+  const upstreamProject = upstreamProjectFacts(installation)
   const cleanupEligible = view.workflow.status === 'completed'
     && COMPLETED_CLEANUP_NODES.has(view.workflow.cursor)
   return {
@@ -677,6 +694,7 @@ function completionInstallationFacts(view: WorkflowView): Record<string, unknown
         reason: boundedText(installation.contributionAdvice.reason, 400),
       },
     } : {}),
+    ...(upstreamProject ? { upstream_project: upstreamProject } : {}),
   }
 }
 

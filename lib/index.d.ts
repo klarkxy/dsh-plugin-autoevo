@@ -558,6 +558,10 @@ interface InstallationRecord {
     eligible: boolean;
     reason: string;
   };
+  /** Host-derived canonical GitHub lineage for a successfully installed discovered capability. */
+  upstreamProject?: {
+    repository: string;
+  };
   predecessorInstallationId?: string;
   supersededByInstallationId?: string;
   replacement?: ReplacementJournal;
@@ -1945,6 +1949,7 @@ declare class PluginInstaller {
   private removeOwnedDirectory;
   private assertPersistentDestination;
   private assertReplacementBinding;
+  private upstreamRepository;
   private assertRecoveryPlanBinding;
   private installWithTransientRetry;
   private resolvePredecessor;

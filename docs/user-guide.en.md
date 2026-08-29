@@ -109,6 +109,8 @@ AutoEvo keeps an installation receipt chain per package. Four companion tools:
 
 AutoEvo records installed, loaded, activated, and verified against the real target-profile result. It does not substitute a private preflight result for real evidence.
 
+When a successfully installed capability came from a discovered GitHub project, the final result also includes the canonical project address confirmed from the Host-reviewed source lineage and politely invites you to Star it if it helped. This is attribution and voluntary upstream support only: AutoEvo does not open the page, authenticate, or Star on your behalf, and it does not show the prompt after a failed install.
+
 For `activated` or `awaiting_user_test`, make one minimal, inspectable, side-effect-free request in the target profile and record the actual tool call and result. The model saying "looks successful" is not the same as a Host `verified` receipt.
 
 ## 6. Diagnose and recover
