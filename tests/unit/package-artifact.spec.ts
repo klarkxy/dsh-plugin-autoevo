@@ -153,35 +153,62 @@ describe('frozen npm package artifacts', () => {
       .rejects.toMatchObject({ code: 'command_failed' })
   })
 
-  it('binds GitHub freezing to the exact detached commit before packing', async () => {
+  it('reuses the exact cached commit and packs only the selected repository subpackage', async () => {
     const root = await tempRoot('autoevo-package-artifact-github-', temporary)
     const commit = 'a'.repeat(40)
     const requests: string[][] = []
+    const gitEnvironments: Array<NodeJS.ProcessEnv | undefined> = []
+    const packCwds: string[] = []
     const staging = path.join(root, 'staging')
     await mkdir(path.join(staging, 'package'), { recursive: true })
     await writeFile(path.join(staging, 'package', 'package.json'), '{"name":"github-package"}')
+    let commitPresent = false
     const runner: CommandRunner = {
       async run(request) {
         requests.push([...request.argv])
+        if (request.argv[0] === 'git') gitEnvironments.push(request.env)
         const args = request.argv.slice(1)
-        if (args.join(' ') === 'rev-parse HEAD') return { exitCode: 0, signal: null, stdout: `${commit}\n`, stderr: '' }
-        if (args.join(' ') === 'status --porcelain') return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        if (args.includes('init') && args.includes('--bare')) await mkdir(request.argv.at(-1)!, { recursive: true })
+        if (args.includes('rev-parse') && args.includes('--is-bare-repository')) return { exitCode: 0, signal: null, stdout: 'true\n', stderr: '' }
+        if (args.includes('get-url')) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+        if (args.includes('cat-file')) {
+          if (!commitPresent) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+          return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        }
+        if (args.includes('fetch')) commitPresent = true
+        if (args.includes('worktree') && args.includes('add')) await mkdir(path.join(request.argv.at(-2)!, 'packages', 'whale'), { recursive: true })
+        if (args.includes('rev-parse') && args.includes('HEAD')) return { exitCode: 0, signal: null, stdout: `${commit}\n`, stderr: '' }
+        if (args.includes('status') && args.includes('--porcelain')) return { exitCode: 0, signal: null, stdout: '', stderr: '' }
         if (args.includes('pack')) {
+          packCwds.push(request.cwd)
           await createTar({ cwd: staging, file: path.join(request.argv.at(-1)!, 'github-package-1.0.0.tgz'), gzip: true }, ['package'])
         }
         return { exitCode: 0, signal: null, stdout: '', stderr: '' }
       },
     }
 
-    const artifact = await freezeGithubPackage({ repository: 'acme/package', commit, artifactRoot: path.join(root, 'artifact'), config: testRuntimeConfig(root), runner })
-    expect(requests.slice(0, 6)).toEqual([
-      ['git', 'init'],
-      ['git', 'remote', 'add', 'origin', 'https://github.com/acme/package.git'],
-      ['git', 'fetch', '--depth=1', 'origin', commit],
-      ['git', 'checkout', '--detach', commit],
-      ['git', 'rev-parse', 'HEAD'],
-      ['git', 'status', '--porcelain'],
-    ])
+    const cacheRoot = path.join(root, '.autoevo', 'cache', 'git')
+    const artifact = await freezeGithubPackage({
+      repository: 'acme/package', commit, packagePath: 'packages/whale', cacheRoot,
+      artifactRoot: path.join(root, 'artifact'), config: testRuntimeConfig(root), runner,
+    })
+    await freezeGithubPackage({
+      repository: 'acme/package', commit, packagePath: 'packages/whale', cacheRoot,
+      artifactRoot: path.join(root, 'artifact-second'), config: testRuntimeConfig(root), runner,
+    })
+    expect(requests.some((argv) => argv.includes('--bare'))).toBe(true)
+    expect(requests.some((argv) => argv.includes('--filter=blob:none') && argv.includes(commit))).toBe(true)
+    expect(requests.some((argv) => argv.includes('worktree') && argv.includes('--no-checkout'))).toBe(true)
+    expect(requests.some((argv) => argv.includes('sparse-checkout') && argv.includes('packages/whale'))).toBe(true)
+    expect(requests.some((argv) => argv.includes('checkout') && argv.includes(commit))).toBe(true)
+    expect(requests.filter((argv) => argv.includes('fetch'))).toHaveLength(1)
+    const packRequests = requests.filter((argv) => argv.includes('pack'))
+    expect(packRequests).toHaveLength(2)
+    expect(packCwds.every((cwd) => cwd.endsWith(path.join('packages', 'whale')))).toBe(true)
+    expect(gitEnvironments.filter((env) => env?.GIT_CONFIG_GLOBAL).length).toBeGreaterThan(0)
+    expect(gitEnvironments.filter((env) => env?.GIT_CONFIG_GLOBAL).every((env) => (
+      env?.GIT_CONFIG_COUNT === '0' && env.GIT_CONFIG_SYSTEM && env.GIT_ATTR_NOSYSTEM === '1'
+    ))).toBe(true)
     expect(artifact.files.map((file) => file.path)).toEqual(['package.json'])
     await expect(stat(path.join(artifact.artifactRoot, 'source'))).rejects.toMatchObject({ code: 'ENOENT' })
   })

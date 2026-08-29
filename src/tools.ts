@@ -190,10 +190,21 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
     }),
     defineTool({
       name: 'capability_workflow_present',
-      description: 'Seal zero to five candidate IDs from the current Host discovery pool into the Gate-1 shortlist. Use an empty array when search found no relevant candidate; only a later fresh user reply may authorize creation or select a candidate for review.',
+      description: 'Seal zero to five candidate IDs from the current Host discovery pool into the Gate-1 shortlist. If a collection reports more than five bundle paths, retry with one exact package_selector returned by that error. Use an empty array when search found no relevant candidate.',
       parameters: {
         workflow_id: { type: 'string', required: true },
         candidate_ids: { type: 'array', items: { type: 'string' }, required: true },
+        package_selectors: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              candidate_id: { type: 'string', required: true },
+              package_path: { type: 'string', required: true },
+            },
+          },
+        },
       },
       output: jsonOutput,
       presentCall: (args) => presentCapabilityToolCall('capability_workflow_present', args),
@@ -201,6 +212,10 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
         return compactAgentView(await service.present({
           workflowId: args.workflow_id,
           candidateIds: args.candidate_ids,
+          ...(args.package_selectors ? { packageSelectors: args.package_selectors.map((item) => ({
+            candidateId: item.candidate_id,
+            packagePath: item.package_path,
+          })) } : {}),
         }, exec) as WorkflowView) as unknown as JsonValue
       },
     }),

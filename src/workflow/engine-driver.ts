@@ -363,6 +363,11 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       if (ids.length > SEALED_SHORTLIST_MAX) {
         throw new EvolutionError('invalid_input', 'Present accepts zero to five discovery candidate_ids')
       }
+      const selectors = input.packageSelectors ?? []
+      if (new Set(selectors.map((item) => item.candidateId)).size !== selectors.length
+        || selectors.some((item) => !ids.includes(item.candidateId))) {
+        throw new EvolutionError('invalid_input', 'Package selectors must uniquely target presented candidate_ids')
+      }
       const pool = workflow.discoveryPool ?? []
       const selected = ids.map((id) => pool.find((item) => item.id === id))
       if (selected.some((item) => !item)) {
@@ -373,20 +378,31 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         return [{
           candidateId: item.id,
           repository: item.repository,
+          ...(selectors.find((selector) => selector.candidateId === item.id)?.packagePath
+            ? { packagePath: selectors.find((selector) => selector.candidateId === item.id)!.packagePath }
+            : {}),
         }]
       })
+      let sealed = selected.map((item) => item!)
+      let packageSelectorRequired = false
       if (previewTargets.length > 0 && this.host.previewGithubCandidates) {
         const resolution = workflow.resolutionId ? await this.host.getResolution(workflow.resolutionId) : undefined
         if (!resolution) throw new EvolutionError('invalid_input', 'Discovery preview requires the current resolution')
         const result = await this.host.previewGithubCandidates(resolution, previewTargets, exec as WorkflowExec)
         workflow.candidatePreviews = Object.fromEntries(result.previews.map((preview) => [preview.candidateId, preview]))
         workflow.candidatePreviewFailures = result.failures
+        packageSelectorRequired = result.failures.some((failure) => (failure.packagePaths?.length ?? 0) > 0)
+        const locals = sealed.filter((item) => item.kind === 'local')
+        sealed = [...locals, ...(result.candidates ?? sealed.filter((item) => item.kind === 'remote'))]
       } else {
         delete workflow.candidatePreviews
         delete workflow.candidatePreviewFailures
       }
-      workflow.candidateSnapshot = selected.map((item, index) => ({ ...item!, index: index + 1 }))
-      workflow.cursor = 'await_selection'
+      workflow.candidateSnapshot = sealed.map((item, index) => ({ ...item, index: index + 1 }))
+      // A collection path list is a structured retry request, not a sealed
+      // zero-candidate result. Keep autonomous discovery control so the Agent
+      // can immediately present the same repository with an exact selector.
+      workflow.cursor = packageSelectorRequired ? 'await_discovery' : 'await_selection'
       workflow.status = 'running'
       workflow.generation += 1
       delete workflow.interrupt
@@ -749,7 +765,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         }
         if (result.reviewFailures) {
           workflow.reviewFailures = result.reviewFailures.map((failure) => ({
-            candidateId: workflow.candidateSnapshot?.find((item) => item.repository?.toLowerCase()
+            candidateId: failure.candidateId ?? workflow.candidateSnapshot?.find((item) => item.repository?.toLowerCase()
               === failure.repository.toLowerCase())?.id ?? candidateId('remote', failure.repository),
             code: failure.code,
             message: failure.message,

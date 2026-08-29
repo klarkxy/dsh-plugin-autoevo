@@ -16,6 +16,7 @@ import type { RuntimeConfig } from './config.js'
 import { isNotFound, isPathInside, isProcessAlive } from './internal-utils.js'
 import type { ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
+import { normalizePackagePath } from './github/git-cache.js'
 import type { CommandRunner } from './process/runner.js'
 import { hashObject, sha256 } from './state/hashes.js'
 import {
@@ -38,6 +39,8 @@ export interface SourceReceipt {
   activeWorkflowId: string | null
   /** Hash of Host-controlled Git config and hooks metadata. */
   gitConfigHash: string
+  /** Normalized package root inside the managed repository. */
+  packagePath?: string
 }
 
 export interface FinalizedChildCommit extends SourceReceipt {
@@ -111,8 +114,10 @@ export function isLockHolderAlive(pid: number): boolean {
   return isProcessAlive(pid)
 }
 
-export function sourceIdForRepository(repository: string): string {
-  return repository.toLowerCase().replace(/[^\w.-]+/gu, '_')
+export function sourceIdForRepository(repository: string, packagePath?: string): string {
+  const base = repository.toLowerCase().replace(/[^\w.-]+/gu, '_')
+  const normalized = normalizePackagePath(packagePath)
+  return normalized ? `${base}_${hashObject(normalized).slice(0, 12)}` : base
 }
 
 export function sourceIdForCreate(resolutionId: string): string {
@@ -616,7 +621,8 @@ export class SourceManager {
     }
     const repository = input.review.sourceSnapshot.repository
     const commit = input.review.sourceSnapshot.commit
-    const sourceId = sourceIdForRepository(repository)
+    const packagePath = normalizePackagePath(input.review.sourceSnapshot.packagePath)
+    const sourceId = sourceIdForRepository(repository, packagePath)
     await this.ensureWorkspaceLayout(input.workspaceCwd)
     await this.acquireLock(sourceId, input.workflowId, input.signal, input.workspaceCwd)
     try {
@@ -651,6 +657,7 @@ export class SourceManager {
         artifactHash: null,
         activeWorkflowId: input.workflowId,
         gitConfigHash: await this.gitConfigHash(sourceId, input.workspaceCwd),
+        ...(packagePath ? { packagePath } : {}),
       }
       await this.writeReceipt(receipt)
       await writeFile(this.lockPath(sourceId), `${JSON.stringify({

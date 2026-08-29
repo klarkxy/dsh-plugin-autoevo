@@ -213,10 +213,11 @@ export async function prepareManagedModification(
       receipt = await deps.sources.resumeWorkflowSource(sourceKey, workflow.id, exec.signal)
     }
   } else if (review.sourceSnapshot.kind === 'github') {
-    sourceKey = sourceIdForRepository(review.sourceSnapshot.repository)
+    sourceKey = sourceIdForRepository(review.sourceSnapshot.repository, review.sourceSnapshot.packagePath)
     const completed = await deps.sources.inspectCompletedSource(sourceKey, exec.signal)
     const reuseHere = Boolean(completed
       && completed.repository?.toLowerCase() === review.sourceSnapshot.repository.toLowerCase()
+      && (completed.packagePath ?? '') === (review.sourceSnapshot.packagePath ?? '')
       && completed.headCommit.toLowerCase() === review.sourceSnapshot.commit.toLowerCase()
       && await deps.sources.pathUnderSourceRoot(completed.path, resolution.cwd))
     if (reuseHere && completed) {

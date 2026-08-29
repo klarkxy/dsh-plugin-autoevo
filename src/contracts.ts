@@ -364,6 +364,8 @@ export type ReviewSourceSnapshot =
       requestedRef: string
       commit: string
       defaultBranch: string
+      /** Empty/absent means the repository root (legacy records remain readable). */
+      packagePath?: string
     }
   | {
       kind: 'local'
@@ -371,6 +373,8 @@ export type ReviewSourceSnapshot =
       baseReviewId: string
       baseCommit: string
       statusHash: string
+      /** Package root retained from a monorepo review lineage. */
+      packagePath?: string
     }
 
 export interface MechanicalFacts {

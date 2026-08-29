@@ -2,6 +2,14 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
+## 1.1.1
+
+- Cache each exact GitHub commit under the current workspace's `.autoevo/cache/git` directory, then reuse the local Git objects for bounded preview and formal package freezing instead of repeatedly reading repository trees and blobs through GitHub APIs.
+- Expand collection repositories into exact `repository + commit + packagePath` candidates, isolate nested package ownership, and let the Agent retry collections larger than five packages with a Host-returned exact package selector.
+- Return legacy repository-only review queues to fresh preview rather than guessing a collection root or failing during formal review.
+- Never use the DSH Desktop executable to interpret npm's JavaScript CLI; resolve a native `node` executable and fail closed when one is unavailable.
+- Keep Git configuration and credentials isolated while selecting Git for Windows' bundled OpenSSL transport so public HTTPS cache fetches work in non-interactive Desktop processes.
+
 ## 1.1.0
 
 - After a discovered GitHub capability installs successfully, preserve its Host-validated upstream lineage and present the canonical project URL with a voluntary Star invitation; never perform the Star or show the prompt for failed installs.

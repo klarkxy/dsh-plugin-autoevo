@@ -15,11 +15,33 @@ export function shellForwardedFileSpec(filename: string): string {
   return `file:${absolute.replaceAll('\\', '/')}`
 }
 
+function isNodeExecutable(executable: string): boolean {
+  return [path.basename(executable), path.win32.basename(executable)]
+    .some((basename) => /^node(?:\.exe)?$/iu.test(basename))
+}
+
+async function npmCliInterpreter(
+  runner: CommandRunner,
+  signal: AbortSignal | undefined,
+  hostExecutable: string = process.execPath,
+): Promise<string> {
+  if (isNodeExecutable(hostExecutable)) return hostExecutable
+  if (!runner.resolveExecutable) {
+    throw new EvolutionError(
+      'command_failed',
+      'npm JavaScript CLI requires a Node executable, but Node could not be resolved from this host',
+    )
+  }
+  const node = await runner.resolveExecutable('node', signal)
+  if (isNodeExecutable(node)) return node
+  throw new EvolutionError('command_failed', 'Resolved Node executable is not a native node binary')
+}
+
 export async function npmPackArgv(runner: CommandRunner, signal?: AbortSignal): Promise<[string, ...string[]]> {
   const adjacent = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
   try {
     await access(adjacent)
-    return [process.execPath, await realpath(adjacent)]
+    return [await npmCliInterpreter(runner, signal), await realpath(adjacent)]
   } catch {
     // Fall through to the npm shim installed alongside the DSH runtime.
   }
@@ -34,10 +56,12 @@ export async function npmPackArgv(runner: CommandRunner, signal?: AbortSignal): 
   for (const candidate of candidates) {
     try {
       await access(candidate)
-      return [process.execPath, await realpath(candidate)]
+      return [await npmCliInterpreter(runner, signal), await realpath(candidate)]
     } catch {
       // Try the next standard npm shim layout.
     }
   }
   throw new EvolutionError('command_failed', 'npm resolved to a Windows shim, but its JavaScript CLI could not be located safely')
 }
+
+export const _testing = { isNodeExecutable, npmCliInterpreter }

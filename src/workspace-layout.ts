@@ -6,6 +6,7 @@ import { EvolutionError } from './errors.js'
 
 export const WORKSPACE_AUTOEVO_DIR = '.autoevo'
 export const WORKSPACE_SOURCE_DIR = path.join(WORKSPACE_AUTOEVO_DIR, 'sources')
+export const WORKSPACE_GIT_CACHE_DIR = path.join(WORKSPACE_AUTOEVO_DIR, 'cache', 'git')
 
 const currentWorkspace = new AsyncLocalStorage<string>()
 
@@ -29,6 +30,15 @@ export function resolveSourceRoot(config: Pick<RuntimeConfig, 'sourceDir'>, cwd?
     throw new EvolutionError('invalid_input', 'Managed sources require the current session workspace')
   }
   return path.resolve(workspace, WORKSPACE_SOURCE_DIR)
+}
+
+/** Rebuildable transport cache. Reviewed artifacts remain under stateDir. */
+export function resolveGitCacheRoot(cwd?: string): string {
+  const workspace = cwd?.trim() || currentWorkspaceCwd()
+  if (!workspace) {
+    throw new EvolutionError('invalid_input', 'GitHub repository caching requires the current session workspace')
+  }
+  return path.resolve(workspace, WORKSPACE_GIT_CACHE_DIR)
 }
 
 export async function ensureAutoEvoGitignore(autoevoRoot: string): Promise<void> {

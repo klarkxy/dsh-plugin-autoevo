@@ -107,6 +107,34 @@ function remoteSnapshotItem(item: ResolutionRecord['remoteCandidates'][number]):
   }
 }
 
+export function remotePackageSnapshotItem(
+  item: ResolutionRecord['remoteCandidates'][number],
+  preview: {
+    repository: string
+    commit: string
+    packagePath: string
+    manifest: { packageName?: string; packageVersion?: string; kind: string }
+  },
+): Omit<CandidateSnapshotItem, 'index'> {
+  const identity = `${preview.repository.toLowerCase()}#${preview.commit.toLowerCase()}:${preview.packagePath}`
+  const digest = hashObject({
+    repository: preview.repository.toLowerCase(),
+    commit: preview.commit.toLowerCase(),
+    packagePath: preview.packagePath,
+    manifest: preview.manifest,
+  })
+  return {
+    id: candidateId('remote', identity),
+    kind: 'remote',
+    name: preview.manifest.packageName ?? (preview.packagePath ? preview.packagePath.split('/').at(-1)! : item.name),
+    identity,
+    repository: preview.repository,
+    commit: preview.commit,
+    ...(preview.packagePath ? { packagePath: preview.packagePath } : {}),
+    digest,
+  }
+}
+
 export function candidateSnapshotFor(
   resolution: ResolutionRecord,
   excludedIds: ReadonlySet<string> = new Set(),
@@ -151,7 +179,9 @@ export function registerReviewedCandidate(workflow: WorkflowRecord, review: Revi
     ? snapshot.find((item) => item.id === workflow.pendingReviewedCandidateId)
     : undefined
   if (!candidate && source.kind === 'github') {
-    candidate = snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase())
+    candidate = snapshot.find((item) => item.repository?.toLowerCase() === source.repository.toLowerCase()
+      && (item.commit?.toLowerCase() ?? source.commit.toLowerCase()) === source.commit.toLowerCase()
+      && (item.packagePath ?? '') === (source.packagePath ?? ''))
       ?? snapshot.find((item) => item.evolutionTarget?.repository.toLowerCase() === source.repository.toLowerCase()
         && item.evolutionTarget.commit === source.commit)
   }

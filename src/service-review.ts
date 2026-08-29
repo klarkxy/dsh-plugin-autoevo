@@ -107,6 +107,10 @@ export async function reviewAndFreezeManagedSource(
 ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
   const runtimeVersion = await dshRuntimeVersion(deps, input.resolution.cwd, input.exec.signal)
   const artifactRoot = path.join(resolveStateRoot(deps.config, input.resolution.cwd), 'review-artifacts', `review-${randomUUID()}`)
+  const receipt = await deps.sources.readReceipt(input.sourceId)
+  if (!receipt || path.resolve(receipt.path) !== path.resolve(input.path)) {
+    throw new EvolutionError('review_rejected', 'Managed package review is missing its source receipt')
+  }
   const local = await reviewLocalPlugin({
     runner: deps.runner,
     config: deps.config,
@@ -119,6 +123,7 @@ export async function reviewAndFreezeManagedSource(
     resolutionId: input.resolution.id,
     requirement: input.resolution.requirement,
     artifactRoot,
+    ...(receipt.packagePath ? { packagePath: receipt.packagePath } : {}),
     ...(runtimeVersion ? { runtimeVersion } : {}),
   })
   const review = local.record

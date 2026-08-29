@@ -90,7 +90,7 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 - 空结果视为没有可复用插件：Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。
 - 只有用户在对话里选中、并由 resume 记入回执的仓库才进入 exact-commit 审查门禁。
 
-发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会读取有界的根 `package.json`、README 与 DSH manifest 预览，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
+发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会把精确 commit 缓存到当前工作区，并从本地 Git 对象读取有界的 `package.json`、README 与 DSH manifest 预览；合集仓库会按有效 DSH bundle 子目录展开，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致，远端身份绑定 `repository + commit + packagePath`。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
 
 正式审查与发现预览严格分离。Host 对精确 GitHub commit 或托管本地 HEAD 只执行一次 `npm pack --ignore-scripts`，流式验证 tgz 路径与条目类型并审查其中的完整文件内容；`ReviewRecord` 同时绑定条目清单、tgz SHA-256 和 owned root。安装只接受该 `file:` 产物，批准前与目标 profile 写入前都会复算 hash，且通过 DSH/pnpm 安装时继续设置 `ignore-scripts`。因此 `maxFiles` / `maxRepositoryBytes` 只约束候选预览，不决定安装包能否被审查或安装。
 
@@ -101,6 +101,7 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
 ```text
 <workspace>/.autoevo/
 ├─ .gitignore
+├─ cache/git/<repository-hash>.git
 └─ sources/<id>/
 
 <dshHome>/autoevo/
@@ -115,6 +116,8 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
    ├─ observer.cordis.yml
    └─ tool-roundtrip.jsonl
 ```
+
+`cache/git` 是可删除、可重建的传输缓存：预览与正式审查从中读取精确 commit，并在选中 `packagePath` 上创建临时稀疏 worktree。它不产生安装授权，也不是 review/install authority；唯一安装权威仍是 `<dshHome>/autoevo/review-artifacts` 下经审查和哈希绑定的 tgz。
 
 `StateStore` 用临时文件加原子 rename 写 JSON receipt，ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，persistent 安装保留恢复锚点，绝不谎报未安装。
 

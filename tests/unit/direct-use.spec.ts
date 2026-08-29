@@ -137,6 +137,19 @@ function confirmationIds(review: ReviewRecord, workflow: WorkflowRecord): string
 }
 
 describe('direct use eligibility', () => {
+  it('binds sibling packages in one repository to their own candidate digest', () => {
+    const review = githubReview({ sourceSnapshot: {
+      kind: 'github', repository: 'acme/collection', requestedRef: COMMIT,
+      commit: COMMIT, defaultBranch: 'main', packagePath: 'packages/one',
+    } })
+    const workflow = workflowFor(review)
+    workflow.candidateSnapshot = [
+      { id: 'candidate_one', index: 1, kind: 'remote', name: 'one', identity: 'one', repository: 'acme/collection', commit: COMMIT, packagePath: 'packages/one', digest: '1'.repeat(64) },
+      { id: 'candidate_two', index: 2, kind: 'remote', name: 'two', identity: 'two', repository: 'acme/collection', commit: COMMIT, packagePath: 'packages/two', digest: '2'.repeat(64) },
+    ]
+    expect(reviewCandidateDigest(review, workflow)).toBe('1'.repeat(64))
+  })
+
   it('lets a low-risk full compatible review expose use_this without a reviewer verdict', () => {
     const review = githubReview()
     const workflow = workflowFor(review)

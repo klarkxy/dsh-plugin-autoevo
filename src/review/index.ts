@@ -12,6 +12,7 @@ export {
 export {
   needsSemanticReviewer,
   previewGithubPlugin,
+  previewGithubPlugins,
   reviewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,

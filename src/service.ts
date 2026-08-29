@@ -55,7 +55,7 @@ import {
   assertDirectUseAllowed,
   isDirectlyUsableReview,
   isManagedModificationEligibleReview,
-  previewGithubPlugin,
+  previewGithubPlugins,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
 } from './review/index.js'
@@ -122,12 +122,13 @@ import {
 } from './service-versions.js'
 import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
-import { DISCOVERY_REMOTE_POOL_MAX } from './workflow/candidates.js'
+import { DISCOVERY_REMOTE_POOL_MAX, remotePackageSnapshotItem } from './workflow/candidates.js'
 import { assertBuiltinEnablementBinding } from './workflow/grants.js'
 import type {
   MarketplaceStepResult,
   CandidatePreview,
   CandidatePreviewFailure,
+  CandidateSnapshotItem,
   DiscoveryPresentInput,
   DiscoveryRefineInput,
   ValidatedResume,
@@ -607,46 +608,73 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async previewGithubCandidates(
     resolution: ResolutionRecord,
-    candidates: Array<{ candidateId: string; repository: string; ref?: string }>,
+    candidates: Array<{ candidateId: string; repository: string; ref?: string; packagePath?: string }>,
     exec: WorkflowExec,
-  ): Promise<{ previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }> {
+  ): Promise<{ candidates: CandidateSnapshotItem[]; previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }> {
     const selected = [...new Map(candidates.map((candidate) => [candidate.candidateId, candidate] as const)).values()].slice(0, 5)
-    const settled = await Promise.allSettled(selected.map(async (candidate): Promise<CandidatePreview> => {
+    const settled = await Promise.allSettled(selected.map(async (candidate): Promise<{
+      candidates: CandidateSnapshotItem[]
+      previews: CandidatePreview[]
+    }> => {
       const remote = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === candidate.repository.toLowerCase())
       if (!remote) throw new EvolutionError('invalid_input', 'Preview candidate is outside the current discovery resolution')
-      const preview = await previewGithubPlugin({
+      const packages = await previewGithubPlugins({
         runner: this.runner,
         config: this.config,
         cwd: resolution.cwd,
         repository: remote.repository,
         ref: candidate.ref ?? remote.defaultBranch ?? 'HEAD',
+        ...(candidate.packagePath ? { packagePath: candidate.packagePath } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
+      const expanded = packages.map((preview, index) => ({
+        ...remotePackageSnapshotItem(remote, preview),
+        index: index + 1,
+      }))
       return {
-        candidateId: candidate.candidateId,
-        repository: preview.repository,
-        commit: preview.commit,
-        defaultBranch: preview.defaultBranch,
-        inspectedFiles: preview.inspectedFiles.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes })),
-        truncated: preview.truncated,
-        manifest: preview.manifest,
-        ...(preview.packageSummary ? { packageSummary: preview.packageSummary } : {}),
-        ...(preview.readmeExcerpt ? { readmeExcerpt: preview.readmeExcerpt } : {}),
+        candidates: expanded,
+        previews: packages.map((preview, index) => ({
+          candidateId: expanded[index]!.id,
+          repository: preview.repository,
+          commit: preview.commit,
+          defaultBranch: preview.defaultBranch,
+          packagePath: preview.packagePath,
+          inspectedFiles: preview.inspectedFiles.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes })),
+          truncated: preview.truncated,
+          manifest: preview.manifest,
+          ...(preview.packageSummary ? { packageSummary: preview.packageSummary } : {}),
+          ...(preview.readmeExcerpt ? { readmeExcerpt: preview.readmeExcerpt } : {}),
+        })),
       }
     }))
+    const expandedCandidates: CandidateSnapshotItem[] = []
     const previews: CandidatePreview[] = []
     const failures: CandidatePreviewFailure[] = []
     settled.forEach((result, index) => {
       const candidate = selected[index]!
-      if (result.status === 'fulfilled') previews.push(result.value)
-      else failures.push({
-        candidateId: candidate.candidateId,
-        repository: candidate.repository,
-        code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
-        message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 300),
-      })
+      if (result.status === 'fulfilled') {
+        expandedCandidates.push(...result.value.candidates)
+        previews.push(...result.value.previews)
+      }
+      else {
+        const packagePaths = result.reason instanceof EvolutionError && Array.isArray(result.reason.details.packagePaths)
+          ? [...new Set(result.reason.details.packagePaths
+              .filter((item): item is string => typeof item === 'string' && item.length <= 500))]
+              .slice(0, 100)
+          : []
+        failures.push({
+          candidateId: candidate.candidateId,
+          repository: candidate.repository,
+          code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
+          message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 300),
+          ...(packagePaths.length > 0 ? { packagePaths } : {}),
+        })
+      }
     })
-    return { previews, failures }
+    if (expandedCandidates.length > 5) {
+      throw new EvolutionError('invalid_input', 'Presented repositories expand to more than five reviewable plugin packages')
+    }
+    return { candidates: expandedCandidates.map((item, index) => ({ ...item, index: index + 1 })), previews, failures }
   }
 
   async ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
@@ -687,12 +715,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
       })
     }
     const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
+    const sealedCandidate = workflow?.candidateSnapshot?.find((item) => item.id === workflow.pendingReviewedCandidateId)
+      ?? workflow?.candidateSnapshot?.find((item) => item.repository?.toLowerCase() === candidate.repository.toLowerCase()
+        && (!ref || item.commit?.toLowerCase() === ref.toLowerCase()))
     const evidence = await reviewGithubPluginWithFiles({
       runner: this.runner,
       config: this.config,
       cwd: resolution.cwd,
       repository: candidate.repository,
-      ref: ref ?? candidate.defaultBranch ?? 'HEAD',
+      ref: sealedCandidate?.commit ?? ref ?? candidate.defaultBranch ?? 'HEAD',
+      ...(sealedCandidate?.packagePath ? { packagePath: sealedCandidate.packagePath } : {}),
       resolutionId: resolution.id,
       requirement: resolution.requirement,
       artifactRoot: this.reviewArtifactRoot(resolution.cwd),
@@ -838,34 +870,40 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async reviewGithubBatch(
     resolution: ResolutionRecord,
-    repositories: string[],
+    candidateIds: string[],
     mode: ReviewMode,
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{
     resolution: ResolutionRecord
     reviews: ReviewRecord[]
-    failures: Array<{ repository: string; code: string; message: string }>
+    failures: Array<{ candidateId: string; repository: string; code: string; message: string }>
   }> {
+    if (!workflow) throw new EvolutionError('invalid_input', 'Candidate-bound GitHub review requires an active workflow')
     const selected = new Set((resolution.selectedRepositories ?? []).map((item) => item.toLowerCase()))
-    const ordered = [...new Set(repositories)].slice(0, 3)
-    for (const repository of ordered) {
-      if (!selected.has(repository.toLowerCase())) {
-        throw new EvolutionError('invalid_input', 'This repository was not selected for read-only review', { repository })
+    const ordered = [...new Set(candidateIds)].slice(0, 3)
+    const snapshot = workflow.candidateSnapshot ?? []
+    for (const candidateId of ordered) {
+      const candidate = snapshot.find((item) => item.id === candidateId)
+      if (!candidate?.repository || candidate.kind !== 'remote' || !candidate.commit) {
+        throw new EvolutionError('invalid_input', 'Review target is not an exact sealed remote package candidate', { candidateId })
+      }
+      if (!selected.has(candidate.repository.toLowerCase())) {
+        throw new EvolutionError('invalid_input', 'This repository was not selected for read-only review', { repository: candidate.repository })
       }
     }
     const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
     const reviews: ReviewRecord[] = []
-    const failures: Array<{ repository: string; code: string; message: string }> = []
-    const reviewOne = async (repository: string): Promise<ReviewRecord> => {
-      const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-      if (!candidate) throw new EvolutionError('invalid_input', 'Repository is outside the discovery snapshot', { repository })
+    const failures: Array<{ candidateId: string; repository: string; code: string; message: string }> = []
+    const reviewOne = async (candidateId: string): Promise<ReviewRecord> => {
+      const candidate = snapshot.find((item) => item.id === candidateId)!
       const evidence = await reviewGithubPluginWithFiles({
         runner: this.runner,
         config: this.config,
         cwd: resolution.cwd,
-        repository: candidate.repository,
-        ref: candidate.defaultBranch ?? 'HEAD',
+        repository: candidate.repository!,
+        ref: candidate.commit!,
+        ...(candidate.packagePath ? { packagePath: candidate.packagePath } : {}),
         resolutionId: resolution.id,
         requirement: resolution.requirement,
         artifactRoot: this.reviewArtifactRoot(resolution.cwd),
@@ -878,11 +916,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
       const settled = await Promise.allSettled(batch.map(reviewOne))
       for (let index = 0; index < settled.length; index += 1) {
         const result = settled[index]!
-        const repository = batch[index]!
+        const candidateId = batch[index]!
+        const repository = snapshot.find((item) => item.id === candidateId)?.repository ?? 'unknown/unknown'
         if (result.status === 'fulfilled') {
           reviews.push(result.value)
         } else {
           failures.push({
+            candidateId,
             repository,
             code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
             message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 500),
@@ -900,8 +940,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
     reviews.sort((left, right) => rank(left) - rank(right))
     const primary = reviews[0]
+    const selectedRepositories = [...new Set(ordered.flatMap((id) => {
+      const repository = snapshot.find((item) => item.id === id)?.repository
+      return repository ? [repository] : []
+    }))]
     const waiting = primary
-      ? withNextStep(waitingConfirmation({ ...resolution, selectedRepositories: ordered }, primary, workflow))
+      ? withNextStep(waitingConfirmation({ ...resolution, selectedRepositories }, primary, workflow))
       : resolution
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, reviews, failures }
@@ -940,6 +984,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       resolutionId: resolution.id,
       requirement: resolution.requirement,
       artifactRoot: this.reviewArtifactRoot(resolution.cwd),
+      ...(root.sourceSnapshot.packagePath ? { packagePath: root.sourceSnapshot.packagePath } : {}),
       ...(runtimeVersion ? { runtimeVersion } : {}),
     })
     if (local.record.sourceSnapshot.kind !== 'local'

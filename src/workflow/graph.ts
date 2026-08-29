@@ -32,7 +32,7 @@ export interface NodeExecutionResult {
   resolution?: ResolutionRecord
   review?: ReviewRecord
   reviews?: ReviewRecord[]
-  reviewFailures?: Array<{ repository: string; code: string; message: string }>
+  reviewFailures?: Array<{ candidateId?: string; repository: string; code: string; message: string }>
   installation?: InstallationRecord
 }
 
@@ -280,11 +280,34 @@ async function executeEnsureMarket(ctx: GraphContext): Promise<NodeExecutionResu
 
 async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
-  const selected = ctx.workflow.pendingRepositories?.length
-    ? ctx.workflow.pendingRepositories
-    : current.selectedRepositories ?? []
+  const reviewQueue = ctx.workflow.reviewQueue ?? []
+  const hasExactRemoteTargets = reviewQueue.length > 0 && reviewQueue.every((candidateId) => {
+    const candidate = ctx.workflow.candidateSnapshot?.find((item) => item.id === candidateId)
+    return candidate?.kind === 'remote' && Boolean(candidate.repository && candidate.commit)
+  })
+  if (!hasExactRemoteTargets) {
+    // Persisted pre-packagePath workflows only carry repository strings. Do
+    // not guess a root/subpackage: return to preview so Gate 1 can reseal an
+    // exact repository + commit + packagePath candidate on a fresh turn.
+    delete ctx.workflow.pendingRepositories
+    delete ctx.workflow.reviewPlan
+    delete ctx.workflow.candidateSnapshot
+    delete ctx.workflow.candidatePreviews
+    ctx.workflow.lastFailure = {
+      stage: 'review',
+      code: 'review_target_upgrade_required',
+      message: 'The saved repository selection must be previewed again to bind an exact package path.',
+      retryable: true,
+    }
+    return { kind: 'next', node: 'await_discovery', resolution: current }
+  }
+  const selected = reviewQueue.length
+    ? reviewQueue
+    : ctx.workflow.pendingRepositories?.length
+      ? ctx.workflow.pendingRepositories
+      : current.selectedRepositories ?? []
   if (selected.length < 1 || selected.length > 3) {
-    throw new EvolutionError('invalid_input', 'candidate review requires between one and three repositories')
+    throw new EvolutionError('invalid_input', 'candidate review requires between one and three sealed targets')
   }
   if (ctx.host.reviewGithubBatch) {
     const result = await ctx.host.reviewGithubBatch(
@@ -313,11 +336,12 @@ async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResu
       reviewFailures: result.failures,
     }
   }
-  const repository = selected[0]!
+  const sealed = ctx.workflow.candidateSnapshot?.find((item) => item.id === selected[0])
+  const repository = sealed?.repository ?? selected[0]!
   const { resolution, review } = await ctx.host.reviewGithub(
     current,
     repository,
-    ctx.workflow.pendingRef,
+    sealed?.commit ?? ctx.workflow.pendingRef,
     ctx.exec,
     ctx.workflow,
   )

@@ -43,6 +43,7 @@ export interface AgentCandidateEvidence {
   kind: CandidateSnapshotItem['kind']
   name: string
   repository?: string
+  package_path?: string
   fit?: string
   availability?: string
   surface_match?: boolean
@@ -171,6 +172,7 @@ function candidateEvidence(
       kind: item.kind,
       name: item.name,
       ...(item.repository ? { repository: item.repository } : {}),
+      ...(item.packagePath ? { package_path: item.packagePath } : {}),
       ...(fit ? { fit } : {}),
       ...(availability ? { availability } : {}),
       ...(item.localKind ? { local_kind: item.localKind } : {}),
@@ -223,7 +225,9 @@ function candidateIdForReview(view: WorkflowView, review: ReviewRecord): string 
   const source = review.sourceSnapshot
   if (source.kind !== 'github') return undefined
   return view.workflow.candidateSnapshot?.find((item) => item.repository?.toLowerCase()
-    === source.repository.toLowerCase())?.id
+    === source.repository.toLowerCase()
+    && (item.commit?.toLowerCase() ?? source.commit.toLowerCase()) === source.commit.toLowerCase()
+    && (item.packagePath ?? '') === (source.packagePath ?? ''))?.id
 }
 
 function reviewEvidence(view: WorkflowView): Record<string, unknown>[] {
@@ -231,7 +235,12 @@ function reviewEvidence(view: WorkflowView): Record<string, unknown>[] {
     candidate_id: candidateIdForReview(view, review),
     review_id: review.id,
     source: review.sourceSnapshot.kind === 'github'
-      ? { kind: 'github', repository: review.sourceSnapshot.repository, commit: review.sourceSnapshot.commit }
+      ? {
+          kind: 'github',
+          repository: review.sourceSnapshot.repository,
+          commit: review.sourceSnapshot.commit,
+          ...(review.sourceSnapshot.packagePath ? { package_path: review.sourceSnapshot.packagePath } : {}),
+        }
       : { kind: 'local', status_hash: review.sourceSnapshot.statusHash },
     fit: review.fit,
     confidence: review.confidence,
@@ -491,6 +500,9 @@ function previewFailureFacts(view: WorkflowView): Record<string, unknown> {
       repository: boundedText(failure.repository, 200),
       code: boundedText(failure.code, 100),
       summary: boundedText(failure.message, 300),
+      ...(failure.packagePaths?.length
+        ? { package_paths: failure.packagePaths.map((item) => boundedText(item, 500)).slice(0, 100) }
+        : {}),
     })),
   } : {}
 }
@@ -502,7 +514,12 @@ function factsFor(view: WorkflowView): Record<string, unknown> {
       clarification_question: view.workflow.clarificationQuestion,
     }
   }
-  if (state === 'discovering') return discoveryFacts(view)
+  if (state === 'discovering') {
+    return {
+      ...discoveryFacts(view),
+      ...previewFailureFacts(view),
+    }
+  }
   if (state === 'search_incomplete') {
     const failure = view.workflow.lastFailure
     return {

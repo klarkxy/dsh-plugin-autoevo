@@ -15,6 +15,8 @@ export interface ReviewCandidateContext {
     id: string
     kind: 'local' | 'remote'
     repository?: string
+    commit?: string
+    packagePath?: string
     identity: string
     digest?: string
   }>
@@ -40,7 +42,9 @@ export function reviewCandidateDigest(review: ReviewRecord, workflow?: ReviewCan
   if (sourceSnapshot.kind === 'github') {
     const repository = sourceSnapshot.repository
     const hit = snapshot.find((item) => item.kind === 'remote'
-      && item.repository?.toLowerCase() === repository.toLowerCase())
+      && item.repository?.toLowerCase() === repository.toLowerCase()
+      && (item.commit?.toLowerCase() ?? sourceSnapshot.commit.toLowerCase()) === sourceSnapshot.commit.toLowerCase()
+      && (item.packagePath ?? '') === (sourceSnapshot.packagePath ?? ''))
     if (hit?.digest && DIGEST_RE.test(hit.digest)) return hit.digest
   } else {
     const localPath = sourceSnapshot.path

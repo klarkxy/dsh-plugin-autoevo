@@ -132,8 +132,10 @@ function workflow(cursor: WorkflowRecord['cursor']): WorkflowRecord {
       name: 'one',
       identity: 'acme/one',
       repository: 'acme/one',
+      commit: 'c'.repeat(40),
       digest: 'f'.repeat(64),
     }],
+    reviewQueue: [`candidate_${'e'.repeat(24)}`],
     pendingRepositories: ['acme/one'],
     lineageTipReviewId: review().id,
     lastReviewId: review().id,
@@ -549,6 +551,19 @@ describe('workflow graph nodes', () => {
       retryable: false,
       diagnosticHash,
     })
+  })
+
+  it('returns a persisted repository-only review target to preview instead of guessing a package path', async () => {
+    const current = resolution()
+    const legacy = workflow('review_github')
+    delete legacy.candidateSnapshot![0]!.commit
+    let reviewed = false
+    const host = { async reviewGithub() { reviewed = true; throw new Error('must not review') } } as unknown as WorkflowHost
+    const result = await runNode('review_github', { host, resolution: current, workflow: legacy })
+    expect(result).toMatchObject({ kind: 'next', node: 'await_discovery' })
+    expect(reviewed).toBe(false)
+    expect(legacy.candidateSnapshot).toBeUndefined()
+    expect(legacy.lastFailure).toMatchObject({ code: 'review_target_upgrade_required', retryable: true })
   })
 
   it.each([

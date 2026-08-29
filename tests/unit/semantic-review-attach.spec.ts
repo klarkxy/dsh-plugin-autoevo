@@ -288,20 +288,29 @@ async function runNative(request: CommandRequest): Promise<CommandResult> {
 }
 
 function ghRunner(files: Record<string, string>): CommandRunner {
+  let commitPresent = false
   return {
     async run(request: CommandRequest): Promise<CommandResult> {
       const joined = request.argv.join(' ')
       if (request.argv[0] === 'git') {
         const args = request.argv.slice(1)
-        if (args[0] === 'init') await mkdir(path.join(request.cwd, '.git'), { recursive: true })
-        if (args[0] === 'checkout' && args[1] === '--detach') {
+        if (args.includes('init') && args.includes('--bare')) await mkdir(request.argv.at(-1)!, { recursive: true })
+        if (args.includes('rev-parse') && args.includes('--is-bare-repository')) return commandResult('true\n')
+        if (args.includes('get-url')) return { ...commandResult(), exitCode: 1, stderr: 'missing' }
+        if (args.includes('cat-file')) {
+          if (!commitPresent) return { ...commandResult(), exitCode: 1, stderr: 'missing' }
+          return commandResult()
+        }
+        if (args.includes('fetch')) commitPresent = true
+        if (args.includes('worktree') && args.includes('add')) await mkdir(request.argv.at(-2)!, { recursive: true })
+        if (args.includes('checkout') && args.includes('--detach')) {
           for (const [relative, content] of Object.entries(files)) {
             const target = path.join(request.cwd, ...relative.split('/'))
             await mkdir(path.dirname(target), { recursive: true })
             await writeFile(target, content)
           }
         }
-        if (args.join(' ') === 'rev-parse HEAD') return commandResult(`${'a'.repeat(40)}\n`)
+        if (args.includes('rev-parse') && args.includes('HEAD')) return commandResult(`${'a'.repeat(40)}\n`)
         return commandResult()
       }
       if (request.argv.includes('pack')) {
@@ -415,11 +424,34 @@ describe('service selected review attachment', () => {
       undefined,
       host,
     )
+    const candidateId = `candidate_${'e'.repeat(24)}`
+    const workflow: WorkflowRecord = {
+      schemaVersion: 2,
+      id: `workflow_${'d'.repeat(24)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-19T00:00:00.000Z',
+      updatedAt: '2026-08-19T00:00:00.000Z',
+      requirement: resolution.requirement,
+      status: 'running',
+      cursor: 'review_github',
+      generation: 1,
+      candidateSnapshot: [{
+        id: candidateId,
+        index: 1,
+        kind: 'remote',
+        name: 'dsh-plugin-alpha',
+        identity: 'anonymous-lab/dsh-plugin-alpha',
+        repository: 'anonymous-lab/dsh-plugin-alpha',
+        commit: 'a'.repeat(40),
+        digest: '4'.repeat(64),
+      }],
+    }
     const result = await serviceWithStore.reviewGithubBatch(
       resolution,
-      ['anonymous-lab/dsh-plugin-alpha'],
+      [candidateId],
       'fixed',
       exec(),
+      workflow,
     )
     expect(result.reviews).toHaveLength(1)
     expect(result.reviews[0]?.sourceSnapshot).toMatchObject({ repository: 'anonymous-lab/dsh-plugin-alpha' })
@@ -427,10 +459,11 @@ describe('service selected review attachment', () => {
     expect(seenRepos).toEqual([])
     await expect(serviceWithStore.reviewGithubBatch(
       resolution,
-      ['acme/other'],
+      ['candidate_outside'],
       'fixed',
       exec(),
-    )).rejects.toThrow(/was not selected for read-only review/i)
+      workflow,
+    )).rejects.toThrow(/exact sealed remote package candidate/i)
   }, 20_000)
 })
 

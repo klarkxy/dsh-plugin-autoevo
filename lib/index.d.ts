@@ -319,12 +319,16 @@ type ReviewSourceSnapshot = {
   requestedRef: string;
   commit: string;
   defaultBranch: string;
+  /** Empty/absent means the repository root (legacy records remain readable). */
+  packagePath?: string;
 } | {
   kind: 'local';
   path: string;
   baseReviewId: string;
   baseCommit: string;
   statusHash: string;
+  /** Package root retained from a monorepo review lineage. */
+  packagePath?: string;
 };
 interface MechanicalFacts {
   fit: ReviewFit;
@@ -773,6 +777,8 @@ interface ReviewCandidateContext {
     id: string;
     kind: 'local' | 'remote';
     repository?: string;
+    commit?: string;
+    packagePath?: string;
     identity: string;
     digest?: string;
   }>;
@@ -936,6 +942,9 @@ interface CandidateSnapshotItem {
   identity: string;
   digest: string;
   repository?: string;
+  /** Normalized repository-relative package root; empty/absent is the root. */
+  packagePath?: string;
+  commit?: string;
   localName?: string;
   localKind?: 'tool' | 'skill' | 'plugin';
   availability?: CandidateAvailability;
@@ -985,6 +994,7 @@ interface CandidatePreview {
   repository: string;
   commit: string;
   defaultBranch: string;
+  packagePath?: string;
   inspectedFiles: Array<{
     path: string;
     sha256: string;
@@ -1009,6 +1019,8 @@ interface CandidatePreviewFailure {
   repository: string;
   code: string;
   message: string;
+  /** Normalized repository-relative package roots that may be retried exactly. */
+  packagePaths?: string[];
 }
 interface DiscoveryRefineInput {
   workflowId: string;
@@ -1018,6 +1030,11 @@ interface DiscoveryRefineInput {
 interface DiscoveryPresentInput {
   workflowId: string;
   candidateIds: string[];
+  /** Optional retry selector for a collection repository with more than five bundles. */
+  packageSelectors?: Array<{
+    candidateId: string;
+    packagePath: string;
+  }>;
 }
 type DiagnosticProbe = 'discovery' | 'review' | 'installation' | 'verification' | 'managed_child' | 'cleanup';
 interface WorkflowDiagnoseInput {
@@ -1256,7 +1273,9 @@ interface WorkflowHost {
     candidateId: string;
     repository: string;
     ref?: string;
+    packagePath?: string;
   }>, exec: WorkflowExec): Promise<{
+    candidates?: CandidateSnapshotItem[];
     previews: CandidatePreview[];
     failures: CandidatePreviewFailure[];
   }>;
@@ -1272,10 +1291,11 @@ interface WorkflowHost {
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewGithubBatch?(resolution: ResolutionRecord, repositories: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+  reviewGithubBatch?(resolution: ResolutionRecord, candidateIds: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     reviews: ReviewRecord[];
     failures: Array<{
+      candidateId: string;
       repository: string;
       code: string;
       message: string;
@@ -2062,6 +2082,8 @@ interface SourceReceipt {
   activeWorkflowId: string | null;
   /** Hash of Host-controlled Git config and hooks metadata. */
   gitConfigHash: string;
+  /** Normalized package root inside the managed repository. */
+  packagePath?: string;
 }
 interface FinalizedChildCommit extends SourceReceipt {
   changedFiles: string[];
@@ -2318,7 +2340,9 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     candidateId: string;
     repository: string;
     ref?: string;
+    packagePath?: string;
   }>, exec: WorkflowExec): Promise<{
+    candidates: CandidateSnapshotItem[];
     previews: CandidatePreview[];
     failures: CandidatePreviewFailure[];
   }>;
@@ -2334,10 +2358,11 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewGithubBatch(resolution: ResolutionRecord, repositories: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+  reviewGithubBatch(resolution: ResolutionRecord, candidateIds: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     reviews: ReviewRecord[];
     failures: Array<{
+      candidateId: string;
       repository: string;
       code: string;
       message: string;

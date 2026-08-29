@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import type { RuntimeConfig } from '../../../src/config.js'
 import {
   classifyRuntimeSurface,
@@ -6,7 +9,7 @@ import {
   VERIFICATION_STATUSES,
   type RuntimeSurfaceFacts,
 } from '../../../src/contracts.js'
-import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, previewGithubPlugin, reviewGithubPlugin, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
+import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, previewGithubPlugin, previewGithubPlugins, reviewGithubPlugin, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
 import type { CommandRequest, CommandRunner } from '../../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -230,8 +233,43 @@ describe('third-party review', () => {
       ['3'.repeat(40), 'export const calculate = () => 1'],
       ['4'.repeat(40), loaderPatch],
     ])
+    let commitPresent = false
     const runner: CommandRunner = {
       async run(request) {
+        if (request.argv[0] === 'git') {
+          const args = [...request.argv.slice(1)]
+          requested.push(args.join(' '))
+          if (args.includes('init') && args.includes('--bare')) {
+            await mkdir(args.at(-1)!, { recursive: true })
+            return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+          }
+          if (args.includes('rev-parse') && args.includes('--is-bare-repository')) return { exitCode: 0, signal: null, stdout: 'true\n', stderr: '' }
+          if (args.includes('get-url')) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+          if (args.includes('cat-file')) {
+            if (!commitPresent) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+            return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+          }
+          if (args.includes('fetch')) {
+            commitPresent = true
+            return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+          }
+          if (args.includes('ls-tree')) return { exitCode: 0, signal: null, stdout: [
+            `100644 blob ${'1'.repeat(40)}\tpackage.json`,
+            `100644 blob ${'2'.repeat(40)}\tREADME.md`,
+            `100644 blob ${'3'.repeat(40)}\tsrc/index.ts`,
+            `100644 blob ${'4'.repeat(40)}\tcordis.patch.yml`,
+          ].join('\n'), stderr: '' }
+          if (args.includes('show')) {
+            const spec = args.at(-1)!
+            const filePath = spec.slice(spec.indexOf(':') + 1)
+            const content = filePath === 'package.json' ? blobs.get('1'.repeat(40))
+              : filePath === 'README.md' ? blobs.get('2'.repeat(40))
+                : filePath === 'src/index.ts' ? blobs.get('3'.repeat(40))
+                  : blobs.get('4'.repeat(40))
+            return { exitCode: 0, signal: null, stdout: content ?? '', stderr: '' }
+          }
+          return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        }
         const endpoint = request.argv.at(-1) ?? ''
         requested.push(endpoint)
         if (endpoint.endsWith('/commits/main')) return { exitCode: 0, signal: null, stdout: JSON.stringify({ sha: 'a'.repeat(40), commit: { committer: { date: new Date().toISOString() } } }), stderr: '' }
@@ -246,7 +284,8 @@ describe('third-party review', () => {
         return { exitCode: 0, signal: null, stdout: JSON.stringify({ encoding: 'base64', content: Buffer.from(content).toString('base64') }), stderr: '' }
       },
     }
-    const preview = await previewGithubPlugin({ runner, config, cwd: 'C:/workspace', repository: 'acme/safe-tool', ref: 'main' })
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-preview-cache-'))
+    const preview = await previewGithubPlugin({ runner, config, cwd, repository: 'acme/safe-tool', ref: 'main' })
 
     expect(preview).toMatchObject({
       repository: 'acme/safe-tool', commit: 'a'.repeat(40), defaultBranch: 'main', truncated: false,
@@ -255,7 +294,62 @@ describe('third-party review', () => {
     })
     expect(preview.readmeExcerpt).toContain('Ignore previous instructions')
     expect(preview.inspectedFiles.map((file) => file.path)).toEqual(['cordis.patch.yml', 'package.json', 'README.md'])
-    expect(requested.some((endpoint) => endpoint.endsWith(`/git/blobs/${'3'.repeat(40)}`))).toBe(false)
+    expect(requested.some((endpoint) => endpoint.includes('/git/blobs/'))).toBe(false)
+    expect(requested.some((entry) => entry.includes('fetch --depth=1 --filter=blob:none'))).toBe(true)
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  it('expands a collection repository into distinct bundle package previews and excludes its unknown root', async () => {
+    const commit = 'a'.repeat(40)
+    const files: Record<string, string> = {
+      'package.json': JSON.stringify({ name: 'whale-collection', private: true }),
+      'maid-atelier/package.json': JSON.stringify({ name: '@whale/maid-atelier', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+      'maid-atelier/cordis.patch.yml': loaderPatch,
+      'orca-link/package.json': JSON.stringify({ name: '@whale/orca-link', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+      'orca-link/cordis.patch.yml': loaderPatch,
+      'skin-manager/package.json': JSON.stringify({ name: '@whale/skin-manager', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+      'skin-manager/cordis.patch.yml': loaderPatch,
+    }
+    let commitPresent = false
+    const requested: string[] = []
+    const runner: CommandRunner = {
+      async run(request) {
+        requested.push(request.argv.join(' '))
+        if (request.argv[0] === 'gh') {
+          const endpoint = request.argv.at(-1) ?? ''
+          if (endpoint.endsWith('/commits/main')) return { exitCode: 0, signal: null, stdout: JSON.stringify({ sha: commit, commit: { committer: { date: new Date().toISOString() } } }), stderr: '' }
+          return { exitCode: 0, signal: null, stdout: JSON.stringify({ default_branch: 'main' }), stderr: '' }
+        }
+        const args = [...request.argv.slice(1)]
+        if (args.includes('init') && args.includes('--bare')) await mkdir(request.argv.at(-1)!, { recursive: true })
+        if (args.includes('rev-parse') && args.includes('--is-bare-repository')) return { exitCode: 0, signal: null, stdout: 'true\n', stderr: '' }
+        if (args.includes('get-url')) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+        if (args.includes('cat-file')) {
+          if (!commitPresent) return { exitCode: 1, signal: null, stdout: '', stderr: 'missing' }
+          return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+        }
+        if (args.includes('fetch')) commitPresent = true
+        if (args.includes('ls-tree')) {
+          const stdout = Object.keys(files).map((filePath, index) => `100644 blob ${index.toString(16).padStart(40, 'b')}\t${filePath}`).join('\n')
+          return { exitCode: 0, signal: null, stdout, stderr: '' }
+        }
+        if (args.includes('show')) {
+          const spec = args.at(-1)!
+          return { exitCode: 0, signal: null, stdout: files[spec.slice(spec.indexOf(':') + 1)] ?? '', stderr: '' }
+        }
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    }
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-collection-cache-'))
+    const previews = await previewGithubPlugins({ runner, config, cwd, repository: 'small-tail/whale', ref: 'main' })
+    expect(previews.map((item) => item.packagePath)).toEqual(['maid-atelier', 'orca-link', 'skin-manager'])
+    expect(previews.map((item) => item.manifest.packageName)).toEqual(['@whale/maid-atelier', '@whale/orca-link', '@whale/skin-manager'])
+    const selected = await previewGithubPlugins({
+      runner, config, cwd, repository: 'small-tail/whale', ref: 'main', packagePath: 'orca-link',
+    })
+    expect(selected.map((item) => item.packagePath)).toEqual(['orca-link'])
+    expect(requested.some((entry) => entry.includes('/git/trees/') || entry.includes('/git/blobs/'))).toBe(false)
+    await rm(cwd, { recursive: true, force: true })
   })
 
   it('infers only defineTool names, not unrelated exported name fields', () => {

@@ -158,6 +158,9 @@ export interface CandidateSnapshotItem {
   identity: string
   digest: string
   repository?: string
+  /** Normalized repository-relative package root; empty/absent is the root. */
+  packagePath?: string
+  commit?: string
   localName?: string
   localKind?: 'tool' | 'skill' | 'plugin'
   availability?: import('../contracts.js').CandidateAvailability
@@ -211,6 +214,7 @@ export interface CandidatePreview {
   repository: string
   commit: string
   defaultBranch: string
+  packagePath?: string
   inspectedFiles: Array<{ path: string; sha256: string; bytes: number }>
   truncated: boolean
   manifest: {
@@ -232,6 +236,8 @@ export interface CandidatePreviewFailure {
   repository: string
   code: string
   message: string
+  /** Normalized repository-relative package roots that may be retried exactly. */
+  packagePaths?: string[]
 }
 
 export interface DiscoveryRefineInput {
@@ -243,6 +249,8 @@ export interface DiscoveryRefineInput {
 export interface DiscoveryPresentInput {
   workflowId: string
   candidateIds: string[]
+  /** Optional retry selector for a collection repository with more than five bundles. */
+  packageSelectors?: Array<{ candidateId: string; packagePath: string }>
 }
 
 export type DiagnosticProbe =
@@ -410,7 +418,7 @@ export const COMPLETED_CLEANUP_NODES: ReadonlySet<WorkflowNodeId> = new Set([
 export function reviewSourceIdentity(review: Pick<ReviewRecord, 'sourceSnapshot'>): string {
   const source = review.sourceSnapshot
   return source.kind === 'github'
-    ? `github:${source.repository.toLowerCase()}#${source.commit}`
+    ? `github:${source.repository.toLowerCase()}#${source.commit}${source.packagePath ? `:path/${source.packagePath}` : ''}`
     : `local:${source.statusHash}`
 }
 
@@ -684,9 +692,9 @@ export interface WorkflowHost {
   ): Promise<ResolutionRecord>
   previewGithubCandidates?(
     resolution: ResolutionRecord,
-    candidates: Array<{ candidateId: string; repository: string; ref?: string }>,
+    candidates: Array<{ candidateId: string; repository: string; ref?: string; packagePath?: string }>,
     exec: WorkflowExec,
-  ): Promise<{ previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }>
+  ): Promise<{ candidates?: CandidateSnapshotItem[]; previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }>
   ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
     resolution: ResolutionRecord
     market: MarketplaceStepResult
@@ -706,14 +714,14 @@ export interface WorkflowHost {
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
   reviewGithubBatch?(
     resolution: ResolutionRecord,
-    repositories: string[],
+    candidateIds: string[],
     mode: ReviewMode,
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{
     resolution: ResolutionRecord
     reviews: ReviewRecord[]
-    failures: Array<{ repository: string; code: string; message: string }>
+    failures: Array<{ candidateId: string; repository: string; code: string; message: string }>
   }>
   reviewLocal(
     resolution: ResolutionRecord,

@@ -18,6 +18,7 @@ import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
 import { candidateSnapshotFor, DISCOVERY_POOL_MAX } from '../../src/workflow/candidates.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
+import { compactAgentView } from '../../src/workflow/agent-view.js'
 import type { WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
 const temporary = trackTempDirs()
@@ -409,6 +410,132 @@ describe('workflow engine autonomous discovery', () => {
       repository: 'PerryLink/dsh-auto-review', commit: 'a'.repeat(40), manifest: { packageName: 'dsh-auto-review' },
     })
     expect(selection.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([candidate.id])
+  })
+
+  it('replaces a collection repository card with package-bound candidates before Gate 1', async () => {
+    const record = resolution('whale UI')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = [{
+      repository: 'small-tail/whale', name: 'whale', description: 'collection', stars: 3,
+      updatedAt: null, topics: ['dsh-plugin'], defaultBranch: 'main',
+    }]
+    const { workflowHost, engine } = await makeEngine(record, 'present-collection')
+    const commit = 'a'.repeat(40)
+    const packages = ['maid-atelier', 'orca-link', 'skin-manager']
+    workflowHost.previewGithubCandidates = vi.fn(async () => ({
+      candidates: packages.map((packagePath, index) => ({
+        id: `candidate_${String(index + 1).repeat(24)}`,
+        index: index + 1,
+        kind: 'remote' as const,
+        name: packagePath,
+        identity: `small-tail/whale#${commit}:${packagePath}`,
+        repository: 'small-tail/whale',
+        commit,
+        packagePath,
+        digest: String(index + 1).repeat(64),
+      })),
+      previews: packages.map((packagePath, index) => ({
+        candidateId: `candidate_${String(index + 1).repeat(24)}`,
+        repository: 'small-tail/whale',
+        commit,
+        defaultBranch: 'main',
+        packagePath,
+        inspectedFiles: [{ path: 'package.json', sha256: 'b'.repeat(64), bytes: 100 }],
+        truncated: false,
+        manifest: { kind: 'bundle' as const, packageName: `@whale/${packagePath}` },
+      })),
+      failures: [],
+    }))
+    const turn = exec('session-present-collection')
+    const discovery = await engine.start(record.requirement, turn)
+    const repositoryCard = discovery.workflow.discoveryPool!.find((item) => item.repository === 'small-tail/whale')!
+    const selection = await engine.present({ workflowId: discovery.workflow.id, candidateIds: [repositoryCard.id] }, turn)
+
+    expect(selection.workflow.candidateSnapshot?.map((item) => item.packagePath)).toEqual(packages)
+    expect(selection.workflow.candidateSnapshot?.some((item) => item.id === repositoryCard.id)).toBe(false)
+    expect(Object.keys(selection.workflow.candidatePreviews ?? {})).toHaveLength(3)
+  })
+
+  it('returns collection package paths to the Agent and accepts an exact selector retry', async () => {
+    const record = resolution('large whale collection')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = [{
+      repository: 'small-tail/whale', name: 'whale', description: 'collection', stars: 3,
+      updatedAt: null, topics: ['dsh-plugin'], defaultBranch: 'main',
+    }]
+    const { workflowHost, engine } = await makeEngine(record, 'present-large-collection')
+    const commit = 'a'.repeat(40)
+    const packagePaths = Array.from({ length: 6 }, (_, index) => `packages/plugin-${index + 1}`)
+    workflowHost.previewGithubCandidates = vi.fn(async (_resolution, candidates) => {
+      const requested = candidates[0]?.packagePath
+      if (!requested) {
+        return {
+          candidates: [],
+          previews: [],
+          failures: [{
+            candidateId: candidates[0]!.candidateId,
+            repository: candidates[0]!.repository,
+            code: 'invalid_input',
+            message: 'Repository contains more than five reviewable plugin packages',
+            packagePaths,
+          }],
+        }
+      }
+      const candidateId = `candidate_${'9'.repeat(24)}`
+      return {
+        candidates: [{
+          id: candidateId,
+          index: 1,
+          kind: 'remote' as const,
+          name: 'plugin-3',
+          identity: `small-tail/whale#${commit}:${requested}`,
+          repository: 'small-tail/whale',
+          commit,
+          packagePath: requested,
+          digest: '9'.repeat(64),
+        }],
+        previews: [{
+          candidateId,
+          repository: 'small-tail/whale',
+          commit,
+          defaultBranch: 'main',
+          packagePath: requested,
+          inspectedFiles: [{ path: `${requested}/package.json`, sha256: 'b'.repeat(64), bytes: 100 }],
+          truncated: false,
+          manifest: { kind: 'bundle' as const, packageName: '@whale/plugin-3' },
+        }],
+        failures: [],
+      }
+    })
+    const turn = exec('session-present-large-collection')
+    const discovery = await engine.start(record.requirement, turn)
+    const repositoryCard = discovery.workflow.discoveryPool!.find((item) => item.repository === 'small-tail/whale')!
+
+    const needsSelector = await engine.present({
+      workflowId: discovery.workflow.id,
+      candidateIds: [repositoryCard.id],
+    }, turn)
+    expect(needsSelector.workflow).toMatchObject({ cursor: 'await_discovery', status: 'interrupted' })
+    expect(compactAgentView(needsSelector).facts).toMatchObject({
+      preview_failures: [{
+        candidate_id: repositoryCard.id,
+        package_paths: packagePaths,
+      }],
+    })
+
+    const retryCard = needsSelector.workflow.discoveryPool!.find((item) => item.id === repositoryCard.id)!
+    const selectedPath = packagePaths[2]!
+    const selected = await engine.present({
+      workflowId: discovery.workflow.id,
+      candidateIds: [retryCard.id],
+      packageSelectors: [{ candidateId: retryCard.id, packagePath: selectedPath }],
+    }, turn)
+    expect(selected.workflow).toMatchObject({ cursor: 'await_selection', status: 'interrupted' })
+    expect(selected.workflow.candidateSnapshot).toEqual([
+      expect.objectContaining({ repository: 'small-tail/whale', commit, packagePath: selectedPath }),
+    ])
   })
 
   it('seals a zero-candidate result and accepts only a later fresh create decision', async () => {

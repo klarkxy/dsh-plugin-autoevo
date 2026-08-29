@@ -58,7 +58,8 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 - 管理员可显式配置额外凭据环境变量名；receipt 与模型可见输出只保留变量名。
 - Git 命令固定 `GIT_CONFIG_COUNT=0`、`GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=Never`。
 - stdout、stderr、命令时间、候选数、文件数和读取总字节均有上限。失败时持久化/返回 stderr 的诊断 hash。
-- 本地打包用 Node 直接运行 npm 的 JavaScript CLI。cache 与 temp 固定在 owned artifact root，成功后删除。
+- 本地打包只允许真实 `node`/`node.exe` 解释 npm 的 JavaScript CLI；Desktop/Electron 宿主可执行文件不能代替 Node。npm cache 与 temp 固定在 owned artifact root，成功后删除。
+- GitHub 精确 commit 的 Git 对象缓存位于工作区 `.autoevo/cache/git`，按仓库加锁并校验 bare/origin/commit；它只是可重建传输层。安装仍只接受 stateDir owned root 中已审查并复算 SHA-256 的 tgz。
 
 ## 4. 验证证据
 

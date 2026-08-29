@@ -241,15 +241,9 @@ function discoveryRunner(
   results: Array<{ name: string, url: string, description: string, stars?: number }>,
   files: Record<string, string> = {},
 ): CommandRunner {
-  const review: CommandRunner = Object.keys(files).length > 0
-    ? ghRunner(files)
-    : {
-      async run(request: CommandRequest): Promise<CommandResult> {
-        const joined = request.argv.join(' ')
-        if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
-        return commandResult()
-      },
-    }
+  const effectiveFiles: Record<string, string> = Object.keys(files).length > 0 ? files : nebulaBundle
+  const review = ghRunner(effectiveFiles)
+  let commitPresent = false
   return {
     async run(request: CommandRequest): Promise<CommandResult> {
       const joined = request.argv.join(' ')
@@ -258,15 +252,33 @@ function discoveryRunner(
       }
       if (request.argv[0] === 'git') {
         const args = request.argv.slice(1)
-        if (args[0] === 'init') await mkdir(path.join(request.cwd, '.git'), { recursive: true })
-        if (args[0] === 'checkout' && args[1] === '--detach') {
-          for (const [relative, content] of Object.entries(files)) {
+        if (args.includes('init') && args.includes('--bare')) await mkdir(request.argv.at(-1)!, { recursive: true })
+        else if (args[0] === 'init') await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+        if (args.includes('rev-parse') && args.includes('--is-bare-repository')) return commandResult('true\n')
+        if (args.includes('get-url')) return { ...commandResult(), exitCode: 1, stderr: 'missing' }
+        if (args.includes('cat-file')) {
+          if (!commitPresent) return { ...commandResult(), exitCode: 1, stderr: 'missing' }
+          return commandResult()
+        }
+        if (args.includes('fetch')) commitPresent = true
+        if (args.includes('ls-tree')) {
+          return commandResult(Object.keys(effectiveFiles).map((filePath, index) => (
+            `100644 blob ${index.toString(16).padStart(40, 'b')}\t${filePath}`
+          )).join('\n'))
+        }
+        if (args.includes('show')) {
+          const spec = args.at(-1)!
+          return commandResult(effectiveFiles[spec.slice(spec.indexOf(':') + 1)] ?? '')
+        }
+        if (args.includes('worktree') && args.includes('add')) await mkdir(request.argv.at(-2)!, { recursive: true })
+        if (args.includes('checkout') && args.includes('--detach')) {
+          for (const [relative, content] of Object.entries(effectiveFiles)) {
             const target = path.join(request.cwd, ...relative.split('/'))
             await mkdir(path.dirname(target), { recursive: true })
             await writeFile(target, content)
           }
         }
-        if (args.join(' ') === 'rev-parse HEAD') return commandResult(`${'a'.repeat(40)}\n`)
+        if (args.includes('rev-parse') && args.includes('HEAD')) return commandResult(`${'a'.repeat(40)}\n`)
         return commandResult()
       }
       if (request.argv.includes('pack')) {
@@ -449,8 +461,9 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(started.workflow.interrupt).toBeUndefined()
     expect(started.workflow.discoveryPool).toHaveLength(1)
     expect(started.review).toBeUndefined()
-    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
-    const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
+    const repositoryCardId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
+    const presented = await presentWith(service, turn, started.workflow.id, [repositoryCardId])
+    const candidateId = presented.workflow.candidateSnapshot![0]!.id
     expect(presented.workflow.cursor).toBe('await_selection')
     expect(presented.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([candidateId])
     expect(presented.workflow.interrupt?.options.map((item) => item.id)).toContain('review_candidates')
@@ -560,8 +573,9 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     const turn = exec()
     const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')
-    const candidateId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
-    const presented = await presentWith(service, turn, started.workflow.id, [candidateId])
+    const repositoryCardId = started.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
+    const presented = await presentWith(service, turn, started.workflow.id, [repositoryCardId])
+    const candidateId = presented.workflow.candidateSnapshot![0]!.id
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.review?.securityRisk).toBe('high')
@@ -683,8 +697,9 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     const useTurn = exec('session-use')
     const resolved = await startWith(useService, useGuard, useTurn, '我需要一个调用 nebula relay 的能力。')
     expect(resolved.workflow.cursor).toBe('await_discovery')
-    const useCandidateId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
-    const usePresented = await presentWith(useService, useTurn, resolved.workflow.id, [useCandidateId])
+    const useRepositoryCardId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
+    const usePresented = await presentWith(useService, useTurn, resolved.workflow.id, [useRepositoryCardId])
+    const useCandidateId = usePresented.workflow.candidateSnapshot![0]!.id
     const reviewed = await navigateWith(useService, useGuard, useTurn, usePresented.workflow.id, usePresented.workflow.interrupt!.interruptId, 'review_candidates', [useCandidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')

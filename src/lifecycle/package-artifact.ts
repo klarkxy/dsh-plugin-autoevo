@@ -9,6 +9,7 @@ import { Parser } from 'tar'
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError } from '../errors.js'
 import { validateGithubRepository } from '../github/discovery.js'
+import { normalizePackagePath, withCachedGithubRepository } from '../github/git-cache.js'
 import type { CommandRunner } from '../process/runner.js'
 import type { ContentFile } from '../review/review.js'
 import { npmPackArgv, shellForwardedFileSpec } from './npm-cli.js'
@@ -228,8 +229,15 @@ export async function freezeLocalPackage(options: FreezeOptions & { sourceRoot: 
   return freezePackedSource(await realpath(options.sourceRoot), options)
 }
 
-export async function freezeGithubPackage(options: FreezeOptions & { repository: string; commit: string }): Promise<FrozenPackageArtifact> {
+export async function freezeGithubPackage(options: FreezeOptions & {
+  repository: string
+  commit: string
+  packagePath?: string
+  cacheRoot?: string
+  workspaceRoot?: string
+}): Promise<FrozenPackageArtifact> {
   const repository = validateGithubRepository(options.repository)
+  const packagePath = normalizePackagePath(options.packagePath)
   if (!/^[a-f0-9]{40}$/iu.test(options.commit)) {
     throw new EvolutionError('invalid_input', 'GitHub package freezing requires an exact 40-character commit')
   }
@@ -239,24 +247,60 @@ export async function freezeGithubPackage(options: FreezeOptions & { repository:
   if ((await readdir(sourceRoot)).length > 0) {
     throw new EvolutionError('unsafe_path', 'Frozen GitHub source directory must be empty before initialization')
   }
-  try {
-    const git = options.config.gitCommand
-    await runChecked(options.runner, [git, 'init'], sourceRoot, options)
-    await runChecked(options.runner, [git, 'remote', 'add', 'origin', `https://github.com/${repository}.git`], sourceRoot, options)
-    await runChecked(options.runner, [git, 'fetch', '--depth=1', 'origin', options.commit], sourceRoot, options)
-    await runChecked(options.runner, [git, 'checkout', '--detach', options.commit], sourceRoot, options)
-    const head = (await runChecked(options.runner, [git, 'rev-parse', 'HEAD'], sourceRoot, options)).trim()
-    if (head.toLowerCase() !== options.commit.toLowerCase()) {
-      throw new EvolutionError('review_rejected', 'Frozen GitHub source HEAD does not match the requested commit')
+  await rm(sourceRoot, { recursive: true })
+  return await withCachedGithubRepository({
+    runner: options.runner,
+    config: options.config,
+    cacheRoot: options.cacheRoot ?? path.join(options.artifactRoot, 'git-cache'),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+    repository,
+    commit: options.commit,
+    ...(options.signal ? { signal: options.signal } : {}),
+  }, async (cached) => {
+    try {
+      await cached.git(['worktree', 'add', '--detach', '--no-checkout', sourceRoot, options.commit])
+      const git = options.config.gitCommand
+      const hooks = path.join(path.resolve(options.cacheRoot ?? path.join(options.artifactRoot, 'git-cache')), 'empty-hooks')
+      const worktreeGit = async (args: string[]): Promise<string> => await runChecked(
+        options.runner,
+        [git, '-c', `core.hooksPath=${hooks}`, '-C', sourceRoot, ...args],
+        sourceRoot,
+        {
+          ...options,
+          env: {
+            GIT_CONFIG_COUNT: '0',
+            GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+            GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
+            GIT_ATTR_NOSYSTEM: '1',
+            GIT_TERMINAL_PROMPT: '0',
+            GCM_INTERACTIVE: 'Never',
+          },
+        },
+      )
+      if (packagePath) {
+        await worktreeGit(['sparse-checkout', 'init', '--cone'])
+        await worktreeGit(['sparse-checkout', 'set', '--', packagePath])
+      }
+      await worktreeGit(['checkout', '--detach', options.commit])
+      const head = (await worktreeGit(['rev-parse', 'HEAD'])).trim()
+      if (head.toLowerCase() !== options.commit.toLowerCase()) {
+        throw new EvolutionError('review_rejected', 'Frozen GitHub source HEAD does not match the requested commit')
+      }
+      const status = await worktreeGit(['status', '--porcelain'])
+      if (status.trim()) throw new EvolutionError('review_rejected', 'Frozen GitHub source is not clean after checkout')
+      const packageRoot = packagePath ? path.join(sourceRoot, ...packagePath.split('/')) : sourceRoot
+      const resolvedSource = await realpath(sourceRoot)
+      const resolvedPackage = await realpath(packageRoot)
+      const relative = path.relative(resolvedSource, resolvedPackage)
+      if (packagePath && (!relative || relative.startsWith('..') || path.isAbsolute(relative))) {
+        throw new EvolutionError('unsafe_path', 'GitHub package path escaped the cached worktree')
+      }
+      return await freezePackedSource(resolvedPackage, options)
+    } finally {
+      await cached.git(['worktree', 'remove', '--force', sourceRoot]).catch(() => undefined)
+      await rm(sourceRoot, { recursive: true, force: true })
     }
-    const status = await runChecked(options.runner, [git, 'status', '--porcelain'], sourceRoot, options)
-    if (status.trim()) throw new EvolutionError('review_rejected', 'Frozen GitHub source is not clean after checkout')
-    return await freezePackedSource(sourceRoot, options)
-  } finally {
-    // The immutable tgz is the review/install authority. Retaining the
-    // checkout would only duplicate source bytes inside long-lived state.
-    await rm(sourceRoot, { recursive: true, force: true })
-  }
+  })
 }
 
 export const _testing = { readPackedFiles, safeArchivePath, shellForwardedFileSpec }

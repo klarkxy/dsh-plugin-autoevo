@@ -16,11 +16,13 @@ import {
   type ToolFixtureAvailability,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { normalizePackagePath, withCachedGithubRepository } from '../github/git-cache.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
 import type { CommandRunner } from '../process/runner.js'
 import { activationTargetsFromPatch } from '../lifecycle/bundle-activation.js'
 import { freezeGithubPackage, freezeLocalPackage, type FrozenPackageArtifact } from '../lifecycle/package-artifact.js'
+import { resolveGitCacheRoot } from '../workspace-layout.js'
 import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 import { isExcludedLocalPackagePath } from './local-path-policy.js'
@@ -114,6 +116,7 @@ export interface GithubPluginPreview {
   repository: string
   commit: string
   defaultBranch: string
+  packagePath: string
   inspectedFiles: InspectedFile[]
   truncated: boolean
   manifest: Pick<ManifestFacts, 'kind' | 'packageName' | 'packageVersion' | 'bundlePatch' | 'license'>
@@ -703,7 +706,7 @@ function mintInstallSpec(input: {
   if (!input.materializable || !input.packageName) return null
   if (input.installSpec) return input.installSpec
   if (input.sourceSnapshot.kind !== 'github') return null
-  return `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
+  return `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}${input.sourceSnapshot.packagePath ? `:path/${input.sourceSnapshot.packagePath}` : ''}`
 }
 
 function mechanicalFactsFrom(input: {
@@ -971,6 +974,7 @@ async function githubIdentity(options: {
   cwd: string
   repository: string
   ref: string
+  packagePath?: string
   signal?: AbortSignal
 }): Promise<{ sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>; maintained: boolean }> {
   const repository = validateGithubRepository(options.repository)
@@ -984,7 +988,14 @@ async function githubIdentity(options: {
   const maintained = typeof commitDate === 'string' && Number.isFinite(Date.parse(commitDate))
     && Date.now() - Date.parse(commitDate) <= 366 * 24 * 60 * 60 * 1000
   return {
-    sourceSnapshot: { kind: 'github', repository, requestedRef: options.ref, commit: commit.sha, defaultBranch: repo.default_branch },
+    sourceSnapshot: {
+      kind: 'github',
+      repository,
+      requestedRef: options.ref,
+      commit: commit.sha,
+      defaultBranch: repo.default_branch,
+      ...(normalizePackagePath(options.packagePath) ? { packagePath: normalizePackagePath(options.packagePath) } : {}),
+    },
     maintained,
   }
 }
@@ -995,18 +1006,12 @@ function boundedPreviewText(content: Uint8Array, maxLength: number): string {
     .replace(/\s+/gu, ' ').trim().slice(0, maxLength)
 }
 
-/** Fetch only package/README/bundle-manifest evidence for Agent shortlist curation. */
-export async function previewGithubPlugin(options: {
-  runner: CommandRunner
-  config: RuntimeConfig
-  cwd: string
-  repository: string
-  ref: string
-  signal?: AbortSignal
-}): Promise<GithubPluginPreview> {
-  const result = await githubSnapshot({ ...options, preview: true })
-  const manifest = manifestFrom(result.snapshot.files)
-  const packageFile = result.snapshot.files.find((file) => file.path === 'package.json')
+function githubPreviewFromSnapshot(
+  sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>,
+  snapshot: ContentSnapshot,
+): GithubPluginPreview {
+  const manifest = manifestFrom(snapshot.files)
+  const packageFile = snapshot.files.find((file) => file.path === 'package.json')
   let packageSummary: GithubPluginPreview['packageSummary']
   if (packageFile) {
     try {
@@ -1021,22 +1026,23 @@ export async function previewGithubPlugin(options: {
         ...(keywords?.length ? { keywords } : {}),
       }
     } catch {
-      // The formal review reports malformed package data. Preview stays read-only and best-effort.
+      // Formal review reports malformed package data. Preview stays best-effort.
     }
   }
-  const readme = result.snapshot.files.find((file) => /^readme(?:\.|$)/iu.test(path.posix.basename(file.path)))
-  const inspectedFiles = result.snapshot.files.map((file) => ({
+  const readme = snapshot.files.find((file) => /^readme(?:\.|$)/iu.test(path.posix.basename(file.path)))
+  const inspectedFiles = snapshot.files.map((file) => ({
     path: file.path,
     ...(file.blobId ? { blobId: file.blobId } : {}),
     sha256: sha256(file.content),
     bytes: file.content.byteLength,
   })).sort((left, right) => left.path.localeCompare(right.path))
   return {
-    repository: result.sourceSnapshot.repository,
-    commit: result.sourceSnapshot.commit,
-    defaultBranch: result.sourceSnapshot.defaultBranch,
+    repository: sourceSnapshot.repository,
+    commit: sourceSnapshot.commit,
+    defaultBranch: sourceSnapshot.defaultBranch,
+    packagePath: sourceSnapshot.packagePath ?? '',
     inspectedFiles,
-    truncated: result.snapshot.truncated,
+    truncated: snapshot.truncated,
     manifest: {
       kind: manifest.kind,
       ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
@@ -1049,12 +1055,119 @@ export async function previewGithubPlugin(options: {
   }
 }
 
+interface CachedTreeEntry extends TreeEntry { path: string; sha: string }
+
+function parseCachedTree(stdout: string): CachedTreeEntry[] {
+  return stdout.split(/\r?\n/gu).flatMap((line) => {
+    if (!line) return []
+    const tab = line.indexOf('\t')
+    if (tab < 0) return []
+    const metadata = line.slice(0, tab).split(' ')
+    const filePath = safeTreePath(line.slice(tab + 1))
+    const sha = metadata[2]
+    if (metadata[1] !== 'blob' || !filePath || !sha || !/^[a-f0-9]{40,64}$/iu.test(sha)) return []
+    return [{ path: filePath, sha, type: 'blob' as const }]
+  })
+}
+
+/** Cache one exact commit, then expand each valid DSH bundle package locally. */
+export async function previewGithubPlugins(options: {
+  runner: CommandRunner
+  config: RuntimeConfig
+  cwd: string
+  repository: string
+  ref: string
+  packagePath?: string
+  signal?: AbortSignal
+}): Promise<GithubPluginPreview[]> {
+  const identity = await githubIdentity(options)
+  return await withCachedGithubRepository({
+    runner: options.runner,
+    config: options.config,
+    cacheRoot: resolveGitCacheRoot(options.cwd),
+    workspaceRoot: options.cwd,
+    repository: identity.sourceSnapshot.repository,
+    commit: identity.sourceSnapshot.commit,
+    ...(options.signal ? { signal: options.signal } : {}),
+  }, async (cached) => {
+    const tree = parseCachedTree(await cached.git(['ls-tree', '-r', identity.sourceSnapshot.commit]))
+    const requestedPackagePath = normalizePackagePath(options.packagePath)
+    const manifests = tree.filter((entry) => {
+      if (entry.path !== 'package.json' && !entry.path.endsWith('/package.json')) return false
+      const packagePath = entry.path === 'package.json' ? '' : path.posix.dirname(entry.path)
+      return !requestedPackagePath || packagePath === requestedPackagePath
+    })
+    if (manifests.length > 100) {
+      throw new EvolutionError('review_rejected', 'Repository contains too many package manifests for bounded plugin preview')
+    }
+    const packageRoots = manifests.map((entry) => entry.path === 'package.json' ? '' : path.posix.dirname(entry.path))
+    const owningPackageRoot = (filePath: string): string => packageRoots
+      .filter((root) => !root || filePath === root || filePath.startsWith(`${root}/`))
+      .sort((left, right) => right.length - left.length)[0] ?? ''
+    const previews: GithubPluginPreview[] = []
+    for (const packageEntry of manifests) {
+      const packagePath = packageEntry.path === 'package.json'
+        ? ''
+        : normalizePackagePath(path.posix.dirname(packageEntry.path))
+      const prefix = packagePath ? `${packagePath}/` : ''
+      const relativeEntries = tree.flatMap((entry): TreeEntry[] => {
+        if (owningPackageRoot(entry.path) !== packagePath) return []
+        if (prefix && !entry.path.startsWith(prefix)) return []
+        const relative = prefix ? entry.path.slice(prefix.length) : entry.path
+        if (!relative) return []
+        return [{ ...entry, path: relative }]
+      })
+      const chosen = selectedPreviewEntries(relativeEntries, options.config)
+      const files: ContentFile[] = []
+      let actualBytes = 0
+      let actualTruncated = chosen.truncated
+      for (const entry of chosen.entries) {
+        const relative = safeTreePath(entry.path)
+        if (!relative || typeof entry.sha !== 'string') continue
+        const fullPath = prefix + relative
+        const content = Buffer.from(await cached.git(['show', `${identity.sourceSnapshot.commit}:${fullPath}`]), 'utf8')
+        if (actualBytes + content.byteLength > options.config.maxRepositoryBytes) {
+          actualTruncated = true
+          continue
+        }
+        actualBytes += content.byteLength
+        files.push({ path: relative, content, blobId: entry.sha })
+      }
+      const manifest = manifestFrom(files)
+      if (manifest.kind !== 'bundle') continue
+      previews.push(githubPreviewFromSnapshot({
+        ...identity.sourceSnapshot,
+        ...(packagePath ? { packagePath } : {}),
+      }, { files, truncated: actualTruncated }))
+    }
+    if (previews.length > 5) {
+      throw new EvolutionError('review_rejected', 'Repository contains more than five DSH bundle packages; retry with an exact package path', {
+        packagePaths: previews.map((item) => item.packagePath).slice(0, 100),
+      })
+    }
+    if (previews.length === 0) {
+      throw new EvolutionError('review_rejected', 'Repository does not contain a reviewable DSH bundle package')
+    }
+    return previews.sort((left, right) => left.packagePath.localeCompare(right.packagePath))
+  })
+}
+
+/** Backward-compatible single-package preview API. */
+export async function previewGithubPlugin(options: Parameters<typeof previewGithubPlugins>[0] & { packagePath?: string }): Promise<GithubPluginPreview> {
+  const previews = await previewGithubPlugins(options)
+  const requested = normalizePackagePath(options.packagePath)
+  const preview = previews.find((item) => item.packagePath === requested) ?? (!options.packagePath && previews.length === 1 ? previews[0] : undefined)
+  if (!preview) throw new EvolutionError('review_rejected', 'Repository preview resolved to multiple packages; select an exact package path')
+  return preview
+}
+
 export async function reviewGithubPluginWithFiles(options: {
   runner: CommandRunner
   config: RuntimeConfig
   cwd: string
   repository: string
   ref: string
+  packagePath?: string
   resolutionId: string
   requirement: string
   artifactRoot?: string
@@ -1080,6 +1193,9 @@ export async function reviewGithubPluginWithFiles(options: {
     config: options.config,
     repository: result.sourceSnapshot.repository,
     commit: result.sourceSnapshot.commit,
+    ...(result.sourceSnapshot.packagePath ? { packagePath: result.sourceSnapshot.packagePath } : {}),
+    cacheRoot: resolveGitCacheRoot(options.cwd),
+    workspaceRoot: options.cwd,
     artifactRoot: options.artifactRoot,
     ...(options.signal ? { signal: options.signal } : {}),
   })
@@ -1314,6 +1430,8 @@ export async function reviewLocalPlugin(options: {
   artifactRoot?: string
   /** GitHub lineage-root SHA. When omitted, HEAD is treated as the root (uncommitted-only reviews). */
   lineageRootCommit?: string
+  /** Pack/review this package while retaining the repository root as source provenance. */
+  packagePath?: string
 }): Promise<LocalReviewResult> {
   if (!/^review_[a-f0-9]{16,64}$/.test(options.baseReviewId)) throw new EvolutionError('invalid_input', 'Invalid base review id')
   const workspace = await realpath(options.workspaceRoot)
@@ -1342,10 +1460,15 @@ export async function reviewLocalPlugin(options: {
     }
   }
   const baseCommit = lineageRoot.toLowerCase()
+  const packagePath = normalizePackagePath(options.packagePath)
+  const packageRoot = packagePath
+    ? await realpath(path.join(canonicalRoot, ...packagePath.split('/')))
+    : canonicalRoot
+  if (!isWithin(canonicalRoot, packageRoot)) throw new EvolutionError('unsafe_path', 'Local package path escaped its managed repository')
   const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
   const artifact = options.artifactRoot
     ? await freezeLocalPackage({
-        sourceRoot: canonicalRoot,
+        sourceRoot: packageRoot,
         artifactRoot: options.artifactRoot,
         config: options.config,
         runner: options.runner,
@@ -1353,16 +1476,19 @@ export async function reviewLocalPlugin(options: {
     : undefined
   const snapshot = artifact
     ? { files: artifact.files, truncated: false }
-    : await inspectLocalPackageDirectory(canonicalRoot, options.config)
+    : await inspectLocalPackageDirectory(packageRoot, options.config)
   // A Host-committed managed change has a clean worktree, so status alone is
   // always the SHA-256 of empty text. Bind the local identity to exact HEAD as
   // well as any residual status to distinguish reviewed commits truthfully.
-  const statusHash = sha256(`${head.toLowerCase()}\n${status}`)
+  const statusHash = sha256(`${head.toLowerCase()}\n${status}\n${packagePath}`)
   const contentHash = hashObject(snapshot.files.map((file) => ({ path: file.path, sha256: sha256(file.content), bytes: file.content.byteLength })))
   const record = evaluatePluginContent({
     resolutionId: options.resolutionId,
     requirement: options.requirement,
-    sourceSnapshot: { kind: 'local', path: canonicalRoot, baseReviewId: options.baseReviewId, baseCommit, statusHash },
+    sourceSnapshot: {
+      kind: 'local', path: canonicalRoot, baseReviewId: options.baseReviewId, baseCommit, statusHash,
+      ...(packagePath ? { packagePath } : {}),
+    },
     files: snapshot.files,
     truncated: snapshot.truncated,
     maintained: true,
