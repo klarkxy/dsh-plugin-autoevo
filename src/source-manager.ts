@@ -742,8 +742,8 @@ export class SourceManager {
     } satisfies SourceLock, null, 2)}\n`, 'utf8')
     return {
       ...next,
-      changedFiles: allChangedFiles.slice(0, 200),
-      changedFilesTruncated: allChangedFiles.length > 200,
+      changedFiles: allChangedFiles,
+      changedFilesTruncated: false,
     }
   }
 

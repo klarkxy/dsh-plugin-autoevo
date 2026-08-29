@@ -4,8 +4,12 @@ All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Ver
 
 ## Unreleased
 
-- Review and materialize only the literal `package.json` publication surface for managed local packages, while falling back to the complete-tree review for unsupported glob declarations; non-package tests, docs, and lockfiles can no longer cause a false truncated-package rejection.
-- Move the public Policy contract to V12 so unfinished release-specific recovery actions restart safely while completed historical receipts remain readable.
+- Freeze remote and managed-local candidates once with `npm pack --ignore-scripts`, inspect the complete tgz entry set selected by npm (including glob and `.npmignore` semantics), and install that same Host-owned `file:` artifact only after SHA-256 rechecks.
+- Treat `maxFiles` and `maxRepositoryBytes` as bounded discovery-preview controls rather than package eligibility limits; large install packages are reviewed completely, and actual I/O/resource failures remain retryable failures rather than permanent rejection.
+- Keep historical source-only reviews readable but require a fresh frozen-package review before installation; block packages whose declared runtime entrypoint is absent from the tgz.
+- Recover complete verbose subprocess output through DSH spill files, retain complete creator/change evidence, and stop silently dropping requirements, active Fibers, package manifests, or local candidates at arbitrary fixed counts.
+- Disable lifecycle scripts both while packing review artifacts and while DSH/pnpm installs the reviewed artifact.
+- Keep the public Policy contract at V13: unfinished historical source-only reviews remain readable but cannot authorize installation, while current workflows can recover through a fresh package review.
 - Preserve a bounded, redacted summary from both stdout and stderr when DSH/pnpm installation fails, and expose its exit code and structured state to users, agents, and diagnosis probes.
 - Preserve trusted Windows `LOCALAPPDATA` for DSH subprocesses so nested pnpm installs reuse the Web profile's existing store instead of failing with `ERR_PNPM_UNEXPECTED_STORE`.
 - Keep a retryable install-stage failure eligible for a fresh user-confirmed attempt when capability verification never started, including persisted workflows affected by the earlier bookkeeping error.

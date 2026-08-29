@@ -1,4 +1,7 @@
 import { spawnSync } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { describe, expect, it } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
@@ -296,6 +299,38 @@ describe('subprocess environment boundary', () => {
       expect(argv[1]).toContain('node_modules\\@deepseek-ai\\dsh\\lib\\bin.js')
     } else {
       expect(argv[0]).toBe('C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd')
+    }
+  })
+
+  it('recovers complete verbose output from the subprocess spill instead of failing the command', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-runner-spill-'))
+    const spillPath = path.join(root, 'stdout.log')
+    await writeFile(spillPath, 'complete verbose output')
+    let spawned: { stdio: unknown } | undefined
+    const subprocess = {
+      resolveExecutable: async () => 'git',
+      spawn: (spec: { stdio: unknown }) => {
+        spawned = spec
+        return {
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          collected: {
+            stdout: { readFrom: () => ({ text: 'tail', lossy: true, spillPath }) },
+            stderr: { readFrom: () => ({ text: '', lossy: false }) },
+          },
+        }
+      },
+    } as unknown as SubprocessRuntime
+    try {
+      const result = await new DshCommandRunner(subprocess, { commandTimeoutMs: 5_000 } as RuntimeConfig)
+        .run({ argv: ['git', 'status'], cwd: root })
+      expect(result.stdout).toBe('complete verbose output')
+      expect(result.stdoutTruncated).toBeUndefined()
+      expect(spawned?.stdio).toMatchObject({
+        stdout: { spill: { maxBytes: 268_435_456 } },
+        stderr: { spill: { maxBytes: 268_435_456 } },
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 

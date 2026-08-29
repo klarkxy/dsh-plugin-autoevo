@@ -7,7 +7,6 @@ import { hashObject, sha256 } from './state/hashes.js'
 
 export const CREATOR_PRESET_ID = 'cordis' as const
 export const CREATOR_FOUNDATION_CONTRACT_VERSION = 2 as const
-export const MAX_CREATOR_RECORDS = 4 as const
 
 export const OFFICIAL_CREATOR_SKILLS = [
   'cordis-plugin-development',
@@ -197,7 +196,7 @@ export function appendCreatorRecord(
   records: readonly CreatorRecord[] | undefined,
   record: CreatorRecord,
 ): CreatorRecord[] {
-  return [...(records ?? []), record].slice(-MAX_CREATOR_RECORDS)
+  return [...(records ?? []), record]
 }
 
 export function createCreatorWorkOrder(input: {

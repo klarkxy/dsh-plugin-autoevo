@@ -384,8 +384,8 @@ export function resolveDecisionFromModel(input: {
     : undefined
   const preview = input.guard.previewDecisionTurn(input.agent, input.interrupt)
   const userMessage = preview.message.normalize('NFKC').trim()
-  if (!userMessage || userMessage.length > 2_000) {
-    throw new EvolutionError('invalid_input', 'host user turn must contain 1 to 2000 characters')
+  if (!userMessage) {
+    throw new EvolutionError('invalid_input', 'host user turn must not be empty')
   }
   const turn = input.guard.consumeDecisionTurn(input.agent, input.interrupt)
   return {

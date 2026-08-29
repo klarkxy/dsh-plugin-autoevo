@@ -345,6 +345,23 @@ describe('third-party review', () => {
     expect(record.findings).toEqual(expect.arrayContaining([expect.objectContaining({ code, severity: 'block' })]))
   })
 
+  it('blocks a source-only package when its declared runtime entrypoint is absent from the frozen package', () => {
+    const record = evaluatePluginContent({
+      resolutionId: 'resolution_0123456789abcdef',
+      requirement: 'calculate',
+      sourceSnapshot: { kind: 'github', repository: 'acme/source-only', requestedRef: 'main', commit: 'a'.repeat(40), defaultBranch: 'main' },
+      files: [
+        { path: 'package.json', content: Buffer.from(JSON.stringify({ name: 'source-only', main: './lib/index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } })) },
+        { path: 'cordis.patch.yml', content: Buffer.from(loaderPatch) },
+      ],
+      truncated: false,
+      maintained: true,
+    })
+    expect(record.findings).toContainEqual(expect.objectContaining({ code: 'runtime_entrypoint_missing', severity: 'block', source: 'lib/index.js' }))
+    expect(record.installSpec).toBeNull()
+    expect(record.recommendation).toBe('skip')
+  })
+
   it('records the active DSH version and fails closed when it cannot be established', () => {
     const files = [
       { path: 'package.json', content: Buffer.from(JSON.stringify({

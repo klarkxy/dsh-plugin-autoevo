@@ -44,7 +44,7 @@ function review(): ReviewRecord {
       commit: 'c'.repeat(40),
       defaultBranch: 'main',
     },
-    inspectedFiles: [],
+    inspectedFiles: [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }],
     manifest: { kind: 'bundle', packageName: 'dsh-one', scripts: [], dependencies: [], peerDependencies: {}, expectedTools: [] },
     fit: 'full',
     confidence: 0.8,
@@ -55,7 +55,13 @@ function review(): ReviewRecord {
     missingCapabilities: [],
     findings: [],
     recommendation: 'use',
-    installSpec: `github:acme/one#${'c'.repeat(40)}`,
+    installSpec: 'file:C:/workspace/review-artifacts/review-one/package/dsh-one.tgz',
+    artifact: {
+      sha256: 'f'.repeat(64),
+      bytes: 8,
+      entryCount: 1,
+      ownedRoot: 'C:/workspace/review-artifacts/review-one',
+    },
     mechanicalFacts: {
       fit: 'full',
       missingCapabilities: [],
@@ -65,7 +71,7 @@ function review(): ReviewRecord {
         kind: 'bundle',
         packageName: 'dsh-one',
         materializable: true,
-        installSpec: `github:acme/one#${'c'.repeat(40)}`,
+        installSpec: 'file:C:/workspace/review-artifacts/review-one/package/dsh-one.tgz',
       },
       truncated: false,
       findings: [],
@@ -582,7 +588,7 @@ describe('workflow graph nodes', () => {
       })
   })
 
-  it('accepts a managed-local receipt after materialization changes its install spec', async () => {
+  it('accepts a managed-local receipt only when it retains the reviewed frozen install spec', async () => {
     const current = resolution()
     const record = workflow('install_verify')
     const installationId = `installation_${'f'.repeat(24)}`
@@ -605,7 +611,7 @@ describe('workflow graph nodes', () => {
           reviewId: inspected.id,
           targetProfile: record.pendingInstall!.targetProfile,
           retention: record.pendingInstall!.retention,
-          installSpec: 'file:C:/workspace/install-artifacts/owned.tgz',
+          installSpec: inspected.installSpec,
           installed: false,
           verification: { reason: 'installation was interrupted after materialization' },
         }

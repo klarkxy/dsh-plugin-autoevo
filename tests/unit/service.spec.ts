@@ -68,6 +68,13 @@ describe('profile mutation serialization', () => {
       kind: 'bundle',
       packageName: 'dsh-tool-calculator',
     }
+    currentReview.installSpec = 'file:C:/state/review-artifacts/recovery/package/reviewed.tgz'
+    currentReview.artifact = {
+      sha256: 'f'.repeat(64),
+      bytes: 10,
+      entryCount: currentReview.inspectedFiles.length,
+      ownedRoot: 'C:/state/review-artifacts/recovery',
+    }
     const grant = {
       id: `recovery_${'f'.repeat(24)}`,
       operation: 'retry_install' as const,
@@ -493,7 +500,13 @@ function candidateReview(repository: string, recommendation: ReviewRecord['recom
   record.recommendation = recommendation
   record.fit = recommendation === 'use' ? 'full' : recommendation === 'modify' ? 'partial' : 'none'
   record.manifest = { ...record.manifest, packageName }
-  record.installSpec = `github:${repository}#${commit}`
+  record.installSpec = `file:C:/workspace/review-artifacts/${suffix}/package/${packageName}.tgz`
+  record.artifact = {
+    sha256: suffix.repeat(64),
+    bytes: 10,
+    entryCount: record.inspectedFiles.length,
+    ownedRoot: `C:/workspace/review-artifacts/${suffix}`,
+  }
   return record
 }
 

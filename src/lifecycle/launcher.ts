@@ -315,7 +315,7 @@ export class DshLauncher {
     const releaseAgeArgs = minimumReleaseAgeExcludes
       .map((item) => `--config.minimum-release-age-exclude=${item}`)
     const request = {
-      argv: this.argv('plugin', '--profile', profile, 'add', '--save-exact', spec, ...storeArgs, ...releaseAgeArgs),
+      argv: this.argv('plugin', '--profile', profile, 'add', '--save-exact', spec, '--config.ignore-scripts=true', ...storeArgs, ...releaseAgeArgs),
       cwd,
       env: this.childEnv(dshHome, options?.forwardCredentials !== false),
       timeoutMs: Math.max(this.config.commandTimeoutMs, 120_000),

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -367,36 +367,30 @@ async function requestApproval(
   }
 }
 
-/** Exact review-derived GitHub install spec. No fallback synthesis at install time. */
-export function expectedGithubInstallSpec(review: ReviewRecord): string | null {
-  if (review.sourceSnapshot.kind !== 'github' || !review.manifest.packageName) return null
-  return `github:${review.sourceSnapshot.repository}#${review.sourceSnapshot.commit}`
-}
-
 export function assertStrictInstallSpec(review: ReviewRecord): string {
-  if (review.sourceSnapshot.kind === 'github') {
-    const expected = expectedGithubInstallSpec(review)
-    if (!expected) {
-      throw new EvolutionError('review_rejected', 'GitHub review is missing package identity required for an immutable install specification')
-    }
-    if (!review.installSpec) {
-      throw new EvolutionError('review_rejected', 'Review is missing an immutable install specification')
-    }
-    if (review.installSpec !== expected) {
-      throw new EvolutionError('review_rejected', 'Review install specification does not match the reviewed GitHub source', {
-        expected,
-        actual: review.installSpec,
-      })
-    }
-    return review.installSpec
+  if (!review.artifact || !/^[a-f0-9]{64}$/u.test(review.artifact.sha256)
+    || !Number.isSafeInteger(review.artifact.bytes) || review.artifact.bytes <= 0
+    || !Number.isSafeInteger(review.artifact.entryCount) || review.artifact.entryCount !== review.inspectedFiles.length) {
+    throw new EvolutionError(
+      'review_rejected',
+      'This review predates frozen package artifacts or is missing artifact provenance; review the exact source again before installation.',
+    )
   }
-  // Local installs materialize an owned file: spec from the reviewed tree; a pre-set non-file spec is rejected.
-  if (review.installSpec && !review.installSpec.startsWith('file:')) {
-    throw new EvolutionError('review_rejected', 'Local review install specification must be an owned file: artifact or null before materialization', {
+  if (!review.installSpec?.startsWith('file:')) {
+    throw new EvolutionError('review_rejected', 'Reviewed installations must use the Host-owned frozen file artifact', {
       actual: review.installSpec,
     })
   }
-  return review.installSpec ?? ''
+  const artifactPath = path.resolve(ownedArtifactPath(review.installSpec))
+  const ownedRoot = path.resolve(review.artifact.ownedRoot)
+  const relative = path.relative(ownedRoot, artifactPath)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new EvolutionError('unsafe_path', 'Reviewed package artifact is outside its Host-owned artifact root', {
+      artifactPath,
+      ownedRoot,
+    })
+  }
+  return review.installSpec
 }
 
 function outcomeAfterCommandFailure(installState: InstallationState): InstallOutcome {
@@ -449,13 +443,31 @@ function qualifyInstallRecovery(
 
 function ownedArtifactPath(installSpec: string): string {
   if (!installSpec.startsWith('file:')) {
-    throw new EvolutionError('review_rejected', 'Managed local installation lost its owned file specification')
+    throw new EvolutionError('review_rejected', 'Reviewed installation lost its Host-owned file artifact specification')
   }
   const candidate = installSpec.slice('file:'.length)
   if (!path.isAbsolute(candidate)) {
-    throw new EvolutionError('unsafe_path', 'Managed local installation artifact is not an absolute path')
+    throw new EvolutionError('unsafe_path', 'Reviewed installation artifact is not an absolute path')
   }
   return candidate
+}
+
+async function readOwnedReviewedArtifact(review: ReviewRecord, installSpec: string): Promise<Buffer> {
+  if (!review.artifact) throw new EvolutionError('review_rejected', 'Review is missing frozen artifact provenance')
+  const artifactPath = ownedArtifactPath(installSpec)
+  const info = await lstat(artifactPath)
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new EvolutionError('unsafe_path', 'Reviewed package artifact is no longer a regular Host-owned file')
+  }
+  const [resolvedRoot, resolvedArtifact] = await Promise.all([
+    realpath(review.artifact.ownedRoot),
+    realpath(artifactPath),
+  ])
+  const relative = path.relative(resolvedRoot, resolvedArtifact)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new EvolutionError('unsafe_path', 'Reviewed package artifact escaped its Host-owned root')
+  }
+  return readFile(resolvedArtifact)
 }
 
 export class PluginInstaller {
@@ -762,34 +774,31 @@ export class PluginInstaller {
     const createdAt = new Date().toISOString()
     const trialRoot = this.store.trialRoot(id)
     const trialsRoot = path.join(this.store.root, 'trials')
-    const artifactsRoot = path.join(this.store.root, 'artifacts')
     const dshHome = input.retention === 'temporary' ? path.join(trialRoot, 'dsh-home') : this.config.dshHome
     const cwd = exec.agent?.session.header.cwd ?? process.cwd()
 
-    let installSpec = strictSpec
-    let ownedArtifactRoot: string | undefined
-    let artifactSha256: string | undefined
-    if (review.sourceSnapshot.kind === 'local') {
-      ownedArtifactRoot = input.retention === 'temporary'
-        ? path.join(trialRoot, 'artifact')
-        : path.join(artifactsRoot, id)
-      try {
-        const materialized = await this.launcher.materializeLocal(review, ownedArtifactRoot, exec.signal)
-        installSpec = materialized.installSpec
-        artifactSha256 = materialized.artifactSha256
-        if (input.expectedArtifactSha256 && artifactSha256 !== input.expectedArtifactSha256) {
-          throw new EvolutionError('review_rejected', 'Managed source package bytes changed after user confirmation', {
-            expectedArtifactSha256: input.expectedArtifactSha256,
-            actualArtifactSha256: artifactSha256,
-          })
-        }
-      } catch (error) {
-        if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
-        else await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
-        throw error
-      }
+    const installSpec = strictSpec
+    const artifactSha256 = review.artifact!.sha256
+    const currentArtifactBytes = await readOwnedReviewedArtifact(review, installSpec)
+    const currentArtifactSha256 = sha256(currentArtifactBytes)
+    if (currentArtifactBytes.byteLength !== review.artifact!.bytes) {
+      throw new EvolutionError('review_expired', 'The frozen reviewed package size changed before installation', {
+        expectedArtifactBytes: review.artifact!.bytes,
+        actualArtifactBytes: currentArtifactBytes.byteLength,
+      })
     }
-    if (!installSpec) throw new EvolutionError('review_rejected', 'The review did not yield an immutable installation spec')
+    if (currentArtifactSha256 !== artifactSha256) {
+      throw new EvolutionError('review_expired', 'The frozen reviewed package bytes changed before installation', {
+        expectedArtifactSha256: artifactSha256,
+        actualArtifactSha256: currentArtifactSha256,
+      })
+    }
+    if (input.expectedArtifactSha256 && artifactSha256 !== input.expectedArtifactSha256) {
+      throw new EvolutionError('review_rejected', 'Managed source receipt does not match the reviewed frozen package', {
+        expectedArtifactSha256: input.expectedArtifactSha256,
+        actualArtifactSha256: artifactSha256,
+      })
+    }
 
     try {
       await requestApproval(
@@ -816,8 +825,20 @@ export class PluginInstaller {
       )
     } catch (error) {
       if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
-      else if (ownedArtifactRoot) await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
       throw error
+    }
+
+    // Approval can remain open while the filesystem changes. Recheck before
+    // the reviewed bytes can execute even in the isolated preflight profile.
+    const approvedArtifactBytes = await readOwnedReviewedArtifact(review, installSpec)
+    const approvedArtifactSha256 = sha256(approvedArtifactBytes)
+    if (approvedArtifactBytes.byteLength !== review.artifact!.bytes || approvedArtifactSha256 !== artifactSha256) {
+      throw new EvolutionError('review_expired', 'The frozen reviewed package changed after user approval and before isolated preflight', {
+        expectedArtifactBytes: review.artifact!.bytes,
+        actualArtifactBytes: approvedArtifactBytes.byteLength,
+        expectedArtifactSha256: artifactSha256,
+        actualArtifactSha256: approvedArtifactSha256,
+      })
     }
 
     const provisional: InstallationRecord = {
@@ -831,8 +852,7 @@ export class PluginInstaller {
       dshHome,
       packageName,
       installSpec,
-      ...(ownedArtifactRoot ? { ownedArtifactRoot } : {}),
-      ...(artifactSha256 ? { artifactSha256 } : {}),
+      artifactSha256,
       installPhase: 'prepared',
       installState: 'unknown',
       installOutcome: 'pending',
@@ -863,7 +883,6 @@ export class PluginInstaller {
       await this.store.put('installations', provisional)
     } catch (error) {
       if (input.retention === 'temporary') await this.removeOwnedDirectory(trialRoot, trialsRoot)
-      else if (ownedArtifactRoot) await this.removeOwnedDirectory(ownedArtifactRoot, artifactsRoot)
       throw error
     }
 
@@ -983,14 +1002,12 @@ export class PluginInstaller {
       destinationJournal = preflightRecord
     }
 
-    if (review.sourceSnapshot.kind === 'local' && artifactSha256) {
-      const currentArtifactSha256 = sha256(await readFile(ownedArtifactPath(installSpec)))
-      if (currentArtifactSha256 !== artifactSha256) {
-        throw new EvolutionError('review_expired', 'Managed source package bytes changed between isolated preflight and destination install', {
-          expectedArtifactSha256: artifactSha256,
-          actualArtifactSha256: currentArtifactSha256,
-        })
-      }
+    const destinationArtifactSha256 = sha256(await readOwnedReviewedArtifact(review, installSpec))
+    if (destinationArtifactSha256 !== artifactSha256) {
+      throw new EvolutionError('review_expired', 'The frozen reviewed package bytes changed between isolated preflight and destination install', {
+        expectedArtifactSha256: artifactSha256,
+        actualArtifactSha256: destinationArtifactSha256,
+      })
     }
     // The isolated phase can take minutes. Recheck ownership and absence at
     // the actual destination mutation boundary to close profile/TOCTOU drift.
@@ -1385,7 +1402,6 @@ export const _testing = {
   verificationTask,
   verificationExpectation,
   assertStrictInstallSpec,
-  expectedGithubInstallSpec,
   outcomeAfterCommandFailure,
   selectInstallVerificationLayer,
   installApprovalReason,

@@ -112,11 +112,38 @@ function jsonFixtures(): Record<string, unknown> {
   return { calculator: { arguments: { expression: '1+1' } } }
 }
 
+async function putFrozenReview(root: string, store: StateStore, record: ReviewRecord): Promise<ReviewRecord> {
+    const artifactRoot = path.join(root, 'review-artifacts', `${record.id}-${Math.random().toString(16).slice(2)}`)
+    const artifactPath = path.join(artifactRoot, 'package', 'reviewed.tgz')
+    const artifactBytes = Buffer.from(`artifact:${record.id}`)
+    await mkdir(path.dirname(artifactPath), { recursive: true })
+    await writeFile(artifactPath, artifactBytes)
+    const installSpec = `file:${artifactPath.replaceAll('\\', '/')}`
+    const frozen: ReviewRecord = {
+      ...record,
+      installSpec,
+      artifact: {
+        sha256: sha256(artifactBytes),
+        bytes: artifactBytes.byteLength,
+        entryCount: record.inspectedFiles.length,
+        ownedRoot: artifactRoot,
+      },
+      ...(record.mechanicalFacts ? {
+        mechanicalFacts: {
+          ...record.mechanicalFacts,
+          manifest: { ...record.mechanicalFacts.manifest, materializable: true, installSpec },
+        },
+      } : {}),
+    }
+    await store.put('reviews', frozen)
+    return frozen
+}
+
 async function setup(record?: ReviewRecord): Promise<{ root: string; store: StateStore; ctx: Context }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-'))
   temporary.push(root)
   const store = new StateStore(root)
-  if (record) await store.put('reviews', record)
+  if (record) await putFrozenReview(root, store, record)
   const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
   return { root, store, ctx }
 }
@@ -136,11 +163,11 @@ function launcherWithHost(evidence: VerificationEvidence, sourceMatches = true) 
 
 describe('fail-closed install outcomes', () => {
   it('rejects missing and mismatched install specifications without synthesizing a fallback', () => {
-    expect(() => installTesting.assertStrictInstallSpec(review({ installSpec: null }))).toThrow(/missing an immutable install specification/i)
+    expect(() => installTesting.assertStrictInstallSpec(review({ installSpec: null }))).toThrow(/Host-owned frozen file artifact/i)
     expect(() => installTesting.assertStrictInstallSpec(review({
       installSpec: `github:acme/calculator#${'d'.repeat(40)}`,
-    }))).toThrow(/does not match the reviewed GitHub source/i)
-    expect(installTesting.assertStrictInstallSpec(review())).toBe(`github:acme/calculator#${'c'.repeat(40)}`)
+    }))).toThrow(/Host-owned frozen file artifact/i)
+    expect(installTesting.assertStrictInstallSpec(review())).toMatch(/^file:/u)
   })
 
   it('returns failed_absent when the install command fails and the target is confirmed absent', async () => {
@@ -756,24 +783,13 @@ describe('fail-closed install outcomes', () => {
       },
       installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
     })
-    await store.put('reviews', local)
+    const frozen = await putFrozenReview(root, store, local)
     const install = vi.fn(async (
       _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
     ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
-    let artifact = ''
+    const artifact = frozen.installSpec!.slice('file:'.length)
     const launcher = {
       profileTargetAbsent: async () => true,
-      materializeLocal: async (_review: ReviewRecord, artifactRoot: string) => {
-        await mkdir(artifactRoot, { recursive: true })
-        artifact = path.join(artifactRoot, 'package.tgz')
-        const bytes = Buffer.from('reviewed bytes')
-        await writeFile(artifact, bytes)
-        return {
-          installSpec: `file:${artifact.replaceAll('\\', '/')}`,
-          artifactRoot,
-          artifactSha256: sha256(bytes),
-        }
-      },
       install,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
@@ -793,6 +809,33 @@ describe('fail-closed install outcomes', () => {
     }, execution())).rejects.toThrow(/bytes changed between isolated preflight and destination install/i)
     expect(install).toHaveBeenCalledTimes(1)
     expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
+  })
+
+  it('rehashes the frozen artifact after approval before isolated execution', async () => {
+    const { root, store } = await setup()
+    const frozen = await putFrozenReview(root, store, attestedReview())
+    const artifact = frozen.installSpec!.slice('file:'.length)
+    const request = vi.fn(async () => {
+      await writeFile(artifact, 'changed while approval was pending')
+      return 'allowed-once'
+    })
+    const ctx = { get: () => ({ request }) } as unknown as Context
+    const install = vi.fn()
+    const launcher = {
+      profileTargetAbsent: async () => true,
+      install,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
+    )
+
+    await expect(installer.install({
+      reviewId: frozen.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/changed after user approval and before isolated preflight/i)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(install).not.toHaveBeenCalled()
   })
 
   it('refuses to overwrite an existing destination package before approval or preflight', async () => {
@@ -862,7 +905,7 @@ describe('fail-closed install outcomes', () => {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileTargetAbsent: async () => false,
       profileDependencySpec: async () => oldSpec,
-      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec === newSpec,
+      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec.startsWith('file:'),
       verifyHost: async () => hostPassedEvidence,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
     } as unknown as DshLauncher
@@ -1218,7 +1261,7 @@ describe('fail-closed install outcomes', () => {
     expect(activated.verification.reason).toMatch(/explicit recovery/i)
     expect(rollback).toHaveBeenCalledTimes(1)
 
-    await store.put('reviews', review())
+    await putFrozenReview(root, store, review())
     const awaitingLauncher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileSourceMatches: async () => true,
@@ -1350,14 +1393,8 @@ describe('fail-closed install outcomes', () => {
       },
       installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
     })
-    await store.put('reviews', local)
-    const launcher = {
-      materializeLocal: async () => ({
-        installSpec: `file:${path.join(root, 'actual.tgz').replaceAll('\\', '/')}`,
-        artifactRoot: path.join(root, 'actual'),
-        artifactSha256: 'e'.repeat(64),
-      }),
-    } as unknown as DshLauncher
+    await putFrozenReview(root, store, local)
+    const launcher = {} as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     await expect(installer.install({
       reviewId: local.id,
@@ -1365,7 +1402,7 @@ describe('fail-closed install outcomes', () => {
       retention: 'persistent',
       expectedArtifactSha256: 'f'.repeat(64),
       verificationTask: 'test calculator',
-    }, execution())).rejects.toThrow(/package bytes changed after user confirmation/i)
+    }, execution())).rejects.toThrow(/receipt does not match the reviewed frozen package/i)
   })
 
   it('verifies a Host tool round-trip without using expected-text substring or a model verifier', async () => {
@@ -1581,7 +1618,7 @@ describe('install authorization uses verdict and hard boundaries', () => {
 
     const rejected = withApprovedVerdict(riskyReview())
     rejected.reviewerVerdict = { ...rejected.reviewerVerdict!, decision: 'rejected' }
-    await store.put('reviews', rejected)
+    await putFrozenReview(root, store, rejected)
     const rejectedResult = await installer.install({
       reviewId: rejected.id,
       targetProfile: 'web',
@@ -1613,24 +1650,13 @@ describe('install authorization uses verdict and hard boundaries', () => {
         license: options.license ?? 'MIT',
         recommendation: 'use',
       })
-      await store.put('reviews', local)
+      await putFrozenReview(root, store, local)
       const installer = new PluginInstaller(
         ctx,
         config(root),
         store,
         {
           profileTargetAbsent: async () => true,
-          materializeLocal: async (_review: ReviewRecord, artifactRoot: string) => {
-            await mkdir(artifactRoot, { recursive: true })
-            const artifact = path.join(artifactRoot, 'package.tgz')
-            const bytes = Buffer.from('reviewed bytes')
-            await writeFile(artifact, bytes)
-            return {
-              installSpec: `file:${artifact.replaceAll('\\', '/')}`,
-              artifactRoot,
-              artifactSha256: sha256(bytes),
-            }
-          },
           install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
           profileSourceMatches: async () => true,
           readInstalledVerificationFixtures: async () => jsonFixtures(),

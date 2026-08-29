@@ -239,7 +239,7 @@ export async function resolveLocalCapabilities(
   const useful = suppressesRemoteDiscovery(candidates)
   return {
     cwd,
-    candidates: candidates.slice(0, 8),
+    candidates,
     shouldDiscoverRemote: !useful,
     reasons: useful
       ? ['A sufficiently relevant local capability is already available; remote search was skipped.']

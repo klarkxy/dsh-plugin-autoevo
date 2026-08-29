@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -10,7 +10,6 @@ import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
 import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
-import { EvolutionError } from '../../src/errors.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { reviewLocalPlugin } from '../../src/review/review.js'
 import { testingCreatorFoundation, testingCreatorPreflight } from '../../src/creator-foundation.js'
@@ -195,7 +194,7 @@ describe('managed modify closure', () => {
     expect(workflow.creatorRecords?.map((item) => item.operation)).toEqual(expect.arrayContaining(['modify', 'correct']))
   }, 30_000)
 
-  it('persists a successful child commit when Host re-review cannot yet seal it', async () => {
+  it('reviews a successful child commit beyond the legacy byte snapshot without losing evidence', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-modify-partial-'))
     temporary.push(root)
     const runner = new NativeRunner()
@@ -267,32 +266,21 @@ describe('managed modify closure', () => {
     }
     const exec = { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent }
 
-    const failure = await service.prepareModify(resolution, baselineEvidence.record, exec, workflow).catch((error) => error)
-    expect(failure).toBeInstanceOf(EvolutionError)
-    expect((failure as EvolutionError).details.managedChildCompleted).toBe(true)
+    const sealed = await service.prepareModify(resolution, baselineEvidence.record, exec, workflow)
     expect(workflow.creatorRecords?.at(-1)?.status).toBe('verified')
     expect(workflow.modificationOutcome).toMatchObject({
-      status: 'indeterminate',
       attempts: [{
         attempt: 1,
         commit: expect.any(String),
         changedFiles: ['generated.js'],
         completionMarkerObserved: true,
+        postReviewId: sealed.review?.id,
       }],
     })
-    expect(workflow.modificationOutcome?.attempts[0]?.postReviewId).toBeUndefined()
     expect((await store.getWorkflow(workflowId))?.modificationOutcome?.attempts[0]?.commit)
       .toBe(workflow.modificationOutcome?.attempts[0]?.commit)
-
-    const externalEdit = path.join(initial.path, 'external-edit.txt')
-    await writeFile(externalEdit, 'must fail closed')
-    await expect(service.finishManagedWork(resolution, exec, workflow)).rejects.toThrow(/working tree|source repository|changed/iu)
-    expect(workflow.managedCommitPendingReview).toBe(true)
-    await unlink(externalEdit)
-
-    cfg.maxRepositoryBytes = 2_097_152
-    const sealed = await service.finishManagedWork(resolution, exec, workflow)
     expect(sealed.review?.installSpec).toMatch(/^file:.*\.tgz$/u)
+    expect(sealed.review?.inspectedFiles.some((file) => file.path === 'generated.js' && file.bytes === 500_001)).toBe(true)
     expect(workflow.managedCommitPendingReview).toBeUndefined()
     expect(workflow.modificationOutcome?.attempts).toHaveLength(1)
     expect(workflow.modificationOutcome?.attempts[0]?.postReviewId).toBe(sealed.review?.id)

@@ -415,8 +415,7 @@ function assertPendingInstallReceipt(
   install: NonNullable<WorkflowRecord['pendingInstall']>,
   installation: InstallationRecord,
 ): void {
-  const installSpecMatches = review.sourceSnapshot.kind === 'local'
-    || installation.installSpec === review.installSpec
+  const installSpecMatches = installation.installSpec === review.installSpec
   if (installation.id !== workflow.pendingInstallationId
     || installation.workflowId !== workflow.id
     || installation.reviewId !== review.id

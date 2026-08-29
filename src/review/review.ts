@@ -11,6 +11,7 @@ import {
   type MechanicalFacts,
   type ReviewFinding,
   type ReviewRecord,
+  type ReviewedArtifact,
   type RuntimeSurface,
   type ToolFixtureAvailability,
 } from '../contracts.js'
@@ -19,6 +20,7 @@ import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
 import type { CommandRunner } from '../process/runner.js'
 import { activationTargetsFromPatch } from '../lifecycle/bundle-activation.js'
+import { freezeGithubPackage, freezeLocalPackage, type FrozenPackageArtifact } from '../lifecycle/package-artifact.js'
 import { capabilityAnchors, normalizeSearchText } from '../resolver/keywords.js'
 import { hashObject, sha256 } from '../state/hashes.js'
 import { isExcludedLocalPackagePath } from './local-path-policy.js'
@@ -29,6 +31,7 @@ export const HARD_SKIP_FINDING_CODES = new Set([
   'bundle_patch_missing',
   'bundle_patch_invalid',
   'bundle_patch_no_activation',
+  'runtime_entrypoint_missing',
   'unsafe_package_name',
 ])
 
@@ -89,6 +92,8 @@ export interface ReviewContentInput {
   truncated?: boolean
   maintained?: boolean
   runtimeVersion?: string
+  installSpec?: string
+  artifact?: ReviewedArtifact
 }
 
 export interface LocalReviewResult {
@@ -470,6 +475,21 @@ function scanContent(files: readonly ContentFile[], manifest: ManifestFacts): Re
       }
     }
   }
+  const declaredRuntimeEntrypoints = [pkg?.main, pkg?.types, pkg?.typings]
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => safeClientPath(value)?.replace(/^\.\//u, ''))
+    .filter((value): value is string => Boolean(value))
+  for (const entrypoint of [...new Set(declaredRuntimeEntrypoints)]) {
+    if (!files.some((file) => file.path === entrypoint)) {
+      findings.push(finding(
+        'runtime_entrypoint_missing',
+        'block',
+        entrypoint,
+        'the package declares a runtime entrypoint that is absent from the frozen install artifact',
+        packageHash,
+      ))
+    }
+  }
   for (const name of manifest.scripts) {
     const value = scripts[name] ?? ''
     const remoteDownload = /\b(?:curl|wget)\b/i.test(value)
@@ -678,8 +698,10 @@ function mintInstallSpec(input: {
   materializable: boolean
   sourceSnapshot: ReviewRecord['sourceSnapshot']
   packageName?: string
+  installSpec?: string
 }): string | null {
   if (!input.materializable || !input.packageName) return null
+  if (input.installSpec) return input.installSpec
   if (input.sourceSnapshot.kind !== 'github') return null
   return `github:${input.sourceSnapshot.repository}#${input.sourceSnapshot.commit}`
 }
@@ -764,6 +786,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     materializable,
     sourceSnapshot: input.sourceSnapshot,
     ...(manifest.packageName ? { packageName: manifest.packageName } : {}),
+    ...(input.installSpec ? { installSpec: input.installSpec } : {}),
   })
   const recommendation = recommendReview({
     sourceKind: input.sourceSnapshot.kind,
@@ -794,7 +817,17 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
   })
   return {
     schemaVersion: 1,
-    id: input.id ?? `review_${hashObject({ policyVersion: POLICY_VERSION, requirement: input.requirement, sourceSnapshot: input.sourceSnapshot, inspectedFiles, manifest, compatible })}`,
+    id: input.id ?? `review_${hashObject({
+      policyVersion: POLICY_VERSION,
+      requirement: input.requirement,
+      sourceSnapshot: input.sourceSnapshot,
+      inspectedFiles,
+      manifest,
+      compatible,
+      artifact: input.artifact
+        ? { sha256: input.artifact.sha256, bytes: input.artifact.bytes, entryCount: input.artifact.entryCount }
+        : undefined,
+    })}`,
     policyVersion: POLICY_VERSION,
     createdAt: input.createdAt ?? new Date().toISOString(),
     resolutionId: input.resolutionId,
@@ -812,6 +845,7 @@ export function evaluatePluginContent(input: ReviewContentInput): ReviewRecord {
     findings: sortedFindings,
     recommendation,
     installSpec,
+    ...(input.artifact ? { artifact: input.artifact } : {}),
     mechanicalFacts,
     runtimeSurface,
   }
@@ -903,13 +937,10 @@ async function githubSnapshot(options: {
   preview?: boolean
   signal?: AbortSignal
 }): Promise<{ sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>; snapshot: ContentSnapshot; maintained: boolean }> {
-  const repository = validateGithubRepository(options.repository)
-  if (!options.ref.trim() || options.ref.includes('\n') || options.ref.includes('\r')) throw new EvolutionError('invalid_input', 'GitHub ref must not be empty or contain newlines')
-  const escapedRef = encodeURIComponent(options.ref)
-  const commit = parseGithub<GithubCommit>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/commits/${escapedRef}`, options.signal), 'commit data')
-  if (typeof commit.sha !== 'string' || !/^[a-f0-9]{40}$/i.test(commit.sha)) throw new EvolutionError('github_unavailable', 'GitHub did not resolve the requested ref to an exact commit')
-  const repo = parseGithub<GithubRepository>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}`, options.signal), 'repository data')
-  if (typeof repo.default_branch !== 'string' || !repo.default_branch) throw new EvolutionError('github_unavailable', 'GitHub did not provide a default branch')
+  const identity = await githubIdentity(options)
+  const { sourceSnapshot, maintained } = identity
+  const repository = sourceSnapshot.repository
+  const commit = { sha: sourceSnapshot.commit }
   const tree = parseGithub<GithubTree>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/git/trees/${commit.sha}?recursive=1`, options.signal), 'tree data')
   if (!Array.isArray(tree.tree)) throw new EvolutionError('github_unavailable', 'GitHub did not provide a file tree')
   const chosen = options.preview
@@ -931,12 +962,29 @@ async function githubSnapshot(options: {
     actualBytes += content.byteLength
     files.push({ path: filePath, content, blobId: entry.sha })
   }
+  return { sourceSnapshot, snapshot: { files, truncated }, maintained }
+}
+
+async function githubIdentity(options: {
+  runner: CommandRunner
+  config: RuntimeConfig
+  cwd: string
+  repository: string
+  ref: string
+  signal?: AbortSignal
+}): Promise<{ sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>; maintained: boolean }> {
+  const repository = validateGithubRepository(options.repository)
+  if (!options.ref.trim() || options.ref.includes('\n') || options.ref.includes('\r')) throw new EvolutionError('invalid_input', 'GitHub ref must not be empty or contain newlines')
+  const escapedRef = encodeURIComponent(options.ref)
+  const commit = parseGithub<GithubCommit>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/commits/${escapedRef}`, options.signal), 'commit data')
+  if (typeof commit.sha !== 'string' || !/^[a-f0-9]{40}$/i.test(commit.sha)) throw new EvolutionError('github_unavailable', 'GitHub did not resolve the requested ref to an exact commit')
+  const repo = parseGithub<GithubRepository>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}`, options.signal), 'repository data')
+  if (typeof repo.default_branch !== 'string' || !repo.default_branch) throw new EvolutionError('github_unavailable', 'GitHub did not provide a default branch')
   const commitDate = commit.commit?.committer?.date
   const maintained = typeof commitDate === 'string' && Number.isFinite(Date.parse(commitDate))
     && Date.now() - Date.parse(commitDate) <= 366 * 24 * 60 * 60 * 1000
   return {
     sourceSnapshot: { kind: 'github', repository, requestedRef: options.ref, commit: commit.sha, defaultBranch: repo.default_branch },
-    snapshot: { files, truncated },
     maintained,
   }
 }
@@ -1009,20 +1057,53 @@ export async function reviewGithubPluginWithFiles(options: {
   ref: string
   resolutionId: string
   requirement: string
+  artifactRoot?: string
   runtimeVersion?: string
   signal?: AbortSignal
 }): Promise<GithubReviewEvidence> {
-  const result = await githubSnapshot(options)
+  if (!options.artifactRoot) {
+    const legacy = await githubSnapshot(options)
+    const record = evaluatePluginContent({
+      resolutionId: options.resolutionId,
+      requirement: options.requirement,
+      sourceSnapshot: legacy.sourceSnapshot,
+      files: legacy.snapshot.files,
+      truncated: legacy.snapshot.truncated,
+      maintained: legacy.maintained,
+      ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
+    })
+    return { record, files: legacy.snapshot.files }
+  }
+  const result = await githubIdentity(options)
+  const artifact = await freezeGithubPackage({
+    runner: options.runner,
+    config: options.config,
+    repository: result.sourceSnapshot.repository,
+    commit: result.sourceSnapshot.commit,
+    artifactRoot: options.artifactRoot,
+    ...(options.signal ? { signal: options.signal } : {}),
+  })
   const record = evaluatePluginContent({
     resolutionId: options.resolutionId,
     requirement: options.requirement,
     sourceSnapshot: result.sourceSnapshot,
-    files: result.snapshot.files,
-    truncated: result.snapshot.truncated,
+    files: artifact.files,
+    truncated: false,
     maintained: result.maintained,
+    installSpec: artifact.installSpec,
+    artifact: reviewedArtifact(artifact),
     ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
   })
-  return { record, files: result.snapshot.files }
+  return { record, files: artifact.files }
+}
+
+function reviewedArtifact(artifact: FrozenPackageArtifact): ReviewedArtifact {
+  return {
+    sha256: artifact.artifactSha256,
+    bytes: artifact.artifactBytes,
+    entryCount: artifact.files.length,
+    ownedRoot: artifact.artifactRoot,
+  }
 }
 
 export async function reviewGithubPlugin(options: {
@@ -1036,7 +1117,16 @@ export async function reviewGithubPlugin(options: {
   runtimeVersion?: string
   signal?: AbortSignal
 }): Promise<ReviewRecord> {
-  return (await reviewGithubPluginWithFiles(options)).record
+  const result = await githubSnapshot(options)
+  return evaluatePluginContent({
+    resolutionId: options.resolutionId,
+    requirement: options.requirement,
+    sourceSnapshot: result.sourceSnapshot,
+    files: result.snapshot.files,
+    truncated: result.snapshot.truncated,
+    maintained: result.maintained,
+    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
+  })
 }
 
 function isWithin(root: string, target: string): boolean {
@@ -1220,6 +1310,8 @@ export async function reviewLocalPlugin(options: {
   resolutionId: string
   requirement: string
   runtimeVersion?: string
+  /** When provided, review exactly one retained npm artifact instead of the source tree. */
+  artifactRoot?: string
   /** GitHub lineage-root SHA. When omitted, HEAD is treated as the root (uncommitted-only reviews). */
   lineageRootCommit?: string
 }): Promise<LocalReviewResult> {
@@ -1251,7 +1343,17 @@ export async function reviewLocalPlugin(options: {
   }
   const baseCommit = lineageRoot.toLowerCase()
   const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
-  const snapshot = await inspectLocalPackageDirectory(canonicalRoot, options.config)
+  const artifact = options.artifactRoot
+    ? await freezeLocalPackage({
+        sourceRoot: canonicalRoot,
+        artifactRoot: options.artifactRoot,
+        config: options.config,
+        runner: options.runner,
+      })
+    : undefined
+  const snapshot = artifact
+    ? { files: artifact.files, truncated: false }
+    : await inspectLocalPackageDirectory(canonicalRoot, options.config)
   // A Host-committed managed change has a clean worktree, so status alone is
   // always the SHA-256 of empty text. Bind the local identity to exact HEAD as
   // well as any residual status to distinguish reviewed commits truthfully.
@@ -1264,6 +1366,7 @@ export async function reviewLocalPlugin(options: {
     files: snapshot.files,
     truncated: snapshot.truncated,
     maintained: true,
+    ...(artifact ? { installSpec: artifact.installSpec, artifact: reviewedArtifact(artifact) } : {}),
     ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
   })
   return { record, contentHash, files: snapshot.files }

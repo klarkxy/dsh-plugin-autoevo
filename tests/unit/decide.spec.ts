@@ -115,15 +115,13 @@ describe('resume validation', () => {
     })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
   })
 
-  it('does not consume an oversized authentic user turn before validation completes', () => {
+  it('accepts a complete authentic user turn beyond the legacy presentation limit', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: 'x'.repeat(2_001) }] })
-    expect(() => resolveDecisionFromModel({
+    expect(resolveDecisionFromModel({
       guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'synthetic-model',
-    })).toThrow(/1 to 2000 characters/i)
-    expect(() => guard.previewDecisionTurn(agent, current)).not.toThrow()
-    expect(guard.consumeDecisionTurn(agent, current).message).toHaveLength(2_001)
+    }).userMessage).toHaveLength(2_001)
   })
 
   it('makes every use_this decision persistent', () => {

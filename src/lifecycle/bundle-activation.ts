@@ -1,6 +1,5 @@
 import type { ActivatedFiber } from '../contracts.js'
 
-export const MAX_ACTIVATED_FIBERS = 32
 const MAX_FIBER_NAME = 214
 const MAX_FIBER_ID = 128
 
@@ -23,23 +22,21 @@ function boundedToken(value: unknown, max: number): string | undefined {
   return token
 }
 
-function pushTarget(out: ActivatedFiber[], seen: Set<string>, row: unknown): void {
-  if (out.length >= MAX_ACTIVATED_FIBERS) return
-  const rec = record(row)
-  if (!rec) return
-  const name = boundedToken(rec.name, MAX_FIBER_NAME)
-  if (!name) return
-  const id = boundedToken(rec.id, MAX_FIBER_ID)
-  const key = `${id ?? ''}\0${name}`
-  if (!seen.has(key)) {
-    seen.add(key)
-    out.push(id ? { id, name } : { name })
-  }
-  if (rec.group === true && Array.isArray(rec.config)) {
-    for (const child of rec.config) {
-      if (out.length >= MAX_ACTIVATED_FIBERS) return
-      pushTarget(out, seen, child)
+function pushTargets(out: ActivatedFiber[], seen: Set<string>, visited: WeakSet<object>, rows: readonly unknown[]): void {
+  const pending = [...rows].reverse()
+  while (pending.length > 0) {
+    const rec = record(pending.pop())
+    if (!rec || visited.has(rec)) continue
+    visited.add(rec)
+    const name = boundedToken(rec.name, MAX_FIBER_NAME)
+    if (!name) continue
+    const id = boundedToken(rec.id, MAX_FIBER_ID)
+    const key = `${id ?? ''}\0${name}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(id ? { id, name } : { name })
     }
+    if (rec.group === true && Array.isArray(rec.config)) pending.push(...[...rec.config].reverse())
   }
 }
 
@@ -48,13 +45,11 @@ export function activationTargetsFromPatch(patches: unknown): ActivatedFiber[] {
   if (!Array.isArray(patches)) return []
   const out: ActivatedFiber[] = []
   const seen = new Set<string>()
+  const visited = new WeakSet<object>()
   for (const item of patches) {
     const patch = record(item)
     if (!patch || !Array.isArray(patch.insert)) continue
-    for (const row of patch.insert) {
-      if (out.length >= MAX_ACTIVATED_FIBERS) return out
-      pushTarget(out, seen, row)
-    }
+    pushTargets(out, seen, visited, patch.insert)
   }
   return out
 }
@@ -113,16 +108,16 @@ export function matchActivatedEntries<T extends ActivationEntry>(
 
 export function flattenLoaderOptions(entries: readonly unknown[]): ActivationEntry[] {
   const out: ActivationEntry[] = []
-  const walk = (rows: readonly unknown[]): void => {
-    for (const row of rows) {
-      const rec = record(row)
-      if (!rec) continue
-      const id = boundedToken(rec.id, MAX_FIBER_ID)
-      const name = boundedToken(rec.name, MAX_FIBER_NAME)
-      if (id || name) out.push({ ...(id ? { id } : {}), options: { ...(id ? { id } : {}), ...(name ? { name } : {}) } })
-      if (rec.group === true && Array.isArray(rec.config)) walk(rec.config)
-    }
+  const visited = new WeakSet<object>()
+  const pending = [...entries].reverse()
+  while (pending.length > 0) {
+    const rec = record(pending.pop())
+    if (!rec || visited.has(rec)) continue
+    visited.add(rec)
+    const id = boundedToken(rec.id, MAX_FIBER_ID)
+    const name = boundedToken(rec.name, MAX_FIBER_NAME)
+    if (id || name) out.push({ ...(id ? { id } : {}), options: { ...(id ? { id } : {}), ...(name ? { name } : {}) } })
+    if (rec.group === true && Array.isArray(rec.config)) pending.push(...[...rec.config].reverse())
   }
-  walk(entries)
   return out
 }

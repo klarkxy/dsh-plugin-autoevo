@@ -148,7 +148,7 @@ Cancellation or exceptions never reuse the cancelled signal for cleanup. The Hos
 The paths most often needed when debugging:
 
 - `<workspace>/.autoevo/sources/<source-id>/`: managed source worktree;
-- `<dshHome>/autoevo/`: Host receipts (`resolutions/`, `reviews/`, `workflows/`, `installations/`, `source-control/`) plus `artifacts/`, `trials/`, `verifications/`.
+- `<dshHome>/autoevo/`: Host receipts (`resolutions/`, `reviews/`, `workflows/`, `installations/`, `source-control/`) plus `review-artifacts/`, `artifacts/`, `trials/`, `verifications/`.
 
 The full layout is canonical in [Architecture §4](architecture.md#4-数据与状态). `StateStore` writes receipts with same-directory temporary files plus atomic rename. Persist a provisional installation before any profile mutation; on final-write failure preserve a recovery anchor or compensate and clean up, and never falsely report "not installed".
 
@@ -161,9 +161,9 @@ The full layout is canonical in [Architecture §4](architecture.md#4-数据与�
 | `sourceDir` | Current workspace `.autoevo/sources` when not set |
 | `ghCommand` / `gitCommand` / `dshCommand` | Corresponding executable names |
 | `dshCommandArgs` | Fixed extra arguments passed to DSH |
-| `maxCandidates` | 1–20, default 20 |
-| `maxFiles` | 4–200, default 200 |
-| `maxRepositoryBytes` | 64 KiB–8 MiB, default 2 MiB |
+| `maxCandidates` | 1–105, default 105; compatibility field, with a fixed discovery-pool ceiling |
+| `maxFiles` | 4–200, default 200; discovery previews only, never package eligibility |
+| `maxRepositoryBytes` | 64 KiB–8 MiB, default 2 MiB; discovery previews only, never package eligibility |
 | `commandTimeoutMs` | 1–300 seconds, default 30 seconds |
 | `forwardedCredentialEnv` | Allowed credential environment-variable names, never values |
 | `verificationPatchPaths` | Additional absolute verification patch paths |
@@ -173,11 +173,11 @@ Configuration boundary changes must be kept in sync with `src/config.ts`, the pu
 
 ## 9. Review, install, and verification
 
-A review receipt binds Policy, requirement, exact source, inspected file hashes, manifest facts, actual DSH runtime, and compatibility. Installation re-reviews and compares materials before mutating.
+A formal review first freezes one Host-owned npm tgz with lifecycle scripts disabled, then binds Policy, requirement, source provenance, every archive-entry hash, the archive SHA-256, manifest facts, actual DSH runtime, and compatibility. Installation never repacks or installs a GitHub spec: it rehashes and installs that same `file:` artifact with lifecycle scripts disabled. Historical reviews without artifact provenance remain readable but require re-review before installation.
 
 Install order in brief (full implementation in `src/lifecycle/install.ts`):
 
-1. Validate the latest review, selection receipt, commitment/lease, and target profile; materialize the owned snapshot/tgz and recheck path, size, and hash;
+1. Validate the latest review, selection receipt, commitment/lease, and target profile; recheck the frozen tgz's owned path, size, and hash;
 2. Obtain DSH `allowed-once` approval, write a provisional receipt, mutate the target profile through DSH's normal install path, and reconcile the exact dependency against the visible package target;
 3. Run Host verification and destination-process hot-load, then write the final receipt; failures land in `failed_absent` / `recovery_required`.
 

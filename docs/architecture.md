@@ -91,6 +91,8 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 
 发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会读取有界的根 `package.json`、README 与 DSH manifest 预览，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
 
+正式审查与发现预览严格分离。Host 对精确 GitHub commit 或托管本地 HEAD 只执行一次 `npm pack --ignore-scripts`，流式验证 tgz 路径与条目类型并审查其中的完整文件内容；`ReviewRecord` 同时绑定条目清单、tgz SHA-256 和 owned root。安装只接受该 `file:` 产物，批准前与目标 profile 写入前都会复算 hash，且通过 DSH/pnpm 安装时继续设置 `ignore-scripts`。因此 `maxFiles` / `maxRepositoryBytes` 只约束候选预览，不决定安装包能否被审查或安装。
+
 ## 4. 数据与状态
 
 Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当前会话工作区 `.autoevo/sources/`（分别可用 `stateDir` / `sourceDir` 覆盖）：
@@ -106,6 +108,8 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
 ├─ resolutions/<id>.json
 ├─ reviews/<id>.json
 ├─ installations/<id>.json
+├─ review-artifacts/review-<uuid>/
+│  └─ <package>.tgz
 └─ verifications/<uuid>/
    ├─ observer.cordis.yml
    └─ tool-roundtrip.jsonl

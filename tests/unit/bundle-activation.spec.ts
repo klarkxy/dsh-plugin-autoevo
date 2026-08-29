@@ -101,4 +101,20 @@ describe('bundle activation identity', () => {
       { id: 'record-sync-tool', name: '@deepseek-ai/dsh-mcp-client' },
     ])
   })
+
+  it('keeps every activated Fiber beyond the former fixed cap and terminates on object cycles', () => {
+    const children = Array.from({ length: 40 }, (_, index) => ({ id: `fiber-${index}`, name: `dsh-fiber-${index}` }))
+    const cyclic: { id: string, name: string, group: true, config: unknown[] } = {
+      id: 'cyclic',
+      name: 'cordis:group',
+      group: true,
+      config: [],
+    }
+    cyclic.config.push(cyclic, ...children)
+
+    const targets = activationTargetsFromPatch([{ insert: [cyclic] }])
+    expect(targets).toHaveLength(41)
+    expect(targets.at(-1)).toEqual({ id: 'fiber-39', name: 'dsh-fiber-39' })
+    expect(flattenLoaderOptions([cyclic])).toHaveLength(41)
+  })
 })

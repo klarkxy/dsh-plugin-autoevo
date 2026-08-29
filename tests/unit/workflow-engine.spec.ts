@@ -211,6 +211,15 @@ function installedPluginCandidate(
   }
 }
 
+function freezeTestReview(record: ReviewRecord, root = 'C:/workspace'): void {
+  if (record.inspectedFiles.length === 0) {
+    record.inspectedFiles = [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }]
+  }
+  const ownedRoot = path.join(root, 'review-artifacts', record.id)
+  record.installSpec = `file:${path.join(ownedRoot, 'package', 'reviewed.tgz').replaceAll('\\', '/')}`
+  record.artifact = { sha256: 'f'.repeat(64), bytes: 8, entryCount: record.inspectedFiles.length, ownedRoot }
+}
+
 async function reviewInstalledCandidate(
   engine: WorkflowEngine,
   guard: CreationGuard,
@@ -1873,6 +1882,7 @@ describe('workflow engine autonomous discovery', () => {
       recommendation: 'use',
       installSpec: `file:${path.join(root, 'dsh-plugin-beta-fixed.tgz')}`,
     }
+    freezeTestReview(fixedReview, root)
     const installs: Array<{ retention: string; replacement?: unknown }> = []
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.latestReview = async () => fixedReview
@@ -1985,6 +1995,7 @@ describe('workflow engine autonomous discovery', () => {
       recommendation: 'modify',
       installSpec: `github:anonymous-lab/dsh-plugin-alpha#${commit}`,
     }
+    freezeTestReview(review)
     workflowHost.listInstallProfiles = async () => ['web']
     workflowHost.reviewExisting = async (resolution, target) => {
       expect(target.commit).toBe(commit)
@@ -2072,6 +2083,8 @@ describe('workflow engine autonomous discovery', () => {
       installSpec: `file:${path.join(root, 'dsh-plugin-alpha.tgz')}`,
       recommendation: 'use',
     }
+    freezeTestReview(githubReview, root)
+    freezeTestReview(localReview, root)
     let latest: ReviewRecord = githubReview
     const installs: Array<{ retention: string; replacement?: unknown }> = []
     workflowHost.listInstallProfiles = async () => ['web']
@@ -2349,6 +2362,7 @@ describe('workflow engine autonomous discovery', () => {
         verificationLayer: 'manual_runtime',
       },
     }
+    freezeTestReview(inspected)
     await store.put('reviews', inspected)
     const failed: InstallationRecord = {
       schemaVersion: 1,

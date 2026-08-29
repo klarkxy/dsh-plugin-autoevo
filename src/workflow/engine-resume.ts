@@ -137,8 +137,8 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         }
         const turn = this.creationGuard.previewDecisionTurn(exec.agent, workflow.interrupt)
         const normalizedAnswer = normalizeRequirement(turn.message)
-        if (!normalizedAnswer || normalizedAnswer.length > 2_000) {
-          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification answer must contain 1 to 2000 characters')
+        if (!normalizedAnswer) {
+          return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification answer must not be empty')
         }
         const discoveryQueries = this.normalizeBaselineDiscoveryQueries(input.navigation.queries)
         this.creationGuard.consumeDecisionTurn(exec.agent, workflow.interrupt)

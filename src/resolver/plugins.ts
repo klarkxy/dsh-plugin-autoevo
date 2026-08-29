@@ -5,8 +5,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 
-const MAX_MANIFEST_BYTES = 128 * 1024
-const MAX_PARENT_HOPS = 12
 const SKIPPED_PACKAGES = new Set(['dsh-plugin-autoevo', 'dsh-find-plugin'])
 
 interface LoaderEntryLike {
@@ -54,11 +52,13 @@ function asFilePath(value: string, baseUrl?: string): string | undefined {
 
 async function nearestPackageJson(start: string): Promise<string | undefined> {
   let current = path.extname(start) ? path.dirname(start) : start
-  for (let index = 0; index < MAX_PARENT_HOPS; index += 1) {
+  const visited = new Set<string>()
+  while (!visited.has(current)) {
+    visited.add(current)
     const candidate = path.join(current, 'package.json')
     try {
       const info = await stat(candidate)
-      if (info.isFile() && info.size <= MAX_MANIFEST_BYTES) return candidate
+      if (info.isFile()) return candidate
     } catch {
       // Continue toward the filesystem root.
     }
@@ -89,7 +89,7 @@ async function resolvePackageJson(specifier: string, baseUrl?: string): Promise<
 async function readManifest(manifestPath: string): Promise<PackageManifest | undefined> {
   try {
     const info = await stat(manifestPath)
-    if (!info.isFile() || info.size > MAX_MANIFEST_BYTES) return undefined
+    if (!info.isFile()) return undefined
     const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
     return parsed as PackageManifest

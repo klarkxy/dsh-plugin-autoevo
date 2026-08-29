@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { POLICY_VERSION, type ActionCommitment, type ReviewRecord, type ReviewerVerdict, type SelectionReceipt } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { isSafePackageName } from '../package-name.js'
@@ -29,6 +30,7 @@ export function reviewSnapshotDigest(review: ReviewRecord): string {
     inspectedFiles: review.inspectedFiles,
     manifest: review.manifest,
     mechanicalFacts: review.mechanicalFacts,
+    artifact: review.artifact,
   })
 }
 
@@ -55,13 +57,21 @@ export function reviewCandidateDigest(review: ReviewRecord, workflow?: ReviewCan
   })
 }
 
-function expectedGithubInstallSpec(review: ReviewRecord): string | null {
-  if (review.sourceSnapshot?.kind !== 'github' || !review.manifest?.packageName) return null
-  return `github:${review.sourceSnapshot.repository}#${review.sourceSnapshot.commit}`
+function reviewedArtifactIsOwned(review: ReviewRecord): boolean {
+  if (!review.artifact || !DIGEST_RE.test(review.artifact.sha256)
+    || !Number.isSafeInteger(review.artifact.bytes) || review.artifact.bytes <= 0
+    || !Number.isSafeInteger(review.artifact.entryCount) || review.artifact.entryCount <= 0
+    || review.artifact.entryCount !== review.inspectedFiles.length
+    || !review.installSpec?.startsWith('file:')) return false
+  const artifactPath = path.resolve(review.installSpec.slice('file:'.length))
+  const ownedRoot = path.resolve(review.artifact.ownedRoot)
+  const relative = path.relative(ownedRoot, artifactPath)
+  return Boolean(relative) && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)
 }
 
 /** Host hard boundaries only. Mechanical recommendation/fit/risk/regex are not boundaries. */
 export function hostDirectUseBoundary(review: ReviewRecord): DirectUseHostBoundary | undefined {
+  if (!reviewedArtifactIsOwned(review)) return 'not_materializable'
   if (review.mechanicalFacts?.directUseHostBoundary === 'not_materializable') return 'not_materializable'
   if (review.mechanicalFacts?.manifest.materializable === false) return 'not_materializable'
   if (review.sourceSnapshot.kind === 'local' && review.mechanicalFacts?.truncated) return 'not_materializable'
@@ -74,12 +84,7 @@ export function hostDirectUseBoundary(review: ReviewRecord): DirectUseHostBounda
   if (review.manifest?.kind !== 'bundle') return 'not_materializable'
   if (!isSafePackageName(review.manifest.packageName)) return 'not_materializable'
 
-  const source = review.sourceSnapshot
-  if (!source) return 'not_materializable'
-  if (source.kind === 'github') {
-    const expected = expectedGithubInstallSpec(review)
-    if (!expected || review.installSpec !== expected) return 'not_materializable'
-  } else if (review.installSpec && !review.installSpec.startsWith('file:')) {
+  if (!review.installSpec?.startsWith('file:')) {
     return 'not_materializable'
   }
   return undefined

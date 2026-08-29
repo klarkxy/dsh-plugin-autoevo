@@ -306,6 +306,13 @@ interface InspectedFile {
   sha256: string;
   bytes: number;
 }
+/** Host-owned npm archive that was itself reviewed and is the only install input. */
+interface ReviewedArtifact {
+  sha256: string;
+  bytes: number;
+  entryCount: number;
+  ownedRoot: string;
+}
 type ReviewSourceSnapshot = {
   kind: 'github';
   repository: string;
@@ -398,6 +405,8 @@ interface ReviewRecord {
   findings: ReviewFinding[];
   recommendation: ReviewRecommendation;
   installSpec: string | null;
+  /** Absent on legacy source-snapshot reviews, which remain readable but are not install authority. */
+  artifact?: ReviewedArtifact;
   /** Present on current reviews. Absent on old readable records, which are never a reviewer approval. */
   mechanicalFacts?: MechanicalFacts;
   /** Frozen static runtime surface. Absent on old readable records. */
@@ -787,6 +796,8 @@ interface CommandResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
 }
 interface CommandRunner {
   run(request: CommandRequest): Promise<CommandResult>;
@@ -2241,6 +2252,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly managedChild;
   constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
   private managedWorkDeps;
+  private reviewArtifactRoot;
   private withWorkspace;
   start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string, discoveryQueries?: string[]): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;

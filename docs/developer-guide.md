@@ -148,7 +148,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 调试时最常用到的路径：
 
 - `<workspace>/.autoevo/sources/<source-id>/`：托管源码工作树；
-- `<dshHome>/autoevo/`：Host receipts（`resolutions/`、`reviews/`、`workflows/`、`installations/`、`source-control/`）与 `artifacts/`、`trials/`、`verifications/`。
+- `<dshHome>/autoevo/`：Host receipts（`resolutions/`、`reviews/`、`workflows/`、`installations/`、`source-control/`）与 `review-artifacts/`、`artifacts/`、`trials/`、`verifications/`。
 
 完整布局以[架构说明 §4](architecture.md#4-数据与状态) 为准。`StateStore` 用同目录临时文件加原子 rename 写 receipt。任何 profile 变更前先持久化 provisional installation；最终写回失败时必须保留可恢复锚点或补偿清理，不能谎报未安装。
 
@@ -161,9 +161,9 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 | `sourceDir` | 未设置时为当前 workspace `.autoevo/sources` |
 | `ghCommand` / `gitCommand` / `dshCommand` | 对应可执行文件名 |
 | `dshCommandArgs` | 传给 DSH 的固定前置参数 |
-| `maxCandidates` | 1–20，默认 20 |
-| `maxFiles` | 4–200，默认 200 |
-| `maxRepositoryBytes` | 64 KiB–8 MiB，默认 2 MiB |
+| `maxCandidates` | 1–105，默认 105；兼容字段，发现池使用固定上限 |
+| `maxFiles` | 4–200，默认 200；仅限制发现预览，不限制安装包资格 |
+| `maxRepositoryBytes` | 64 KiB–8 MiB，默认 2 MiB；仅限制发现预览，不限制安装包资格 |
 | `commandTimeoutMs` | 1–300 秒，默认 30 秒 |
 | `forwardedCredentialEnv` | 允许转发的凭据环境变量名，不保存值 |
 | `verificationPatchPaths` | 额外验证 patch 的绝对路径列表 |
@@ -173,11 +173,11 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 9. 审查、安装与验证
 
-审查 receipt 绑定 Policy、需求、精确来源、已检查文件 hash、manifest facts、实际 DSH runtime 与兼容性。安装前重新审查并比较材料。
+正式审查先在禁用生命周期脚本的情况下冻结一个 Host-owned npm tgz，再绑定 Policy、需求、来源溯源、全部归档条目 hash、归档 SHA-256、manifest facts、实际 DSH runtime 与兼容性。安装阶段不重新打包，也不安装 GitHub spec；它会再次校验并安装同一个 `file:` 产物，同时继续禁用生命周期脚本。缺少产物溯源的历史 review 仍可读取，但安装前必须重新审查。
 
 安装器的关键顺序（完整实现见 `src/lifecycle/install.ts`）：
 
-1. 验证最新 review、selection receipt、commitment/lease 与 target profile；物化 owned snapshot/tgz 并复核路径、size、hash；
+1. 验证最新 review、selection receipt、commitment/lease 与 target profile；复核已冻结 tgz 的归属路径、size 与 hash；
 2. 取得 DSH `allowed-once` approval 后写 provisional receipt，通过 DSH 的正常安装路径修改目标 profile，并对账 exact dependency 与可见 package target；
 3. 执行 Host 验证与目标进程热加载，写最终 receipt；失败进入 `failed_absent` / `recovery_required`。
 

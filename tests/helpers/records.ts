@@ -38,7 +38,7 @@ export function testReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord 
       commit: 'c'.repeat(40),
       defaultBranch: 'main',
     },
-    inspectedFiles: [],
+    inspectedFiles: [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }],
     manifest: {
       kind: 'bundle',
       packageName: 'dsh-tool-calculator',
@@ -57,7 +57,13 @@ export function testReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord 
     missingCapabilities: [],
     findings: [],
     recommendation: 'use',
-    installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
+    installSpec: 'file:C:/workspace/review-artifacts/review-default/package/dsh-tool-calculator.tgz',
+    artifact: {
+      sha256: 'f'.repeat(64),
+      bytes: 8,
+      entryCount: 1,
+      ownedRoot: 'C:/workspace/review-artifacts/review-default',
+    },
     ...overrides,
   }
 }

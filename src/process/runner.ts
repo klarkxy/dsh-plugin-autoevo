@@ -1,4 +1,5 @@
 import os from 'node:os'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { RuntimeConfig } from '../config.js'
@@ -52,6 +53,8 @@ export interface CommandResult {
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
+  stdoutTruncated?: boolean
+  stderrTruncated?: boolean
 }
 
 const DIAGNOSTIC_LINE = /(?:ERR_[A-Z0-9_]+|\b(?:error|failed|failure|not found|timed? out|cannot|unable|denied)\b|\bE(?:PERM|ACCES|NOENT|CONN\w*|TIMEDOUT|NOTFOUND)\b)/iu
@@ -316,8 +319,8 @@ export class DshCommandRunner implements CommandRunner {
         signal,
         stdio: {
           stdin: 'ignore',
-          stdout: { maxBytes: 2_000_000 },
-          stderr: { maxBytes: 512_000 },
+          stdout: { maxBytes: 2_000_000, spill: { maxBytes: 268_435_456 } },
+          stderr: { maxBytes: 512_000, spill: { maxBytes: 268_435_456 } },
         },
       })
     } catch (error) {
@@ -341,14 +344,21 @@ export class DshCommandRunner implements CommandRunner {
     throwIfCommandAborted(command, signal)
     const stdoutRead = handle.collected.stdout?.readFrom(0)
     const stderrRead = handle.collected.stderr?.readFrom(0)
-    if (stdoutRead?.lossy || stderrRead?.lossy) {
-      throw new EvolutionError('command_failed', `${command} output exceeded the review limit`, { command })
-    }
+    const stdoutSpill = stdoutRead?.lossy && stdoutRead.spillPath
+      ? await readFile(stdoutRead.spillPath, 'utf8').catch(() => undefined)
+      : undefined
+    const stderrSpill = stderrRead?.lossy && stderrRead.spillPath
+      ? await readFile(stderrRead.spillPath, 'utf8').catch(() => undefined)
+      : undefined
+    const stdout = stdoutSpill ?? stdoutRead?.text ?? ''
+    const stderr = stderrSpill ?? stderrRead?.text ?? ''
     const result: CommandResult = {
       exitCode: outcome.exitCode,
       signal: outcome.signal,
-      stdout: stdoutRead?.text ?? '',
-      stderr: stderrRead?.text ?? '',
+      stdout,
+      stderr,
+      ...(stdoutRead?.lossy && stdoutSpill === undefined ? { stdoutTruncated: true } : {}),
+      ...(stderrRead?.lossy && stderrSpill === undefined ? { stderrTruncated: true } : {}),
     }
     if (!request.allowFailure && outcome.exitCode !== 0) {
       throw commandResultFailure(command, result)

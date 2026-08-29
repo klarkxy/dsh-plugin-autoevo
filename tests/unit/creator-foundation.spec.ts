@@ -251,7 +251,7 @@ describe('Creator records and legacy workflow JSON', () => {
     expect(JSON.stringify(card)).not.toContain(roundtrip.creatorRecords![0]!.receipt!.compositionSha256)
   })
 
-  it('bounds persisted Creator records', () => {
+  it('retains every persisted Creator record while presentation stays bounded separately', () => {
     let records = undefined as ReturnType<typeof appendCreatorRecord> | undefined
     for (const operation of ['create', 'modify', 'correct', 'modify', 'correct'] as const) {
       records = appendCreatorRecord(records, {
@@ -260,8 +260,8 @@ describe('Creator records and legacy workflow JSON', () => {
         createdAt: new Date().toISOString(),
       })
     }
-    expect(records).toHaveLength(4)
-    expect(records!.map((item) => item.operation)).toEqual(['modify', 'correct', 'modify', 'correct'])
+    expect(records).toHaveLength(5)
+    expect(records!.map((item) => item.operation)).toEqual(['create', 'modify', 'correct', 'modify', 'correct'])
   })
 })
 

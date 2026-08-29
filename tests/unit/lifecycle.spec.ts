@@ -15,6 +15,7 @@ import { builtinReceiptSpec } from '../../src/lifecycle/enable-builtin.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
 import { StateStore } from '../../src/state/store.js'
+import { sha256 } from '../../src/state/hashes.js'
 import { _testing as snapshotTesting } from '../../src/lifecycle/snapshot.js'
 
 const temporary = trackTempDirs()
@@ -74,9 +75,22 @@ async function installHarness(record: ReviewRecord): Promise<{ root: string, sto
   const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-install-'))
   temporary.push(root)
   const store = new StateStore(root)
-  await store.put('reviews', record)
+  await putFrozenReview(root, store, record)
   const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
   return { root, store, ctx }
+}
+
+async function putFrozenReview(root: string, store: StateStore, record: ReviewRecord): Promise<void> {
+  const artifactRoot = path.join(root, 'review-artifacts', record.id)
+  const artifactPath = path.join(artifactRoot, 'package', 'reviewed.tgz')
+  const bytes = Buffer.from(`artifact:${record.id}`)
+  await mkdir(path.dirname(artifactPath), { recursive: true })
+  await writeFile(artifactPath, bytes)
+  await store.put('reviews', {
+    ...record,
+    installSpec: `file:${artifactPath.replaceAll('\\', '/')}`,
+    artifact: { sha256: sha256(bytes), bytes: bytes.byteLength, entryCount: record.inspectedFiles.length, ownedRoot: artifactRoot },
+  })
 }
 
 describe('lifecycle validation', () => {
@@ -333,7 +347,7 @@ describe('lifecycle validation', () => {
       }
     }
     const store = new FailingFinalStore(root)
-    await store.put('reviews', attestedReview())
+    await putFrozenReview(root, store, attestedReview())
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),

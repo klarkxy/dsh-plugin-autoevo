@@ -111,8 +111,8 @@ export function newResolutionId(requirement: string): string {
 
 export function assertRequirement(requirement: string): string {
   const value = requirement.normalize('NFKC').trim()
-  if (!value || value.length > 2_000) {
-    throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
+  if (!value) {
+    throw new EvolutionError('invalid_input', 'requirement must not be empty')
   }
   return value
 }

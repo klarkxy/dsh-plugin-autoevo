@@ -5,7 +5,6 @@ import { fileURLToPath, URL } from 'node:url'
 import type { LocalCapabilityCandidate } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 
-const MAX_MANIFEST_BYTES = 128 * 1024
 const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const PACKAGE_NAME = /^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -34,7 +33,7 @@ function within(root: string, candidate: string): boolean {
 async function readBoundedJson<T>(file: string): Promise<T | undefined> {
   try {
     const info = await stat(file)
-    if (!info.isFile() || info.size > MAX_MANIFEST_BYTES) return undefined
+    if (!info.isFile()) return undefined
     const value: unknown = JSON.parse(await readFile(file, 'utf8'))
     return value && typeof value === 'object' && !Array.isArray(value) ? value as T : undefined
   } catch {

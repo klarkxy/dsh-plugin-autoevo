@@ -65,7 +65,7 @@ function githubReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
       commit: COMMIT,
       defaultBranch: 'main',
     },
-    inspectedFiles: [],
+    inspectedFiles: [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }],
     manifest: {
       kind: 'bundle',
       packageName: 'dsh-one',
@@ -83,7 +83,13 @@ function githubReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
     missingCapabilities: [],
     findings: [],
     recommendation: 'use',
-    installSpec: `github:acme/one#${COMMIT}`,
+    installSpec: 'file:C:/workspace/review-artifacts/review-one/package/dsh-one.tgz',
+    artifact: {
+      sha256: 'f'.repeat(64),
+      bytes: 8,
+      entryCount: 1,
+      ownedRoot: 'C:/workspace/review-artifacts/review-one',
+    },
     ...overrides,
   }
 }
@@ -265,6 +271,8 @@ describe('direct use eligibility', () => {
         { path: 'src/run.ts', content: Buffer.from("import { spawn } from 'node:child_process'\nspawn('echo')") },
       ],
     })
+    record.installSpec = 'file:C:/workspace/review-artifacts/process/package/dsh-one.tgz'
+    record.artifact = { sha256: 'f'.repeat(64), bytes: 100, entryCount: record.inspectedFiles.length, ownedRoot: 'C:/workspace/review-artifacts/process' }
     expect(record.findings.map((item) => item.code)).toEqual(expect.arrayContaining(['process_execution']))
     expect(record.findings.some((item) => item.code === 'prompt_injection')).toBe(false)
     expect(record.securityRisk).toBe('medium')

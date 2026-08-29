@@ -93,6 +93,7 @@
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/schemastery": "3.18.1",
     "semver": "7.8.5",
+    "tar": "7.5.22",
     "yaml": "2.9.0"
   },
   "peerDependencies": {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
@@ -8,11 +9,10 @@ import type { DshLauncher } from './lifecycle/launcher.js'
 import type { CommandRunner } from './process/runner.js'
 import {
   isDirectlyUsableReview,
-  reviewGithubPlugin,
   reviewLocalPlugin,
 } from './review/index.js'
 import type { SourceManager } from './source-manager.js'
-import { hashObject } from './state/hashes.js'
+import { hashObject, sha256 } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import type { WorkflowExec, WorkflowRecord } from './workflow/contracts.js'
 import { resolveStateRoot } from './workspace-layout.js'
@@ -58,6 +58,7 @@ export function materialReviewFacts(review: ReviewRecord): unknown {
     requirement: review.requirement,
     sourceIdentity,
     inspectedFiles: review.inspectedFiles,
+    artifact: review.artifact,
     manifest: review.manifest,
     compatibility: review.compatibility,
   }
@@ -105,6 +106,7 @@ export async function reviewAndFreezeManagedSource(
   },
 ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
   const runtimeVersion = await dshRuntimeVersion(deps, input.resolution.cwd, input.exec.signal)
+  const artifactRoot = path.join(resolveStateRoot(deps.config, input.resolution.cwd), 'review-artifacts', `review-${randomUUID()}`)
   const local = await reviewLocalPlugin({
     runner: deps.runner,
     config: deps.config,
@@ -116,17 +118,17 @@ export async function reviewAndFreezeManagedSource(
     lineageRootCommit: input.lineageRootCommit,
     resolutionId: input.resolution.id,
     requirement: input.resolution.requirement,
+    artifactRoot,
     ...(runtimeVersion ? { runtimeVersion } : {}),
   })
-  const artifactRoot = path.join(resolveStateRoot(deps.config, input.resolution.cwd), 'review-artifacts', `${local.record.id}-${randomUUID()}`)
-  const materialized = await deps.launcher.materializeLocal(local.record, artifactRoot, input.exec.signal)
-  const review: ReviewRecord = { ...local.record, installSpec: materialized.installSpec }
+  const review = local.record
+  if (!review.artifact) throw new EvolutionError('review_rejected', 'Managed review did not produce a frozen package artifact')
   await deps.store.put('reviews', review)
   await deps.sources.recordReviewedArtifact({
     sourceId: input.sourceId,
     workflowId: input.workflowId,
     reviewId: review.id,
-    artifactHash: materialized.artifactSha256,
+    artifactHash: review.artifact.sha256,
   })
   const waiting = withNextStep(waitingConfirmation(input.resolution, review))
   await deps.store.put('resolutions', waiting)
@@ -134,60 +136,19 @@ export async function reviewAndFreezeManagedSource(
 }
 
 export async function revalidateReview(
-  deps: Pick<ReviewOrchestrationDeps, 'runner' | 'config' | 'store' | 'sources'>,
+  _deps: Pick<ReviewOrchestrationDeps, 'runner' | 'config' | 'store' | 'sources'>,
   review: ReviewRecord,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ): Promise<boolean> {
-  let lastError: unknown
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const resolution = await deps.store.getResolution(review.resolutionId)
-      const runtimeVersion = await dshRuntimeVersion(deps, resolution.cwd, signal)
-      let current: ReviewRecord
-      if (review.sourceSnapshot.kind === 'github') {
-        current = await reviewGithubPlugin({
-          runner: deps.runner,
-          config: deps.config,
-          cwd: resolution.cwd,
-          repository: review.sourceSnapshot.repository,
-          ref: review.sourceSnapshot.commit,
-          resolutionId: resolution.id,
-          requirement: resolution.requirement,
-          ...(runtimeVersion ? { runtimeVersion } : {}),
-          ...(signal ? { signal } : {}),
-        })
-      } else {
-        const prior = await deps.store.listReviews(resolution.id)
-        const managed = await deps.sources.receiptForManagedPath(review.sourceSnapshot.path)
-        const root = managed ? undefined : lineageRootReview(review, prior)
-        if (!managed && root?.sourceSnapshot.kind !== 'github') return false
-        const lineageRootCommit = managed?.baseCommit
-          ?? (root?.sourceSnapshot.kind === 'github' ? root.sourceSnapshot.commit : undefined)
-        if (!lineageRootCommit) return false
-        current = (await reviewLocalPlugin({
-          runner: deps.runner,
-          config: deps.config,
-          workspaceRoot: managed ? path.dirname(review.sourceSnapshot.path) : resolution.cwd,
-          path: review.sourceSnapshot.path,
-          baseReviewId: review.sourceSnapshot.baseReviewId,
-          lineageRootCommit,
-          resolutionId: resolution.id,
-          requirement: resolution.requirement,
-          ...(runtimeVersion ? { runtimeVersion } : {}),
-        })).record
-      }
-      return hashObject(materialReviewFacts(current)) === hashObject(materialReviewFacts(review))
-    } catch (error) {
-      if (signal?.aborted) throw error
-      lastError = error
-    }
+  if (review.artifact && review.installSpec?.startsWith('file:')) {
+    const artifactPath = path.resolve(review.installSpec.slice('file:'.length))
+    const ownedRoot = path.resolve(review.artifact.ownedRoot)
+    const relative = path.relative(ownedRoot, artifactPath)
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false
+    const current = await readFile(artifactPath).catch(() => undefined)
+    return Boolean(current && sha256(current) === review.artifact.sha256)
   }
-  throw new EvolutionError(
-    'command_failed',
-    'Review revalidation could not complete after retry; the previous review was not marked expired',
-    {
-      causeCode: lastError instanceof EvolutionError ? lastError.code : 'command_failed',
-      diagnosticHash: hashObject({ cause: lastError instanceof Error ? lastError.message : String(lastError) }),
-    },
-  )
+  // Historical source-only reviews remain readable, but are not current
+  // installation authority. A fresh formal review creates a frozen artifact.
+  return false
 }

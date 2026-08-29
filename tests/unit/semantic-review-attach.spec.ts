@@ -1,4 +1,6 @@
 import { mkdtemp } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { mkdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -19,6 +21,7 @@ import {
 } from '../../src/service.js'
 import type { SemanticReviewerHost, SemanticReviewerResult } from '../../src/semantic-reviewer.js'
 import { requirementHashFor } from '../../src/semantic-reviewer.js'
+import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowExec, WorkflowRecord } from '../../src/workflow/contracts.js'
 
@@ -37,6 +40,12 @@ function agent(): Agent {
 
 function exec(): WorkflowExec {
   return { agent: agent() }
+}
+
+function installable(record: ReviewRecord): ReviewRecord {
+  record.installSpec = 'file:C:/workspace/review-artifacts/semantic/package/reviewed.tgz'
+  record.artifact = { sha256: 'f'.repeat(64), bytes: 100, entryCount: record.inspectedFiles.length, ownedRoot: 'C:/workspace/review-artifacts/semantic' }
+  return record
 }
 
 function lowRiskReview() {
@@ -63,7 +72,7 @@ function lowRiskReview() {
     },
     files,
   })
-  return { record, files }
+  return { record: installable(record), files }
 }
 
 function highRiskReview() {
@@ -90,7 +99,7 @@ function highRiskReview() {
     },
     files,
   })
-  return { record, files }
+  return { record: installable(record), files }
 }
 
 function workflowFor(review: ReviewRecord, digest = '4'.repeat(64)): WorkflowRecord {
@@ -251,7 +260,7 @@ function config(root: string): RuntimeConfig {
   return testRuntimeConfig(root)
 }
 
-function commandResult(stdout = '') {
+function commandResult(stdout = ''): CommandResult {
   return { exitCode: 0, signal: null, stdout, stderr: '' }
 }
 
@@ -259,10 +268,45 @@ function fileBlob(text: string): string {
   return Buffer.from(text).toString('base64')
 }
 
-function ghRunner(files: Record<string, string>) {
+async function runNative(request: CommandRequest): Promise<CommandResult> {
+  const [command, ...args] = request.argv
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: request.cwd,
+      env: { ...process.env, ...request.env },
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (exitCode, signal) => resolve({ exitCode, signal, stdout, stderr }))
+  })
+}
+
+function ghRunner(files: Record<string, string>): CommandRunner {
   return {
-    async run(request: { argv: readonly string[] }) {
+    async run(request: CommandRequest): Promise<CommandResult> {
       const joined = request.argv.join(' ')
+      if (request.argv[0] === 'git') {
+        const args = request.argv.slice(1)
+        if (args[0] === 'init') await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+        if (args[0] === 'checkout' && args[1] === '--detach') {
+          for (const [relative, content] of Object.entries(files)) {
+            const target = path.join(request.cwd, ...relative.split('/'))
+            await mkdir(path.dirname(target), { recursive: true })
+            await writeFile(target, content)
+          }
+        }
+        if (args.join(' ') === 'rev-parse HEAD') return commandResult(`${'a'.repeat(40)}\n`)
+        return commandResult()
+      }
+      if (request.argv.includes('pack')) {
+        return runNative(request)
+      }
       if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
       if (joined.includes('/commits/')) {
         return commandResult(JSON.stringify({ sha: 'a'.repeat(40), commit: { committer: { date: new Date().toISOString() } } }))
@@ -292,6 +336,7 @@ function ghRunner(files: Record<string, string>) {
 const syntheticModelFiles = {
   'package.json': JSON.stringify({
     name: 'dsh-plugin-alpha',
+    version: '1.0.0',
     license: 'MIT',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
@@ -386,7 +431,7 @@ describe('service selected review attachment', () => {
       'fixed',
       exec(),
     )).rejects.toThrow(/was not selected for read-only review/i)
-  })
+  }, 20_000)
 })
 
 function hash24(value: string): string {

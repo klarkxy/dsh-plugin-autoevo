@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -18,6 +18,7 @@ import {
   type VersionTrackingDeps,
 } from '../../src/service-versions.js'
 import { StateStore } from '../../src/state/store.js'
+import { sha256 } from '../../src/state/hashes.js'
 
 const temporary = trackTempDirs()
 
@@ -177,13 +178,22 @@ describe('capability rollback', () => {
     targetId: string
   }> {
     const { root, store, ctx } = await setup()
-    const targetReview = attestedReview()
+    const artifactRoot = path.join(root, 'review-artifacts', 'rollback')
+    const artifactPath = path.join(artifactRoot, 'package', 'reviewed.tgz')
+    const bytes = Buffer.from('rollback artifact')
+    await mkdir(path.dirname(artifactPath), { recursive: true })
+    await writeFile(artifactPath, bytes)
+    const targetReview = attestedReview({
+      installSpec: `file:${artifactPath.replaceAll('\\', '/')}`,
+      artifact: { sha256: sha256(bytes), bytes: bytes.byteLength, entryCount: 1, ownedRoot: artifactRoot },
+    })
     await store.put('reviews', targetReview)
     const targetId = `installation_${'1'.repeat(24)}`
     const currentId = `installation_${'2'.repeat(24)}`
     await store.put('installations', installation({
       id: targetId,
       reviewId: targetReview.id,
+      installSpec: targetReview.installSpec!,
       supersededByInstallationId: currentId,
     }))
     await store.put('installations', installation({
@@ -196,7 +206,7 @@ describe('capability rollback', () => {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileTargetAbsent: async () => false,
       profileDependencySpec: async () => options.liveSpec ?? NEW_SPEC,
-      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec === OLD_SPEC,
+      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec === targetReview.installSpec,
       verifyHost: async () => hostPassedEvidence,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
     } as unknown as DshLauncher
@@ -218,7 +228,7 @@ describe('capability rollback', () => {
   it('reinstalls the predecessor through the standard installer and links the lineage', async () => {
     const { store, deps, currentId, targetId } = await rollbackDeps()
     const result = await rollbackInstallation(deps, { installationId: currentId }, execution())
-    expect(result.installSpec).toBe(OLD_SPEC)
+    expect(result.installSpec).toMatch(/^file:/u)
     expect(result.reviewId).toBe(`review_${'a'.repeat(64)}`)
     expect(result.predecessorInstallationId).toBe(currentId)
     expect(result.replacement?.state).toBe('new_present')

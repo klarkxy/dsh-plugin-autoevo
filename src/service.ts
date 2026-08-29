@@ -103,6 +103,7 @@ import type { SemanticVerifierHost } from './semantic-verifier.js'
 import { SourceManager } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
+import { resolveStateRoot } from './workspace-layout.js'
 import {
   adoptInstallation,
   scanOrphanedInstallations,
@@ -323,6 +324,10 @@ export class CapabilityEvolutionService implements WorkflowHost {
       creatorFoundation: this.creatorFoundation,
       managedChild: this.managedChild,
     }
+  }
+
+  private reviewArtifactRoot(cwd: string): string {
+    return path.join(resolveStateRoot(this.config, cwd), 'review-artifacts', `review-${randomUUID()}`)
   }
 
   private withWorkspace<T>(exec: { agent?: ToolRunContext['agent'] }, fn: () => T): T {
@@ -691,6 +696,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ref: ref ?? candidate.defaultBranch ?? 'HEAD',
       resolutionId: resolution.id,
       requirement: resolution.requirement,
+      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
@@ -788,31 +794,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
         }
         const selected = [...new Set([...(resolution.selectedRepositories ?? []), target.repository])]
         const selectedResolution = { ...resolution, selectedRepositories: selected }
-        const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
-        const upstreamEvidence = await reviewGithubPluginWithFiles({
-          runner: this.runner,
-          // This immutable upstream snapshot is a lineage anchor only. The
-          // managed repair itself is reviewed in full immediately below.
-          config: {
-            ...this.config,
-            maxFiles: Math.min(this.config.maxFiles, 8),
-            maxRepositoryBytes: Math.min(this.config.maxRepositoryBytes, 262_144),
-          },
-          cwd: resolution.cwd,
-          repository: target.repository,
-          ref: target.commit,
-          resolutionId: resolution.id,
-          requirement: resolution.requirement,
-          ...(runtimeVersion ? { runtimeVersion } : {}),
-          ...(exec.signal ? { signal: exec.signal } : {}),
-        })
-        if (upstreamEvidence.record.sourceSnapshot.kind !== 'github'
-          || upstreamEvidence.record.sourceSnapshot.commit.toLowerCase() !== target.commit.toLowerCase()
-          || (upstreamEvidence.record.manifest.packageName
-            && upstreamEvidence.record.manifest.packageName !== target.packageName)) {
-          throw new EvolutionError('review_rejected', 'Fresh upstream review does not match the frozen managed repair root')
-        }
-        const upstreamReview = await this.persistReviewed(upstreamEvidence.record, upstreamEvidence.files, exec, workflow)
         await this.sources.claimCompletedSourceForWorkflow(sourceId, workflow.id, exec.signal)
         workflow.managedSourceId = sourceId
         workflow.updatedAt = new Date().toISOString()
@@ -822,7 +803,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
             resolution: selectedResolution,
             sourceId,
             path: receipt.path,
-            baseReviewId: upstreamReview.id,
+            baseReviewId: root.id,
             lineageRootCommit: target.commit,
             workflowId: workflow.id,
             exec,
@@ -842,6 +823,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ref: target.commit,
       resolutionId: resolution.id,
       requirement: resolution.requirement,
+      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
@@ -887,6 +869,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ref: candidate.defaultBranch ?? 'HEAD',
         resolutionId: resolution.id,
         requirement: resolution.requirement,
+        artifactRoot: this.reviewArtifactRoot(resolution.cwd),
         ...(runtimeVersion ? { runtimeVersion } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
@@ -957,6 +940,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       lineageRootCommit: root.sourceSnapshot.commit,
       resolutionId: resolution.id,
       requirement: resolution.requirement,
+      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
       ...(runtimeVersion ? { runtimeVersion } : {}),
     })
     if (local.record.sourceSnapshot.kind !== 'local'

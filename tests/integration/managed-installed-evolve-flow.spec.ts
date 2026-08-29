@@ -12,6 +12,7 @@ import { PluginInstaller } from '../../src/lifecycle/install.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { StateStore } from '../../src/state/store.js'
+import { sha256 } from '../../src/state/hashes.js'
 
 const temporary = trackTempDirs()
 
@@ -32,7 +33,12 @@ describe('installed evolve replacement on an isolated profile', () => {
     const oldCommit = 'a'.repeat(40)
     const newCommit = 'b'.repeat(40)
     const oldSpec = `github:anonymous-lab/dsh-plugin-alpha#${oldCommit}`
-    const newSpec = `github:anonymous-lab/dsh-plugin-alpha#${newCommit}`
+    const artifactRoot = path.join(root, 'state', 'review-artifacts', 'replacement')
+    const artifactPath = path.join(artifactRoot, 'package', 'dsh-plugin-alpha.tgz')
+    const artifactBytes = Buffer.from('replacement artifact')
+    await mkdir(path.dirname(artifactPath), { recursive: true })
+    await writeFile(artifactPath, artifactBytes)
+    const newSpec = `file:${artifactPath.replaceAll('\\', '/')}`
     await writeFile(path.join(profileRoot, 'package.json'), `${JSON.stringify({
       dependencies: { 'dsh-plugin-alpha': oldSpec },
       dsh: { profile: { bundles: ['dsh-plugin-alpha'] } },
@@ -53,7 +59,7 @@ describe('installed evolve replacement on an isolated profile', () => {
         commit: newCommit,
         defaultBranch: 'main',
       },
-      inspectedFiles: [],
+      inspectedFiles: [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }],
       manifest: {
         kind: 'bundle',
         packageName: 'dsh-plugin-alpha',
@@ -72,6 +78,12 @@ describe('installed evolve replacement on an isolated profile', () => {
       findings: [],
       recommendation: 'use',
       installSpec: newSpec,
+      artifact: {
+        sha256: sha256(artifactBytes),
+        bytes: artifactBytes.byteLength,
+        entryCount: 1,
+        ownedRoot: artifactRoot,
+      },
       runtimeSurface: {
         llmDependency: false,
         llmRegistered: false,
@@ -125,7 +137,7 @@ describe('installed evolve replacement on an isolated profile', () => {
           return { exitCode: 0, signal: null, stdout: '', stderr: '' }
         }
         if (request.argv.includes('add')) {
-          const spec = request.argv.at(-1)!
+          const spec = request.argv[request.argv.indexOf('--save-exact') + 1]!
           const profile = request.argv[request.argv.indexOf('--profile') + 1]!
           const dest = path.join(request.env?.DSH_HOME ?? dshHome, 'profiles', profile, 'package.json')
           await mkdir(path.dirname(dest), { recursive: true })

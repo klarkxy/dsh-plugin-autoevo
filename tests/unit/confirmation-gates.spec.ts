@@ -1,5 +1,7 @@
 import { mkdtemp } from 'node:fs/promises'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -14,6 +16,7 @@ import { EvolutionError } from '../../src/errors.js'
 import { assertUseThisReceipt } from '../../src/lifecycle/decide.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION, type SemanticReviewerHost } from '../../src/semantic-reviewer.js'
+import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { StateStore } from '../../src/state/store.js'
 
 const temporary = trackTempDirs()
@@ -39,14 +42,33 @@ function fileBlob(text: string): string {
   return Buffer.from(text).toString('base64')
 }
 
-function commandResult(stdout = ''): { exitCode: number, signal: null, stdout: string, stderr: string } {
+function commandResult(stdout = ''): CommandResult {
   return { exitCode: 0, signal: null, stdout, stderr: '' }
 }
 
-function withGitSupport(base: { run: (request: { argv: readonly string[], cwd: string }) => Promise<{ exitCode: number, signal: null, stdout: string, stderr: string }> }) {
+async function runNative(request: CommandRequest): Promise<CommandResult> {
+  const [command, ...args] = request.argv
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: request.cwd,
+      env: { ...process.env, ...request.env },
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (exitCode, signal) => resolve({ exitCode, signal, stdout, stderr }))
+  })
+}
+
+function withGitSupport(base: Pick<CommandRunner, 'run'>): CommandRunner {
   const gitState = { head: '1'.repeat(40), branch: 'main', n: 0, dirty: true }
   return {
-    async run(request: { argv: readonly string[], cwd: string }) {
+    async run(request: CommandRequest): Promise<CommandResult> {
       const args = request.argv.slice(1)
       const joined = args.join(' ')
       if (request.argv[0] === 'git' || /git(?:\.exe)?$/iu.test(String(request.argv[0]))) {
@@ -75,6 +97,9 @@ function withGitSupport(base: { run: (request: { argv: readonly string[], cwd: s
           return commandResult()
         }
         return commandResult()
+      }
+      if (request.argv.includes('pack')) {
+        return runNative(request)
       }
       return base.run(request)
     },
@@ -215,30 +240,46 @@ function searchItem(result: { name: string, url: string, description: string, st
 function discoveryRunner(
   results: Array<{ name: string, url: string, description: string, stars?: number }>,
   files: Record<string, string> = {},
-) {
-  const review = Object.keys(files).length > 0
+): CommandRunner {
+  const review: CommandRunner = Object.keys(files).length > 0
     ? ghRunner(files)
     : {
-      async run(request: { argv: readonly string[] }) {
+      async run(request: CommandRequest): Promise<CommandResult> {
         const joined = request.argv.join(' ')
         if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
         return commandResult()
       },
     }
   return {
-    async run(request: { argv: readonly string[] }) {
+    async run(request: CommandRequest): Promise<CommandResult> {
       const joined = request.argv.join(' ')
       if (joined.includes('/search/repositories')) {
         return commandResult(JSON.stringify({ items: results.map(searchItem) }))
+      }
+      if (request.argv[0] === 'git') {
+        const args = request.argv.slice(1)
+        if (args[0] === 'init') await mkdir(path.join(request.cwd, '.git'), { recursive: true })
+        if (args[0] === 'checkout' && args[1] === '--detach') {
+          for (const [relative, content] of Object.entries(files)) {
+            const target = path.join(request.cwd, ...relative.split('/'))
+            await mkdir(path.dirname(target), { recursive: true })
+            await writeFile(target, content)
+          }
+        }
+        if (args.join(' ') === 'rev-parse HEAD') return commandResult(`${'a'.repeat(40)}\n`)
+        return commandResult()
+      }
+      if (request.argv.includes('pack')) {
+        return runNative(request)
       }
       return review.run(request)
     },
   }
 }
 
-function ghRunner(files: Record<string, string>) {
+function ghRunner(files: Record<string, string>): CommandRunner {
   return {
-    async run(request: { argv: readonly string[] }) {
+    async run(request: CommandRequest): Promise<CommandResult> {
       const joined = request.argv.join(' ')
       if (joined.includes('--version')) return commandResult('0.1.0-rc.6\n')
       if (joined.includes('/search/repositories')) return commandResult(JSON.stringify({ items: [] }))
@@ -272,6 +313,7 @@ function ghRunner(files: Record<string, string>) {
 const nebulaBundle = {
   'package.json': JSON.stringify({
     name: 'dsh-nebula',
+    version: '1.0.0',
     license: 'MIT',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' },
@@ -420,7 +462,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('example-org/dsh-nebula')
     expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('use_this')
-  })
+  }, 20_000)
 
   it('rejects a Gate-1 use_this decision without consuming the interrupt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-direct-install-'))
@@ -497,7 +539,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe(thirdCandidate.repository)
-  })
+  }, 20_000)
 
   it.each([
     { verdict: 'uncertain' as ReviewerVerdictDecision },
@@ -556,7 +598,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
 
     expect(reviewed.workflow.interrupt?.facts.canInstall).toBe(true)
-  })
+  }, 20_000)
 
   it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-create-'))
@@ -639,7 +681,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     })
     useService.listInstallProfiles = async () => ['web']
     const useTurn = exec('session-use')
-const resolved = await startWith(useService, useGuard, useTurn, '我需要一个调用 nebula relay 的能力。')
+    const resolved = await startWith(useService, useGuard, useTurn, '我需要一个调用 nebula relay 的能力。')
     expect(resolved.workflow.cursor).toBe('await_discovery')
     const useCandidateId = resolved.workflow.discoveryPool!.find((item) => item.repository === 'example-org/dsh-nebula')!.id
     const usePresented = await presentWith(useService, useTurn, resolved.workflow.id, [useCandidateId])
@@ -664,7 +706,7 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
     expect(() => useGuard.assertInstallAuthorized(useTurn.agent, reviewed.review!, stored)).toThrow(/current Host action commitment|has not chosen/i)
     expect(() => useGuard.assertInstallAuthorized(useTurn.agent, { ...reviewed.review!, id: `review_${'f'.repeat(64)}` }, stored)).toThrow(/current Host action commitment|has not chosen|bound to a different review/i)
     expect(confirmed.workflow.cursor === 'installed' || confirmed.workflow.cursor === 'await_confirmation').toBe(true)
-  })
+  }, 30_000)
 
   it('rejects a forged resume that does not match the latest host user turn', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-auth-'))
@@ -803,5 +845,5 @@ const resolved = await startWith(useService, useGuard, useTurn, '我需要一个
       candidateId: selectedCandidateId,
       reviewId: selectedReviewId,
     }))
-  })
+  }, 30_000)
 })

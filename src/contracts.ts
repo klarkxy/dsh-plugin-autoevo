@@ -349,6 +349,14 @@ export interface InspectedFile {
   bytes: number
 }
 
+/** Host-owned npm archive that was itself reviewed and is the only install input. */
+export interface ReviewedArtifact {
+  sha256: string
+  bytes: number
+  entryCount: number
+  ownedRoot: string
+}
+
 export type ReviewSourceSnapshot =
   | {
       kind: 'github'
@@ -449,6 +457,8 @@ export interface ReviewRecord {
   findings: ReviewFinding[]
   recommendation: ReviewRecommendation
   installSpec: string | null
+  /** Absent on legacy source-snapshot reviews, which remain readable but are not install authority. */
+  artifact?: ReviewedArtifact
   /** Present on current reviews. Absent on old readable records, which are never a reviewer approval. */
   mechanicalFacts?: MechanicalFacts
   /** Frozen static runtime surface. Absent on old readable records. */

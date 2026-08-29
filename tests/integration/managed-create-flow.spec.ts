@@ -257,7 +257,7 @@ describe('managed create vertical flow', () => {
     expect(status.stdout.trim()).toBe('')
   }, 60_000)
 
-  it('retries Host review of a committed create without launching another child', async () => {
+  it('reviews a committed create even when its package exceeds the legacy byte snapshot', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-create-review-retry-'))
     temporary.push(root)
     const preflight = testingCreatorPreflight()
@@ -290,15 +290,10 @@ describe('managed create vertical flow', () => {
     const flow = workflow()
     const current = resolution(root)
     const exec = { agent: { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent }
-    const failure = await service.prepareCreate(current, exec, flow).catch((error) => error)
-    expect(failure).toMatchObject({ details: expect.objectContaining({ managedChildCompleted: true }) })
+    const sealed = await service.prepareCreate(current, exec, flow)
     expect(flow.creatorRecords?.at(-1)?.status).toBe('verified')
-    expect(flow.managedCommitPendingReview).toBe(true)
-
-    cfg.maxRepositoryBytes = 2_097_152
-    const sealed = await service.finishManagedWork(current, exec, flow)
     expect(sealed.review?.installSpec).toMatch(/^file:.*\.tgz$/u)
-    expect(flow.creatorRecords?.at(-1)?.status).toBe('verified')
+    expect(sealed.review?.inspectedFiles.some((file) => file.path === 'generated.js' && file.bytes === 500_001)).toBe(true)
     expect(flow.managedCommitPendingReview).toBeUndefined()
   }, 60_000)
 
@@ -502,9 +497,9 @@ describe('managed create vertical flow', () => {
     })
     expect(reclaimed.review.resolutionId).toBe(secondResolution.id)
     if (reclaimed.review.sourceSnapshot.kind !== 'local') throw new Error('reclaimed review must be local')
-    const freshRoot = await store.getReview(reclaimed.review.sourceSnapshot.baseReviewId)
-    expect(freshRoot).toMatchObject({
-      resolutionId: secondResolution.id,
+    const lineageRoot = await store.getReview(reclaimed.review.sourceSnapshot.baseReviewId)
+    expect(lineageRoot).toMatchObject({
+      resolutionId: githubReview.resolutionId,
       sourceSnapshot: {
         kind: 'github',
         repository: target.repository,

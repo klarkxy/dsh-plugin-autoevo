@@ -85,14 +85,14 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     discoveryQueries?: string[],
   ): Promise<WorkflowView> {
     const requestSummary = normalizeRequirement(requirement)
-    if (!requestSummary || requestSummary.length > 2_000) {
-      throw new EvolutionError('invalid_input', 'requirement must contain 1 to 2000 characters')
+    if (!requestSummary) {
+      throw new EvolutionError('invalid_input', 'requirement must not be empty')
     }
     const capturedRequirement = this.creationGuard.lastUserMessage(exec.agent)
     const originalRequirement = capturedRequirement ?? (this.requireHostCapturedRequirement ? undefined : requirement)
     const normalized = originalRequirement ? normalizeRequirement(originalRequirement) : ''
-    if (!originalRequirement || !normalized || normalized.length > 2_000) {
-      throw new EvolutionError('invalid_input', 'A current Host-captured user requirement of 1 to 2000 characters is required')
+    if (!originalRequirement || !normalized) {
+      throw new EvolutionError('invalid_input', 'A current Host-captured user requirement is required')
     }
     const question = clarificationQuestion?.trim()
     if (question && question.length > 300) {

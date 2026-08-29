@@ -52,7 +52,7 @@ function githubReview(): ReviewRecord {
       commit: COMMIT,
       defaultBranch: 'main',
     },
-    inspectedFiles: [],
+    inspectedFiles: [{ path: 'package.json', sha256: 'e'.repeat(64), bytes: 8 }],
     manifest: {
       kind: 'bundle',
       packageName: 'dsh-one',
@@ -70,7 +70,8 @@ function githubReview(): ReviewRecord {
     missingCapabilities: [],
     findings: [],
     recommendation: 'use',
-    installSpec: `github:acme/one#${COMMIT}`,
+    installSpec: 'file:C:/workspace/review-artifacts/progress/package/dsh-one.tgz',
+    artifact: { sha256: 'f'.repeat(64), bytes: 8, entryCount: 1, ownedRoot: 'C:/workspace/review-artifacts/progress' },
   }
 }
 

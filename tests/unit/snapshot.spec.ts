@@ -89,7 +89,7 @@ describe('immutable local package materialization', () => {
       await writeFile(path.join(source, 'lib', `${String(index).padStart(3, '0')}.js`), 'review me')
     }
     expect((await inspectLocalPackageDirectory(source, config(root))).truncated).toBe(true)
-  })
+  }, 15_000)
 
   it('binds the complete reviewed file set and installs from an owned tarball, never the workspace link', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-snapshot-'))
