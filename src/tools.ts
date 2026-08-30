@@ -93,6 +93,12 @@ function presentCapabilityToolCall(name: string, args: unknown): ToolCallView {
   if (name === 'capability_workflow_recover') {
     return genericPendingCard(args, 'Cleaning up and restarting plugin discovery', '正在清理并重新发现插件', 'other')
   }
+  if (name === 'capability_repair') {
+    return genericPendingCard(args, 'Preparing a full-access repair request', '正在准备完整权限故障修理请求', 'other')
+  }
+  if (name === 'capability_repair_resume') {
+    return genericPendingCard(args, 'Running the confirmed full-access repair', '已确认，正在运行完整权限故障修理', 'execute')
+  }
   if (name === 'plugin_remove') {
     return genericPendingCard(args, 'Removing the selected plugin', '正在移除所选插件', 'delete')
   }
@@ -358,6 +364,45 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
           workflowId: args.workflow_id,
           ...(args.interrupt_id ? { interruptId: args.interrupt_id } : {}),
         }, exec) as WorkflowView) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_repair',
+      description: 'Prepare a completion-first fault-repair session when an ordinary capability workflow, project operation, plugin, DSH Profile, dependency, or Host runtime failure cannot be completed under the current authority. This call never repairs or elevates. It seals the objective and returns a repair_id that requires an explicit fresh user confirmation. The proposed repair Agent will use the official danger-full-access preset, arbitrary shell/file/network operations, and no per-command approval prompts; it is not limited to predefined actions or AutoEvo-owned files.',
+      parameters: {
+        objective: {
+          type: 'string',
+          required: true,
+          description: 'Concrete completion outcome for the repair Agent, including the original task that must become usable.',
+        },
+        failure_context: {
+          type: 'string',
+          description: 'Relevant observed errors, attempted steps, paths, and evidence. Do not include credentials or hidden chain-of-thought.',
+        },
+      },
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_repair', args),
+      async execute(args, exec) {
+        return service.prepareRepair({
+          objective: args.objective,
+          ...(args.failure_context ? { failureContext: args.failure_context } : {}),
+        }, exec) as unknown as JsonValue
+      },
+    }),
+    defineTool({
+      name: 'capability_repair_resume',
+      description: 'Consume one sealed full-access repair request and immediately launch its Host-owned repair Agent. Call only after the user explicitly confirms that exact repair in a fresh top-level turn. Pass only repair_id. Host rejects same-turn calls, replay, cross-session use, restart-stale requests, and already-consumed requests. The repair Agent receives the standard coding toolset plus danger-full-access and works autonomously until it has repaired and verified the objective or reaches a real blocker.',
+      parameters: {
+        repair_id: {
+          type: 'string',
+          required: true,
+          description: 'The Host-minted repair_id returned by capability_repair.',
+        },
+      },
+      output: jsonOutput,
+      presentCall: (args) => presentCapabilityToolCall('capability_repair_resume', args),
+      async execute(args, exec) {
+        return await service.resumeRepair({ repairId: args.repair_id }, exec) as unknown as JsonValue
       },
     }),
     defineTool({

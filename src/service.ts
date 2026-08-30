@@ -75,6 +75,15 @@ import {
 } from './service-managed-work.js'
 import { DshManagedChildHost, type ManagedChildHost } from './managed-child.js'
 import {
+  DshRepairChildHost,
+  FaultRepairMode,
+  type FaultRepairPrepareInput,
+  type FaultRepairResumeInput,
+  type FaultRepairTicketView,
+  type RepairChildHost,
+  type RepairChildResult,
+} from './repair-mode.js'
+import {
   addExplicitCandidate,
   assertRequirement,
   authorizationForResolution,
@@ -279,6 +288,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
   private readonly engine: WorkflowEngine
   private readonly creatorFoundation: CreatorFoundation
   private readonly managedChild: ManagedChildHost
+  private readonly faultRepair: FaultRepairMode
 
   constructor(
     private readonly ctx: Context,
@@ -290,11 +300,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
     _semanticReviewer?: SemanticReviewerHost,
     _semanticVerifier?: SemanticVerifierHost,
     creatorFoundation?: CreatorFoundation,
+    repairChild?: RepairChildHost,
   ) {
     this.launcher = new DshLauncher(runner, config)
     this.sources = new SourceManager(config, runner)
     this.creatorFoundation = creatorFoundation ?? createCreatorFoundation(ctx)
     this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
+    this.faultRepair = new FaultRepairMode(creationGuard, repairChild ?? new DshRepairChildHost(ctx))
     this.installer = new PluginInstaller(
       ctx,
       config,
@@ -346,6 +358,14 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
     return this.withWorkspace(exec, () => this.engine.resume(input, exec))
+  }
+
+  prepareRepair(input: FaultRepairPrepareInput, exec: ToolRunContext): FaultRepairTicketView {
+    return this.faultRepair.prepare(input, exec)
+  }
+
+  resumeRepair(input: FaultRepairResumeInput, exec: ToolRunContext): Promise<RepairChildResult & { status: 'completed' }> {
+    return this.faultRepair.resume(input, exec)
   }
 
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView> {

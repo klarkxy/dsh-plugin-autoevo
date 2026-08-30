@@ -14,7 +14,7 @@
 ## 2. 安装、升级与首次加载
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.1.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
 ```
 
 通过 npx 运行 DSH，无需全局安装；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。安装或升级后重启该 profile，让新 bundle 生效。
@@ -120,6 +120,14 @@ AutoEvo 在目标 profile 的真实安装结果上分别记录 installed、loade
 > 检查这次失败的原因，先不要重试、安装或清理。
 
 诊断是只读、有预算且脱敏的：不会自动重试，也不会把完整 stderr、凭据、私密路径或会话正文交给模型。
+
+### 完整权限故障修理模式
+
+当普通工作流、受管源码施工、插件安装、DSH Profile、依赖环境或宿主运行时故障使任务无法继续时，Agent 可以提出一次“完整权限故障修理”。提出请求本身不会修改系统，也不会提升权限；界面会先说明修理目标以及将授予的权限，等待用户在新的回复中明确同意。
+
+确认后，Host 会启动一个临时的标准编码 Agent，并应用 DSH 官方 `danger-full-access` 权限预设；在尚未提供预设服务的 DSH 0.1.1 上，Host 会写入完全等价的 `sandbox=danger-full-access` 与 `approval=never`。这个 Agent 可以使用任意必要的本机命令、文件修改、网络访问、依赖安装和进程操作，也可以维护项目、插件、DSH Profile 与宿主运行时；它不受 AutoEvo 受管源码目录或预定义修复动作限制，并且不会再逐条弹出命令审批。修理完成、失败或取消后，这个临时 Agent 会被销毁，原会话不会永久变成全权限。
+
+这个确认只覆盖完成所述本机修理目标所需的操作。发布、购买、对外发送消息、轮换凭据或与目标无关的破坏性操作，仍需要在原始任务中被明确要求。若必须重启当前 DSH Host，修理 Agent 会先完成可验证的准备工作，并明确报告剩余的重启边界。
 
 故障恢复绑定当前 sealed interrupt。根据 Agent 提供的合法选项，用新消息确认对账、清理或重试；不要手工拼接旧 workflow、review 或 installation ID。
 

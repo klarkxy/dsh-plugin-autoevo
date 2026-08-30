@@ -14,7 +14,7 @@ This guide is for users who discover, install, improve, or create capabilities i
 ## 2. Install, upgrade, and first load
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.1.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
 ```
 
 Run DSH through npx; no global install needed. Keep the `@deepseek-ai/` prefix — the unscoped `dsh` package on npm is an unrelated project. Restart the profile after installing or upgrading so the new bundle takes effect.
@@ -120,6 +120,14 @@ To only learn what failed, say it directly:
 > Inspect why this failed; do not retry, install, or clean up yet.
 
 Diagnosis is read-only, bounded, and redacted: it does not retry, and it does not hand full stderr, credentials, private paths, or session content to the model.
+
+### Full-access fault-repair mode
+
+When an ordinary workflow, managed-source implementation, plugin install, DSH Profile, dependency environment, or Host runtime failure prevents task completion, the Agent can propose a full-access fault repair. Preparing the request neither changes the system nor elevates permissions. The UI first presents the repair objective and authority change, then waits for the user to explicitly confirm in a fresh reply.
+
+After confirmation, the Host launches a temporary standard coding Agent with DSH's official `danger-full-access` permission preset. On DSH 0.1.1, which predates the preset service, the Host writes the exact equivalent `sandbox=danger-full-access` and `approval=never` pair. It may use any necessary local commands, file changes, network access, dependency installation, and process operations, including maintenance of projects, plugins, DSH Profiles, and the Host runtime. It is not restricted to AutoEvo's managed source root or predefined repair actions, and it does not prompt for each command. The temporary Agent is disposed after completion, failure, or cancellation, so the parent session does not remain permanently elevated.
+
+The confirmation covers operations needed to complete the stated local repair objective. Publication, purchases, external messages, credential rotation, and unrelated destructive changes still need to be explicitly part of the original task. If the current DSH Host itself must restart, the repair Agent completes and verifies all preparatory work first and reports the remaining restart boundary.
 
 Failure recovery is bound to the current sealed interrupt. Use a fresh message to confirm reconciliation, cleanup, or retry among the legal options the Agent presents; do not manually stitch old workflow, review, or installation IDs together.
 

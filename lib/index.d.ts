@@ -53,7 +53,7 @@ declare const Config$1: Schema<Config$1>;
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
 declare const POLICY_VERSION = "13";
-declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
+declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_repair", "capability_repair_resume", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'enable_builtin' | 'use_review' | 'modify_review' | 'create_authorized';
@@ -1351,6 +1351,8 @@ interface WorkflowExec {
 }
 //#endregion
 //#region src/creation-guard.d.ts
+/** Minimum Host-owned boundary needed to require a fresh, session-bound user turn. */
+type DecisionTurnBoundary = Pick<InterruptPayload, 'ownerSessionId' | 'bootId' | 'validAfterTurnId'>;
 interface AgentGateState {
   generation: number;
   activeResolutionId?: string;
@@ -1405,17 +1407,17 @@ declare class CreationGuard {
    * True when resume must park: no claimed turn, or the claimed turn is the
    * interrupt-issuing turn. Does not consume the turn.
    */
-  isAwaitingFreshUserTurn(agent: Agent | undefined, interrupt: InterruptPayload): boolean;
+  isAwaitingFreshUserTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): boolean;
   /**
    * Validate and return the latest host-owned user turn without consuming it.
    * Callers use this to finish all local validation before claiming authority.
    */
-  previewDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn;
+  previewDecisionTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): ClaimedHostTurn;
   /**
    * Consume the latest host-owned user turn after all caller-side validation.
    * Rejects missing turns, replay, and stale turns before mutating the ledger.
    */
-  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn;
+  consumeDecisionTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): ClaimedHostTurn;
   /**
    * Host-owned grant. Never accepted from ResumeInput.
    * `lease` is omitted when the commitment endpoint is `none`.
@@ -2069,6 +2071,60 @@ interface ManagedChildHost {
   run(request: ManagedChildRequest): Promise<ManagedChildResult>;
 }
 //#endregion
+//#region src/repair-mode.d.ts
+declare const REPAIR_PRESET_ID = "standard";
+declare const FULL_ACCESS_PRESET_ID = "danger-full-access";
+interface FaultRepairPrepareInput {
+  objective: string;
+  failureContext?: string;
+}
+interface FaultRepairResumeInput {
+  repairId: string;
+}
+interface FaultRepairTicketView {
+  repairId: string;
+  objective: string;
+  status: 'awaiting_confirmation';
+  permissionPreset: typeof FULL_ACCESS_PRESET_ID;
+  approvalPolicy: 'never';
+  scope: 'local_machine';
+  confirmationRequired: true;
+  message: string;
+}
+interface RepairChildRequest {
+  parent: Agent;
+  cwd: string;
+  objective: string;
+  failureContext?: string;
+  signal?: AbortSignal;
+}
+interface RepairChildResult {
+  sessionId: string;
+  taskResult: string;
+  permissionPreset: typeof FULL_ACCESS_PRESET_ID;
+  permissionSource: 'permission_preset' | 'compatibility_knobs';
+  agentPreset: typeof REPAIR_PRESET_ID;
+}
+interface RepairChildHost {
+  run(request: RepairChildRequest): Promise<RepairChildResult>;
+}
+/** Host-owned full-access repair Agent lifecycle. */
+declare class DshRepairChildHost implements RepairChildHost {
+  private readonly ctx;
+  constructor(ctx: Context);
+  run(request: RepairChildRequest): Promise<RepairChildResult>;
+}
+declare class FaultRepairMode {
+  private readonly creationGuard;
+  private readonly child;
+  private readonly tickets;
+  constructor(creationGuard: CreationGuard, child: RepairChildHost);
+  prepare(input: FaultRepairPrepareInput, exec: ToolRunContext): FaultRepairTicketView;
+  resume(input: FaultRepairResumeInput, exec: ToolRunContext): Promise<RepairChildResult & {
+    status: 'completed';
+  }>;
+}
+//#endregion
 //#region src/source-manager.d.ts
 interface SourceReceipt {
   sourceId: string;
@@ -2309,12 +2365,17 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly engine;
   private readonly creatorFoundation;
   private readonly managedChild;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation);
+  private readonly faultRepair;
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation, repairChild?: RepairChildHost);
   private managedWorkDeps;
   private reviewArtifactRoot;
   private withWorkspace;
   start(requirement: string, exec: ToolRunContext, intent?: RequestIntent, clarificationQuestion?: string, discoveryQueries?: string[]): Promise<WorkflowView>;
   resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView>;
+  prepareRepair(input: FaultRepairPrepareInput, exec: ToolRunContext): FaultRepairTicketView;
+  resumeRepair(input: FaultRepairResumeInput, exec: ToolRunContext): Promise<RepairChildResult & {
+    status: 'completed';
+  }>;
   refine(input: DiscoveryRefineInput, exec: ToolRunContext): Promise<WorkflowView>;
   present(input: DiscoveryPresentInput, exec: ToolRunContext): Promise<WorkflowView>;
   diagnose(input: WorkflowDiagnoseInput, exec: ToolRunContext): Promise<WorkflowView>;
@@ -2421,5 +2482,5 @@ declare const _testing: {
 };
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, type ExecutionLease, FORGED_RESUME_HOST_KEYS, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, _testing, apply, classifyRuntimeSurface, hostLayerSuccess, inject, inspectLoadedToolSafety, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
+export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, type ExecutionLease, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, _testing, apply, classifyRuntimeSurface, hostLayerSuccess, inject, inspectLoadedToolSafety, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
 //# sourceMappingURL=index.d.ts.map

@@ -5,6 +5,8 @@ export const TOOL_NAMES = [
   'capability_workflow',
   'capability_workflow_resume',
   'capability_workflow_recover',
+  'capability_repair',
+  'capability_repair_resume',
   'capability_versions',
   'capability_rollback',
   'capability_adopt',

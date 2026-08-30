@@ -28,7 +28,7 @@ Each topic has one canonical home. Interactive flow diagrams (standalone HTML wi
 ## Install
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.1.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
 ```
 
 - Replace `--profile web` with the profile you actually use; keep the `@deepseek-ai/` prefix (the unscoped `dsh` package on npm is an unrelated project).
@@ -62,9 +62,11 @@ The full flow is in [User Guide §3](docs/user-guide.en.md#3-your-first-complete
 
 Version-chain tools: `capability_versions` lists versions, `capability_rollback` restores a historical version, `capability_adopt` registers manually installed plugins, and `capability_updates` checks upstream releases read-only. See [User Guide §4.6](docs/user-guide.en.md#46-versions-adoption-and-upstream-updates).
 
+When an ordinary workflow, project permission, plugin/Profile, or DSH Host fault still prevents completion, AutoEvo can propose a full-access fault repair. After explicit confirmation in a fresh user message, the Host launches a temporary `standard` Agent with the official `danger-full-access` preset and no per-command prompts. It may work across projects, plugins, Profiles, and the Host environment without a predefined repair-action list. See the [User Guide](docs/user-guide.en.md#full-access-fault-repair-mode).
+
 ## Safety boundary
 
-AutoEvo owns workflow, warnings, and evidence records; DSH Core enforces permissions, sandboxes, and approvals, and AutoEvo cannot bypass that. Discovery, review, and diagnosis are read-only by default; installed third-party code ultimately runs with the current user's authority. See the [Security Model](docs/security.md) (Chinese) for the full trust boundary.
+AutoEvo owns workflow, warnings, and evidence records; DSH Core enforces permissions, sandboxes, and approvals. The default flow remains read-only or managed. Full-access fault repair also uses DSH Core's official permission preset and requires fresh user confirmation. Installed or repaired code ultimately runs with the current user's authority. See the [Security Model](docs/security.md) (Chinese) for the full trust boundary.
 
 ## Develop
 

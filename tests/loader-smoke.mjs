@@ -33,6 +33,8 @@ try {
 
   const expected = [
     'capability_adopt',
+    'capability_repair',
+    'capability_repair_resume',
     'capability_rollback',
     'capability_updates',
     'capability_versions',

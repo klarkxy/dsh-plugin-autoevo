@@ -23,6 +23,12 @@ import {
 import { hashObject } from './state/hashes.js'
 import type { InterruptPayload } from './workflow/contracts.js'
 
+/** Minimum Host-owned boundary needed to require a fresh, session-bound user turn. */
+export type DecisionTurnBoundary = Pick<
+  InterruptPayload,
+  'ownerSessionId' | 'bootId' | 'validAfterTurnId'
+>
+
 interface AgentGateState {
   generation: number
   activeResolutionId?: string
@@ -262,7 +268,7 @@ export class CreationGuard {
    * True when resume must park: no claimed turn, or the claimed turn is the
    * interrupt-issuing turn. Does not consume the turn.
    */
-  isAwaitingFreshUserTurn(agent: Agent | undefined, interrupt: InterruptPayload): boolean {
+  isAwaitingFreshUserTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): boolean {
     if (!agent) return true
     const turnId = this.states.get(agent)?.currentTurnId
     return !turnId || turnId === interrupt.validAfterTurnId
@@ -272,7 +278,7 @@ export class CreationGuard {
    * Validate and return the latest host-owned user turn without consuming it.
    * Callers use this to finish all local validation before claiming authority.
    */
-  previewDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
+  previewDecisionTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): ClaimedHostTurn {
     if (!agent) {
       throw new EvolutionError('invalid_input', 'A live Agent session is required to resume a workflow decision')
     }
@@ -315,7 +321,7 @@ export class CreationGuard {
    * Consume the latest host-owned user turn after all caller-side validation.
    * Rejects missing turns, replay, and stale turns before mutating the ledger.
    */
-  consumeDecisionTurn(agent: Agent | undefined, interrupt: InterruptPayload): ClaimedHostTurn {
+  consumeDecisionTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): ClaimedHostTurn {
     const turn = this.previewDecisionTurn(agent, interrupt)
     const state = agent ? this.states.get(agent) : undefined
     if (!state) throw new EvolutionError('invalid_input', 'No host-claimed user turn is available for this decision')

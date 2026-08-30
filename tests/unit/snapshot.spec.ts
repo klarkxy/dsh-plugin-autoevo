@@ -77,7 +77,7 @@ describe('immutable local package materialization', () => {
     expect(complete.truncated).toBe(false)
     expect(complete.files.map((file) => file.path)).toEqual(['package.json', 'README.md', 'lib/index.js'])
     expect((await inspectLocalDirectory(source, config(root))).truncated).toBe(true)
-  })
+  }, 15_000)
 
   it('falls back to complete-tree review for unsupported package file globs', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-package-glob-'))

@@ -277,6 +277,20 @@ describe('tool pending presentation', () => {
       workflow_id: WORKFLOW_ID,
       interrupt_id: INTERRUPT_ID,
     }).title).toMatch(/cleaning up and restarting/i)
+    expect(presented('capability_repair', {
+      objective: 'repair the Host runtime',
+    })).toMatchObject({
+      card: 'generic',
+      kind: 'other',
+      title: 'Preparing a full-access repair request',
+    })
+    expect(presented('capability_repair_resume', {
+      repair_id: 'repair_hidden',
+    })).toMatchObject({
+      card: 'generic',
+      kind: 'execute',
+      title: 'Running the confirmed full-access repair',
+    })
     expect(presented('plugin_remove', { installation_id: INSTALLATION_ID })).toMatchObject({
       card: 'generic',
       kind: 'delete',
@@ -304,6 +318,20 @@ describe('tool pending presentation', () => {
       properties: Record<string, unknown>
     }
     expect(parameters.properties).toHaveProperty('queries')
+  })
+
+  it('exposes a two-call full-access repair gate without command parameters', () => {
+    const prepare = tool('capability_repair').parameters as unknown as {
+      properties: Record<string, unknown>
+    }
+    const resume = tool('capability_repair_resume').parameters as unknown as {
+      properties: Record<string, unknown>
+    }
+    expect(prepare.properties).toHaveProperty('objective')
+    expect(prepare.properties).toHaveProperty('failure_context')
+    expect(prepare.properties).not.toHaveProperty('command')
+    expect(resume.properties).toEqual(expect.objectContaining({ repair_id: expect.any(Object) }))
+    expect(Object.keys(resume.properties)).toEqual(['repair_id'])
   })
 
   it('forwards model-planned baseline queries through the initial workflow tool', async () => {

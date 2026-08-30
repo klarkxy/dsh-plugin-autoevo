@@ -32,6 +32,15 @@ export { CapabilityEvolutionService } from './service.js'
 export { StateStore } from './state/store.js'
 export { reviewIdentity } from './lifecycle/decide.js'
 export { probeWorkspaceWriteSandbox } from './sandbox-probe.js'
+export { DshRepairChildHost, FaultRepairMode } from './repair-mode.js'
+export type {
+  FaultRepairPrepareInput,
+  FaultRepairResumeInput,
+  FaultRepairTicketView,
+  RepairChildHost,
+  RepairChildRequest,
+  RepairChildResult,
+} from './repair-mode.js'
 export {
   BRIDGE_EXECUTION_TOOLS,
   FORGED_RESUME_HOST_KEYS,

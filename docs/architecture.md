@@ -79,6 +79,8 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 
 父会话保持决策与治理边界，不在托管源内直接施工。获批的创建/修改由 Host 创建 cwd 精确绑定到单个托管源的短生命周期子会话；DSH Core 以该不可变 cwd 作为 `workspace-write` 根，AutoEvo 再限制发布、插件变更、Cordis 运行时变更、嵌套委派，以及 `pnpm add/update/remove/dlx` 与 `npx`。托管根内落实已声明依赖的 `pnpm install --ignore-scripts`（无包参数）是允许的。提示词不是授权边界。
 
+故障修理使用另一条显式边界。`capability_repair` 只在内存中密封修理目标、故障上下文、父会话、Host boot 和当前 turn；`capability_repair_resume` 必须由后续新的顶层用户消息触发。确认后，Host 创建 `standard` 子 Agent：新版 DSH 通过 `permissionPresets` 应用 `danger-full-access`，DSH 0.1.1 则写入等价的 sandbox 与 approval 事件；两者都是文件不受限、approval 为 `never`，且不安装受管源码 `ExecutionGuard`。因此修理操作不经过命令类型表，可以跨项目、插件、Profile 与宿主环境使用标准 shell、文件和网络工具。子 Agent 完成后把最终证据回传并销毁；若当前 Host 本身必须重启，则只报告已完成的准备与剩余重启边界。
+
 只读解析与审查依赖 `tools`、`skills`、`subprocess` 与 `systemPrompt`；安装和移除另需 live approval service 和当前 Agent turn。
 
 ### 远端发现

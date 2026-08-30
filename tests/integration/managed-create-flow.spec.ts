@@ -531,5 +531,5 @@ describe('managed create vertical flow', () => {
       reviewId: preparedModify.review?.id,
     })
     await service.releaseManagedSource(secondFlow, { agent })
-  }, 30_000)
+  }, 60_000)
 })

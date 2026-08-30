@@ -2,6 +2,13 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
+## 1.2.0
+
+- Add a completion-first fault-repair workflow that seals the repair objective, requires explicit confirmation in a fresh top-level user turn, and then launches a temporary Host-owned standard coding Agent with unrestricted local repair authority.
+- Apply DSH's official `danger-full-access` permission preset with no per-command prompts, while preserving compatibility with DSH 0.1.1 by writing the equivalent sandbox and approval policy events when the preset service is unavailable.
+- Let the confirmed repair Agent use arbitrary shell, file, process, dependency, network, project, plugin, Profile, and Host-runtime operations instead of a predefined repair-action catalogue, then return its verification evidence and dispose the elevated child.
+- Keep same-turn, replayed, cross-session, cross-boot, and already-consumed repair requests non-executable, without permanently elevating the parent session.
+
 ## 1.1.1
 
 - Cache each exact GitHub commit under the current workspace's `.autoevo/cache/git` directory, then reuse the local Git objects for bounded preview and formal package freezing instead of repeatedly reading repository trees and blobs through GitHub APIs.

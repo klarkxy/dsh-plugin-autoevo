@@ -6,6 +6,8 @@
 
 可信输入只有四类：插件自身固定策略、DSH services、用户在当前任务中的明确批准，以及插件自己写入并重新读取的 receipt。AutoEvo 产出工作流证据与风险警告；它不拥有也不替代 DSH Core 的权限、sandbox 或 approval 强制执行。
 
+完整权限故障修理是明确的例外工作流，但不是绕过 DSH Core：首次调用只密封目标并返回确认请求；只有用户在新的顶层消息中确认后，Host 才创建临时标准 Agent。新版 Host 通过 `permissionPresets.set(..., 'danger-full-access')` 同时切换文件策略和审批策略；DSH 0.1.1 写入等价的 `sandbox/mode=danger-full-access` 与 `approval/policy=never` 事件。该 Agent 不挂载 AutoEvo 的受管源码 `ExecutionGuard`，因此可用标准工具任意修理本机项目、插件、Profile 与宿主运行时。请求绑定发起会话、Host boot 与确认后的新用户 turn，同回合、重放、跨会话和重启后的请求都会拒绝。子 Agent 在完成、失败或取消后销毁，父会话不会被永久提权。
+
 GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 一律按不可信数据处理。系统提示只含本插件固定策略。审查输出是来源路径、派生风险代码、短事实说明、blob/content hash、fit 和兼容性结论。
 
 远端发现是 Host 自己的 scoped GitHub 搜索，不是第三方市场插件：

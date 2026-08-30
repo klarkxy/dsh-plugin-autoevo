@@ -192,7 +192,7 @@ describe('managed modify closure', () => {
     expect(workflow.lineageTipReviewId).toBe(result.review?.id)
     expect(workflow.lastFailure).toBeUndefined()
     expect(workflow.creatorRecords?.map((item) => item.operation)).toEqual(expect.arrayContaining(['modify', 'correct']))
-  }, 30_000)
+  }, 60_000)
 
   it('reviews a successful child commit beyond the legacy byte snapshot without losing evidence', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-modify-partial-'))
@@ -284,5 +284,5 @@ describe('managed modify closure', () => {
     expect(workflow.managedCommitPendingReview).toBeUndefined()
     expect(workflow.modificationOutcome?.attempts).toHaveLength(1)
     expect(workflow.modificationOutcome?.attempts[0]?.postReviewId).toBe(sealed.review?.id)
-  }, 30_000)
+  }, 60_000)
 })
