@@ -5,6 +5,7 @@ import type {
   ReviewRecord,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { deriveInstallationLineage, installationIdentity } from '../installation-lineage.js'
 import {
   dependencySpecDigest,
   evolutionTargetFromExactGithub,
@@ -57,31 +58,78 @@ function newer(left: string, right: string): boolean {
   return left.localeCompare(right) > 0
 }
 
+function matchesInstallationTarget(
+  record: InstallationRecord,
+  packageName: string,
+  profile?: string,
+  dshHome?: string,
+): boolean {
+  const targetIdentity = installationIdentity({
+    dshHome: dshHome ?? record.dshHome,
+    targetProfile: profile ?? record.targetProfile,
+    packageName,
+  })
+  return installationIdentity(record) === targetIdentity
+}
+
+export function walkReviewLineage(
+  base: ReviewRecord,
+  reviews: readonly ReviewRecord[],
+  mode: 'strict' | 'best-effort' = 'best-effort',
+): ReviewRecord | undefined {
+  const byId = new Map(reviews.map((item) => [item.id, item] as const))
+  if (!byId.has(base.id)) byId.set(base.id, base)
+  const seen = new Set<string>()
+  const resolutionId = base.resolutionId
+  const packageName = base.manifest.packageName
+  const sourcePath = base.sourceSnapshot.kind === 'local' ? base.sourceSnapshot.path : undefined
+  const baseCommit = base.sourceSnapshot.kind === 'local' ? base.sourceSnapshot.baseCommit : undefined
+  let current = base
+  while (current.sourceSnapshot.kind === 'local') {
+    if (seen.has(current.id)) {
+      if (mode === 'strict') throw new EvolutionError('invalid_input', 'baseReviewId lineage is cyclic')
+      return undefined
+    }
+    seen.add(current.id)
+    if (mode === 'best-effort'
+      && (current.resolutionId !== resolutionId
+        || current.sourceSnapshot.path !== sourcePath
+        || current.sourceSnapshot.baseCommit !== baseCommit
+        || current.manifest.packageName !== packageName)) {
+      return undefined
+    }
+    const parent = byId.get(current.sourceSnapshot.baseReviewId)
+    if (!parent) {
+      if (mode === 'strict') {
+        throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
+      }
+      return undefined
+    }
+    current = parent
+  }
+  if (current.sourceSnapshot.kind !== 'github') {
+    if (mode === 'strict') {
+      throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
+    }
+    return undefined
+  }
+  if (mode === 'best-effort'
+    && (current.resolutionId !== resolutionId
+      || (current.manifest.packageName && packageName && current.manifest.packageName !== packageName))) {
+    return undefined
+  }
+  return current
+}
+
+export function lineageRootReview(base: ReviewRecord, reviews: readonly ReviewRecord[]): ReviewRecord {
+  return walkReviewLineage(base, reviews, 'strict')!
+}
+
 export function managedSnapshotRootReview(
   review: ReviewRecord,
   byId: ReadonlyMap<string, ReviewRecord>,
 ): ReviewRecord | undefined {
-  const seen = new Set<string>()
-  const resolutionId = review.resolutionId
-  const packageName = review.manifest.packageName
-  const sourcePath = review.sourceSnapshot.kind === 'local' ? review.sourceSnapshot.path : undefined
-  const baseCommit = review.sourceSnapshot.kind === 'local' ? review.sourceSnapshot.baseCommit : undefined
-  let current = review
-  while (current.sourceSnapshot.kind === 'local') {
-    if (seen.has(current.id)) return undefined
-    seen.add(current.id)
-    if (current.resolutionId !== resolutionId
-      || current.sourceSnapshot.path !== sourcePath
-      || current.sourceSnapshot.baseCommit !== baseCommit
-      || current.manifest.packageName !== packageName) return undefined
-    const parent = byId.get(current.sourceSnapshot.baseReviewId)
-    if (!parent) return undefined
-    current = parent
-  }
-  if (current.sourceSnapshot.kind !== 'github'
-    || current.resolutionId !== resolutionId
-    || (current.manifest.packageName && packageName && current.manifest.packageName !== packageName)) return undefined
-  return current
+  return walkReviewLineage(review, [...byId.values()], 'best-effort')
 }
 
 function sourceIdFromLocalPath(candidate: string): string | undefined {
@@ -98,6 +146,7 @@ function managedSnapshotCandidate(input: {
   reviews: readonly ReviewRecord[]
   installations: readonly InstallationRecord[]
   profile: string
+  dshHome?: string
   newestExactInstallation?: InstallationRecord
   managedReviewIds: ReadonlySet<string>
 }): LocalCapabilityCandidate | undefined {
@@ -129,7 +178,12 @@ function managedSnapshotCandidate(input: {
 
     const relatedInstall = [...input.installations]
       .filter((item) => item.reviewId === review.id || item.installSpec === review.installSpec)
-      .filter((item) => item.targetProfile === input.profile)
+      .filter((item) => matchesInstallationTarget(
+        item,
+        packageName,
+        input.profile,
+        input.dshHome,
+      ))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
     const localEventAt = relatedInstall && newer(relatedInstall.createdAt, review.createdAt)
       ? relatedInstall.createdAt
@@ -161,6 +215,7 @@ export function lineageCandidateFromRecords(input: {
   reviews: readonly ReviewRecord[]
   installations: readonly InstallationRecord[]
   profile?: string
+  dshHome?: string
   /** Review ids already validated against live Host-managed source receipts. */
   managedReviewIds?: readonly string[]
 }): LocalCapabilityCandidate | undefined {
@@ -187,11 +242,21 @@ export function lineageCandidateFromRecords(input: {
     const parsed = parseExactGithubDependency(installation.installSpec)
     if (!parsed) continue
     const packageName = installation.packageName ?? parsed.repository.split('/')[1] ?? parsed.repository
-    if (profile && installation.targetProfile !== profile) continue
+    if ((profile || input.dshHome)
+      && !matchesInstallationTarget(installation, packageName, profile, input.dshHome)) continue
     if (!knownSourceMatchesRequest(input.requirement, input.intent, parsed.repository, packageName)) continue
     bestInstall = installation
     break
   }
+  const installationLineage = deriveInstallationLineage(input.installations)
+  const bestEligibleLeaves = bestInstall
+    ? installationLineage.eligibleLeavesFor(bestInstall)
+    : []
+  const bestInstallIsEligible = Boolean(bestInstall
+    && bestEligibleLeaves.some((item) => item.id === bestInstall!.id))
+  const ambiguousBestInstall = bestInstallIsEligible && bestEligibleLeaves.length > 1
+  const liveBestInstall = bestInstallIsEligible && bestEligibleLeaves.length === 1
+  if (ambiguousBestInstall) return undefined
 
   const managedSnapshot = managedSnapshotCandidate({
     requirement: input.requirement,
@@ -199,6 +264,7 @@ export function lineageCandidateFromRecords(input: {
     reviews: input.reviews,
     installations: input.installations,
     profile: profile ?? 'web',
+    ...(input.dshHome ? { dshHome: input.dshHome } : {}),
     managedReviewIds: new Set(input.managedReviewIds ?? []),
     ...(bestInstall ? { newestExactInstallation: bestInstall } : {}),
   })
@@ -217,8 +283,7 @@ export function lineageCandidateFromRecords(input: {
     const parsed = parseExactGithubDependency(bestInstall.installSpec)
     if (!parsed) throw new EvolutionError('invalid_input', 'Known-source installation lost its exact GitHub specification')
     const failed = bestInstall.installOutcome === 'failed_absent'
-    const live = bestInstall.installed === true && !bestInstall.removed && !bestInstall.supersededByInstallationId
-    if (live) return undefined
+    if (liveBestInstall) return undefined
     const packageName = bestInstall.packageName ?? parsed.repository.split('/')[1] ?? parsed.repository
     const target = evolutionTargetFromExactGithub({
       kind: failed ? 'failed_install' : 'reviewed_snapshot',

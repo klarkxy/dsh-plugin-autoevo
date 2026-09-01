@@ -124,6 +124,7 @@ export async function discoverRemoteCandidates(options: {
   let failed = 0
   const queries: string[] = []
   for (const phrase of phrases) {
+    options.signal?.throwIfAborted()
     try {
       const batch = await searchGithubRepositories({
         runner: options.runner,
@@ -133,6 +134,7 @@ export async function discoverRemoteCandidates(options: {
         limit: poolLimit,
         ...(options.signal ? { signal: options.signal } : {}),
       })
+      options.signal?.throwIfAborted()
       succeeded += 1
       queries.push(phrase)
       reasons.push(`GitHub topic search ${JSON.stringify(phrase)} returned ${batch.length} summaries.`)
@@ -149,6 +151,7 @@ export async function discoverRemoteCandidates(options: {
         })
       }
     } catch (error) {
+      options.signal?.throwIfAborted()
       failed += 1
       queries.push(phrase)
       reasons.push(`GitHub topic search ${JSON.stringify(phrase)} was unavailable: ${boundedText(errorMessage(error), 300)}`)

@@ -13,7 +13,6 @@ export {
   needsSemanticReviewer,
   previewGithubPlugin,
   previewGithubPlugins,
-  reviewGithubPlugin,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,
   type GithubPluginPreview,

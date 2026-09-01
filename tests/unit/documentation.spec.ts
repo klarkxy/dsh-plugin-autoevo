@@ -66,16 +66,6 @@ describe('documentation set', () => {
     }
   })
 
-  it('documents the four distinct completion signals', () => {
-    for (const relativePath of ['docs/user-guide.md', 'docs/user-guide.en.md']) {
-      const guide = read(relativePath)
-      expect(guide).toContain('verified')
-      expect(guide).toContain('activated')
-      expect(guide).toContain('awaiting_user_test')
-      expect(guide).toContain('restartRequired')
-    }
-  })
-
   it('does not install @deepseek-ai/dsh at the repo root', () => {
     const pkg = JSON.parse(read('package.json')) as {
       dependencies?: Record<string, string>
@@ -88,17 +78,84 @@ describe('documentation set', () => {
     }
   })
 
-  it('documents the Host-owned managed-child construction boundary', () => {
-    const governedDocs = [
-      ...documentationFiles,
-      'skills/autoevo-plugin-creator/SKILL.md',
-      'skills/autoevo-plugin-creator/references/autoevo-state.md',
-      'skills/autoevo-plugin-creator/references/eval-traces.md',
-    ].map(read).join('\n')
+  it('documents the Host-owned managed-child construction boundary in the creator skill', () => {
+    const skill = read('skills/autoevo-plugin-creator/SKILL.md')
+    expect(skill).not.toMatch(/resume with the local checkout path|finish_managed_work/u)
+    expect(skill).toContain('short-lived, cwd-bound managed child')
+    expect(skill).toContain('The parent Capability Evolution session remains read-only')
+    expect(skill).toContain('Do not pass an arbitrary checkout path or edit from the parent session')
+  })
 
-    expect(governedDocs).not.toMatch(/resume with the local checkout path|finish_managed_work/u)
-    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('short-lived, cwd-bound managed child')
-    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('The parent Capability Evolution session remains read-only')
-    expect(read('skills/autoevo-plugin-creator/SKILL.md')).toContain('Do not pass an arbitrary checkout path or edit from the parent session')
+  it('keeps the cheap test gate free of pack, integration, and DSH harness work', () => {
+    const packSpawningSpecs = [
+      'tests/unit/package-artifact.spec.ts',
+      'tests/unit/confirmation-gates.spec.ts',
+      'tests/unit/semantic-review-attach.spec.ts',
+    ] as const
+    const scripts = (JSON.parse(read('package.json')) as { scripts: Record<string, string> }).scripts
+    const invoked = (name: string, seen = new Set<string>()): Set<string> => {
+      const body = scripts[name]
+      if (!body || seen.has(name)) return seen
+      seen.add(name)
+      for (const match of body.matchAll(/\bpnpm\s+([a-z0-9:_-]+)/giu)) invoked(match[1]!, seen)
+      return seen
+    }
+    const forbiddenFromFast = [
+      'test:integration',
+      'test:acceptance',
+      'test:loader',
+      'test:packaged',
+      'test:e2e',
+      'test:e2e:offline',
+      'test:e2e:live',
+      'test:e2e:local',
+      'test:e2e:adversarial',
+      'test:e2e:marketplace',
+    ]
+
+    expect(scripts.test).toBe('vitest run')
+    expect(scripts['test:integration']).toContain('vitest.integration.config.ts')
+    expect(scripts['check:fast']).toBe('pnpm lint && pnpm typecheck && pnpm test && pnpm build')
+    expect(scripts.check).toBe('pnpm check:fast')
+
+    for (const name of ['test', 'check:fast', 'check'] as const) {
+      const names = invoked(name)
+      for (const forbidden of forbiddenFromFast) {
+        expect(names.has(forbidden), `${name} invokes ${forbidden}`).toBe(false)
+      }
+    }
+
+    const release = invoked('check:release')
+    expect(release.has('test')).toBe(true)
+    expect(release.has('test:integration')).toBe(true)
+    expect(release.has('test:acceptance')).toBe(true)
+    expect(release.has('test:loader')).toBe(true)
+    expect(release.has('test:packaged')).toBe(true)
+    expect(release.has('test:e2e:offline')).toBe(true)
+    expect(release.has('test:e2e:live')).toBe(true)
+    expect(release.has('pack:dry-run')).toBe(true)
+
+    const vitest = read('vitest.config.ts')
+    const integration = read('vitest.integration.config.ts')
+    expect(vitest).toContain("include: ['tests/unit/**/*.spec.ts']")
+    expect(vitest).not.toContain("include: ['tests/**/*.spec.ts']")
+    expect(integration).toContain('tests/integration/**/*.spec.ts')
+    for (const spec of packSpawningSpecs) {
+      expect(existsSync(path.join(projectRoot, spec)), spec).toBe(true)
+      expect(vitest).toContain(spec)
+      expect(integration).toContain(spec)
+    }
+
+    const ci = read('.github/workflows/ci.yml')
+    expect(ci).not.toMatch(/test:acceptance|test:e2e|DSH_PACKAGE_ROOT|@deepseek-ai\/dsh/u)
+
+    for (const relativePath of ['docs/developer-guide.md', 'docs/developer-guide.en.md'] as const) {
+      const guide = read(relativePath)
+      expect(guide).toContain('pnpm check:fast')
+      expect(guide).toContain('pnpm check:release')
+      expect(guide).toContain('pnpm test:integration')
+      expect(guide).not.toMatch(/日常完整合入门|Complete daily integration gate/u)
+      expect(guide).not.toMatch(/pnpm check\n```/u)
+    }
   })
 })

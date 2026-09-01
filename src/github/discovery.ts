@@ -1,7 +1,7 @@
 import type { RuntimeConfig } from '../config.js'
 import type { RemotePluginCandidate } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
-import type { CommandRunner } from '../process/runner.js'
+import { commandResultFailure, type CommandRunner } from '../process/runner.js'
 import { sha256 } from '../state/hashes.js'
 
 export const DSH_PLUGIN_TOPIC = 'dsh-plugin'
@@ -21,7 +21,7 @@ interface GithubSearchItem {
 }
 
 interface GithubSearchResponse {
-  items?: unknown
+  items: unknown[]
 }
 
 const REPOSITORY = /^(?<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}))\/(?<name>[A-Za-z0-9_.-]+)$/
@@ -48,11 +48,7 @@ function stripAnsi(text: string): string {
 
 function asSearchResponse(stdout: string): GithubSearchResponse {
   const cleaned = stripAnsi(stdout).trim()
-  try {
-    const value: unknown = JSON.parse(cleaned)
-    if (!value || typeof value !== 'object') throw new Error('not an object')
-    return value as GithubSearchResponse
-  } catch (cause) {
+  const malformed = (cause: unknown, parseCategory: 'invalid_json' | 'invalid_schema'): never => {
     const stdoutBytes = Buffer.byteLength(cleaned)
     const stdoutSha256 = sha256(cleaned)
     throw new EvolutionError(
@@ -60,12 +56,22 @@ function asSearchResponse(stdout: string): GithubSearchResponse {
       `GitHub returned malformed repository search data (${stdoutBytes} bytes, sha256 ${stdoutSha256})`,
       {
         cause: cause instanceof Error ? cause.message : String(cause),
-        parseCategory: 'invalid_json',
+        parseCategory,
         stdoutBytes,
         stdoutSha256,
       },
     )
   }
+  let value: unknown
+  try {
+    value = JSON.parse(cleaned)
+  } catch (cause) {
+    return malformed(cause, 'invalid_json')
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray((value as GithubSearchResponse).items)) {
+    return malformed(new Error('items is not an array on a non-array object'), 'invalid_schema')
+  }
+  return value as GithubSearchResponse
 }
 
 function asCandidate(item: GithubSearchItem): RemotePluginCandidate | null {
@@ -113,6 +119,7 @@ export async function searchGithubRepositories(options: {
   limit: number
   signal?: AbortSignal
 }): Promise<RemotePluginCandidate[]> {
+  options.signal?.throwIfAborted()
   const query = scopedGithubQuery(options.query)
   const perPage = Math.min(20, Math.max(1, options.limit))
   const result = await options.runner.run({
@@ -134,10 +141,12 @@ export async function searchGithubRepositories(options: {
     cwd: options.cwd,
     ...(options.signal ? { signal: options.signal } : {}),
   })
+  options.signal?.throwIfAborted()
+  if (result.exitCode !== 0) throw commandResultFailure(options.config.ghCommand, result)
   const payload = asSearchResponse(result.stdout)
-  if (!Array.isArray(payload.items)) return []
   const merged = new Map<string, RemotePluginCandidate>()
   for (const raw of payload.items) {
+    options.signal?.throwIfAborted()
     if (!raw || typeof raw !== 'object') continue
     const candidate = asCandidate(raw as GithubSearchItem)
     if (!candidate) continue

@@ -200,7 +200,7 @@ async function runScenario() {
     assert.match(result.stdout, /E2E_CORDIS_DEFINE_PROBE_EXECUTED/u)
     assert.doesNotMatch(result.stdout, /UNKNOWN_TOOL/u)
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"13"/u)
+    assert.match(result.stdout, /"policy_version":"14"/u)
     assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     return {
       scenario,
@@ -213,7 +213,7 @@ async function runScenario() {
 
   if (scenario === 'resolve-local') {
     assert.match(result.stdout, /"state":"waiting_candidate_selection"/u)
-    assert.match(result.stdout, /"policy_version":"13"/u)
+    assert.match(result.stdout, /"policy_version":"14"/u)
     assert.doesNotMatch(result.stdout, /"policy_version":"10"/u)
     const reviews = await filesBelow(path.join(stateDir, 'reviews'), '.json')
     assert.equal(reviews.length, 0)

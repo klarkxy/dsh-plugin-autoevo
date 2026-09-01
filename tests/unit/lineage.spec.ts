@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../../src/contracts.js'
+import {
+  POLICY_VERSION,
+  type InstallationRecord,
+  type LocalCapabilityCandidate,
+  type ResolutionRecord,
+  type ReviewRecord,
+} from '../../src/contracts.js'
+import { applyIntentToCandidate } from '../../src/resolver/intent.js'
+import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import {
   githubRepositoriesInText,
   isFailedSameSpecification,
@@ -7,6 +15,7 @@ import {
   mergeLineageCandidate,
   shouldSkipRemoteDiscovery,
 } from '../../src/resolver/lineage.js'
+import { candidateSnapshotFor } from '../../src/workflow/candidates.js'
 
 const COMMIT = 'df098f16752eb0a53d52d0d931c64ab7236bf1d9'
 const SPEC = `github:anonymous-lab/dsh-plugin-record-sync#${COMMIT}`
@@ -82,6 +91,46 @@ function installation(): InstallationRecord {
   }
 }
 
+function liveInstallation(overrides: Partial<InstallationRecord> = {}): InstallationRecord {
+  return {
+    ...installation(),
+    id: `installation_${'6'.repeat(24)}`,
+    installPhase: 'completed',
+    installState: 'installed',
+    installOutcome: 'verified',
+    installed: true,
+    loaded: true,
+    verified: true,
+    removed: false,
+    verification: {
+      ...installation().verification,
+      status: 'passed',
+      sourceMatched: true,
+      reason: 'verified installed source',
+    },
+    ...overrides,
+  }
+}
+
+function committedChild(
+  parent: InstallationRecord,
+  id: string,
+  installSpec: string,
+): InstallationRecord {
+  return liveInstallation({
+    id,
+    createdAt: '2026-08-23T06:00:00.000Z',
+    installSpec,
+    predecessorInstallationId: parent.id,
+    replacement: {
+      state: 'new_present',
+      oldSpecDigest: dependencySpecDigest(parent.installSpec),
+      newInstallSpec: installSpec,
+      preparedAt: '2026-08-23T05:59:00.000Z',
+    },
+  })
+}
+
 function managedRepairReview(): ReviewRecord {
   return {
     ...review(),
@@ -99,6 +148,94 @@ function managedRepairReview(): ReviewRecord {
 }
 
 describe('known-source lineage', () => {
+  const historicalTarget: NonNullable<LocalCapabilityCandidate['evolutionTarget']> = {
+    kind: 'failed_install',
+    repository: 'anonymous-lab/dsh-plugin-record-sync',
+    commit: COMMIT,
+    packageName: 'dsh-plugin-record-sync',
+    profile: 'web',
+    dependencySpec: SPEC,
+    specDigest: 'f'.repeat(64),
+  }
+
+  function installedProfileCandidate(dependencySpec: string): LocalCapabilityCandidate {
+    return {
+      kind: 'plugin',
+      name: 'dsh-plugin-record-sync',
+      description: 'installed profile plugin',
+      availability: 'installed_in_profile',
+      confidence: 0.99,
+      semanticFit: 'full',
+      fit: 'partial',
+      evolutionTarget: historicalTarget,
+      profileEvidence: {
+        source: 'host_profile_manifest',
+        profile: 'web',
+        packageName: 'dsh-plugin-record-sync',
+        dependencySpec,
+        configuredBundle: false,
+      },
+    }
+  }
+
+  const evolveIntent = {
+    operation: 'evolve_existing' as const,
+    requiredSurface: 'native_dsh_plugin' as const,
+    targetName: 'dsh-plugin-record-sync',
+    evolveReason: 'repair' as const,
+  }
+
+  it.each([
+    'file:[local-reference]',
+    '[remote-reference]',
+    '^1.2.3',
+    'workspace:*',
+  ])('clears inherited lineage when authoritative profile evidence is not exact: %s', (dependencySpec) => {
+    const applied = applyIntentToCandidate(installedProfileCandidate(dependencySpec), evolveIntent)
+
+    expect(applied.evolutionTarget).toBeUndefined()
+  })
+
+  it('replaces inherited lineage with the exact current profile target', () => {
+    const applied = applyIntentToCandidate(installedProfileCandidate(SPEC), evolveIntent)
+
+    expect(applied.evolutionTarget).toMatchObject({
+      kind: 'github_exact',
+      repository: 'anonymous-lab/dsh-plugin-record-sync',
+      commit: COMMIT,
+      dependencySpec: SPEC,
+    })
+  })
+
+  it('preserves historical lineage only when no authoritative profile evidence exists', () => {
+    const candidate = installedProfileCandidate(SPEC)
+    delete candidate.profileEvidence
+
+    expect(applyIntentToCandidate(candidate, evolveIntent).evolutionTarget).toEqual(historicalTarget)
+  })
+
+  it('omits a cleared opaque target from the frozen candidate snapshot', () => {
+    const candidate = applyIntentToCandidate(installedProfileCandidate('file:[local-reference]'), evolveIntent)
+    const resolution: ResolutionRecord = {
+      schemaVersion: 2,
+      id: `resolution_${'7'.repeat(24)}`,
+      policyVersion: POLICY_VERSION,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      requirement: 'repair record sync',
+      cwd: process.cwd(),
+      decision: 'none',
+      localCandidates: [candidate],
+      remoteCandidates: [],
+      remoteDiscoveryComplete: false,
+      authorization: { state: 'selection_required', resolutionId: `resolution_${'7'.repeat(24)}`, reason: 'wait' },
+      queries: [],
+      reasons: [],
+      intent: evolveIntent,
+    }
+
+    expect(candidateSnapshotFor(resolution)[0]?.evolutionTarget).toBeUndefined()
+  })
+
   it('extracts github owner/repo mentions from a requirement', () => {
     expect(githubRepositoriesInText('改进 anonymous-lab/dsh-plugin-record-sync 这份已审查的 DSH 插件')).toEqual([
       'anonymous-lab/dsh-plugin-record-sync',
@@ -316,6 +453,162 @@ describe('known-source lineage', () => {
       dependencySpec: SPEC,
     })
     expect(isFailedSameSpecification(candidate?.evolutionTarget, SPEC)).toBe(false)
+  })
+
+  it.each([undefined, `installation_${'9'.repeat(24)}`, `installation_${'6'.repeat(24)}`])(
+    'suppresses the sole eligible live receipt regardless of its raw forward link: %s',
+    (supersededByInstallationId) => {
+      const live = liveInstallation({
+        ...(supersededByInstallationId ? { supersededByInstallationId } : {}),
+      })
+
+      expect(lineageCandidateFromRecords({
+        requirement: 'repair record-sync',
+        intent: {
+          operation: 'evolve_existing',
+          requiredSurface: 'native_dsh_plugin',
+          targetName: 'record-sync',
+          evolveReason: 'repair',
+        },
+        reviews: [review()],
+        installations: [live],
+        profile: 'web',
+      })).toBeUndefined()
+    },
+  )
+
+  it('keeps a parent with a committed canonical child as historical despite a wrong raw forward link', () => {
+    const parent = liveInstallation({
+      supersededByInstallationId: `installation_${'9'.repeat(24)}`,
+    })
+    const child = committedChild(
+      parent,
+      `installation_${'7'.repeat(24)}`,
+      'file:C:/state/review-artifacts/repaired.tgz',
+    )
+
+    const candidate = lineageCandidateFromRecords({
+      requirement: 'repair record-sync',
+      intent: {
+        operation: 'evolve_existing',
+        requiredSurface: 'native_dsh_plugin',
+        targetName: 'record-sync',
+        evolveReason: 'repair',
+      },
+      reviews: [review()],
+      installations: [parent, child],
+      profile: 'web',
+    })
+
+    expect(candidate?.evolutionTarget).toMatchObject({
+      kind: 'reviewed_snapshot',
+      installationId: parent.id,
+      dependencySpec: SPEC,
+    })
+  })
+
+  it('omits receipt-derived lineage when the best relevant receipt is one of multiple eligible leaves', () => {
+    const older = liveInstallation({
+      id: `installation_${'6'.repeat(24)}`,
+      createdAt: '2026-08-23T05:00:00.000Z',
+    })
+    const newer = liveInstallation({
+      id: `installation_${'7'.repeat(24)}`,
+      createdAt: '2026-08-23T06:00:00.000Z',
+    })
+
+    expect(lineageCandidateFromRecords({
+      requirement: 'repair record-sync',
+      intent: {
+        operation: 'evolve_existing',
+        requiredSurface: 'native_dsh_plugin',
+        targetName: 'record-sync',
+        evolveReason: 'repair',
+      },
+      reviews: [],
+      installations: [older, newer],
+      profile: 'web',
+    })).toBeUndefined()
+  })
+
+  it('normalizes the configured identity casing while excluding a newer foreign-home receipt', () => {
+    const configuredHome = installation().dshHome
+    const local = liveInstallation({
+      id: `installation_${'6'.repeat(24)}`,
+      createdAt: '2026-08-23T05:00:00.000Z',
+      dshHome: process.platform === 'win32' ? configuredHome.toUpperCase() : configuredHome,
+      targetProfile: process.platform === 'win32' ? 'WEB' : 'web',
+      packageName: 'DSH-PLUGIN-RECORD-SYNC',
+    })
+    const foreign = liveInstallation({
+      id: `installation_${'7'.repeat(24)}`,
+      createdAt: '2026-08-23T06:00:00.000Z',
+      dshHome: 'C:/foreign/.dsh',
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
+      installed: false,
+      loaded: false,
+      verified: false,
+    })
+
+    expect(lineageCandidateFromRecords({
+      requirement: 'repair record-sync',
+      intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
+      reviews: [review()],
+      installations: [local, foreign],
+      profile: 'web',
+      dshHome: configuredHome,
+    })).toBeUndefined()
+  })
+
+  it('excludes a foreign home even when no active profile was resolved', () => {
+    const configuredHome = installation().dshHome
+    const local = {
+      ...installation(),
+      id: `installation_${'6'.repeat(24)}`,
+      createdAt: '2026-08-23T05:00:00.000Z',
+    }
+    const foreign = liveInstallation({
+      id: `installation_${'7'.repeat(24)}`,
+      createdAt: '2026-08-23T06:00:00.000Z',
+      dshHome: 'C:/foreign/.dsh',
+    })
+
+    expect(lineageCandidateFromRecords({
+      requirement: 'repair record-sync',
+      intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
+      reviews: [],
+      installations: [local, foreign],
+      dshHome: configuredHome,
+    })?.evolutionTarget).toMatchObject({
+      kind: 'failed_install',
+      installationId: local.id,
+    })
+  })
+
+  it('does not bind a managed snapshot to a same-profile failure from another configured home', () => {
+    const repaired = managedRepairReview()
+    const foreignFailure: InstallationRecord = {
+      ...installation(),
+      id: `installation_${'7'.repeat(24)}`,
+      createdAt: '2026-08-23T06:00:00.000Z',
+      reviewId: repaired.id,
+      dshHome: 'C:/foreign/.dsh',
+      installSpec: repaired.installSpec!,
+    }
+
+    expect(lineageCandidateFromRecords({
+      requirement: 'repair record-sync',
+      intent: { operation: 'evolve_existing', requiredSurface: 'native_dsh_plugin' },
+      reviews: [review(), repaired],
+      installations: [foreignFailure],
+      profile: 'web',
+      dshHome: installation().dshHome,
+      managedReviewIds: [repaired.id],
+    })?.evolutionTarget).toMatchObject({
+      kind: 'reviewed_snapshot',
+      reviewId: repaired.id,
+    })
   })
 
   it('matches a record-sync diagnosis request to the failed plugin, not a same-named skill', () => {

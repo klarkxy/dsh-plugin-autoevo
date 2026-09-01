@@ -9,12 +9,12 @@ import {
   VERIFICATION_STATUSES,
   type RuntimeSurfaceFacts,
 } from '../../../src/contracts.js'
-import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, previewGithubPlugin, previewGithubPlugins, reviewGithubPlugin, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
+import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, previewGithubPlugin, previewGithubPlugins, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
 import type { CommandRequest, CommandRunner } from '../../../src/process/runner.js'
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh', stateDir: 'C:/dsh/state', ghCommand: 'gh', gitCommand: 'git', dshCommand: 'dsh', dshCommandArgs: [],
-  maxCandidates: 5, maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
+  maxFiles: 10, maxRepositoryBytes: 100_000, commandTimeoutMs: 1_000, forwardedCredentialEnv: [], verificationPatchPaths: [], evolutionPreset: true,
 
 }
 const loaderPatch = '- insert:\n    - id: synthetic-capability\n      name: synthetic-capability\n'
@@ -143,72 +143,13 @@ describe('third-party review', () => {
     expect(JSON.stringify(record)).not.toContain('process.env.TOKEN')
   })
 
-  it('pins a GitHub ref to its resolved commit before loading immutable blobs', async () => {
-    const requests: CommandRequest[] = []
-    const blobs = new Map<string, string>([
-      ['1'.repeat(40), JSON.stringify({ name: 'safe-tool', dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculate'] } }, peerDependencies: { '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6 <0.2.0' } })],
-      ['2'.repeat(40), '# safe calculator'],
-      ['3'.repeat(40), 'export const calculate = () => 1'],
-      ['4'.repeat(40), loaderPatch],
-    ])
+  it('refuses formal GitHub review without a Host-owned artifact root', async () => {
     const runner: CommandRunner = {
-      async run(request) {
-        requests.push(request)
-        const endpoint = request.argv.at(-1) ?? ''
-        if (endpoint.endsWith('/commits/main')) return { exitCode: 0, signal: null, stdout: JSON.stringify({ sha: 'a'.repeat(40), commit: { committer: { date: new Date().toISOString() } } }), stderr: '' }
-        if (endpoint === 'repos/acme/safe-tool') return { exitCode: 0, signal: null, stdout: JSON.stringify({ default_branch: 'main' }), stderr: '' }
-        if (endpoint.includes('/git/trees/')) return { exitCode: 0, signal: null, stdout: JSON.stringify({ tree: [
-          { path: 'package.json', type: 'blob', sha: '1'.repeat(40), size: 200 },
-          { path: 'README.md', type: 'blob', sha: '2'.repeat(40), size: 20 },
-          { path: 'src/index.ts', type: 'blob', sha: '3'.repeat(40), size: 40 },
-          { path: 'cordis.patch.yml', type: 'blob', sha: '4'.repeat(40), size: loaderPatch.length },
-        ] }), stderr: '' }
-        const content = blobs.get(endpoint.split('/').at(-1) ?? '')
-        return { exitCode: 0, signal: null, stdout: JSON.stringify({ encoding: 'base64', content: Buffer.from(content ?? '').toString('base64') }), stderr: '' }
+      async run() {
+        return { exitCode: 0, signal: null, stdout: '{}', stderr: '' }
       },
     }
-    const record = await reviewGithubPlugin({ runner, config, cwd: 'C:/workspace', repository: 'acme/safe-tool', ref: 'main', resolutionId: 'resolution_0123456789abcdef', requirement: 'calculate', runtimeVersion: '0.1.0-rc.6' })
-    expect(record.sourceSnapshot).toMatchObject({ kind: 'github', requestedRef: 'main', commit: 'a'.repeat(40) })
-    expect(record.inspectedFiles.map((file) => file.blobId)).toEqual(['4'.repeat(40), '1'.repeat(40), '2'.repeat(40), '3'.repeat(40)])
-    expect(record.compatibility.status).toBe('compatible')
-    expect(requests.slice(0, 3).map((request) => request.argv.at(-1))).toEqual([
-      'repos/acme/safe-tool/commits/main', 'repos/acme/safe-tool', `repos/acme/safe-tool/git/trees/${'a'.repeat(40)}?recursive=1`,
-    ])
-    expect(requests.slice(3).every((request) => request.argv.at(-1)?.includes('/git/blobs/'))).toBe(true)
-  })
-
-  it('returns in-process files from the same GitHub snapshot used to build the review record', async () => {
-    const runner: CommandRunner = {
-      async run(request) {
-        const endpoint = request.argv.at(-1) ?? ''
-        if (endpoint.endsWith('/commits/main')) {
-          return { exitCode: 0, signal: null, stdout: JSON.stringify({ sha: 'a'.repeat(40), commit: { committer: { date: new Date().toISOString() } } }), stderr: '' }
-        }
-        if (endpoint === 'repos/acme/safe-tool') {
-          return { exitCode: 0, signal: null, stdout: JSON.stringify({ default_branch: 'main' }), stderr: '' }
-        }
-        if (endpoint.includes('/git/trees/')) {
-          return {
-            exitCode: 0,
-            signal: null,
-            stdout: JSON.stringify({
-              tree: [
-                { path: 'package.json', type: 'blob', sha: '1'.repeat(40), size: 200 },
-                { path: 'cordis.patch.yml', type: 'blob', sha: '4'.repeat(40), size: loaderPatch.length },
-              ],
-            }),
-            stderr: '',
-          }
-        }
-        const blobs = new Map<string, string>([
-          ['1'.repeat(40), JSON.stringify({ name: 'safe-tool', dsh: { bundle: { patch: './cordis.patch.yml', tools: ['calculate'] } } })],
-          ['4'.repeat(40), loaderPatch],
-        ])
-        const content = blobs.get(endpoint.split('/').at(-1) ?? '')
-        return { exitCode: 0, signal: null, stdout: JSON.stringify({ encoding: 'base64', content: Buffer.from(content ?? '').toString('base64') }), stderr: '' }
-      },
-    }
-    const evidence = await reviewGithubPluginWithFiles({
+    await expect(reviewGithubPluginWithFiles({
       runner,
       config,
       cwd: 'C:/workspace',
@@ -217,9 +158,8 @@ describe('third-party review', () => {
       resolutionId: 'resolution_0123456789abcdef',
       requirement: 'calculate',
       runtimeVersion: '0.1.0-rc.6',
-    })
-    expect(evidence.files.map((file) => file.path).sort()).toEqual(evidence.record.inspectedFiles.map((file) => file.path))
-    expect(evidence.files).toHaveLength(evidence.record.inspectedFiles.length)
+      artifactRoot: '',
+    })).rejects.toThrow(/artifact root|frozen package|GitHub/i)
   })
 
   it('previews only bounded package, README, and bundle-manifest evidence', async () => {

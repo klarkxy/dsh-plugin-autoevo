@@ -18,7 +18,6 @@ export function testRuntimeConfig(root: string, overrides: TestRuntimeConfigOver
     gitCommand: 'git',
     dshCommand: 'dsh',
     dshCommandArgs: [],
-    maxCandidates: 5,
     maxFiles: 200,
     maxRepositoryBytes: 2_097_152,
     commandTimeoutMs: 30_000,

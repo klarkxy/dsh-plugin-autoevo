@@ -65,7 +65,7 @@ capability_workflow
 
 ## 3. DSH 接缝
 
-入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`ExecutionLease`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`、`DshSemanticReviewerHost`/`DshSemanticVerifierHost`。独立 semantic verifier 不是安装完成的可信门槛。
+入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`、`DshSemanticReviewerHost`/`DshSemanticVerifierHost`。独立 semantic verifier 不是安装完成的可信门槛。
 
 Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。
 
@@ -92,7 +92,7 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 - 空结果视为没有可复用插件：Agent 在对话里说明后，由 `capability_workflow_resume` 记录新建或停止。
 - 只有用户在对话里选中、并由 resume 记入回执的仓库才进入 exact-commit 审查门禁。
 
-发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会把精确 commit 缓存到当前工作区，并从本地 Git 对象读取有界的 `package.json`、README 与 DSH manifest 预览；合集仓库会按有效 DSH bundle 子目录展开，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致，远端身份绑定 `repository + commit + packagePath`。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment/lease 和独立 DSH approval。
+发现结果先进入无 interrupt 的模型控制检查点：模型看到完整的有界候选卡、Host 验证身份、派生匹配信号、命中查询、topics、标记为不可信数据的仓库摘要、已尝试查询和剩余预算；可补查，也可随时从池中密封 1–5 项。只有这 1–5 项会把精确 commit 缓存到当前工作区，并从本地 Git 对象读取有界的 `package.json`、README 与 DSH manifest 预览；合集仓库会按有效 DSH bundle 子目录展开，外部文本仍是不可信数据。密封后候选的可见集合与 Host 接受集合完全一致，远端身份绑定 `repository + commit + packagePath`。Gate 1 后用户可从中选择 1–3 项进入 exact-commit 正式审查；比较其它候选时用只读 `navigation`；Gate 2 的最终动作仍绑定新鲜用户回合、精确 review、commitment 和独立 DSH approval。
 
 正式审查与发现预览严格分离。Host 对精确 GitHub commit 或托管本地 HEAD 只执行一次 `npm pack --ignore-scripts`，流式验证 tgz 路径与条目类型并审查其中的完整文件内容；`ReviewRecord` 同时绑定条目清单、tgz SHA-256 和 owned root。安装只接受该 `file:` 产物，批准前与目标 profile 写入前都会复算 hash，且通过 DSH/pnpm 安装时继续设置 `ignore-scripts`。因此 `maxFiles` / `maxRepositoryBytes` 只约束候选预览，不决定安装包能否被审查或安装。
 
@@ -121,7 +121,11 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
 
 `cache/git` 是可删除、可重建的传输缓存：预览与正式审查从中读取精确 commit，并在选中 `packagePath` 上创建临时稀疏 worktree。它不产生安装授权，也不是 review/install authority；唯一安装权威仍是 `<dshHome>/autoevo/review-artifacts` 下经审查和哈希绑定的 tgz。
 
-`StateStore` 用临时文件加原子 rename 写 JSON receipt，ID 使用受限格式。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，persistent 安装保留恢复锚点，绝不谎报未安装。
+`StateStore` 用临时文件加原子 rename 写 JSON receipt，ID 使用受限格式。普通枚举可跳过损坏记录并留下脱敏诊断，但凡读取结果会决定 workflow 协调、版本拓扑、安装、移除、回滚、领养或更新边界，就使用同一次扫描的严格结果；发现任何损坏记录时整次操作失败，不从不完整集合推导“当前版本”或“没有活动 workflow”。任何 DSH Profile 变更前先写 `installState: unknown`、`installOutcome: pending` 的 provisional installation receipt；最终 receipt 写入失败时，persistent 安装保留恢复锚点，绝不谎报未安装。
+
+Git cache、preset 与托管源锁等特定文件资源拥有各自的跨进程保护，但这不等于整个 workflow 生命周期支持多进程共享同一状态根。部署必须保证同一 `<dshHome>/autoevo` 状态根只有一个活动 AutoEvo Host 进程。单 Host 内由 workflow 内存锁串行同一流程；最终确认先把 consumed interrupt、running 状态、下一节点和完整 grant 原子写入 workflow，再调用 Host decision 与节点。重启后遇到旧 boot 的 running workflow 时，只进入既有 `recovery_required` 对账，不重放已确认动作。
+
+在这一单 Host 边界内，cleanup-and-restart 会先收敛 installation cleanup 与 managed-source release，再在父 workflow 中持久化固定 child ID 和完整 restart plan。若取消或进程退出发生在 child 发布前，父记录继续公开为 `recovery_required`；后续 `recover` 只发布该固定 child，不重复 cleanup。已存在且身份一致的 child 直接复用；只有明确位于只读、授权前节点、错误为 `command_failed` 且没有任何授权、安装、托管源或 Creator 证据的失败 child，才允许以同一 ID 重试。
 
 ### Receipt 与绑定
 
@@ -138,11 +142,11 @@ Host 持久状态默认位于 `<dshHome>/autoevo/`，托管源码默认位于当
 - 最终副作用确认由 LLM 解释新鲜用户回合并提交结构化 `decision`；Host 不用关键词或正则重做语义理解。
 - `use_this` / `modify_this` 必须携带该 action 当前允许的 `candidate_id`；Host 只从工作流的 candidate→review 绑定解析精确 review，不接受模型提供的 repository、path、review id 或 install spec。
 - Host 仍验证 owner session、boot、interrupt、回合水位、快照 digest、可用 action、候选集合、防重放、review identity 和后续 DSH approval。
-- 当前 Policy 为 V13（`POLICY_VERSION = 13`）。任何旧 Policy 的未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict、commitment 或 lease，Host 要求从当前顶层用户原文重开；已完成安装与历史 receipt 仍可读取和显式删除。
+- 当前 Policy 为 V14（`POLICY_VERSION = 14`）。任何旧 Policy 的未完成记录都不得恢复或执行其 decision、interrupt、receipt、verdict 或 commitment，Host 要求从当前顶层用户原文重开；已完成安装与历史 receipt 仍可读取和显式删除。
 
 ### 验证与安装语义
 
-MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、lease、endpoint 或用户决定。机械验证完全由 Host 驱动，不把验证任务交给普通模型。
+MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、endpoint 或用户决定。机械验证完全由 Host 驱动，不把验证任务交给普通模型。
 
 三层结果严格区分，三者都是非失败完成态，但后二者不得冒充功能已验证：
 
@@ -217,13 +221,13 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 - `src/workflow/engine-recovery.ts`：completed 清理重开与故障恢复计划。
 - `src/workflow/engine-resume.ts`：resume 校验、LLM 决策解析与 candidate→review 绑定。
 - `src/workflow/candidates.ts`：候选 ID、快照密封与发现池预算常量。
-- `src/workflow/grants.ts`：SelectionReceipt / ActionCommitment / ExecutionLease 铸造。
+- `src/workflow/grants.ts`：SelectionReceipt / ActionCommitment 铸造。
 
 **生命周期：**
 
 - `src/source-manager.ts`：普通 Git 源、排他锁、hookless commit 与来源回执。
 - `src/lifecycle/install.ts`：批准、重验证、状态机和失败清理。
-- `src/lifecycle/snapshot.ts`：完整本地文件绑定、owned snapshot 与固定 tgz。
+- `src/lifecycle/package-artifact.ts`：审查期 `npm pack --ignore-scripts` 冻结 Host-owned tgz。
 - `src/lifecycle/launcher.ts`：DSH CLI、隔离安装进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
 - `src/host-verification-driver.ts`：按 frozen runtime-surface 选择验证层；plugin 自报不得铸造 `tool_roundtrip`；`manual_runtime` 不拉起验证子进程。
 - `src/verification-observer.ts`：记录 Host 工具名/callId 往返与完成轮 hash；不记录模型正文，也不作为语义成功门槛。

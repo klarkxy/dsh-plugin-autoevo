@@ -7,10 +7,9 @@ import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { ExecutionLease } from '../../src/contracts.js'
-import { ExecutionGuard, leaseAllowsExecution } from '../../src/execution-guard.js'
+import { ExecutionGuard } from '../../src/execution-guard.js'
 import type { CommandRunner } from '../../src/process/runner.js'
-import { probeWorkspaceWriteSandbox } from '../../src/sandbox-probe.js'
+import { probeWorkspaceWriteSandbox, _testing as sandboxProbeTesting } from '../../src/sandbox-probe.js'
 
 function exec(name: string, args: Record<string, unknown> = {}): ToolExecution {
   return {
@@ -87,52 +86,6 @@ describe('parent execution boundaries', () => {
     const protectedParent = new ExecutionGuard({ role: 'parent', cwd: 'C:/workspace', protectedRoots: ['C:/workspace/.autoevo'] })
     expect(protectedParent.guard(exec('write', { path: 'notes.txt' }))).toBeUndefined()
     expect(protectedParent.guard(exec('write', { path: '.autoevo/sources/plugin/index.ts' }))).toMatch(/protected|managed/i)
-  })
-})
-
-function lease(partial: Pick<ExecutionLease, 'endpoint' | 'allowedParameterConstraints'>): ExecutionLease {
-  return {
-    id: `lease_${'a'.repeat(24)}`,
-    commitmentId: `commitment_${'b'.repeat(24)}`,
-    selectionReceiptId: `selection_${'c'.repeat(24)}`,
-    workflowId: `workflow_${'d'.repeat(24)}`,
-    ownerSessionId: 'session-lease',
-    bootId: 'boot_lease',
-    hostTurnId: `turn_${'e'.repeat(24)}`,
-    interruptId: `interrupt_${'f'.repeat(24)}`,
-    snapshotDigest: '1'.repeat(64),
-    requestedAction: 'reuse_local',
-    createdAt: '2026-08-19T00:00:00.000Z',
-    ...partial,
-  }
-}
-
-describe('lease matching helpers', () => {
-  it('matches an exact leased tool name', () => {
-    const current = lease({
-      endpoint: { kind: 'exact_tool', name: 'calculator' },
-      allowedParameterConstraints: {},
-    })
-    expect(leaseAllowsExecution(current, exec('calculator'))).toBe(true)
-    expect(leaseAllowsExecution(current, exec('weather'))).toBe(false)
-    expect(leaseAllowsExecution(undefined, exec('calculator'))).toBe(false)
-  })
-
-  it('matches bridge tools only when the exact target is present in real arguments', () => {
-    const current = lease({
-      endpoint: {
-        kind: 'bridge',
-        tools: ['tool_search', 'tool_describe', 'tool_call'],
-        target: 'telegram_send',
-      },
-      allowedParameterConstraints: { exactTarget: 'telegram_send' },
-    })
-    expect(leaseAllowsExecution(current, exec('tool_search', { query: 'telegram_send' }))).toBe(true)
-    expect(leaseAllowsExecution(current, exec('tool_describe', { name: 'telegram_send' }))).toBe(true)
-    expect(leaseAllowsExecution(current, exec('tool_call', { name: 'telegram_send', arguments: { text: 'hi' } }))).toBe(true)
-    expect(leaseAllowsExecution(current, exec('tool_call', { name: 'weather' }))).toBe(false)
-    expect(leaseAllowsExecution(current, exec('tool_search', { query: 'telegram' }))).toBe(false)
-    expect(leaseAllowsExecution(current, exec('tool_describe', {}))).toBe(false)
   })
 })
 
@@ -242,11 +195,19 @@ describe('child execution boundaries', () => {
   })
 })
 
-function officialStack(cwd: string, options: { mode?: string; root?: string; fsEscape?: boolean; shellEscape?: boolean } = {}) {
+function officialStack(cwd: string, options: {
+  mode?: string
+  root?: string
+  fsEscape?: boolean
+  shellEscape?: boolean
+  abortOutsideFs?: { controller: AbortController; reason: unknown }
+  abortInsideRunner?: { controller: AbortController; reason: unknown }
+} = {}) {
   const contains = (parent: string, candidate: string) => {
     const relative = path.relative(parent, candidate)
     return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
   }
+  const calls = { policy: 0, fsResolve: 0, fsWrite: 0, runner: 0 }
   const policy = {
     mode: options.mode ?? 'workspace-write',
     workspaceRoot: options.root ?? cwd,
@@ -254,10 +215,18 @@ function officialStack(cwd: string, options: { mode?: string; root?: string; fsE
   }
   const fs = {
     sandboxMode: 'read-only',
-    async resolve(candidate: string) { return candidate },
+    async resolve(candidate: string) {
+      calls.fsResolve += 1
+      return candidate
+    },
     contains,
     async writeText(candidate: string, body: string) {
+      calls.fsWrite += 1
       const inside = contains(cwd, candidate)
+      if (!inside && options.abortOutsideFs) {
+        options.abortOutsideFs.controller.abort(options.abortOutsideFs.reason)
+        throw options.abortOutsideFs.reason
+      }
       if (!inside && !options.fsEscape) throw new Error('FS_SANDBOX_DENIED')
       await writeFile(candidate, body)
       return { version: 'v1' }
@@ -270,18 +239,26 @@ function officialStack(cwd: string, options: { mode?: string; root?: string; fsE
   } as unknown as SandboxProvider
   const runner: CommandRunner = {
     async run(request) {
+      calls.runner += 1
       const candidate = request.argv.at(-1)!
       const inside = contains(cwd, candidate)
       if (!inside && !options.shellEscape) return { exitCode: 1, signal: null, stdout: '', stderr: 'denied' }
       await writeFile(candidate, 'shell probe\n')
+      if (inside && options.abortInsideRunner) {
+        options.abortInsideRunner.controller.abort(options.abortInsideRunner.reason)
+      }
       return { exitCode: 0, signal: null, stdout: '', stderr: '' }
     },
   }
   return {
     sandbox,
-    sandboxPolicy: { resolve: () => policy } as unknown as SandboxPolicyService,
+    sandboxPolicy: { resolve: () => {
+      calls.policy += 1
+      return policy
+    } } as unknown as SandboxPolicyService,
     fs,
     runner,
+    calls,
   }
 }
 
@@ -295,6 +272,63 @@ describe('official DSH workspace-write sandbox probe', () => {
     await expect(probeWorkspaceWriteSandbox(undefined, session, cwd)).rejects.toThrow(/official DSH sandbox/i)
     await expect(probeWorkspaceWriteSandbox(officialStack(cwd, { mode: 'read-only' }), session, cwd)).rejects.toThrow(/workspace-write/i)
     await expect(probeWorkspaceWriteSandbox(officialStack(cwd, { root: path.resolve('C:/tmp/other') }), session, cwd)).rejects.toThrow(/workspaceRoot/i)
+  })
+
+  it('propagates a pre-aborted signal before policy, filesystem, or runner probes', async () => {
+    const controller = new AbortController()
+    const reason = new Error('sandbox probe pre-aborted')
+    controller.abort(reason)
+    const stack = officialStack(cwd)
+
+    await expect(probeWorkspaceWriteSandbox(stack, session, cwd, controller.signal)).rejects.toBe(reason)
+    expect(stack.calls).toEqual({ policy: 0, fsResolve: 0, fsWrite: 0, runner: 0 })
+  })
+
+  it('rethrows an outside filesystem abort exactly instead of treating it as a sandbox denial', async () => {
+    const controller = new AbortController()
+    const reason = new Error('outside filesystem probe cancelled')
+    const stack = officialStack(cwd, { abortOutsideFs: { controller, reason } })
+
+    await expect(probeWorkspaceWriteSandbox(stack, session, cwd, controller.signal)).rejects.toBe(reason)
+    expect(stack.calls.runner).toBe(0)
+  })
+
+  it('does not start the outside shell probe when an ignoring inside runner aborts', async () => {
+    const controller = new AbortController()
+    const reason = new Error('inside runner cancelled')
+    const stack = officialStack(cwd, { abortInsideRunner: { controller, reason } })
+
+    await expect(probeWorkspaceWriteSandbox(stack, session, cwd, controller.signal)).rejects.toBe(reason)
+    expect(stack.calls.runner).toBe(1)
+  })
+
+  it('reports successful-path cleanup failure after attempting every owned path', async () => {
+    const cleanup = new Error('probe cleanup failed')
+    const attempted: string[] = []
+    await expect(sandboxProbeTesting.cleanupProbePaths(['one', 'two', 'three', 'four'], async (candidate) => {
+      attempted.push(candidate)
+      if (candidate === 'two') throw cleanup
+    })).rejects.toBe(cleanup)
+    expect(attempted).toEqual(['one', 'two', 'three', 'four'])
+  })
+
+  it('treats only a definite missing probe path as absent', async () => {
+    const missing = Object.assign(new Error('probe path missing'), { code: 'ENOENT' })
+    const unreadable = Object.assign(new Error('probe path unreadable'), { code: 'EACCES' })
+
+    await expect(sandboxProbeTesting.exists('missing', undefined, async () => { throw missing }))
+      .resolves.toBe(false)
+    await expect(sandboxProbeTesting.exists('unreadable', undefined, async () => { throw unreadable }))
+      .rejects.toBe(unreadable)
+  })
+
+  it('preserves exact cancellation when a probe-path access completes after abort', async () => {
+    const controller = new AbortController()
+    const reason = new Error('probe path access cancelled')
+
+    await expect(sandboxProbeTesting.exists('probe', controller.signal, async () => {
+      controller.abort(reason)
+    })).rejects.toBe(reason)
   })
 
   it('rejects accepted filesystem or shell escapes', async () => {

@@ -29,14 +29,14 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 一律按
 1. 候选来自同一当前 Policy resolution 的持久 review receipt；任何 Policy 不匹配的 review 都不得授权；
 2. Host 只阻断无法正确安装目标的机械问题：来源或包身份不明确、snapshot 不完整或不可物化、installSpec 与审查来源不一致、bundle manifest 无效或明显路径越界；
 3. `needsSemanticReviewer` 只表示值得请求第二意见。reviewer 缺失、超时、`rejected` 或 `uncertain` 会作为警告展示，不会自行取消安装入口，也不能授予执行权。生命周期脚本、进程/网络/文件访问、兼容性未知、fit 与 recommendation 同样是给人类和 LLM 的事实与建议；
-4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment（必要时 ExecutionLease）；reviewer/verifier 不能铸造授权，也不能把安装完成态升级为 `verified`；
+4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment；reviewer/verifier 不能铸造授权，也不能把安装完成态升级为 `verified`；
 5. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
 6. 安装前重新审查，材料一致；live Host `selectionReceipt` 与 `actionCommitment` 必须存在且结构哈希匹配；
 7. live DSH approval 返回一次性的 `allowed-once`，只批准副作用，不代替用户决定。
 
 symlink、特殊文件或截断的本地快照停在审查阶段；材料变化记为 `review_expired`；非 bundle 或 Host 判定不可物化仍不可直接安装。风险高、脚本存在、兼容性未知或明确不兼容、reviewer 无法判断时，用户仍可在看到摘要后选择使用、修改或跳过。
 
-本地改进批准后复制到插件 owned snapshot，完整文件 hash 与 review 对齐；冻结 tgz 后再复核 snapshot，最终安装该 tgz。生命周期与构建脚本按 DSH 和包管理器的正常规则执行，AutoEvo 只在事前展示并在失败时返回结构化阶段、摘要、可重试性与修复建议，不静默修改 profile 的构建白名单。
+本地改进在审查时冻结 Host-owned tgz；安装只接受该 file: 产物，批准前与隔离预检后再复算 SHA-256。生命周期与构建脚本按 DSH 和包管理器的正常规则执行，AutoEvo 只在事前展示并在失败时返回结构化阶段、摘要、可重试性与修复建议，不静默修改 profile 的构建白名单。
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
 
@@ -91,6 +91,9 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 
 ## 7. 运行假设
 
+- 同一 `<dshHome>/autoevo` 状态根当前只支持一个活动 AutoEvo Host 进程。部分缓存、preset 与托管源文件有独立的跨进程保护，但 workflow 不提供多 Host 仲裁。最终确认以持久化 workflow 的 running checkpoint 作为唯一执行声明；旧 boot 的 running 记录只进入恢复，不重放动作。
+- 单 Host cleanup-and-restart 在 cleanup 与 managed-source release 完成后持久化固定 child ID/restart plan；child 尚未收敛时父状态必须显示 `recovery_required`。恢复只能复用该 child ID，且只有正向证明为授权前、无 effect/authority 证据的 `command_failed` child 才能重试。
+- 状态列表的容错读取只用于诊断或可选历史展示。任何会授权、恢复或推导当前 workflow / installation 拓扑的路径都使用严格扫描；损坏或不可读 receipt 会让操作失败关闭，诊断只公开计数与 hash，不公开路径、spec 或原始内容。
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描的检测项见 §6；结果供安装决策使用，不构成权限结论。
 - MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；它们是警告和决策证据，不会自行控制 DSH Core 权限。可修 high 仍可走 `modify_this`，且 DSH Core 允许时用户可明确接受警告。安装完成后的功能是否已验证只看 Host 三层结果，不看 reviewer/verifier。

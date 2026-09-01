@@ -86,6 +86,7 @@ function creatorCatalogServices() {
 function runtime(cwd: string, owned = true, lifecycle: {
   whenIdle?: () => Promise<void>
   onDispose?: () => void
+  disposeError?: Error
   childCwd?: string
   emitShell?: (emit: (exec: {
     name: string
@@ -95,7 +96,10 @@ function runtime(cwd: string, owned = true, lifecycle: {
   const modes: string[] = []
   const services = sandboxServices(cwd, modes)
   const catalog = creatorCatalogServices()
-  const disposed = vi.fn(async () => { lifecycle.onDispose?.() })
+  const disposed = vi.fn(async () => {
+    lifecycle.onDispose?.()
+    if (lifecycle.disposeError) throw lifecycle.disposeError
+  })
   const followups: UserMessage[] = []
   let createOptions: CreateAgentOptions | undefined
   let preExecuteInstalled = false
@@ -357,6 +361,101 @@ describe('real Host-managed child lifecycle', () => {
     await vi.waitFor(() => expect(live.followups).toHaveLength(1))
     controller.abort()
     await expect(running).rejects.toThrow(/cancelled by the user/i)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('does not send a followup when cancellation occurs immediately after the sandbox probe', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-probe-abort-'))
+    temporary.push(cwd)
+    const live = runtime(cwd)
+    const controller = new AbortController()
+    const reason = new Error('cancel after sandbox probe')
+    const probe = vi.fn(async () => {
+      controller.abort(reason)
+      return {
+        ok: true as const,
+        mode: 'workspace-write' as const,
+        cwd,
+        platform: process.platform,
+        enforcement: 'partial' as const,
+        isolation: 'integrity-partial' as const,
+        note: 'test probe',
+      }
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner, probe)
+
+    await expect(host.run({
+      parent: parentAgent(cwd, live.ctx),
+      ...childRequest(cwd),
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(probe).toHaveBeenCalledOnce()
+    expect(live.followups).toEqual([])
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('preserves the exact managed-child primary error when dispose also fails', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-primary-dispose-'))
+    temporary.push(cwd)
+    const primary = new Error('managed child primary failure')
+    const cleanup = new Error('managed child dispose failure')
+    const live = runtime(cwd, true, {
+      whenIdle: async () => { throw primary },
+      disposeError: cleanup,
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+
+    let failure: unknown
+    try {
+      await host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(primary)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('rejects with the managed-child dispose error when the primary operation succeeds', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-success-dispose-'))
+    temporary.push(cwd)
+    const cleanup = new Error('managed child dispose failure')
+    const live = runtime(cwd, true, { disposeError: cleanup })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+
+    let failure: unknown
+    try {
+      await host.run({ parent: parentAgent(cwd, live.ctx), ...childRequest(cwd) })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(cleanup)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('preserves managed-child cancellation classification when dispose fails', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-child-cancel-dispose-'))
+    temporary.push(cwd)
+    let resolveIdle!: () => void
+    const idle = new Promise<void>((resolve) => { resolveIdle = resolve })
+    const live = runtime(cwd, true, {
+      whenIdle: () => idle,
+      onDispose: resolveIdle,
+      disposeError: new Error('managed child dispose failure'),
+    })
+    const host = new DshManagedChildHost(live.ctx, live.runner)
+    const controller = new AbortController()
+    const running = host.run({
+      parent: parentAgent(cwd, live.ctx),
+      ...childRequest(cwd),
+      signal: controller.signal,
+    })
+    await vi.waitFor(() => expect(live.followups).toHaveLength(1))
+    controller.abort()
+
+    await expect(running).rejects.toMatchObject({
+      code: 'command_failed',
+      details: { cancelled: true },
+    })
     expect(live.disposed).toHaveBeenCalledOnce()
   })
 })

@@ -50,7 +50,7 @@ describe('evolution-mode entry', () => {
     expect(register).not.toHaveBeenCalled()
 
     expect(section).not.toHaveBeenCalled()
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V13')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V14')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('supposedly temporary capability')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host captures the latest top-level user message verbatim')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one clarification_question')
@@ -60,7 +60,7 @@ describe('evolution-mode entry', () => {
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Dependency mutation, nested collaboration, Git writes, plugin mutation, publication/release/deploy')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('When the Agent supplies no queries and no clarification is pending')
     expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Materializing declared dependencies with `pnpm install --ignore-scripts`')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V13 unfinished workflows')
+    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V14 unfinished workflows')
 
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)

@@ -454,6 +454,7 @@ function semanticState(view: WorkflowView): AgentSemanticState {
   }
   if (workflow.cursor === 'await_modify_work') return 'managed_work'
   if (workflow.status === 'running') return 'executing'
+  if (workflow.recovery?.action === 'cleanup_and_restart') return 'recovery_required'
   if (workflow.cursor === 'recovery_required' || workflow.status === 'failed') return 'recovery_required'
   if (workflow.cursor === 'stopped' || workflow.cursor === 'superseded') return 'cancelled'
   return 'completed'

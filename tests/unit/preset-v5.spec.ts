@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,6 +28,18 @@ async function tempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), `${prefix}-`))
   temps.push(dir)
   return dir
+}
+
+async function migrationLockFixture(prefix: string): Promise<{ presetsRoot: string; lockFile: string; markerFile: string }> {
+  const root = await tempDir(prefix)
+  const presetsRoot = path.join(root, 'presets')
+  await mkdir(presetsRoot, { recursive: true })
+  const lockFile = _testing.migrationLockPath(presetsRoot)
+  return { presetsRoot, lockFile, markerFile: `${lockFile}.recovery` }
+}
+
+function legacyLock(pid: number): string {
+  return `${JSON.stringify({ pid, createdAt: '2026-08-31T00:00:00.000Z' }, null, 2)}\n`
 }
 
 describe('evolution preset Search-first V18', () => {
@@ -148,6 +160,112 @@ describe('evolution preset Search-first V18', () => {
     await _testing.recoverInterruptedMigration(paths.presetsRoot, paths.targetDir, rename)
     expect(await readFile(path.join(paths.targetDir, 'preset.yml'), 'utf8')).toMatch(/能力进化|Capability|name:/u)
     await expect(readFile(path.join(staging, 'preset.yml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('recovers a dead legacy lock exactly and an old release cannot delete its replacement', async () => {
+    const { presetsRoot, lockFile } = await migrationLockFixture('autoevo-preset-lock-token')
+    await writeFile(lockFile, legacyLock(41001), 'utf8')
+    const recovered = await _testing.acquireMigrationLock(presetsRoot, {
+      isProcessAlive: () => false,
+      token: (() => {
+        const tokens = ['probe', 'recovery', 'replacement']
+        return () => tokens.shift() ?? 'extra'
+      })(),
+    })
+    expect(JSON.parse(await readFile(lockFile, 'utf8'))).toMatchObject({ lockToken: 'replacement' })
+
+    await unlink(lockFile)
+    const newer = await _testing.acquireMigrationLock(presetsRoot, { token: () => 'newer' })
+    await _testing.releaseMigrationLock(recovered)
+    expect(JSON.parse(await readFile(lockFile, 'utf8'))).toMatchObject({ lockToken: 'newer' })
+    await _testing.releaseMigrationLock(newer)
+  })
+
+  it('allows only one recoverer that observed the same stale lock body', async () => {
+    const { presetsRoot, lockFile } = await migrationLockFixture('autoevo-preset-lock-race')
+    await writeFile(lockFile, legacyLock(41002), 'utf8')
+    let entered = 0
+    let open!: () => void
+    const gate = new Promise<void>((resolve) => { open = resolve })
+    const testing = {
+      isProcessAlive: () => false,
+      token: (() => {
+        let next = 0
+        return () => `token-${next++}`
+      })(),
+      beforeRecoveryMarker: async () => {
+        entered += 1
+        if (entered === 2) open()
+        await gate
+      },
+    }
+    const results = await Promise.allSettled([
+      _testing.acquireMigrationLock(presetsRoot, testing),
+      _testing.acquireMigrationLock(presetsRoot, testing),
+    ])
+    const winners = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof _testing.acquireMigrationLock>>> => result.status === 'fulfilled')
+    expect(winners).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')[0]).toMatchObject({ reason: expect.objectContaining({ message: expect.stringMatching(/already running/i) }) })
+    await _testing.releaseMigrationLock(winners[0]!.value)
+  })
+
+  it('cleans only its own published token when a recovery marker races the publisher', async () => {
+    const { presetsRoot, lockFile, markerFile } = await migrationLockFixture('autoevo-preset-lock-publish-race')
+    await expect(_testing.acquireMigrationLock(presetsRoot, {
+      token: () => 'publisher',
+      afterLockWrite: async () => {
+        await writeFile(markerFile, 'foreign recovery marker\n', { encoding: 'utf8', flag: 'wx' })
+      },
+    })).rejects.toThrow(/already running/i)
+    await expect(lstat(lockFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(markerFile, 'utf8')).toBe('foreign recovery marker\n')
+  })
+
+  it('removes its complete token-owned lock when the initial wx writer rejects after writing', async () => {
+    const { presetsRoot, lockFile } = await migrationLockFixture('autoevo-preset-lock-write-reject')
+    await expect(_testing.acquireMigrationLock(presetsRoot, {
+      token: () => 'writer-token',
+      writeLock: async (target, payload) => {
+        await writeFile(target, payload, { encoding: 'utf8', flag: 'wx' })
+        throw new Error('writer rejected after payload landed')
+      },
+    })).rejects.toThrow(/writer rejected after payload landed/i)
+    await expect(lstat(lockFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    const next = await _testing.acquireMigrationLock(presetsRoot, { token: () => 'next-token' })
+    await _testing.releaseMigrationLock(next)
+  })
+
+  it('retains a recovery marker after stale unlink failure and blocks later publishers', async () => {
+    const { presetsRoot, lockFile, markerFile } = await migrationLockFixture('autoevo-preset-lock-fail-closed')
+    await writeFile(lockFile, legacyLock(41003), 'utf8')
+    await expect(_testing.acquireMigrationLock(presetsRoot, {
+      isProcessAlive: () => false,
+      afterLockWrite: async () => { throw new Error('replacement publish failed') },
+    })).rejects.toThrow(/replacement publish failed/i)
+    await expect(lstat(lockFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(_testing.acquireMigrationLock(presetsRoot)).rejects.toThrow(/already running/i)
+    await expect(lstat(markerFile)).resolves.toBeDefined()
+  })
+
+  it('fails closed for live, unknown, and invalid legacy lock bodies', async () => {
+    const { presetsRoot, lockFile } = await migrationLockFixture('autoevo-preset-lock-invalid')
+    await writeFile(lockFile, legacyLock(41004), 'utf8')
+    await expect(_testing.acquireMigrationLock(presetsRoot, { isProcessAlive: () => true })).rejects.toThrow(/already running/i)
+    expect(await readFile(lockFile, 'utf8')).toBe(legacyLock(41004))
+
+    await expect(_testing.acquireMigrationLock(presetsRoot, {
+      isProcessAlive: () => { throw new Error('liveness unavailable') },
+    })).rejects.toThrow(/refused migration lock recovery/i)
+    expect(await readFile(lockFile, 'utf8')).toBe(legacyLock(41004))
+
+    await unlink(lockFile)
+    await writeFile(lockFile, '{"createdAt":"2026-08-31T00:00:00.000Z"}\n', 'utf8')
+    await expect(_testing.acquireMigrationLock(presetsRoot, { isProcessAlive: () => false })).rejects.toThrow(/lock body is invalid/i)
+    expect(await readFile(lockFile, 'utf8')).toBe('{"createdAt":"2026-08-31T00:00:00.000Z"}\n')
+
+    await writeFile(lockFile, 'not json\n', 'utf8')
+    await expect(_testing.acquireMigrationLock(presetsRoot, { isProcessAlive: () => false })).rejects.toThrow(/lock body is invalid/i)
+    expect(await readFile(lockFile, 'utf8')).toBe('not json\n')
   })
 
   it('produces the same current manifest in independent blank homes', async () => {

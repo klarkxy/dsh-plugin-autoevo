@@ -414,11 +414,11 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
       },
       output: jsonOutput,
       presentCall: (args) => presentCapabilityToolCall('capability_versions', args),
-      async execute(args) {
+      async execute(args, exec) {
         return await service.listVersions({
           ...(args.package_name ? { packageName: args.package_name } : {}),
           ...(args.installation_id ? { installationId: args.installation_id } : {}),
-        }) as unknown as JsonValue
+        }, exec) as unknown as JsonValue
       },
     }),
     defineTool({
@@ -445,9 +445,9 @@ export function createTools(service: CapabilityEvolutionService): ToolDefinition
       },
       output: jsonOutput,
       presentCall: (args) => presentCapabilityToolCall('capability_adopt', args),
-      async execute(args) {
-        if (!args.package_name) return await service.scanOrphans() as unknown as JsonValue
-        return await service.adopt({ packageName: args.package_name }) as unknown as JsonValue
+      async execute(args, exec) {
+        if (!args.package_name) return await service.scanOrphans(exec) as unknown as JsonValue
+        return await service.adopt({ packageName: args.package_name }, exec) as unknown as JsonValue
       },
     }),
     defineTool({

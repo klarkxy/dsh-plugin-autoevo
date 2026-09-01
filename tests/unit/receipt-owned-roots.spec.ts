@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { _testing } from '../../src/index.js'
+import { _testing } from '../../src/plugin-runtime.js'
 import { tempRoot, trackTempDirs } from '../helpers/temp-dirs.js'
 
 const temporary = trackTempDirs()

@@ -40,9 +40,11 @@ import { DshLauncher } from './lifecycle/launcher.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
 import type { CommandRunner } from './process/runner.js'
 import { applyIntentToCandidate } from './resolver/intent.js'
+import { dependencySpecDigest } from './resolver/installed-origin.js'
 import {
   isFailedSameSpecification,
   lineageCandidateFromRecords,
+  lineageRootReview,
   managedSnapshotRootReview,
   mergeLineageCandidate,
   shouldSkipRemoteDiscovery,
@@ -52,7 +54,6 @@ import { resolveBundledDshRoot } from './resolver/host-bundled.js'
 import { builtinMountPresent, builtinReceiptSpec, enableBuiltinMount, parseBuiltinReceiptSpec } from './lifecycle/enable-builtin.js'
 import { resolveCurrentProfileOwner } from './resolver/profile.js'
 import {
-  assertDirectUseAllowed,
   isDirectlyUsableReview,
   isManagedModificationEligibleReview,
   previewGithubPlugins,
@@ -95,7 +96,6 @@ import {
 } from './service-resolution.js'
 import {
   dshRuntimeVersion,
-  lineageRootReview,
   materialReviewFacts,
   revalidateReview,
   reviewAndFreezeManagedSource,
@@ -151,7 +151,7 @@ import type {
 } from './workflow/contracts.js'
 
 export { addExplicitCandidate } from './service-resolution.js'
-export { lineageRootReview } from './service-review.js'
+export { lineageRootReview } from './resolver/lineage.js'
 export { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
 export {
   assertSemanticReviewerBinding,
@@ -178,6 +178,20 @@ async function serializeProfileMutation<T>(dshHome: string, profile: string, ope
   } finally {
     release()
     if (profileMutationTails.get(key) === tail) profileMutationTails.delete(key)
+  }
+}
+
+async function initialBuiltinReceipt(
+  store: Pick<StateStore, 'getInstallation'>,
+  installationId: string,
+  signal: AbortSignal | undefined,
+): Promise<InstallationRecord | undefined> {
+  try {
+    return await store.getInstallation(installationId)
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason
+    if (error instanceof EvolutionError && error.code === 'not_found') return undefined
+    throw error
   }
 }
 
@@ -391,8 +405,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
     })
   }
 
-  listVersions(input: VersionsInput): Promise<CapabilityVersionList> {
-    return listCapabilityVersions(this.versionTrackingDeps(), input)
+  listVersions(input: VersionsInput, exec?: ToolRunContext): Promise<CapabilityVersionList> {
+    return listCapabilityVersions(this.versionTrackingDeps(), input, exec?.signal)
   }
 
   async rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord> {
@@ -403,14 +417,26 @@ export class CapabilityEvolutionService implements WorkflowHost {
     })
   }
 
-  scanOrphans(): Promise<OrphanScan> {
-    return scanOrphanedInstallations(this.adoptDeps())
+  scanOrphans(exec: ToolRunContext): Promise<OrphanScan> {
+    return scanOrphanedInstallations(this.adoptDeps(), { ...(exec.signal ? { signal: exec.signal } : {}) })
   }
 
-  async adopt(input: AdoptInput): Promise<InstallationRecord> {
-    const profile = await this.currentProfileOwner()
+  async adopt(input: AdoptInput, exec: ToolRunContext): Promise<InstallationRecord> {
+    exec.signal?.throwIfAborted()
+    let profile: string
+    try {
+      profile = await this.currentProfileOwner()
+    } catch (error) {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      throw error
+    }
+    exec.signal?.throwIfAborted()
     return serializeProfileMutation(this.config.dshHome, profile, () =>
-      adoptInstallation({ ...this.adoptDeps(), currentProfile: async () => profile }, input))
+      adoptInstallation(
+        this.adoptDeps(),
+        input,
+        { expectedProfile: profile, ...(exec.signal ? { signal: exec.signal } : {}) },
+      ))
   }
 
   checkUpdates(exec: ToolRunContext): Promise<CapabilityUpdateReport> {
@@ -463,23 +489,40 @@ export class CapabilityEvolutionService implements WorkflowHost {
 
   async bootstrapResolution(requirementInput: string, exec: WorkflowExec, intent: RequestIntent = DEFAULT_REQUEST_INTENT): Promise<ResolutionRecord> {
     const requirement = assertRequirement(requirementInput)
-    const activeProfile = await this.currentProfileOwner().catch(() => undefined)
+    const activeProfile = await this.currentProfileOwner().catch((_error: unknown) => {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      return undefined
+    })
+    exec.signal?.throwIfAborted()
     const dshPackageRoot = await resolveBundledDshRoot({
       dshHome: this.config.dshHome,
       config: this.config,
       runner: this.runner,
       ...(exec.signal ? { signal: exec.signal } : {}),
-    }).catch(() => undefined)
+    }).catch(() => {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      return undefined
+    })
+    exec.signal?.throwIfAborted()
     const local = await resolveLocalCapabilities(this.ctx, requirement, asToolExec(exec), {
       dshHome: this.config.dshHome,
       intent,
       ...(activeProfile ? { activeProfile } : {}),
       ...(dshPackageRoot ? { dshPackageRoot } : {}),
     })
-    const [reviews, installations] = await Promise.all([
+    exec.signal?.throwIfAborted()
+    const [reviews, installationHistory] = await Promise.all([
       this.store.listAllReviews(),
-      this.store.listInstallations(),
+      this.store.listInstallationsStrict().then(
+        (installations) => ({ available: true as const, installations }),
+        (_error: unknown) => {
+          if (exec.signal?.aborted) throw exec.signal.reason
+          return { available: false as const, installations: [] }
+        },
+      ),
     ])
+    if (exec.signal?.aborted) throw exec.signal.reason
+    const installations = installationHistory.installations
     const reviewById = new Map(reviews.map((item) => [item.id, item]))
     const managedReviewIds: string[] = []
     for (const review of reviews) {
@@ -494,20 +537,29 @@ export class CapabilityEvolutionService implements WorkflowHost {
           : review.sourceSnapshot.baseCommit,
         workspaceCwd: local.cwd,
         ...(exec.signal ? { signal: exec.signal } : {}),
-      }).catch(() => undefined)
+      }).catch((_error: unknown) => {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        return undefined
+      })
+      exec.signal?.throwIfAborted()
       if (completed) managedReviewIds.push(review.id)
     }
-    const lineage = lineageCandidateFromRecords({
-      requirement,
-      intent,
-      reviews,
-      installations,
-      managedReviewIds,
-      ...(activeProfile ? { profile: activeProfile } : {}),
-    })
+    exec.signal?.throwIfAborted()
+    const lineage = installationHistory.available
+      ? lineageCandidateFromRecords({
+          requirement,
+          intent,
+          reviews,
+          installations,
+          managedReviewIds,
+          dshHome: this.config.dshHome,
+          ...(activeProfile ? { profile: activeProfile } : {}),
+        })
+      : undefined
     const candidates = mergeLineageCandidate(local.candidates, lineage)
       .map((item) => applyIntentToCandidate(item, intent))
     const skipRemote = shouldSkipRemoteDiscovery(candidates, intent)
+    exec.signal?.throwIfAborted()
     const decision: ResolutionRecord['decision'] = skipRemote ? 'use_local' : 'none'
     const id = newResolutionId(requirement)
     const authorization = waitingAuthorization(id, decision, skipRemote)
@@ -530,7 +582,9 @@ export class CapabilityEvolutionService implements WorkflowHost {
       intent,
     }
     const waiting = withNextStep(record)
+    exec.signal?.throwIfAborted()
     await this.store.put('resolutions', waiting)
+    exec.signal?.throwIfAborted()
     return waiting
   }
 
@@ -763,16 +817,63 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+    exec.signal?.throwIfAborted()
     const expected = workflow?.candidateSnapshot
       ?.find((item) => item.id === workflow.pendingReviewedCandidateId)
       ?.evolutionTarget
     if (!expected || hashObject(expected) !== hashObject(target)) {
       throw new EvolutionError('invalid_input', 'Installed-source review must use the frozen Host evolution target')
     }
+    const optionalReview = async (reviewId: string | undefined): Promise<ReviewRecord | undefined> => {
+      if (!reviewId) return undefined
+      try {
+        const prior = await this.store.getReview(reviewId)
+        exec.signal?.throwIfAborted()
+        return prior
+      } catch (error) {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        return undefined
+      }
+    }
+    if (target.kind === 'github_exact' || target.kind === 'owned_chain') {
+      if (dependencySpecDigest(target.dependencySpec) !== target.specDigest) {
+        throw new EvolutionError('review_expired', 'Installed-source review target has an invalid dependency binding')
+      }
+      let liveProfile: string
+      try {
+        exec.signal?.throwIfAborted()
+        liveProfile = await this.currentProfileOwner()
+        exec.signal?.throwIfAborted()
+      } catch (error) {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        throw new EvolutionError('review_expired', 'The live profile owner could not be revalidated before installed-source review', {
+          cause: error instanceof Error ? error.message : String(error),
+        })
+      }
+      if (liveProfile !== target.profile) {
+        throw new EvolutionError('review_expired', 'The live profile owner changed before installed-source review')
+      }
+      let liveSpec: string | undefined
+      try {
+        exec.signal?.throwIfAborted()
+        liveSpec = await this.launcher.profileDependencySpec(
+          this.config.dshHome,
+          target.profile,
+          target.packageName,
+        )
+        exec.signal?.throwIfAborted()
+      } catch (error) {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        throw new EvolutionError('review_expired', 'The live installed dependency could not be revalidated before review', {
+          cause: error instanceof Error ? error.message : String(error),
+        })
+      }
+      if (liveSpec !== target.dependencySpec) {
+        throw new EvolutionError('review_expired', 'The live installed dependency changed before review')
+      }
+    }
     if (target.kind === 'managed_local') {
-      const priorReview = target.reviewId
-        ? await this.store.getReview(target.reviewId).catch(() => undefined)
-        : undefined
+      const priorReview = await optionalReview(target.reviewId)
       if (!workflow || priorReview?.sourceSnapshot.kind !== 'local' || !target.sourceId) {
         throw new EvolutionError('review_rejected', 'Managed local review is missing its completed Host source')
       }
@@ -806,15 +907,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
           exec,
         })
       } catch (error) {
-        await this.sources.completeWorkflow(target.sourceId, workflow.id, exec.signal).catch(() => undefined)
+        await this.sources.completeWorkflow(target.sourceId, workflow.id).catch(() => undefined)
         throw error
       }
     }
     validateGithubRepository(target.repository)
     if (target.kind === 'reviewed_snapshot' || target.kind === 'failed_install') {
-      const priorReview = target.reviewId
-        ? await this.store.getReview(target.reviewId).catch(() => undefined)
-        : undefined
+      const priorReview = await optionalReview(target.reviewId)
       if (priorReview?.sourceSnapshot.kind === 'local') {
         if (!workflow) {
           throw new EvolutionError('invalid_input', 'Managed snapshot review requires an active workflow')
@@ -860,7 +959,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
             exec,
           })
         } catch (error) {
-          await this.sources.completeWorkflow(sourceId, workflow.id, exec.signal).catch(() => undefined)
+          await this.sources.completeWorkflow(sourceId, workflow.id).catch(() => undefined)
           throw error
         }
       }
@@ -930,28 +1029,44 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ...(runtimeVersion ? { runtimeVersion } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
-      return await this.persistReviewed(evidence.record)
+      return evidence.record
+    }
+    const recordFailure = (candidateId: string, repository: string, reason: unknown): void => {
+      failures.push({
+        candidateId,
+        repository,
+        code: reason instanceof EvolutionError ? reason.code : 'command_failed',
+        message: (reason instanceof Error ? reason.message : String(reason)).slice(0, 500),
+      })
     }
     const runBatch = async (batch: string[]): Promise<void> => {
+      exec.signal?.throwIfAborted()
       const settled = await Promise.allSettled(batch.map(reviewOne))
+      exec.signal?.throwIfAborted()
       for (let index = 0; index < settled.length; index += 1) {
         const result = settled[index]!
         const candidateId = batch[index]!
         const repository = snapshot.find((item) => item.id === candidateId)?.repository ?? 'unknown/unknown'
         if (result.status === 'fulfilled') {
-          reviews.push(result.value)
+          exec.signal?.throwIfAborted()
+          try {
+            reviews.push(await this.persistReviewed(result.value))
+          } catch (error) {
+            if (exec.signal?.aborted) throw exec.signal.reason
+            recordFailure(candidateId, repository, error)
+            continue
+          }
+          exec.signal?.throwIfAborted()
         } else {
-          failures.push({
-            candidateId,
-            repository,
-            code: result.reason instanceof EvolutionError ? result.reason.code : 'command_failed',
-            message: (result.reason instanceof Error ? result.reason.message : String(result.reason)).slice(0, 500),
-          })
+          recordFailure(candidateId, repository, result.reason)
         }
       }
     }
     await runBatch(ordered.slice(0, 2))
-    if (ordered[2] && shouldReviewAdaptiveThird(mode, reviews, workflow)) await runBatch([ordered[2]])
+    if (ordered[2]) {
+      exec.signal?.throwIfAborted()
+      if (shouldReviewAdaptiveThird(mode, reviews, workflow)) await runBatch([ordered[2]])
+    }
 
     const rank = (review: ReviewRecord): number => {
       if (isDirectlyUsableReview(review, workflow)) return 0
@@ -967,6 +1082,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
     const waiting = primary
       ? withNextStep(waitingConfirmation({ ...resolution, selectedRepositories }, primary, workflow))
       : resolution
+    exec.signal?.throwIfAborted()
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, reviews, failures }
   }
@@ -1006,13 +1122,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
       artifactRoot: this.reviewArtifactRoot(resolution.cwd),
       ...(root.sourceSnapshot.packagePath ? { packagePath: root.sourceSnapshot.packagePath } : {}),
       ...(runtimeVersion ? { runtimeVersion } : {}),
+      ...(exec.signal ? { signal: exec.signal } : {}),
     })
+    exec.signal?.throwIfAborted()
     if (local.record.sourceSnapshot.kind !== 'local'
       || local.record.sourceSnapshot.baseCommit.toLowerCase() !== root.sourceSnapshot.commit.toLowerCase()) {
       throw new EvolutionError('review_rejected', 'The local checkout is not based on the reviewed upstream commit')
     }
     const review = await this.persistReviewed(local.record)
     const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
+    exec.signal?.throwIfAborted()
     await this.store.put('resolutions', waiting)
     return { resolution: waiting, review }
   }
@@ -1023,7 +1142,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<InstallationRecord> {
-    assertDirectUseAllowed(review, workflow)
     const provenance = review.sourceSnapshot.kind === 'local'
       ? await this.sources.receiptForManagedPath(review.sourceSnapshot.path)
       : undefined
@@ -1230,8 +1348,16 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return this.creationGuard.isManagedWorkAvailable(exec.agent)
   }
 
-  enableTargetProfile(): Promise<string | undefined> {
-    return this.currentProfileOwner().catch(() => undefined)
+  async enableTargetProfile(exec: WorkflowExec): Promise<string | undefined> {
+    exec.signal?.throwIfAborted()
+    try {
+      const profile = await this.currentProfileOwner()
+      exec.signal?.throwIfAborted()
+      return profile
+    } catch (error) {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      throw error
+    }
   }
 
   async enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord> {
@@ -1241,20 +1367,23 @@ export class CapabilityEvolutionService implements WorkflowHost {
       config: this.config,
       runner: this.runner,
       ...(exec.signal ? { signal: exec.signal } : {}),
-    }).catch(() => undefined)
+    }).catch(() => {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      return undefined
+    })
     if (!bundledRoot) {
       throw new EvolutionError('command_failed', 'The Host dsh package root is unavailable; cannot revalidate the built-in capability', {
         command: this.config.dshCommand,
       })
     }
+    exec.signal?.throwIfAborted()
     return await serializeProfileMutation(this.config.dshHome, endpoint.targetProfile, async () => {
+      exec.signal?.throwIfAborted()
       const createdAt = new Date().toISOString()
       const installationId = workflow.pendingInstallationId
         ?? `installation_${hashObject({ workflowId: workflow.id, endpoint, createdAt, nonce: randomUUID() }).slice(0, 24)}`
-      let provisional = await this.store.getInstallation(installationId).catch((error: unknown) => {
-        if (error instanceof EvolutionError && error.code === 'not_found') return undefined
-        throw error
-      })
+      let provisional = await initialBuiltinReceipt(this.store, installationId, exec.signal)
+      exec.signal?.throwIfAborted()
       if (provisional) {
         const spec = parseBuiltinReceiptSpec(provisional.installSpec)
         if (provisional.workflowId !== workflow.id
@@ -1274,17 +1403,21 @@ export class CapabilityEvolutionService implements WorkflowHost {
               packageName: endpoint.packageName,
             }).catch(() => undefined)
           : false
+        exec.signal?.throwIfAborted()
         const reconciliation = reconcileBuiltinWriteAhead(provisional, exactOwnedRowPresent)
         if (reconciliation.record !== provisional) {
+          exec.signal?.throwIfAborted()
           provisional = reconciliation.record
           await this.store.put('installations', provisional)
+          exec.signal?.throwIfAborted()
         }
         if (reconciliation.kind === 'recovery') {
           throw new EvolutionError('command_failed', 'The write-ahead built-in receipt requires explicit recovery')
         }
       } else {
+        exec.signal?.throwIfAborted()
         provisional = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           id: installationId,
           createdAt,
           workflowId: workflow.id,
@@ -1316,6 +1449,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
           },
         }
         await this.store.put('installations', provisional)
+        exec.signal?.throwIfAborted()
       }
       let journal = provisional
       let enabled
@@ -1330,6 +1464,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
           endpoint,
           cwd: workflow.cwd ?? process.cwd(),
           beforeProfileWrite: async () => {
+            exec.signal?.throwIfAborted()
             const spec = parseBuiltinReceiptSpec(journal.installSpec)
             if (!spec) throw new EvolutionError('invalid_input', 'The provisional built-in receipt is malformed')
             journal = {
@@ -1350,6 +1485,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
             }
             delete journal.installFailure
             await this.store.put('installations', journal)
+            exec.signal?.throwIfAborted()
           },
           ...(exec.signal ? { signal: exec.signal } : {}),
         })
@@ -1363,7 +1499,14 @@ export class CapabilityEvolutionService implements WorkflowHost {
               packageName: endpoint.packageName,
             }).catch(() => undefined)
           : false
-        await this.store.put('installations', failedBuiltinEnablement(journal, error, exactOwnedRowPresent))
+        try {
+          await this.store.put('installations', failedBuiltinEnablement(journal, error, exactOwnedRowPresent))
+        } catch (settlementError) {
+          // The write-ahead receipt remains the only durable anchor when
+          // post-effect settlement itself cannot be committed.
+          throw settlementError
+        }
+        if (exec.signal?.aborted) throw exec.signal.reason
         throw error
       }
       const ownership = parseBuiltinReceiptSpec(journal.installSpec)!.wrote || enabled.wrote
@@ -1392,6 +1535,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         },
       }
       await this.store.put('installations', record)
+      exec.signal?.throwIfAborted()
       return record
     })
   }
@@ -1439,6 +1583,7 @@ export const _testing = {
   reviewCandidateDigest,
   reviewSnapshotDigest,
   serializeProfileMutation,
+  initialBuiltinReceipt,
   failedBuiltinEnablement,
   reconcileBuiltinWriteAhead,
 }

@@ -9,5 +9,8 @@ describe('DSH bundle scaffold', () => {
     expect(plugin.Config).toBeDefined()
     expect(plugin.apply).toBeTypeOf('function')
     expect('default' in plugin).toBe(false)
+    expect(plugin.POLICY_VERSION).toBe('14')
+    expect('ExecutionLease' in plugin).toBe(false)
+    expect('_testing' in plugin).toBe(false)
   })
 })

@@ -1,10 +1,12 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
+import { testReview } from '../helpers/records.js'
 import {
+  DEFAULT_REQUEST_INTENT,
   POLICY_VERSION,
   type CandidateAvailability,
   type EvolutionTargetKind,
@@ -19,7 +21,7 @@ import { StateStore } from '../../src/state/store.js'
 import { candidateSnapshotFor, DISCOVERY_POOL_MAX } from '../../src/workflow/candidates.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
-import type { WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
+import type { WorkflowExec, WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
 
 const temporary = trackTempDirs()
 
@@ -124,7 +126,7 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     async enableTargetProfile() {
       return 'web'
     },
-    enableBuiltin: vi.fn(async () => {}),
+    enableBuiltin: vi.fn(async (workflow) => builtinInstallation(workflow)),
     getResolution(id) {
       return store.getResolution(id)
     },
@@ -133,6 +135,66 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     },
     getInstallation(id) {
       return store.getInstallation(id)
+    },
+    async listInstallProfiles() {
+      return ['web']
+    },
+    managedWorkAvailable() {
+      return true
+    },
+    async refineRemote(current) {
+      return current
+    },
+    async previewGithubCandidates() {
+      return { previews: [], failures: [] }
+    },
+    async reviewExisting() {
+      throw new Error('not used')
+    },
+    async reviewGithubBatch() {
+      throw new Error('not used')
+    },
+    async prepareModify() {
+      throw new Error('not used')
+    },
+    async prepareCreate() {
+      throw new Error('not used')
+    },
+    async finishManagedWork() {
+      throw new Error('not used')
+    },
+  }
+}
+
+function builtinInstallation(workflow: WorkflowRecord): InstallationRecord {
+  return {
+    schemaVersion: 1,
+    id: workflow.pendingInstallationId ?? `installation_${'8'.repeat(24)}`,
+    createdAt: '2026-08-31T00:00:00.000Z',
+    workflowId: workflow.id,
+    targetProfile: workflow.actionCommitment?.targetProfile ?? 'web',
+    retention: 'persistent',
+    dshHome: 'C:/dsh',
+    packageName: '@deepseek-ai/dsh-time-context',
+    installSpec: '@deepseek-ai/dsh-time-context@0.1.1-rc.2',
+    installPhase: 'completed',
+    installState: 'installed',
+    installOutcome: 'pending',
+    installed: true,
+    loaded: false,
+    verified: false,
+    restartRequired: true,
+    removed: false,
+    verification: {
+      attempted: true,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: false,
+      status: 'passed',
+      reason: 'built-in enabled',
     },
   }
 }
@@ -161,8 +223,153 @@ async function makeEngine(record: ResolutionRecord, suffix: string): Promise<{
   const store = new StateStore(root)
   const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
   const workflowHost = host(store, record)
-  const engine = new WorkflowEngine(store, guard, workflowHost)
+  const engine = new WorkflowEngine(store, guard, workflowHost, false)
   return { root, store, guard, workflowHost, engine }
+}
+
+function committedRestartParent(options: {
+  parentId?: string
+  childId?: string
+  cwd?: string
+  cleanup?: 'not_required' | 'already_removed' | 'removed'
+  installationId?: string
+} = {}): WorkflowRecord {
+  const parentId = options.parentId ?? `workflow_${'a'.repeat(24)}`
+  const childId = options.childId ?? `workflow_${'c'.repeat(24)}`
+  const cleanup = options.cleanup ?? 'not_required'
+  const cwd = options.cwd ?? 'C:/workspace'
+  return {
+    schemaVersion: 3,
+    id: parentId,
+    policyVersion: POLICY_VERSION,
+    createdAt: '2026-08-31T00:00:00.000Z',
+    updatedAt: '2026-08-31T00:00:00.000Z',
+    requirement: 'calculator',
+    requirementNormalized: 'calculator',
+    cwd,
+    ownerSessionId: 'session-restart',
+    bootId: 'boot_engine',
+    status: 'completed',
+    cursor: 'recovery_required',
+    generation: 4,
+    consumedInterruptIds: [],
+    ...(options.installationId ? { lastInstallationId: options.installationId } : {}),
+    recovery: {
+      action: 'cleanup_and_restart',
+      hostTurnId: 'turn_restart',
+      cleanup,
+      ...(options.installationId ? { installationId: options.installationId } : {}),
+      restartRequired: cleanup !== 'not_required',
+      restartedAsWorkflowId: childId,
+      restart: {
+        requirement: 'calculator',
+        normalized: 'calculator',
+        cwd,
+        intent: DEFAULT_REQUEST_INTENT,
+      },
+      completedAt: '2026-08-31T00:00:01.000Z',
+    },
+  }
+}
+
+function committedRestartChild(parent: WorkflowRecord, status: WorkflowRecord['status'] = 'running'): WorkflowRecord {
+  return {
+    schemaVersion: 3,
+    id: parent.recovery!.restartedAsWorkflowId,
+    policyVersion: POLICY_VERSION,
+    createdAt: '2026-08-31T00:00:02.000Z',
+    updatedAt: '2026-08-31T00:00:02.000Z',
+    requirement: parent.recovery!.restart!.requirement,
+    requirementNormalized: parent.recovery!.restart!.normalized,
+    cwd: parent.recovery!.restart!.cwd,
+    ownerSessionId: parent.ownerSessionId!,
+    bootId: status === 'running' ? 'boot_previous' : 'boot_engine',
+    status,
+    cursor: 'resolve_local',
+    generation: 1,
+    consumedInterruptIds: [],
+    intent: parent.recovery!.restart!.intent,
+    recoveredFromWorkflowId: parent.id,
+    ...(status === 'failed'
+      ? { error: { code: 'command_failed', message: 'safe preauthorization failure' } }
+      : {}),
+  }
+}
+
+function committedCleanupInstallation(
+  parent: WorkflowRecord,
+  overrides: Partial<InstallationRecord> = {},
+): InstallationRecord {
+  return {
+    schemaVersion: 1,
+    id: parent.recovery!.installationId!,
+    createdAt: '2026-08-31T00:00:00.000Z',
+    reviewId: `review_${'e'.repeat(24)}`,
+    workflowId: parent.id,
+    targetProfile: 'headless',
+    retention: 'persistent',
+    dshHome: 'C:/dsh',
+    packageName: 'dsh-plugin-demo',
+    installSpec: 'file:demo.tgz',
+    installPhase: 'completed',
+    installState: 'not_installed',
+    installOutcome: 'failed_absent',
+    installed: false,
+    loaded: false,
+    verified: false,
+    restartRequired: false,
+    removed: true,
+    verification: {
+      attempted: false,
+      expectedTools: [],
+      calledTools: [],
+      resultTools: [],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: false,
+      reason: 'removed recovery receipt',
+    },
+    ...overrides,
+  }
+}
+
+async function prepareBuiltinConfirmation(suffix: string): Promise<{
+  root: string
+  store: StateStore
+  guard: CreationGuard
+  workflowHost: WorkflowHost
+  engine: WorkflowEngine
+  turn: ToolRunContext
+  record: ResolutionRecord
+  candidateId: string
+  confirmation: WorkflowView
+}> {
+  const record = resolution('current time')
+  record.localCandidates = [{
+    kind: 'plugin',
+    name: '@deepseek-ai/dsh-time-context',
+    description: 'Time context',
+    availability: 'host_bundled',
+    confidence: 0.92,
+    fit: 'full',
+    reuseEligible: false,
+    hostBundled: {
+      packageName: '@deepseek-ai/dsh-time-context',
+      version: '0.1.1-rc.2',
+      mountId: 'time-context',
+    },
+  }]
+  const setup = await makeEngine(record, suffix)
+  const turn = exec(`session-${suffix}`)
+  const { selection } = await startAndPresent(setup.engine, 'current time', turn)
+  const candidateId = selection.workflow.candidateSnapshot![0]!.id
+  setup.guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先查看这个内置能力' }] })
+  const confirmation = await setup.engine.resume({
+    workflowId: selection.workflow.id,
+    interruptId: selection.workflow.interrupt!.interruptId,
+    navigation: { kind: 'enable_builtin', candidateIds: [candidateId] },
+  }, turn)
+  return { ...setup, turn, record, candidateId, confirmation }
 }
 
 function installedPluginCandidate(
@@ -244,6 +451,1244 @@ async function reviewInstalledCandidate(
 }
 
 describe('workflow engine autonomous discovery', () => {
+  it('rejects corrupt workflow coordination state before bootstrap or workflow persistence', async () => {
+    const { root, store, workflowHost, engine } = await makeEngine(resolution(), 'strict-workflow-start')
+    const badId = `workflow_${'9'.repeat(24)}`
+    await mkdir(path.join(root, 'workflows'), { recursive: true })
+    await writeFile(path.join(root, 'workflows', `${badId}.json`), '{"private":"do-not-expose"', 'utf8')
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+
+    const failure = await engine.start('calculator', exec()).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toMatchObject({
+      code: 'invalid_input',
+      details: {
+        diagnosticCount: 1,
+        diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
+      },
+    })
+    expect(JSON.stringify(failure)).not.toContain(root)
+    expect(JSON.stringify(failure)).not.toContain('do-not-expose')
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it.each(['status', 'cursor', 'generation', 'unfinished-identity'] as const)(
+    'rejects semantically invalid workflow %s before bootstrap or effects',
+    async (variant) => {
+      const { root, store, workflowHost, engine } = await makeEngine(resolution(), `semantic-workflow-${variant}`)
+      const badId = `workflow_${'8'.repeat(24)}`
+      const secret = `semantic-${variant}-secret`
+      const malformed: Record<string, unknown> = {
+        schemaVersion: 3,
+        id: badId,
+        policyVersion: POLICY_VERSION,
+        createdAt: '2026-08-31T00:00:00.000Z',
+        updatedAt: '2026-08-31T00:00:01.000Z',
+        requirement: 'calculator',
+        requirementNormalized: 'calculator',
+        cwd: 'C:/workspace',
+        ownerSessionId: 'session-semantic-workflow',
+        bootId: 'boot_semantic_workflow',
+        status: 'interrupted',
+        cursor: 'await_discovery',
+        generation: 1,
+        privatePayload: secret,
+      }
+      if (variant === 'status') malformed.status = 'paused'
+      if (variant === 'cursor') malformed.cursor = 'unknown_cursor'
+      if (variant === 'generation') malformed.generation = -1
+      if (variant === 'unfinished-identity') delete malformed.bootId
+      await mkdir(path.join(root, 'workflows'), { recursive: true })
+      await writeFile(path.join(root, 'workflows', `${badId}.json`), JSON.stringify(malformed), 'utf8')
+
+      await expect(store.listWorkflows()).resolves.toEqual([malformed])
+      expect(store.stateDiagnostics()).toEqual([])
+      const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+      const effect = vi.spyOn(workflowHost, 'discoverRemote')
+      const put = vi.spyOn(store, 'put')
+      const failure = await engine.start('calculator', exec('session-semantic-workflow', 'C:/workspace'))
+        .then(() => undefined, (error: unknown) => error)
+
+      expect(failure).toMatchObject({
+        code: 'invalid_input',
+        details: {
+          diagnosticCount: 1,
+          diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
+        },
+      })
+      expect(JSON.stringify(failure)).not.toContain(secret)
+      expect(JSON.stringify(failure)).not.toContain(root)
+      expect(bootstrap).not.toHaveBeenCalled()
+      expect(effect).not.toHaveBeenCalled()
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
+  it('preserves the exact abort when a strict workflow scan rejects ordinarily', async () => {
+    const { store, workflowHost, engine } = await makeEngine(resolution(), 'strict-workflow-abort')
+    const controller = new AbortController()
+    const reason = new Error('strict workflow scan cancelled')
+    vi.spyOn(store, 'listWorkflowsStrict').mockImplementation(async () => {
+      controller.abort(reason)
+      throw new Error('ordinary workflow read failure')
+    })
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+    const turn = { ...exec(), signal: controller.signal } as ToolRunContext
+
+    await expect(engine.start('calculator', turn)).rejects.toBe(reason)
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation when the initial resolution read aborts then %s and starts no later node effect',
+    async (mode) => {
+      const { store, workflowHost, engine } = await makeEngine(resolution(), 'initial-resolution-abort')
+      const turn = exec('session-initial-resolution', 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'review_github'
+      record.status = 'running'
+      const controller = new AbortController()
+      const reason = new Error('initial resolution read cancelled')
+      const getResolution = vi.spyOn(workflowHost, 'getResolution').mockImplementation(async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary resolution read failure')
+        return resolution()
+      })
+      const reviewGithub = vi.fn(async () => {
+        throw new Error('review effect must not start')
+      })
+      workflowHost.reviewGithubBatch = reviewGithub
+      const put = vi.spyOn(store, 'put')
+      const execution = { ...turn, signal: controller.signal } as ToolRunContext
+      const driver = engine as unknown as {
+        runUntilPark(workflow: WorkflowRecord, exec: ToolRunContext): Promise<WorkflowView>
+      }
+
+      await expect(driver.runUntilPark(record, execution)).rejects.toBe(reason)
+      expect(getResolution).toHaveBeenCalledTimes(1)
+      expect(reviewGithub).not.toHaveBeenCalled()
+      expect(put).toHaveBeenCalledTimes(1)
+      await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+        status: 'failed',
+        error: { message: reason.message },
+      })
+    },
+  )
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation when the loop checkpoint aborts then %s and starts no node effect',
+    async (mode) => {
+      const { store, workflowHost, engine } = await makeEngine(resolution(), `loop-checkpoint-${mode}`)
+      const turn = exec(`session-loop-checkpoint-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'review_github'
+      record.status = 'running'
+      const controller = new AbortController()
+      const reason = new Error(`loop checkpoint ${mode} cancelled`)
+      const effect = vi.fn(async () => {
+        throw new Error('review effect must not start')
+      })
+      workflowHost.reviewGithubBatch = effect
+      const originalPut = store.put.bind(store)
+      let workflowPuts = 0
+      vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+        if (kind === 'workflows') {
+          workflowPuts += 1
+          if (workflowPuts === 1) {
+            if (mode === 'return') await originalPut(kind, value)
+            controller.abort(reason)
+            if (mode === 'reject') throw new Error('ordinary checkpoint failure')
+            return
+          }
+        }
+        await originalPut(kind, value)
+      })
+      const driver = engine as unknown as {
+        runUntilPark(
+          workflow: WorkflowRecord,
+          execution: ToolRunContext,
+          guardGeneration: undefined,
+          currentResolution: ResolutionRecord,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(driver.runUntilPark(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+        undefined,
+        resolution(),
+      )).rejects.toBe(reason)
+      expect(effect).not.toHaveBeenCalled()
+      expect(workflowPuts).toBe(2)
+      await expect(store.getWorkflow(record.id)).resolves.toMatchObject({ status: 'failed' })
+    },
+  )
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation when MODEL resolution lookup aborts then %s',
+    async (mode) => {
+      const { store, workflowHost, engine } = await makeEngine(resolution(), `model-resolution-${mode}`)
+      const turn = exec(`session-model-resolution-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_discovery'
+      record.status = 'running'
+      delete record.resolutionId
+      const controller = new AbortController()
+      const reason = new Error(`MODEL resolution ${mode} cancelled`)
+      const getResolution = vi.spyOn(workflowHost, 'getResolution').mockImplementation(async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary MODEL resolution failure')
+        return resolution()
+      })
+      const originalPut = store.put.bind(store)
+      let workflowPuts = 0
+      vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+        await originalPut(kind, value)
+        if (kind === 'workflows') {
+          workflowPuts += 1
+          if (workflowPuts === 1) record.resolutionId = resolution().id
+        }
+      })
+      const driver = engine as unknown as {
+        runUntilPark(workflow: WorkflowRecord, execution: ToolRunContext): Promise<WorkflowView>
+      }
+
+      await expect(driver.runUntilPark(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(getResolution).toHaveBeenCalledTimes(1)
+      expect(workflowPuts).toBe(2)
+      await expect(store.getWorkflow(record.id)).resolves.toMatchObject({ status: 'failed' })
+    },
+  )
+
+  it.each([
+    ['install_verify', 'return'],
+    ['install_verify', 'reject'],
+    ['enable_builtin', 'return'],
+    ['enable_builtin', 'reject'],
+  ] as const)(
+    'does not execute %s when its pending backlink checkpoint aborts then %s',
+    async (node, mode) => {
+      const { store, workflowHost, engine } = await makeEngine(resolution(), `pending-backlink-${node}-${mode}`)
+      const turn = exec(`session-pending-backlink-${node}-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = node
+      record.status = 'running'
+      record.pendingInstall = { targetProfile: 'web', retention: 'persistent' }
+      const controller = new AbortController()
+      const reason = new Error(`pending backlink ${node} ${mode} cancelled`)
+      const effect = vi.fn(async () => {
+        throw new Error('profile effect must not start')
+      })
+      workflowHost.installReviewed = effect
+      workflowHost.enableBuiltin = effect
+      if (node === 'install_verify') {
+        workflowHost.latestReview = async () => testReview({ resolutionId: resolution().id })
+      }
+      const originalPut = store.put.bind(store)
+      let workflowPuts = 0
+      vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+        if (kind === 'workflows') {
+          workflowPuts += 1
+          if (workflowPuts === 2) {
+            if (mode === 'return') await originalPut(kind, value)
+            controller.abort(reason)
+            if (mode === 'reject') throw new Error('ordinary pending checkpoint failure')
+            return
+          }
+        }
+        await originalPut(kind, value)
+      })
+      const driver = engine as unknown as {
+        runUntilPark(
+          workflow: WorkflowRecord,
+          execution: ToolRunContext,
+          guardGeneration: undefined,
+          currentResolution: ResolutionRecord,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(driver.runUntilPark(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+        undefined,
+        resolution(),
+      )).rejects.toBe(reason)
+      expect(effect).not.toHaveBeenCalled()
+      expect(workflowPuts).toBe(3)
+      await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+        status: 'failed',
+        pendingInstallationId: expect.stringMatching(/^installation_[a-f0-9]{24}$/u),
+      })
+    },
+  )
+
+  it.each(['reviews', 'profiles', 'managed', 'retryable'] as const)(
+    'preserves exact cancellation at the INTERRUPT %s pre-effect boundary',
+    async (boundary) => {
+      const { store, workflowHost, engine } = await makeEngine(resolution(), `interrupt-${boundary}-abort`)
+      const turn = exec(`session-interrupt-${boundary}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_confirmation'
+      record.status = 'running'
+      const controller = new AbortController()
+      const reason = new Error(`INTERRUPT ${boundary} cancelled`)
+      const abortAfter = <T>(value: T): T => {
+        controller.abort(reason)
+        return value
+      }
+      const internals = engine as unknown as {
+        reviewsForWorkflow(workflow: WorkflowRecord): Promise<ReviewRecord[]>
+        retryableInstall(workflow: WorkflowRecord): Promise<unknown>
+        runUntilPark(
+          workflow: WorkflowRecord,
+          execution: ToolRunContext,
+          guardGeneration: undefined,
+          currentResolution: ResolutionRecord,
+        ): Promise<WorkflowView>
+      }
+      vi.spyOn(internals, 'reviewsForWorkflow').mockImplementation(async () =>
+        boundary === 'reviews' ? abortAfter([]) : [])
+      workflowHost.listInstallProfiles = async () => boundary === 'profiles' ? abortAfter([]) : []
+      workflowHost.managedWorkAvailable = async () => boundary === 'managed' ? abortAfter(true) : true
+      vi.spyOn(internals, 'retryableInstall').mockImplementation(async () =>
+        boundary === 'retryable' ? abortAfter(undefined) : undefined)
+      const put = vi.spyOn(store, 'put')
+
+      await expect(internals.runUntilPark(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+        undefined,
+        resolution(),
+      )).rejects.toBe(reason)
+      expect(put).toHaveBeenCalledTimes(2)
+      const persisted = await store.getWorkflow(record.id)
+      expect(persisted).toMatchObject({ status: 'failed' })
+      expect(persisted.interrupt).toBeUndefined()
+    },
+  )
+
+  it.each(['return', 'reject', 'corrupt'] as const)(
+    'does not checkpoint a reissued interrupt when its retry receipt read ends with %s',
+    async (mode) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `reissue-retry-${mode}`)
+      const turn = exec(`session-reissue-retry-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_confirmation'
+      record.status = 'interrupted'
+      record.lastInstallationId = `installation_${'4'.repeat(24)}`
+      const controller = new AbortController()
+      const reason = new Error(`retry receipt ${mode} cancelled`)
+      const corrupt = new EvolutionError('invalid_input', 'corrupt retry receipt')
+      workflowHost.getInstallation = async () => {
+        if (mode === 'corrupt') throw corrupt
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary retry receipt read failure')
+        return { id: record.lastInstallationId } as InstallationRecord
+      }
+      const put = vi.spyOn(store, 'put')
+      const internals = engine as unknown as {
+        reissueInterrupt(workflow: WorkflowRecord, execution: ToolRunContext): Promise<void>
+      }
+
+      const result = internals.reissueInterrupt(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )
+      if (mode === 'corrupt') await expect(result).rejects.toBe(corrupt)
+      else await expect(result).rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['resolution', 'return'],
+    ['resolution', 'reject'],
+    ['profiles', 'return'],
+    ['profiles', 'reject'],
+    ['managed', 'return'],
+    ['managed', 'reject'],
+  ] as const)(
+    'preserves exact cancellation at the reissue %s read when it aborts then %s',
+    async (boundary, mode) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `reissue-${boundary}-${mode}`)
+      const turn = exec(`session-reissue-${boundary}-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_confirmation'
+      record.status = 'interrupted'
+      const controller = new AbortController()
+      const reason = new Error(`reissue ${boundary} ${mode} cancelled`)
+      const abortRead = <T>(value: T): T => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error(`ordinary ${boundary} read failure`)
+        return value
+      }
+      if (boundary === 'resolution') workflowHost.getResolution = async () => abortRead(current)
+      if (boundary === 'profiles') workflowHost.listInstallProfiles = async () => abortRead([])
+      if (boundary === 'managed') workflowHost.managedWorkAvailable = async () => abortRead(true)
+      const put = vi.spyOn(store, 'put')
+      const internals = engine as unknown as {
+        reissueInterrupt(workflow: WorkflowRecord, execution: ToolRunContext): Promise<void>
+      }
+
+      await expect(internals.reissueInterrupt(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not clear verification history or continue after a corrupt retry receipt read', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'clear-verification-corrupt-receipt')
+    const started = await engine.start('calculator', exec())
+    const record = await store.getWorkflow(started.workflow.id)
+    const inspected = testReview({ resolutionId: current.id })
+    record.lastInstallationId = `installation_${'3'.repeat(24)}`
+    record.consumedVerificationAttempts = [{
+      reviewId: inspected.id,
+      sourceIdentity: `github:acme/one#${'c'.repeat(40)}`,
+      layer: 'unspecified',
+    }]
+    const attempts = record.consumedVerificationAttempts
+    const corrupt = new EvolutionError('invalid_input', 'corrupt verification receipt')
+    workflowHost.getInstallation = async () => { throw corrupt }
+    const internals = engine as unknown as {
+      clearErroneousVerificationAttempt(
+        workflow: WorkflowRecord,
+        review: ReviewRecord,
+        signal?: AbortSignal,
+      ): Promise<void>
+    }
+
+    await expect(internals.clearErroneousVerificationAttempt(record, inspected)).rejects.toBe(corrupt)
+    expect(record.consumedVerificationAttempts).toBe(attempts)
+  })
+
+  it('does not project an executeNode result when the Host returns after cancellation', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'execute-result-abort')
+    const turn = exec('session-execute-result-abort', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    const candidateId = `candidate_${'7'.repeat(24)}`
+    record.cursor = 'review_github'
+    record.status = 'running'
+    record.candidateSnapshot = [{
+      id: candidateId,
+      index: 1,
+      kind: 'remote',
+      name: 'one',
+      identity: 'acme/one',
+      repository: 'acme/one',
+      commit: 'c'.repeat(40),
+      digest: 'd'.repeat(64),
+    }]
+    record.reviewQueue = [candidateId]
+    delete record.lastReviewId
+    const controller = new AbortController()
+    const reason = new Error('executeNode result cancelled')
+    const reviewed = testReview({
+      id: `review_${'7'.repeat(64)}`,
+      resolutionId: current.id,
+    })
+    const effect = vi.fn(async () => {
+      controller.abort(reason)
+      return { resolution: current, review: reviewed }
+    })
+    workflowHost.reviewGithubBatch = async () => {
+      const result = await effect()
+      return { resolution: result.resolution, reviews: [result.review], failures: [] }
+    }
+    const driver = engine as unknown as {
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+
+    await expect(driver.runUntilPark(
+      record,
+      { ...turn, signal: controller.signal } as ToolRunContext,
+      undefined,
+      current,
+    )).rejects.toBe(reason)
+    expect(effect).toHaveBeenCalledTimes(1)
+    expect(record.lastReviewId).toBeUndefined()
+    expect(record.reviewedCandidateIds).toBeUndefined()
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+      status: 'failed',
+      cursor: 'review_github',
+    })
+  })
+
+  it.each(['installed', 'recovery_required'] as const)(
+    'commits terminal %s settlement before returning exact cancellation from source release',
+    async (cursor) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `terminal-release-${cursor}-abort`)
+      const turn = exec(`session-terminal-release-${cursor}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = cursor
+      record.status = 'running'
+      const controller = new AbortController()
+      const reason = new Error(`terminal ${cursor} release cancelled`)
+      const release = vi.fn(async () => {
+        controller.abort(reason)
+      })
+      workflowHost.releaseManagedSource = release
+      const put = vi.spyOn(store, 'put')
+      const driver = engine as unknown as {
+        runUntilPark(
+          workflow: WorkflowRecord,
+          execution: ToolRunContext,
+          guardGeneration: undefined,
+          currentResolution: ResolutionRecord,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(driver.runUntilPark(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+        undefined,
+        current,
+      )).rejects.toBe(reason)
+      expect(release).toHaveBeenCalledTimes(1)
+      expect(put).toHaveBeenCalledTimes(2)
+      await expect(store.getWorkflow(record.id)).resolves.toMatchObject(cursor === 'installed'
+        ? { status: 'completed', cursor: 'installed' }
+        : { status: 'interrupted', cursor: 'recovery_required', interrupt: { kind: 'await_recovery' } })
+    },
+  )
+
+  it('keeps a terminal source-release settlement error ahead of cancellation without committing failure', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'terminal-release-error-priority')
+    const turn = exec('session-terminal-release-error', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'installed'
+    record.status = 'running'
+    const controller = new AbortController()
+    const reason = new Error('terminal release cancellation')
+    const settlementError = new Error('terminal release settlement failed')
+    const release = vi.fn(async () => {
+      controller.abort(reason)
+      throw settlementError
+    })
+    workflowHost.releaseManagedSource = release
+    const driver = engine as unknown as {
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+
+    await expect(driver.runUntilPark(
+      record,
+      { ...turn, signal: controller.signal } as ToolRunContext,
+      undefined,
+      current,
+    )).rejects.toBe(settlementError)
+    expect(release).toHaveBeenCalledTimes(2)
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+      status: 'running',
+    })
+    expect((await store.getWorkflow(record.id)).error).toBeUndefined()
+  })
+
+  it('keeps managed-source release failure ahead of a node error and does not commit failed', async () => {
+    const current = resolution('new capability')
+    const { store, workflowHost, engine } = await makeEngine(current, 'node-source-release-priority')
+    const turn = exec('session-node-source-release', 'C:/workspace')
+    const started = await engine.start('new capability', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'prepare_create'
+    record.status = 'running'
+    const primary = new Error('managed node failed')
+    const settlement = new Error('managed source release failed')
+    workflowHost.prepareCreate = async () => { throw primary }
+    workflowHost.releaseManagedSource = vi.fn(async () => { throw settlement })
+    const driver = engine as unknown as {
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+
+    await expect(driver.runUntilPark(record, turn, undefined, current)).rejects.toBe(settlement)
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+      status: 'running',
+      cursor: 'prepare_create',
+    })
+    expect((await store.getWorkflow(record.id)).error).toBeUndefined()
+  })
+
+  it('keeps failed-checkpoint persistence failure ahead of the node error after source release', async () => {
+    const current = resolution('new capability')
+    const { store, workflowHost, engine } = await makeEngine(current, 'node-failed-checkpoint-priority')
+    const turn = exec('session-node-failed-checkpoint', 'C:/workspace')
+    const started = await engine.start('new capability', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'prepare_create'
+    record.status = 'running'
+    const primary = new Error('managed node failed')
+    const checkpointFailure = new Error('failed checkpoint unavailable')
+    workflowHost.prepareCreate = async () => { throw primary }
+    workflowHost.releaseManagedSource = vi.fn(async () => undefined)
+    const originalPut = store.put.bind(store)
+    vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+      if (kind === 'workflows' && (value as WorkflowRecord).status === 'failed') throw checkpointFailure
+      await originalPut(kind, value)
+    })
+    const driver = engine as unknown as {
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+
+    await expect(driver.runUntilPark(record, turn, undefined, current)).rejects.toBe(checkpointFailure)
+    expect(workflowHost.releaseManagedSource).toHaveBeenCalledTimes(1)
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({ status: 'running' })
+  })
+
+  it('does not complete recovery or plan fresh work when managed-source release fails', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'recovery-source-release-failure')
+    const turn = exec('session-recovery-source-release', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'recovery_required'
+    record.status = 'interrupted'
+    record.managedSourceId = 'managed-calculator'
+    const settlement = new Error('managed source completion failed')
+    workflowHost.releaseManagedSource = vi.fn(async (_workflow, cleanupExec) => {
+      expect(cleanupExec.signal).toBeUndefined()
+      throw settlement
+    })
+    const setRestart = vi.fn()
+    const put = vi.spyOn(store, 'put')
+    const internals = engine as unknown as {
+      finishCleanupAndRestart(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        input: { hostTurnId: string; cleanup: 'not_required'; restartRequired: boolean },
+        setRestart: (value: unknown) => void,
+      ): Promise<WorkflowView>
+    }
+
+    await expect(internals.finishCleanupAndRestart(record, turn, {
+      hostTurnId: 'turn_recovery_source',
+      cleanup: 'not_required',
+      restartRequired: false,
+    }, setRestart)).rejects.toBe(settlement)
+    expect(put).not.toHaveBeenCalled()
+    expect(setRestart).not.toHaveBeenCalled()
+    expect(record).toMatchObject({ status: 'interrupted', cursor: 'recovery_required' })
+  })
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation before recovery control when the parent read aborts then %s',
+    async (mode) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `recovery-parent-${mode}-abort`)
+      const turn = exec(`session-recovery-parent-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const controller = new AbortController()
+      const reason = new Error(`recovery parent ${mode} cancelled`)
+      const originalGet = store.getWorkflow.bind(store)
+      vi.spyOn(store, 'getWorkflow').mockImplementation(async (id) => {
+        const record = await originalGet(id)
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary parent read failure')
+        return record
+      })
+      workflowHost.cleanupInstallation = vi.fn(async () => {
+        throw new Error('cleanup must not start')
+      })
+      const put = vi.spyOn(store, 'put')
+
+      await expect(engine.recover(
+        { workflowId: started.workflow.id },
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(workflowHost.cleanupInstallation).not.toHaveBeenCalled()
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation before cleanup when the linked recovery receipt read aborts then %s',
+    async (mode) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `recovery-receipt-${mode}-abort`)
+      const turn = exec(`session-recovery-receipt-${mode}`, 'C:/workspace')
+      const started = await engine.start('calculator', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.lastInstallationId = `installation_${'7'.repeat(24)}`
+      const controller = new AbortController()
+      const reason = new Error(`recovery receipt ${mode} cancelled`)
+      workflowHost.getInstallation = async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary recovery receipt failure')
+        return { id: record.lastInstallationId, workflowId: record.id } as InstallationRecord
+      }
+      workflowHost.cleanupInstallation = vi.fn(async () => {
+        throw new Error('cleanup must not start')
+      })
+      const put = vi.spyOn(store, 'put')
+      const internals = engine as unknown as {
+        requireOwnedLinkedInstallation(
+          workflow: WorkflowRecord,
+          execution: ToolRunContext,
+        ): Promise<InstallationRecord | undefined>
+      }
+
+      await expect(internals.requireOwnedLinkedInstallation(
+        record,
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(workflowHost.cleanupInstallation).not.toHaveBeenCalled()
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
+  it('retries the fixed child publication after cancellation commits cleanup and parent recovery', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'recovery-child-publication-cancel')
+    const turn = exec('session-recovery-child-cancel', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'recovery_required'
+    record.status = 'interrupted'
+    record.managedSourceId = 'managed-calculator'
+    const controller = new AbortController()
+    const reason = new Error('cancel after cleanup settlement')
+    const release = vi.fn(async () => { controller.abort(reason) })
+    workflowHost.releaseManagedSource = release
+    const setRestart = vi.fn()
+    const internals = engine as unknown as {
+      finishCleanupAndRestart(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        input: { hostTurnId: string; cleanup: 'not_required'; restartRequired: boolean },
+        setRestart: (value: unknown) => void,
+      ): Promise<WorkflowView | undefined>
+    }
+
+    await expect(internals.finishCleanupAndRestart(
+      record,
+      { ...turn, signal: controller.signal } as ToolRunContext,
+      { hostTurnId: 'turn_cleanup_committed', cleanup: 'not_required', restartRequired: false },
+      setRestart,
+    )).resolves.toBeUndefined()
+    expect(() => controller.signal.throwIfAborted()).toThrow(reason)
+    const parent = await store.getWorkflow(record.id)
+    expect(parent).toMatchObject({
+      status: 'completed',
+      recovery: {
+        action: 'cleanup_and_restart',
+        restartedAsWorkflowId: expect.stringMatching(/^workflow_[a-f0-9]{24}$/u),
+        restart: {
+          requirement: 'calculator',
+          normalized: 'calculator',
+          cwd: 'C:/workspace',
+        },
+      },
+    })
+    const childId = parent.recovery!.restartedAsWorkflowId
+    await expect(store.getWorkflow(childId)).rejects.toMatchObject({ code: 'not_found' })
+
+    workflowHost.releaseManagedSource = vi.fn(async () => undefined)
+    const bootstrap = workflowHost.bootstrapResolution.bind(workflowHost)
+    const startFailure = new Error('fixed child bootstrap failed')
+    let bootstrapCalls = 0
+    workflowHost.bootstrapResolution = async (...args) => {
+      bootstrapCalls += 1
+      if (bootstrapCalls === 1) throw startFailure
+      return await bootstrap(...args)
+    }
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      exec('session-recovery-child-cancel', 'C:/workspace'),
+    )).rejects.toBe(startFailure)
+    await expect(store.getWorkflow(childId)).resolves.toMatchObject({
+      id: childId,
+      recoveredFromWorkflowId: parent.id,
+      status: 'failed',
+    })
+
+    const resumed = await engine.recover({ workflowId: parent.id }, exec('session-recovery-child-cancel', 'C:/workspace'))
+    expect(resumed.workflow).toMatchObject({
+      id: childId,
+      recoveredFromWorkflowId: parent.id,
+      status: 'interrupted',
+    })
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(bootstrapCalls).toBe(2)
+  })
+
+  it.each([
+    {
+      name: 'invalid intent',
+      corrupt(parent: WorkflowRecord) {
+        const restart = parent.recovery!.restart as unknown as Record<string, unknown>
+        restart.intent = { operation: 'invalid', requiredSurface: 'any' }
+      },
+    },
+    {
+      name: 'relative workspace',
+      corrupt(parent: WorkflowRecord) {
+        parent.recovery!.restart!.cwd = 'relative/workspace'
+      },
+    },
+    {
+      name: 'self child id',
+      corrupt(parent: WorkflowRecord) {
+        parent.recovery!.restartedAsWorkflowId = parent.id
+      },
+    },
+    {
+      name: 'removed cleanup without an installation proof id',
+      corrupt(parent: WorkflowRecord) {
+        parent.recovery!.cleanup = 'removed'
+        parent.recovery!.restartRequired = true
+      },
+    },
+  ])('rejects a committed recovery plan with $name before child publication', async ({ name, corrupt }) => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, `restart-plan-${name.replaceAll(' ', '-')}`)
+    const parent = committedRestartParent()
+    corrupt(parent)
+    await store.put('workflows', parent)
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )).rejects.toThrow(/restart plan is malformed/i)
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { name: 'still present', removed: false, owner: 'parent' },
+    { name: 'owned by another workflow', removed: true, owner: 'foreign' },
+    { name: 'missing', removed: true, owner: 'missing' },
+  ] as const)(
+    'refuses committed cleanup proof that is $name before child publication',
+    async ({ removed, owner }) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `restart-cleanup-${owner}`)
+      const installationId = `installation_${'d'.repeat(24)}`
+      const parent = committedRestartParent({ cleanup: 'removed', installationId })
+      await store.put('workflows', parent)
+      if (owner !== 'missing') {
+        await store.put('installations', committedCleanupInstallation(parent, {
+          removed,
+          workflowId: owner === 'parent' ? parent.id : `workflow_${'f'.repeat(24)}`,
+        }))
+      }
+      const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+      await expect(engine.recover(
+        { workflowId: parent.id },
+        exec('session-restart', 'C:/workspace'),
+      )).rejects.toMatchObject({ code: owner === 'missing' ? 'not_found' : 'invalid_input' })
+      expect(bootstrap).not.toHaveBeenCalled()
+      await expect(store.getWorkflow(parent.recovery!.restartedAsWorkflowId)).rejects.toMatchObject({ code: 'not_found' })
+    },
+  )
+
+  it.each([
+    { cleanup: 'removed', retention: 'persistent', restartRequired: false },
+    { cleanup: 'removed', retention: 'temporary', restartRequired: true },
+    { cleanup: 'already_removed', retention: 'persistent', restartRequired: false },
+    { cleanup: 'already_removed', retention: 'temporary', restartRequired: true },
+  ] as const)(
+    'refuses $cleanup cleanup proof when $retention retention conflicts with restartRequired=$restartRequired',
+    async ({ cleanup, retention, restartRequired }) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(
+        current,
+        `restart-cleanup-${cleanup}-${retention}-${String(restartRequired)}`,
+      )
+      const installationId = `installation_${'d'.repeat(24)}`
+      const parent = committedRestartParent({ cleanup, installationId })
+      parent.recovery!.restartRequired = restartRequired
+      await store.put('workflows', parent)
+      await store.put('installations', committedCleanupInstallation(parent, { retention }))
+      const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+      await expect(engine.recover(
+        { workflowId: parent.id },
+        exec('session-restart', 'C:/workspace'),
+      )).rejects.toMatchObject({ code: 'invalid_input' })
+      expect(bootstrap).not.toHaveBeenCalled()
+      await expect(store.getWorkflow(parent.recovery!.restartedAsWorkflowId)).rejects.toMatchObject({ code: 'not_found' })
+    },
+  )
+
+  it('rejects semantically invalid committed cleanup retention before child publication', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-cleanup-invalid-retention')
+    const installationId = `installation_${'d'.repeat(24)}`
+    const parent = committedRestartParent({ cleanup: 'removed', installationId })
+    parent.recovery!.restartRequired = false
+    await store.put('workflows', parent)
+    await store.put('installations', committedCleanupInstallation(parent, {
+      retention: 'corrupt' as InstallationRecord['retention'],
+    }))
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+    put.mockClear()
+
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )).rejects.toMatchObject({ code: 'invalid_input' })
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(parent.recovery!.restartedAsWorkflowId)).rejects.toMatchObject({ code: 'not_found' })
+  })
+
+  it('rejects semantically invalid cleanup retention before calling the Host remover', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-cleanup-producer-invalid-retention')
+    const installationId = `installation_${'d'.repeat(24)}`
+    const parent = committedRestartParent({ cleanup: 'removed', installationId })
+    const linked = committedCleanupInstallation(parent, {
+      removed: false,
+      retention: 'corrupt' as InstallationRecord['retention'],
+    })
+    workflowHost.cleanupInstallation = vi.fn(async () => ({
+      installationId,
+      removed: true,
+      restartRequired: false,
+    }))
+    const put = vi.spyOn(store, 'put')
+    const internals = engine as unknown as {
+      cleanupOwnedInstallation(
+        workflow: WorkflowRecord,
+        installation: InstallationRecord,
+        execution: ToolRunContext,
+      ): Promise<unknown>
+    }
+
+    await expect(internals.cleanupOwnedInstallation(parent, linked, exec('session-restart', 'C:/workspace')))
+      .rejects.toMatchObject({ code: 'invalid_input' })
+    expect(workflowHost.cleanupInstallation).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it.each(['missing', 'safe_failed'] as const)(
+    'requires the current canonical workspace before %s fixed-child publication',
+    async (state) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `restart-cwd-${state}`)
+      const parent = committedRestartParent()
+      await store.put('workflows', parent)
+      if (state === 'safe_failed') await store.put('workflows', committedRestartChild(parent, 'failed'))
+      const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+      await expect(engine.recover(
+        { workflowId: parent.id },
+        exec('session-restart', 'C:/different-workspace'),
+      )).rejects.toThrow(/fixed workspace/i)
+      expect(bootstrap).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not turn a committed-restart realpath I/O failure into lexical path authority', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-realpath-eio')
+    const parent = committedRestartParent()
+    await store.put('workflows', parent)
+    const failure = Object.assign(new Error('injected restart realpath failure'), { code: 'EIO' })
+    const internals = engine as unknown as { resolveWorkflowRealpath(value: string): Promise<string> }
+    vi.spyOn(internals, 'resolveWorkflowRealpath').mockRejectedValue(failure)
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )).rejects.toBe(failure)
+    expect(bootstrap).not.toHaveBeenCalled()
+  })
+
+  it('preserves exact cancellation when committed-restart realpath rejects concurrently', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-realpath-abort')
+    const parent = committedRestartParent()
+    await store.put('workflows', parent)
+    const controller = new AbortController()
+    const reason = new Error('restart workspace lookup cancelled')
+    const failure = Object.assign(new Error('ordinary realpath failure'), { code: 'EIO' })
+    const internals = engine as unknown as { resolveWorkflowRealpath(value: string): Promise<string> }
+    vi.spyOn(internals, 'resolveWorkflowRealpath').mockImplementation(async () => {
+      controller.abort(reason)
+      throw failure
+    })
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      { ...exec('session-restart', 'C:/workspace'), signal: controller.signal } as ToolRunContext,
+    )).rejects.toBe(reason)
+    expect(bootstrap).not.toHaveBeenCalled()
+  })
+
+  it('retains lexical compatibility for a missing committed-restart workspace', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-realpath-missing')
+    const parent = committedRestartParent()
+    await store.put('workflows', parent)
+    const missing = Object.assign(new Error('workspace is absent'), { code: 'ENOENT' })
+    const internals = engine as unknown as { resolveWorkflowRealpath(value: string): Promise<string> }
+    vi.spyOn(internals, 'resolveWorkflowRealpath').mockRejectedValue(missing)
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+    const recovered = await engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )
+
+    expect(recovered.workflow).toMatchObject({
+      id: parent.recovery!.restartedAsWorkflowId,
+      recoveredFromWorkflowId: parent.id,
+    })
+    expect(bootstrap).toHaveBeenCalledTimes(1)
+  })
+
+  it('seals an old-boot running fixed child under its own workflow lock without replaying bootstrap', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-running-child')
+    const parent = committedRestartParent()
+    const child = committedRestartChild(parent)
+    await store.put('workflows', parent)
+    await store.put('workflows', child)
+    const release = vi.fn(async (_workflow: WorkflowRecord, _execution: WorkflowExec) => undefined)
+    workflowHost.releaseManagedSource = release
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+
+    const recovered = await engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )
+
+    expect(recovered).toMatchObject({
+      status: 'parked',
+      alreadyWaiting: true,
+      workflow: {
+        id: child.id,
+        status: 'interrupted',
+        cursor: 'recovery_required',
+        bootId: 'boot_engine',
+        lastFailure: { code: 'service_restart_incomplete', retryable: false },
+        interrupt: { kind: 'await_recovery' },
+      },
+    })
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(release).toHaveBeenCalledWith(expect.objectContaining({ id: child.id }), expect.any(Object))
+    expect(release.mock.calls[0]?.[1]).not.toHaveProperty('signal')
+    expect(bootstrap).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(child.id)).resolves.toMatchObject({
+      status: 'interrupted',
+      cursor: 'recovery_required',
+      interrupt: { kind: 'await_recovery' },
+    })
+  })
+
+  it('preserves source-release settlement priority while sealing an old-boot fixed child', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'restart-running-child-release')
+    const parent = committedRestartParent()
+    const child = committedRestartChild(parent)
+    await store.put('workflows', parent)
+    await store.put('workflows', child)
+    const settlement = new Error('fixed child managed-source release failed')
+    workflowHost.releaseManagedSource = vi.fn(async () => { throw settlement })
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+
+    await expect(engine.recover(
+      { workflowId: parent.id },
+      exec('session-restart', 'C:/workspace'),
+    )).rejects.toBe(settlement)
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(child.id)).resolves.toMatchObject({
+      status: 'running',
+      bootId: 'boot_previous',
+    })
+  })
+
+  it('does not rewrite a committed terminal outcome when cancellation begins during view projection', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'committed-view-abort')
+    const turn = exec('session-committed-view-abort', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'installed'
+    record.status = 'running'
+    workflowHost.releaseManagedSource = vi.fn(async () => undefined)
+    const controller = new AbortController()
+    const reason = new Error('committed view cancelled')
+    const internals = engine as unknown as {
+      view(
+        workflow: WorkflowRecord,
+        currentResolution?: ResolutionRecord,
+        extras?: { status?: 'parked'; alreadyWaiting?: boolean },
+      ): Promise<WorkflowView>
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+    const originalView = internals.view.bind(engine)
+    vi.spyOn(internals, 'view').mockImplementation(async (...args) => {
+      const result = await originalView(...args)
+      controller.abort(reason)
+      return result
+    })
+    const put = vi.spyOn(store, 'put')
+
+    await expect(internals.runUntilPark(
+      record,
+      { ...turn, signal: controller.signal } as ToolRunContext,
+      undefined,
+      current,
+    )).rejects.toBe(reason)
+    expect(put).toHaveBeenCalledTimes(2)
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+      status: 'completed',
+      cursor: 'installed',
+    })
+    expect((await store.getWorkflow(record.id)).error).toBeUndefined()
+  })
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation when a linked installation view read aborts then %s',
+    async (mode) => {
+      const current = resolution('calculator')
+      const { store, workflowHost, engine } = await makeEngine(current, `view-installation-${mode}-abort`)
+      const started = await engine.start('calculator', exec())
+      const record = await store.getWorkflow(started.workflow.id)
+      record.lastInstallationId = `installation_${'6'.repeat(24)}`
+      const controller = new AbortController()
+      const reason = new Error(`view installation ${mode} cancelled`)
+      workflowHost.getInstallation = async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary installation view failure')
+        return { id: record.lastInstallationId } as InstallationRecord
+      }
+      const internals = engine as unknown as {
+        view(
+          workflow: WorkflowRecord,
+          resolution: ResolutionRecord,
+          extras: Record<string, never>,
+          signal: AbortSignal,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(internals.view(record, current, {}, controller.signal)).rejects.toBe(reason)
+    },
+  )
+
+  it('does not disguise a corrupt linked installation as an absent view record', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'view-corrupt-installation')
+    const started = await engine.start('calculator', exec())
+    const record = await store.getWorkflow(started.workflow.id)
+    record.lastInstallationId = `installation_${'5'.repeat(24)}`
+    const failure = new EvolutionError('invalid_input', 'corrupt linked installation')
+    workflowHost.getInstallation = async () => { throw failure }
+    const internals = engine as unknown as {
+      view(workflow: WorkflowRecord, resolution: ResolutionRecord): Promise<WorkflowView>
+    }
+
+    await expect(internals.view(record, current)).rejects.toBe(failure)
+  })
+
+  it('keeps a post-checkpoint guard safety error ahead of concurrent cancellation', async () => {
+    const current = resolution('calculator')
+    const { store, workflowHost, engine } = await makeEngine(current, 'terminal-sync-guard-priority')
+    const turn = exec('session-terminal-sync-guard', 'C:/workspace')
+    const started = await engine.start('calculator', turn)
+    const record = await store.getWorkflow(started.workflow.id)
+    record.cursor = 'installed'
+    record.status = 'running'
+    workflowHost.releaseManagedSource = vi.fn(async () => undefined)
+    const controller = new AbortController()
+    const reason = new Error('guard synchronization cancellation')
+    const guardError = new Error('guard safety synchronization failed')
+    const internals = engine as unknown as {
+      syncGuard(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution?: ResolutionRecord,
+      ): void
+      runUntilPark(
+        workflow: WorkflowRecord,
+        execution: ToolRunContext,
+        guardGeneration: undefined,
+        currentResolution: ResolutionRecord,
+      ): Promise<WorkflowView>
+    }
+    const originalSync = internals.syncGuard.bind(engine)
+    let syncCalls = 0
+    vi.spyOn(internals, 'syncGuard').mockImplementation((...args) => {
+      syncCalls += 1
+      if (syncCalls === 2) {
+        controller.abort(reason)
+        throw guardError
+      }
+      originalSync(...args)
+    })
+
+    await expect(internals.runUntilPark(
+      record,
+      { ...turn, signal: controller.signal } as ToolRunContext,
+      undefined,
+      current,
+    )).rejects.toBe(guardError)
+    expect(syncCalls).toBe(2)
+    await expect(store.getWorkflow(record.id)).resolves.toMatchObject({
+      status: 'failed',
+      error: { message: guardError.message },
+    })
+  })
+
   it('starts at a model-controlled discovery checkpoint without an interrupt or candidate snapshot', async () => {
     const { store, engine } = await makeEngine(resolution(), 'discovery')
 
@@ -599,6 +2044,96 @@ describe('workflow engine autonomous discovery', () => {
     ])
   })
 
+  it('rejects a persisted interrupt option that canonical Host policy did not issue', async () => {
+    const record = resolution('incomplete capability')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = false
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'forged-interrupt-option')
+    const turn = exec('session-forged-interrupt-option')
+    const waiting = await engine.start(record.requirement, turn)
+    expect(waiting.workflow).toMatchObject({ cursor: 'await_selection', status: 'interrupted' })
+    expect(waiting.workflow.interrupt?.options.map((option) => option.id)).not.toContain('create_new')
+    const persisted = await store.getWorkflow(waiting.workflow.id)
+    persisted.interrupt!.options.push({ id: 'create_new', labelEn: 'Create new', labelZh: '新建' })
+    await store.put('workflows', persisted)
+    const applyDecision = vi.spyOn(workflowHost, 'applyDecision')
+    const prepareCreate = vi.fn(async () => { throw new Error('must not create') })
+    workflowHost.prepareCreate = prepareCreate
+    const put = vi.spyOn(store, 'put')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '那就新建' }] })
+
+    await expect(engine.resume({
+      workflowId: persisted.id,
+      interruptId: persisted.interrupt!.interruptId,
+      decision: { action: 'create_new' },
+    }, turn)).rejects.toThrow(/canonical Host control/i)
+    expect(applyDecision).not.toHaveBeenCalled()
+    expect(prepareCreate).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-boolean discovery-complete field before old-boot interrupt reissue', async () => {
+    const record = resolution('incomplete capability')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = false
+    const { store, workflowHost, engine } = await makeEngine(record, 'corrupt-reissue-resolution')
+    const turn = exec('session-corrupt-reissue-resolution')
+    const waiting = await engine.start(record.requirement, turn)
+    const persisted = await store.getWorkflow(waiting.workflow.id)
+    persisted.bootId = 'boot_previous'
+    persisted.interrupt!.bootId = 'boot_previous'
+    await store.put('workflows', persisted)
+    const currentResolution = await store.getResolution(persisted.resolutionId!)
+    await store.put('resolutions', {
+      ...currentResolution,
+      remoteDiscoveryComplete: 'false' as unknown as boolean,
+    })
+    const prepareCreate = vi.fn(async () => { throw new Error('must not create') })
+    workflowHost.prepareCreate = prepareCreate
+    const put = vi.spyOn(store, 'put')
+
+    await expect(engine.resume({
+      workflowId: persisted.id,
+      interruptId: persisted.interrupt!.interruptId,
+      navigation: { kind: 'stop' },
+    }, turn)).rejects.toThrow(/resolution control state is malformed/i)
+    expect(prepareCreate).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(persisted.id)).resolves.toMatchObject({
+      bootId: 'boot_previous',
+      interrupt: { bootId: 'boot_previous' },
+    })
+  })
+
+  it('rejects an interrupt kind that does not match its persisted workflow cursor', async () => {
+    const record = resolution('incomplete capability')
+    record.decision = 'inspect_remote'
+    record.localCandidates = []
+    record.remoteCandidates = []
+    record.remoteDiscoveryComplete = false
+    const { store, guard, workflowHost, engine } = await makeEngine(record, 'mismatched-interrupt-kind')
+    const turn = exec('session-mismatched-interrupt-kind')
+    const waiting = await engine.start(record.requirement, turn)
+    const persisted = await store.getWorkflow(waiting.workflow.id)
+    persisted.interrupt!.kind = 'await_confirmation'
+    await store.put('workflows', persisted)
+    const applyDecision = vi.spyOn(workflowHost, 'applyDecision')
+    const put = vi.spyOn(store, 'put')
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '停止' }] })
+
+    await expect(engine.resume({
+      workflowId: persisted.id,
+      interruptId: persisted.interrupt!.interruptId,
+      navigation: { kind: 'stop' },
+    }, turn)).rejects.toThrow(/interrupt kind/i)
+    expect(applyDecision).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
   it('rejects oversized presentations, duplicate ids, and candidates outside the discovery pool', async () => {
     const { store, engine } = await makeEngine(resolution(), 'present-invalid')
     const discovery = await engine.start('calculator', exec())
@@ -804,6 +2339,57 @@ describe('workflow engine autonomous discovery', () => {
     expect(persisted.consumedInterruptIds).toContain(consumedInterruptId)
   })
 
+  it.each(['abort', 'error'] as const)(
+    'does not overwrite a landed search_more resolution when recovery reread ends with %s',
+    async (mode) => {
+      const record = resolution('review capability')
+      record.decision = 'inspect_remote'
+      record.remoteCandidates = [
+        { repository: 'acme/old-review', name: 'old-review', description: '', stars: 1, updatedAt: null, topics: [] },
+      ]
+      const { store, guard, workflowHost, engine } = await makeEngine(record, `search-more-reread-${mode}`)
+      const turn = exec(`session-search-more-reread-${mode}`)
+      const { selection } = await startAndPresent(engine, 'review capability', turn)
+      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '换个范围继续找' }] })
+      const landed = { ...record, reasons: [...record.reasons, `landed-${mode}`] }
+      const applyFailure = new Error('apply navigation rejected after landing')
+      workflowHost.refineRemote = vi.fn(async (current) => current)
+      workflowHost.applyNavigation = async () => {
+        await store.put('resolutions', landed)
+        throw applyFailure
+      }
+      const controller = new AbortController()
+      const reason = new Error('search_more reread cancelled')
+      const readFailure = new Error('search_more reread unavailable')
+      const originalGet = store.getResolution.bind(store)
+      let reads = 0
+      workflowHost.getResolution = async (id) => {
+        reads += 1
+        if (reads === 1) return await originalGet(id)
+        if (mode === 'abort') controller.abort(reason)
+        throw readFailure
+      }
+      const originalPut = store.put.bind(store)
+      let resolutionPuts = 0
+      vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+        if (kind === 'resolutions') resolutionPuts += 1
+        await originalPut(kind, value)
+      })
+
+      const result = engine.resume({
+        workflowId: selection.workflow.id,
+        interruptId: selection.workflow.interrupt!.interruptId,
+        navigation: { kind: 'search_more', queries: ['review automation'] },
+      }, { ...turn, signal: controller.signal } as ToolRunContext)
+      if (mode === 'abort') await expect(result).rejects.toBe(reason)
+      else await expect(result).rejects.toBe(readFailure)
+      expect(resolutionPuts).toBe(1)
+      await expect(store.getResolution(record.id)).resolves.toMatchObject({
+        reasons: expect.arrayContaining([`landed-${mode}`]),
+      })
+    },
+  )
+
   it('rejects a non-root GitHub refinement URL without consuming the interrupt', async () => {
     const record = resolution()
     record.decision = 'inspect_remote'
@@ -832,7 +2418,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(refineRemote).not.toHaveBeenCalled()
   })
 
-  it('permits local reuse only after Gate 1 and binds the receipt and lease to the sealed candidate', async () => {
+  it('permits local reuse only after Gate 1 and binds the receipt and commitment to the sealed candidate', async () => {
     const { guard, engine } = await makeEngine(resolution(), 'reuse')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
@@ -848,8 +2434,55 @@ describe('workflow engine autonomous discovery', () => {
     expect(reused.workflow).toMatchObject({ status: 'completed', cursor: 'reuse_local' })
     expect(reused.workflow.selectionReceipt).toMatchObject({ kind: 'reuse_local', candidateIds: [candidate.id] })
     expect(reused.workflow.selectionReceipt?.candidateDigests[candidate.id]).toBe(candidate.digest)
-    expect(reused.workflow.executionLease).toMatchObject({ candidateId: candidate.id, candidateDigest: candidate.digest, endpoint: { kind: 'exact_tool', name: 'pwsh' } })
+    expect(reused.workflow.actionCommitment).toMatchObject({ candidateId: candidate.id, candidateDigest: candidate.digest, endpoint: { kind: 'exact_tool', name: 'pwsh' } })
   })
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation before persisting a built-in Gate-1 selection when profile resolution aborts then %s',
+    async (mode) => {
+      const record = resolution('current time')
+      record.localCandidates = [{
+        kind: 'plugin',
+        name: '@deepseek-ai/dsh-time-context',
+        description: 'Time context',
+        availability: 'host_bundled',
+        confidence: 0.92,
+        fit: 'full',
+        reuseEligible: false,
+        hostBundled: {
+          packageName: '@deepseek-ai/dsh-time-context',
+          version: '0.1.1-rc.2',
+          mountId: 'time-context',
+        },
+      }]
+      const { store, guard, workflowHost, engine } = await makeEngine(record, `enable-profile-${mode}`)
+      const turn = exec(`session-enable-profile-${mode}`)
+      const { selection } = await startAndPresent(engine, 'current time', turn)
+      const candidate = selection.workflow.candidateSnapshot![0]!
+      const controller = new AbortController()
+      const reason = new Error(`enable profile ${mode} cancelled`)
+      workflowHost.enableTargetProfile = async (received) => {
+        expect(received.signal).toBe(controller.signal)
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary profile resolution failure')
+        return 'web'
+      }
+      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '直接启用' }] })
+      const put = vi.spyOn(store, 'put')
+
+      await expect(engine.resume({
+        workflowId: selection.workflow.id,
+        interruptId: selection.workflow.interrupt!.interruptId,
+        navigation: { kind: 'enable_builtin', candidateIds: [candidate.id] },
+      }, { ...turn, signal: controller.signal } as ToolRunContext)).rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+      await expect(store.getWorkflow(selection.workflow.id)).resolves.toMatchObject({
+        cursor: 'await_selection',
+        status: 'interrupted',
+      })
+      await expect(store.getWorkflow(selection.workflow.id)).resolves.not.toHaveProperty('invalidResumeAttempt')
+    },
+  )
 
   it('parks a host-bundled Gate-1 selection and enables only after a fresh bound Gate-2 decision', async () => {
     const record = resolution('current time')
@@ -915,6 +2548,7 @@ describe('workflow engine autonomous discovery', () => {
     vi.mocked(workflowHost.enableBuiltin!).mockImplementation(async (workflow) => {
       capturedCommitment = structuredClone(workflow.actionCommitment)
       capturedReceipt = structuredClone(workflow.selectionReceipt)
+      return builtinInstallation(workflow)
     })
 
     const enabled = await engine.resume({
@@ -937,8 +2571,136 @@ describe('workflow engine autonomous discovery', () => {
       },
     })
     expect(capturedReceipt).toMatchObject({ phase: 'gate2', kind: 'enable_builtin', candidateIds: [candidate.id] })
-    expect(enabled.workflow.executionLease).toBeUndefined()
     expect(workflowHost.enableBuiltin).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation at the final workflow reread when storage does %s',
+    async (mode) => {
+      const {
+        store,
+        guard,
+        workflowHost,
+        engine,
+        turn,
+        candidateId,
+        confirmation,
+      } = await prepareBuiltinConfirmation(`final-reread-${mode}`)
+      const controller = new AbortController()
+      const reason = new Error(`final workflow reread ${mode} cancelled`)
+      const resumeTurn = { ...turn, signal: controller.signal } as ToolRunContext
+      const originalGet = store.getWorkflow.bind(store)
+      let reads = 0
+      vi.spyOn(store, 'getWorkflow').mockImplementation(async (id) => {
+        const record = await originalGet(id)
+        reads += 1
+        if (reads === 2) {
+          controller.abort(reason)
+          if (mode === 'reject') throw new Error('ordinary final workflow read failure')
+        }
+        return record
+      })
+      const checkpoint = vi.spyOn(store, 'put')
+      const applyDecision = vi.spyOn(workflowHost, 'applyDecision')
+      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+
+      await expect(engine.resume({
+        workflowId: confirmation.workflow.id,
+        interruptId: confirmation.workflow.interrupt!.interruptId,
+        decision: { action: 'enable_builtin', candidateId },
+      }, resumeTurn)).rejects.toBe(reason)
+
+      expect(checkpoint).not.toHaveBeenCalled()
+      expect(applyDecision).not.toHaveBeenCalled()
+      await expect(originalGet(confirmation.workflow.id)).resolves.toMatchObject({
+        generation: confirmation.workflow.generation,
+        status: 'interrupted',
+        cursor: 'await_confirmation',
+        interrupt: { interruptId: confirmation.workflow.interrupt!.interruptId },
+      })
+    },
+  )
+
+  it('checkpoints one final decision before Host application and settles application failure without replay', async () => {
+    const {
+      store,
+      guard,
+      workflowHost,
+      engine,
+      turn,
+      candidateId,
+      confirmation,
+    } = await prepareBuiltinConfirmation('single-host-final-decision')
+    const interruptId = confirmation.workflow.interrupt!.interruptId
+    const effect = vi.fn(async () => builtinInstallation(confirmation.workflow))
+    workflowHost.enableBuiltin = effect
+    workflowHost.applyDecision = vi.fn(async (current) => {
+      await expect(store.getWorkflow(confirmation.workflow.id)).resolves.toMatchObject({
+        generation: confirmation.workflow.generation + 1,
+        status: 'running',
+        cursor: 'enable_builtin',
+        consumedInterruptIds: expect.arrayContaining([interruptId]),
+        interrupt: undefined,
+        actionCommitment: { requestedAction: 'enable_builtin' },
+      })
+      throw new Error('injected decision application failure')
+    })
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+
+    const recovered = await engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId,
+      decision: { action: 'enable_builtin', candidateId },
+    }, turn)
+
+    expect(recovered.workflow).toMatchObject({
+      generation: confirmation.workflow.generation + 1,
+      status: 'interrupted',
+      cursor: 'recovery_required',
+      lastFailure: { code: 'final_decision_application_failed', retryable: false },
+      interrupt: { kind: 'await_recovery' },
+    })
+    expect(effect).not.toHaveBeenCalled()
+  })
+
+
+  it('does not overwrite a running checkpoint when a later effect aborts', async () => {
+    const {
+      store,
+      guard,
+      workflowHost,
+      engine,
+      turn,
+      candidateId,
+      confirmation,
+    } = await prepareBuiltinConfirmation('claim-advanced-checkpoint')
+    const abortController = new AbortController()
+    const resumeTurn = { ...turn, signal: abortController.signal } as ToolRunContext
+    const effect = vi.fn(async () => {
+      abortController.abort()
+      throw new Error('injected post-checkpoint abort')
+    })
+    workflowHost.enableBuiltin = effect
+    const interruptId = confirmation.workflow.interrupt!.interruptId
+    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+
+    await expect(engine.resume({
+      workflowId: confirmation.workflow.id,
+      interruptId,
+      decision: { action: 'enable_builtin', candidateId },
+    }, resumeTurn)).rejects.toThrow(/injected post-checkpoint abort/u)
+
+    const advanced = await store.getWorkflow(confirmation.workflow.id)
+    expect(advanced).toMatchObject({
+      generation: confirmation.workflow.generation + 1,
+      cursor: 'enable_builtin',
+      status: 'failed',
+      error: { message: 'injected post-checkpoint abort' },
+    })
+    expect(advanced.interrupt).toBeUndefined()
+    expect(advanced.lastFailure?.code).not.toBe('final_confirmation_precheckpoint_failed')
+    expect(advanced.consumedInterruptIds?.filter((id) => id === interruptId)).toHaveLength(1)
+    expect(effect).toHaveBeenCalledTimes(1)
   })
 
   it('rejects stale or forged Gate-2 built-in enablement without mutation', async () => {
@@ -1175,6 +2937,37 @@ describe('workflow engine autonomous discovery', () => {
       .rejects.toThrow(/call budget is exhausted/i)
   })
 
+  it.each(['resolution', 'review', 'installation'] as const)(
+    'preserves exact cancellation and writes no diagnosis when the linked %s read aborts',
+    async (linkedKind) => {
+      const record = resolution()
+      record.remoteDiscoveryComplete = false
+      const { store, workflowHost, engine } = await makeEngine(record, `diagnose-${linkedKind}-abort`)
+      const started = await engine.start('calculator', exec())
+      const stored = await store.getWorkflow(started.workflow.id)
+      if (linkedKind === 'review') stored.lastReviewId = `review_${'7'.repeat(24)}`
+      if (linkedKind === 'installation') stored.lastInstallationId = `installation_${'8'.repeat(24)}`
+      await store.put('workflows', stored)
+
+      const controller = new AbortController()
+      const reason = new Error(`diagnose ${linkedKind} cancelled`)
+      const abortRead = async (): Promise<never> => {
+        controller.abort(reason)
+        throw new Error(`ordinary ${linkedKind} read failure`)
+      }
+      if (linkedKind === 'resolution') workflowHost.getResolution = abortRead
+      if (linkedKind === 'review') workflowHost.getReview = abortRead
+      if (linkedKind === 'installation') workflowHost.getInstallation = abortRead
+      const put = vi.spyOn(store, 'put')
+      const turn = { ...exec(), signal: controller.signal } as ToolRunContext
+
+      await expect(engine.diagnose({ workflowId: stored.id, probes: ['discovery'] }, turn))
+        .rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+      await expect(store.getWorkflow(stored.id)).resolves.not.toHaveProperty('lastDiagnosis')
+    },
+  )
+
   it('diagnoses an installation from its bounded summary and structured failure facts', async () => {
     const { store, engine } = await makeEngine(resolution(), 'diagnose-installation')
     const started = await engine.start('calculator', exec())
@@ -1249,7 +3042,9 @@ describe('workflow engine autonomous discovery', () => {
     let refineCalls = 0
     workflowHost.refineRemote = async (current) => {
       refineCalls += 1
-      return refineCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+      const next = refineCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+      await store.put('resolutions', next)
+      return next
     }
     const turn = exec()
     const started = await engine.start('calculator', turn)
@@ -1275,6 +3070,85 @@ describe('workflow engine autonomous discovery', () => {
       code: 'command_failed',
     })])
   })
+
+  it.each(['return', 'reject'] as const)(
+    'writes no invalid managed-work resume attempt when its resolution read aborts then %s',
+    async (mode) => {
+      const current = resolution('new capability')
+      const { store, workflowHost, engine } = await makeEngine(current, `managed-invalid-resolution-${mode}`)
+      const turn = exec(`session-managed-invalid-${mode}`, 'C:/workspace')
+      const started = await engine.start('new capability', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_modify_work'
+      record.status = 'interrupted'
+      delete record.interrupt
+      const controller = new AbortController()
+      const reason = new Error(`managed invalid resolution ${mode} cancelled`)
+      workflowHost.getResolution = async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary managed resolution read failure')
+        return current
+      }
+      const put = vi.spyOn(store, 'put')
+      const internals = engine as unknown as {
+        resumeFinishManagedWork(
+          workflow: WorkflowRecord,
+          input: { decision: { action: string } },
+          execution: ToolRunContext,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(internals.resumeFinishManagedWork(
+        record,
+        { decision: { action: 'stop' } },
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+      expect(record.invalidResumeAttempt).toBeUndefined()
+    },
+  )
+
+  it.each(['return', 'reject'] as const)(
+    'does not advance managed work when its required resolution read aborts then %s',
+    async (mode) => {
+      const current = resolution('new capability')
+      const { store, workflowHost, engine } = await makeEngine(current, `managed-required-resolution-${mode}`)
+      const turn = exec(`session-managed-required-${mode}`, 'C:/workspace')
+      const started = await engine.start('new capability', turn)
+      const record = await store.getWorkflow(started.workflow.id)
+      record.cursor = 'await_modify_work'
+      record.status = 'interrupted'
+      delete record.interrupt
+      const originalGeneration = record.generation
+      const controller = new AbortController()
+      const reason = new Error(`managed required resolution ${mode} cancelled`)
+      workflowHost.getResolution = async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary required resolution read failure')
+        return current
+      }
+      const put = vi.spyOn(store, 'put')
+      const internals = engine as unknown as {
+        resumeFinishManagedWork(
+          workflow: WorkflowRecord,
+          input: { navigation: { kind: string } },
+          execution: ToolRunContext,
+        ): Promise<WorkflowView>
+      }
+
+      await expect(internals.resumeFinishManagedWork(
+        record,
+        { navigation: { kind: 'finish_managed_work' } },
+        { ...turn, signal: controller.signal } as ToolRunContext,
+      )).rejects.toBe(reason)
+      expect(put).not.toHaveBeenCalled()
+      expect(record).toMatchObject({
+        generation: originalGeneration,
+        status: 'interrupted',
+        cursor: 'await_modify_work',
+      })
+    },
+  )
 
   it('keeps managed construction open when sealing rejects the current source state', async () => {
     const record = resolution('new capability')
@@ -1402,7 +3276,9 @@ describe('workflow engine autonomous discovery', () => {
     let refinementCalls = 0
     workflowHost.refineRemote = async (current) => {
       refinementCalls += 1
-      return refinementCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+      const next = refinementCalls >= 2 ? { ...current, remoteDiscoveryComplete: true } : current
+      await store.put('resolutions', next)
+      return next
     }
     workflowHost.prepareCreate = async (current, _exec, workflow) => {
       const sourceRoot = path.join(root, 'managed-source')
@@ -1509,7 +3385,11 @@ describe('workflow engine autonomous discovery', () => {
       lastInstallationId: installationId,
     }
     await store.put('workflows', workflow)
-    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    const cleanupInstallation = vi.fn(async (id: string) => {
+      const currentInstallation = await store.getInstallation(id)
+      await store.put('installations', { ...currentInstallation, removed: true })
+      return { installationId: id, removed: true, restartRequired: true }
+    })
     workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
     const recoveredAfterRestart = await engine.start('calculator', turn)
@@ -1614,7 +3494,7 @@ describe('workflow engine autonomous discovery', () => {
       updatedAt: '2026-08-21T00:00:00.000Z',
       requirement: 'calculator',
       requirementNormalized: 'calculator',
-      cwd: process.cwd(),
+      cwd: record.cwd,
       ownerSessionId: 'session-1',
       bootId: 'boot_engine',
       resolutionId: record.id,
@@ -1629,9 +3509,13 @@ describe('workflow engine autonomous discovery', () => {
       completionTurnId: 'turn_install',
     }
     await store.put('workflows', workflow)
-    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    const cleanupInstallation = vi.fn(async (id: string) => {
+      const currentInstallation = await store.getInstallation(id)
+      await store.put('installations', { ...currentInstallation, removed: true })
+      return { installationId: id, removed: true, restartRequired: true }
+    })
     workflowHost.cleanupInstallation = cleanupInstallation
-    const turn = exec()
+    const turn = exec('session-1', record.cwd)
 
     const sameTurn = await engine.recover({ workflowId: workflow.id }, turn)
     expect(sameTurn).toMatchObject({ status: 'parked', alreadyWaiting: true })
@@ -1648,7 +3532,7 @@ describe('workflow engine autonomous discovery', () => {
     const denied = vi.fn(async () => {
       throw new EvolutionError('approval_required', 'The removal was not approved (denied)', { outcome: 'denied' })
     })
-    const deniedEngine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation: denied })
+    const deniedEngine = new WorkflowEngine(store, guard, { ...host(store, record), cleanupInstallation: denied }, false)
     await expect(deniedEngine.recover({ workflowId: workflow.id }, turn)).rejects.toMatchObject({
       code: 'approval_required',
     })
@@ -1694,7 +3578,17 @@ describe('workflow engine autonomous discovery', () => {
     expect(old.interrupt).toBeUndefined()
     expect(old.selectionReceipt).toEqual({ id: 'selection_old' })
 
-    await expect(engine.recover({ workflowId: workflow.id }, turn)).rejects.toThrow(/not waiting for a recovery decision/i)
+    const existingChild = await store.getWorkflow(restarted.workflow.id)
+    expect(existingChild).toMatchObject({
+      recoveredFromWorkflowId: old.id,
+      ownerSessionId: old.ownerSessionId,
+      cwd: old.recovery!.restart!.cwd,
+      requirementNormalized: old.recovery!.restart!.normalized,
+      intent: old.recovery!.restart!.intent,
+    })
+    const converged = await engine.recover({ workflowId: workflow.id }, turn)
+    expect(converged.workflow.id).toBe(restarted.workflow.id)
+    expect(cleanupInstallation).toHaveBeenCalledOnce()
   })
 
   it('keeps a completed V9 temporary receipt readable and explicitly removes it before a fresh V10 workflow', async () => {
@@ -1751,7 +3645,11 @@ describe('workflow engine autonomous discovery', () => {
       lastReviewId: `review_${'e'.repeat(24)}`,
       completionTurnId: 'turn_install',
     } satisfies WorkflowRecord)
-    const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: true }))
+    const cleanupInstallation = vi.fn(async (id: string) => {
+      const currentInstallation = await store.getInstallation(id)
+      await store.put('installations', { ...currentInstallation, removed: true })
+      return { installationId: id, removed: true, restartRequired: true }
+    })
     workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
     const currentRequest = '现在清理旧试装并找农历转换能力'
@@ -1776,7 +3674,7 @@ describe('workflow engine autonomous discovery', () => {
         action: 'cleanup_and_restart',
         cleanup: 'removed',
         installationId,
-        restartRequired: true,
+        restartRequired: false,
         restartedAsWorkflowId: restarted.workflow.id,
       },
     })
@@ -2044,6 +3942,7 @@ describe('workflow engine autonomous discovery', () => {
         dshHome: root,
         packageName: 'dsh-plugin-beta',
         installSpec: fixedReview.installSpec ?? '',
+        installPhase: 'completed',
         installState: 'installed',
         installOutcome: 'activated',
         installed: true,
@@ -2257,6 +4156,7 @@ describe('workflow engine autonomous discovery', () => {
         dshHome: root,
         packageName: 'dsh-plugin-alpha',
         installSpec: localReview.installSpec ?? '',
+        installPhase: 'completed',
         installState: 'installed',
         installOutcome: 'activated',
         installed: true,
@@ -2437,6 +4337,141 @@ describe('workflow engine autonomous discovery', () => {
     })
   })
 
+  it('preserves exact cancellation after the supersede reread and writes no checkpoint', async () => {
+    const { engine, guard, store } = await makeEngine(resolution('first'), 'supersede-reread-abort')
+    const firstTurn = exec('session-supersede-reread')
+    guard.rememberUserMessage(firstTurn.agent, { content: [{ type: 'text', text: '第一个含糊需求' }] })
+    const first = await engine.start('first summary', firstTurn, undefined, '你具体指什么？')
+    guard.rememberUserMessage(firstTurn.agent, { content: [{ type: 'text', text: '现在改成找农历转换插件' }] })
+    const controller = new AbortController()
+    const reason = new Error('supersede reread cancelled')
+    const originalGet = store.getWorkflow.bind(store)
+    const get = vi.spyOn(store, 'getWorkflow').mockImplementation(async (id) => {
+      const record = await originalGet(id)
+      controller.abort(reason)
+      return record
+    })
+    const put = vi.spyOn(store, 'put')
+    const nextTurn = { ...firstTurn, signal: controller.signal } as ToolRunContext
+
+    await expect(engine.start('lunar calendar plugin', nextTurn)).rejects.toBe(reason)
+    expect(put).not.toHaveBeenCalled()
+    get.mockRestore()
+    await expect(store.getWorkflow(first.workflow.id)).resolves.toMatchObject({
+      status: 'interrupted',
+      cursor: 'await_clarification',
+    })
+  })
+
+  it('preserves exact cancellation after a stale-policy reread before cleanup or checkpoint', async () => {
+    const { engine, store, workflowHost } = await makeEngine(resolution('calculator'), 'stale-policy-reread-abort')
+    const turn = exec('session-stale-policy-reread')
+    const first = await engine.start('calculator', turn)
+    const stale = await store.getWorkflow(first.workflow.id)
+    stale.policyVersion = 'legacy-policy'
+    await store.put('workflows', stale)
+    const controller = new AbortController()
+    const reason = new Error('stale workflow reread cancelled')
+    const originalGet = store.getWorkflow.bind(store)
+    vi.spyOn(store, 'getWorkflow').mockImplementation(async (id) => {
+      const record = await originalGet(id)
+      controller.abort(reason)
+      return record
+    })
+    const release = vi.fn(async () => undefined)
+    workflowHost.releaseManagedSource = release
+    const put = vi.spyOn(store, 'put')
+    const nextTurn = { ...turn, signal: controller.signal } as ToolRunContext
+
+    await expect(engine.start('calculator', nextTurn)).rejects.toBe(reason)
+    expect(release).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('does not complete a stale-policy workflow or start replacement work when source release fails', async () => {
+    const { engine, store, workflowHost } = await makeEngine(resolution('calculator'), 'stale-policy-release-failure')
+    const turn = exec('session-stale-policy-release')
+    const first = await engine.start('calculator', turn)
+    const stale = await store.getWorkflow(first.workflow.id)
+    stale.policyVersion = 'legacy-policy'
+    await store.put('workflows', stale)
+    const releaseFailure = new Error('managed source completion failed')
+    const release = vi.fn(async () => { throw releaseFailure })
+    workflowHost.releaseManagedSource = release
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+
+    await expect(engine.start('calculator', turn)).rejects.toBe(releaseFailure)
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(first.workflow.id)).resolves.toMatchObject({
+      policyVersion: 'legacy-policy',
+      status: 'interrupted',
+    })
+  })
+
+  it('does not checkpoint restart recovery when old-boot managed-source release fails', async () => {
+    const { engine, store, workflowHost } = await makeEngine(resolution('calculator'), 'old-boot-source-release-failure')
+    const turn = exec('session-old-boot-release', 'C:/workspace')
+    const first = await engine.start('calculator', turn)
+    const running = await store.getWorkflow(first.workflow.id)
+    running.status = 'running'
+    running.bootId = 'boot_previous'
+    delete running.interrupt
+    await store.put('workflows', running)
+    const settlement = new Error('old managed source release failed')
+    workflowHost.releaseManagedSource = vi.fn(async () => { throw settlement })
+    const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+    const put = vi.spyOn(store, 'put')
+
+    await expect(engine.start('calculator', turn)).rejects.toBe(settlement)
+    expect(workflowHost.releaseManagedSource).toHaveBeenCalledTimes(1)
+    expect(bootstrap).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    await expect(store.getWorkflow(first.workflow.id)).resolves.toMatchObject({
+      status: 'running',
+      bootId: 'boot_previous',
+    })
+  })
+
+  it.each(['running', 'interrupted'] as const)(
+    'preserves exact cancellation after a reusable %s workflow reread before restart or view work',
+    async (status) => {
+      const { engine, store, workflowHost } = await makeEngine(resolution('calculator'), `reusable-${status}-reread-abort`)
+      const turn = exec(`session-reusable-${status}`, 'C:/workspace')
+      const first = await engine.start('calculator', turn)
+      if (status === 'running') {
+        const record = await store.getWorkflow(first.workflow.id)
+        record.status = 'running'
+        await store.put('workflows', record)
+      }
+      const controller = new AbortController()
+      const reason = new Error(`reusable ${status} reread cancelled`)
+      const originalGet = store.getWorkflow.bind(store)
+      vi.spyOn(store, 'getWorkflow').mockImplementation(async (id) => {
+        const record = await originalGet(id)
+        controller.abort(reason)
+        return record
+      })
+      const release = vi.fn(async () => undefined)
+      workflowHost.releaseManagedSource = release
+      const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
+      const reissue = vi.spyOn(
+        engine as unknown as { reissueInterrupt(workflow: WorkflowRecord, execution: ToolRunContext): Promise<void> },
+        'reissueInterrupt',
+      )
+      const put = vi.spyOn(store, 'put')
+      const nextTurn = { ...turn, signal: controller.signal } as ToolRunContext
+
+      await expect(engine.start('calculator', nextTurn)).rejects.toBe(reason)
+      expect(release).not.toHaveBeenCalled()
+      expect(reissue).not.toHaveBeenCalled()
+      expect(bootstrap).not.toHaveBeenCalled()
+      expect(put).not.toHaveBeenCalled()
+    },
+  )
+
   it('retries a legacy pre-verification install only after a fresh receipt-bound decision', async () => {
     const record = resolution('calculator')
     const { root, store, guard, workflowHost, engine } = await makeEngine(record, 'legacy-preverify-retry')
@@ -2566,6 +4601,7 @@ describe('workflow engine autonomous discovery', () => {
         ...failed,
         id: activeWorkflow.pendingInstallationId!,
         createdAt: '2026-08-28T00:00:03.000Z',
+        installPhase: 'completed',
         installState: 'installed',
         installOutcome: 'awaiting_user_test',
         installed: true,

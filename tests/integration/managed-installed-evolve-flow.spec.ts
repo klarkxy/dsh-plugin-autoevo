@@ -111,6 +111,7 @@ describe('installed evolve replacement on an isolated profile', () => {
       dshHome,
       packageName: 'dsh-plugin-alpha',
       installSpec: oldSpec,
+      installPhase: 'completed',
       installState: 'installed',
       installOutcome: 'awaiting_user_test',
       installed: true,
@@ -204,7 +205,7 @@ describe('installed evolve replacement on an isolated profile', () => {
     expect(removeCalls).toEqual([])
     expect(result.replacement?.state).toBe('new_present')
     expect(await launcher.profileDependencySpec(dshHome, 'web', 'dsh-plugin-alpha')).toBe(newSpec)
-    expect((await store.getInstallation(predecessorId)).supersededByInstallationId).toBe(result.id)
+    expect((await store.getInstallation(predecessorId)).supersededByInstallationId).toBeUndefined()
     expect(result.restartRequired).toBe(true)
   })
 })

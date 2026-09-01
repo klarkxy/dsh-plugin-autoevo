@@ -28,6 +28,68 @@ function execution(agent: Agent): ToolRunContext {
   } as unknown as ToolRunContext
 }
 
+function repairRuntime(lifecycle: {
+  whenIdle?: () => Promise<void>
+  onDispose?: () => void
+  disposeError?: Error
+} = {}) {
+  const parent = parentAgent()
+  const disposed = vi.fn(async () => {
+    lifecycle.onDispose?.()
+    if (lifecycle.disposeError) throw lifecycle.disposeError
+  })
+  const followup = vi.fn()
+  const childSession = {
+    header: { id: '', cwd: 'C:\\workspace', delegationDepth: 1 },
+    events: [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }],
+    deriveMessages: () => [{
+      role: 'assistant',
+      content: [{ type: 'text', text: `repair complete\n${_testing.REPAIR_RESULT_MARKER}` }],
+    }],
+  }
+  const child = {
+    id: '',
+    options: parent.options,
+    session: childSession,
+    followup,
+    whenIdle: async () => { await lifecycle.whenIdle?.() },
+  } as unknown as Agent
+  const registry = {
+    create: vi.fn(async (options: { sessionId: string; setup: (ctx: Context) => Promise<void> }) => {
+      ;(child as unknown as { id: string }).id = String(options.sessionId)
+      childSession.header.id = String(options.sessionId)
+      await options.setup({
+        agent: child,
+        systemPrompt: { section: vi.fn() },
+      } as unknown as Context)
+      return { agent: child, dispose: disposed }
+    }),
+    isOwnedBy: vi.fn(() => true),
+  } as unknown as AgentRegistry
+  ;(parent as unknown as { ctx: Context }).ctx = {
+    get: (name: string) => name === 'agents' ? registry : undefined,
+  } as unknown as Context
+  const hostCtx = {
+    get: (name: string) => {
+      if (name === 'permissionPresets') {
+        return {
+          names: ['danger-full-access'],
+          set: vi.fn(),
+          current: () => 'danger-full-access',
+        }
+      }
+      if (name === 'agentPresets') {
+        return {
+          mount: vi.fn(async () => ({ id: 'standard', trust: 'system' })),
+          composedPreset: () => 'standard',
+        }
+      }
+      return undefined
+    },
+  } as unknown as Context
+  return { parent, host: new DshRepairChildHost(hostCtx), disposed, followup }
+}
+
 describe('full-access fault repair gate', () => {
   it('requires a fresh user turn, consumes the ticket once, and relays the sealed objective', async () => {
     const guard = new CreationGuard({ bootId: 'boot-repair' })
@@ -189,5 +251,70 @@ describe('DSH full-access repair Agent lifecycle', () => {
       { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
       { type: 'approval/policy', data: { policy: 'never' } },
     ])
+  })
+
+  it('preserves the exact repair primary error when dispose also fails', async () => {
+    const primary = new Error('repair primary failure')
+    const cleanup = new Error('repair dispose failure')
+    const live = repairRuntime({
+      whenIdle: async () => { throw primary },
+      disposeError: cleanup,
+    })
+
+    let failure: unknown
+    try {
+      await live.host.run({
+        parent: live.parent,
+        cwd: 'C:\\workspace',
+        objective: 'repair primary failure',
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(primary)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('rejects with the repair dispose error when the primary operation succeeds', async () => {
+    const cleanup = new Error('repair dispose failure')
+    const live = repairRuntime({ disposeError: cleanup })
+
+    let failure: unknown
+    try {
+      await live.host.run({
+        parent: live.parent,
+        cwd: 'C:\\workspace',
+        objective: 'successful repair',
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(cleanup)
+    expect(live.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('preserves repair cancellation classification when dispose fails', async () => {
+    let resolveIdle!: () => void
+    const idle = new Promise<void>((resolve) => { resolveIdle = resolve })
+    const live = repairRuntime({
+      whenIdle: () => idle,
+      onDispose: resolveIdle,
+      disposeError: new Error('repair dispose failure'),
+    })
+    const controller = new AbortController()
+    const running = live.host.run({
+      parent: live.parent,
+      cwd: 'C:\\workspace',
+      objective: 'cancelled repair',
+      signal: controller.signal,
+    })
+    await vi.waitFor(() => expect(live.followup).toHaveBeenCalledOnce())
+    controller.abort()
+
+    await expect(running).rejects.toMatchObject({
+      code: 'command_failed',
+      details: { cancelled: true },
+    })
+    expect(live.disposed).toHaveBeenCalledOnce()
   })
 })

@@ -20,9 +20,9 @@ import type { InterruptPayload, ValidatedResume, WorkflowPendingInstall } from '
 export { prefersChinese }
 
 export function reviewIdentity(review: ReviewRecord): string {
-  return review.sourceSnapshot.kind === 'github'
-    ? review.sourceSnapshot.commit.toLowerCase()
-    : review.sourceSnapshot.statusHash.toLowerCase()
+  if (review.sourceSnapshot.kind === 'github') return review.sourceSnapshot.commit.toLowerCase()
+  if (review.sourceSnapshot.kind === 'local') return review.sourceSnapshot.statusHash.toLowerCase()
+  throw new EvolutionError('review_rejected', 'Review source identity is malformed and cannot authorize an effect')
 }
 
 export function latestGate2Decision(resolution: { decisions?: DecisionReceipt[] }): DecisionReceipt | undefined {
@@ -196,7 +196,7 @@ export function resolveDecisionTarget(
   assertOptionAllowed(interrupt, decision.action)
   const suppliedRetention = (decision as AuthorizationDecisionInput & { retention?: unknown }).retention
   if (suppliedRetention !== undefined) {
-    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V13')
+    throw new EvolutionError('invalid_input', 'Authorization decisions do not accept retention under Policy V14')
   }
   const option = interrupt.options.find((item) => item.id === decision.action)!
   const needsCandidate = decision.action === 'use_this'

@@ -9,14 +9,14 @@
 - Node.js `^22.19.0 || ^24.0.0`；CI 覆盖两个受支持的主版本。
 - pnpm；CI 当前使用 `10.29.2`。
 - Git；远端审查和 live GitHub discovery E2E 还需要 GitHub CLI。
-- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。CI 在 runner 临时目录安装验收基线 `@deepseek-ai/dsh@0.1.1-rc.2`（Cordis `4.0.1`）并通过 `DSH_PACKAGE_ROOT` 指向它；本地可用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据须注明实际版本。
+- Host DSH CLI（打包验收与 E2E）不要加进仓库根依赖，否则 `npx @deepseek-ai/dsh` 会命中过期 CLI。PR/`main` CI 只跑 `pnpm check:fast` 与 pack dry-run，不安装 DSH。Live E2E 与 `pnpm check:release` 在 runner 临时目录安装验收基线 `@deepseek-ai/dsh@0.1.1-rc.2`（Cordis `4.0.1`）并通过 `DSH_PACKAGE_ROOT` 指向它；本地可用 `>=0.1.0-rc.6 <0.2.0` 范围内的 DSH，发版证据须注明实际版本。
 - Windows / PowerShell 是完整支持与主要实测环境。Linux/macOS 只承诺 build/import smoke；核心流程使用 argv runner，不能依赖交互式 shell 副作用。
 
-初始化并运行日常验收：
+初始化并运行日常快速门：
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm check
+pnpm check:fast
 ```
 
 常用门：
@@ -25,15 +25,15 @@ pnpm check
 | --- | --- | --- |
 | `pnpm lint` | flat 配置 `eslint.config.mjs`，`eslint src tests` | 快速语法/规范检查 |
 | `pnpm typecheck` | `tsc --noEmit` | 公共类型或合同变化 |
-| `pnpm test` | 全部 Vitest 单元与集成测试 | 逻辑变更 |
+| `pnpm test` | 进程内 Vitest 单元测试（不含 `tests/integration` 与真实 `npm pack`） | 逻辑变更 |
 | `pnpm build` | 用 tsdown 重建 `lib/` | 源码或导出变化 |
-| `pnpm check:fast` | lint、typecheck、Vitest、build | 提交前快速反馈门 |
-| `pnpm test:acceptance` | Loader smoke、打包验收、local/adversarial offline E2E | 集中的 DSH 运行时验收 |
-| `pnpm check` | `check:fast` 加 `test:acceptance` | 日常完整合入门 |
-| `pnpm check:release` | `check` 加 live marketplace E2E 和 pack dry-run | 发布候选 |
+| `pnpm check:fast` | lint、typecheck、进程内 Vitest、build | 日常提交门 |
+| `pnpm test:integration` | 会 spawn 真实 `npm pack` 的 Vitest 与 `tests/integration/**` | 打包或托管 create/modify/evolve |
+| `pnpm test:acceptance` | Loader smoke、打包验收、local/adversarial offline E2E | 需要 Host DSH 的运行时验收 |
+| `pnpm check:release` | `check:fast` 加 integration Vitest、acceptance、live marketplace E2E 和 pack dry-run | 发布候选全量门 |
 | `pnpm pack:dry-run` | 检查发布包内容 | 文档、exports 或 files 变化 |
 
-live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通过。
+`pnpm check` 是 `check:fast` 的别名，不会跑 DSH 验收。live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通过。
 
 ## 2. 文档职责
 
@@ -55,7 +55,7 @@ live E2E 会访问外部 GitHub，缺少网络或认证时不应冒充离线通�
 src/
 ├─ index.ts                    # Cordis/DSH 入口与服务装配
 ├─ config.ts                   # 公开配置 schema 与默认值
-├─ contracts.ts                # Policy V13 公共合同、review/install receipts
+├─ contracts.ts                # Policy V14 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
 ├─ service-review.ts           # 审查编排与重验证
@@ -83,7 +83,7 @@ tests/*.mjs                    # Loader、打包和 E2E acceptance
 lib/                           # tsdown 生成且提交/发布的运行产物
 ```
 
-`src/workflow/engine.ts` 是薄 façade；引擎实现按继承链拆分为 `engine-core.ts`、`engine-driver.ts`、`engine-recovery.ts`、`engine-resume.ts`，候选快照在 `candidates.ts`，selection receipt / commitment / lease 铸造在 `grants.ts`。
+`src/workflow/engine.ts` 是薄 façade；引擎实现按继承链拆分为 `engine-core.ts`、`engine-driver.ts`、`engine-recovery.ts`、`engine-resume.ts`，候选快照在 `candidates.ts`，selection receipt / commitment 铸造在 `grants.ts`。
 
 `lib/` 是生成目录，但仓库会跟踪并发布它。不要直接编辑 `lib/`；修改 `src/` 后运行 `pnpm build`，并把生成差异一起审查。
 
@@ -103,12 +103,12 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 5. 工作流与两道确认门
 
-当前 Policy 为 V13。状态机、两道确认门与生命周期映射以[架构说明 §4](architecture.md#4-数据与状态) 为准；这里只列改动工作流时容易踩的边界：
+当前 Policy 为 V14。状态机、两道确认门与生命周期映射以[架构说明 §4](architecture.md#4-数据与状态) 为准；这里只列改动工作流时容易踩的边界：
 
 - 内部 graph cursor 与公开 `lifecycleState` 不应混用。模型只看到版本化的 `AgentWorkflowViewV2`；永远不要接受模型自报的 repository、review ID、路径或 install spec，`use_this` / `modify_this` 只绑定密封候选快照中的候选 ID。
 - 同回合重复 resume 不获得新授权；防重放失败不会消费当前合法 interrupt。
 - DSH `allowed-once` approval 只批准一次副作用，不能替代两道确认门。
-- 旧 Policy 的未完成记录（selection、review、commitment、lease）不跨版本恢复；Host fail closed 并要求重新发现。
+- 旧 Policy 的未完成记录（selection、review、commitment）不跨版本恢复；Host fail closed 并要求重新发现。
 
 ## 6. Resolver 与来源 lineage
 
@@ -177,7 +177,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 安装器的关键顺序（完整实现见 `src/lifecycle/install.ts`）：
 
-1. 验证最新 review、selection receipt、commitment/lease 与 target profile；复核已冻结 tgz 的归属路径、size 与 hash；
+1. 验证最新 review、selection receipt、commitment 与 target profile；复核已冻结 tgz 的归属路径、size 与 hash；
 2. 取得 DSH `allowed-once` approval 后写 provisional receipt，通过 DSH 的正常安装路径修改目标 profile，并对账 exact dependency 与可见 package target；
 3. 执行 Host 验证与目标进程热加载，写最终 receipt；失败进入 `failed_absent` / `recovery_required`。
 
@@ -206,7 +206,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 | 本地/对抗/市场 E2E | `tests/e2e-runner.mjs` |
 | 文档导航与关键语义 | `tests/unit/documentation.spec.ts` |
 
-修复回归时先跑最窄测试，再跑 `pnpm check:fast`；涉及工作流、profile、打包或 Loader 时至少跑 `pnpm check`。发布候选跑 `pnpm check:release`。
+修复回归时先跑最窄测试，再跑 `pnpm check:fast`。打包、Loader、托管 create/modify 或真实 DSH 行为在发布候选跑 `pnpm check:release`。
 
 ## 11. 调试真实 DSH 问题
 
@@ -248,7 +248,7 @@ HTTP 200 只证明 Web 服务可访问，不能证明目标插件功能可用；
 7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的发布 tag（`documentation.spec.ts` 会校验一致性）；
 8. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
 
-仓库 CI 负责验收，不自动创建 release。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
+仓库 PR/`main` CI 跑快速门，不自动创建 release；完整 DSH 验收在发布候选与 Live E2E。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
 
 ## 参考入口
 

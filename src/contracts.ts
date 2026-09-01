@@ -1,5 +1,5 @@
 /** Receipt policy. New resolution/review/workflow records use this value. */
-export const POLICY_VERSION = '13'
+export const POLICY_VERSION = '14'
 
 export const TOOL_NAMES = [
   'capability_workflow',
@@ -563,7 +563,7 @@ export interface VerificationVerdict {
 }
 
 export interface InstallationRecord {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   id: string
   createdAt: string
   /** Linked review for managed installs; adopted (workflow-external) installs have none. */
@@ -823,28 +823,6 @@ export interface ActionCommitment {
   frozenManifestDigest?: string
   frozenInstallSpec?: string | null
   targetProfile?: string
-}
-
-/**
- * Current-turn execution grant. Bound to commitment + session/boot/workflow + turn watermark.
- * Host may silently re-sign the next continuation only when receipt, commitment, and endpoint are unchanged.
- */
-export interface ExecutionLease {
-  id: string
-  commitmentId: string
-  selectionReceiptId: string
-  workflowId: string
-  ownerSessionId: string
-  bootId: string
-  hostTurnId: string
-  interruptId: string
-  snapshotDigest: string
-  candidateId?: string
-  candidateDigest?: string
-  requestedAction: ActionCommitment['requestedAction']
-  endpoint: ExecutionEndpoint
-  allowedParameterConstraints: ActionCommitment['allowedParameterConstraints']
-  createdAt: string
 }
 
 export const BRIDGE_EXECUTION_TOOLS = ['tool_search', 'tool_describe', 'tool_call'] as const

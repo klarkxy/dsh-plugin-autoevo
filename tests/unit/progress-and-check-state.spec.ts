@@ -368,6 +368,20 @@ describe('tool pending presentation', () => {
     )
   })
 
+  it('forwards the tool execution context through adoption scan and claim flows', async () => {
+    const scanOrphans = vi.fn(async () => ({ profile: 'web', orphans: [] }))
+    const adopt = vi.fn(async () => ({ id: `installation_${'a'.repeat(24)}` }))
+    const definition = createTools({ scanOrphans, adopt } as unknown as CapabilityEvolutionService)
+      .find((item) => item.name === 'capability_adopt')!
+    const run = { signal: new AbortController().signal } as ToolRunContext
+
+    await definition.execute({}, run)
+    await definition.execute({ package_name: 'dsh-tool-orphan' }, run)
+
+    expect(scanOrphans).toHaveBeenCalledWith(run)
+    expect(adopt).toHaveBeenCalledWith({ packageName: 'dsh-tool-orphan' }, run)
+  })
+
   it('shows Chinese pending titles for a Chinese requirement', () => {
     expect(presented('capability_workflow', {
       requirement: '我需要一个科学计算器',

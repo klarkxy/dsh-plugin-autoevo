@@ -509,7 +509,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(reviewed.workflow.cursor).toBe('await_selection')
     expect(reviewed.workflow.interrupt?.interruptId).toBe(presented.workflow.interrupt!.interruptId)
     expect(reviewed.workflow.consumedInterruptIds ?? []).not.toContain(presented.workflow.interrupt!.interruptId)
-    expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.installation).toBeUndefined()
   })
 
@@ -605,7 +604,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
       return
     }
 
-    expect(reviewed.workflow.executionLease).toBeUndefined()
     const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
     expect(optionIds).toContain('use_this')
     expect(optionIds).toContain('stop')
@@ -676,11 +674,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
       candidateId: localCandidateId,
       candidateDigest: reused.workflow.selectionReceipt?.candidateDigests[localCandidateId],
       requestedAction: 'reuse_local',
-      endpoint: { kind: 'exact_tool', name: 'quasar-ledger' },
-    })
-    expect(reused.workflow.executionLease).toMatchObject({
-      candidateId: localCandidateId,
-      candidateDigest: reused.workflow.actionCommitment?.candidateDigest,
       endpoint: { kind: 'exact_tool', name: 'quasar-ledger' },
     })
 
@@ -757,7 +750,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.selectionReceipt?.kind).toBe('review_candidates')
     expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
-    expect(reviewed.workflow.executionLease).toBeUndefined()
     expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
       .toBe('example-org/dsh-nebula-capture')
     const stored = await store.getResolution(started.resolution!.id)
@@ -796,7 +788,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect((await store.getResolution(started.resolution!.id)).decisions ?? []).toEqual([])
     expect(reviewed.workflow.selectionReceipt).toMatchObject({ kind: 'review_candidates', candidateIds: ids })
     expect(reviewed.workflow.actionCommitment?.endpoint).toEqual({ kind: 'none' })
-    expect(reviewed.workflow.executionLease).toBeUndefined()
 
     const selectedCandidateId = ids[1]!
     const selectedReviewId = reviewed.workflow.reviewIdsByCandidate![selectedCandidateId]!

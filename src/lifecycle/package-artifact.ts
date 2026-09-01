@@ -72,7 +72,12 @@ function hostReviewCapacity(): ReviewCapacity {
 }
 
 /** Stream a packed npm artifact without extracting it onto the filesystem. */
-async function readPackedFiles(tarball: string, capacity: ReviewCapacity = hostReviewCapacity()): Promise<ContentFile[]> {
+async function readPackedFiles(
+  tarball: string,
+  capacity: ReviewCapacity = hostReviewCapacity(),
+  signal?: AbortSignal,
+): Promise<ContentFile[]> {
+  signal?.throwIfAborted()
   const files: ContentFile[] = []
   const seen = new Set<string>()
   let declaredBytes = 0
@@ -138,16 +143,21 @@ async function readPackedFiles(tarball: string, capacity: ReviewCapacity = hostR
   const input = createReadStream(tarball)
   try {
     for await (const chunk of input) {
+      signal?.throwIfAborted()
       if (failure) throw failure
       if (!parser.write(chunk)) await once(parser, 'drain')
+      signal?.throwIfAborted()
     }
     parser.end()
     await complete
+    signal?.throwIfAborted()
     if (failure) throw failure
   } catch (error) {
     input.destroy()
+    if (signal?.aborted) throw signal.reason
     throw failure ?? error
   }
+  signal?.throwIfAborted()
   return files.sort((left, right) => left.path.localeCompare(right.path))
 }
 
@@ -166,14 +176,37 @@ async function packedTarball(packageRoot: string): Promise<string> {
   return tarball
 }
 
-async function hashPackedArtifact(tarball: string): Promise<{ sha256: string; bytes: number }> {
+async function hashPackedArtifact(tarball: string, signal?: AbortSignal): Promise<{ sha256: string; bytes: number }> {
+  signal?.throwIfAborted()
   const digest = createHash('sha256')
   let bytes = 0
   for await (const chunk of createReadStream(tarball)) {
+    signal?.throwIfAborted()
     bytes += chunk.length
     digest.update(chunk)
   }
+  signal?.throwIfAborted()
   return { sha256: digest.digest('hex'), bytes }
+}
+
+async function runWithBestEffortCleanup<T>(
+  operation: () => Promise<T>,
+  cleanup: readonly (() => Promise<void>)[],
+): Promise<T> {
+  let operationFailed = false
+  let operationError: unknown
+  let value: T | undefined
+  try {
+    value = await operation()
+  } catch (error) {
+    operationFailed = true
+    operationError = error
+  }
+  const cleanupResults = await Promise.allSettled(cleanup.map((remove) => remove()))
+  if (operationFailed) throw operationError
+  const cleanupFailure = cleanupResults.find((result) => result.status === 'rejected')
+  if (cleanupFailure?.status === 'rejected') throw cleanupFailure.reason
+  return value as T
 }
 
 async function ownedChild(root: string, name: string): Promise<string> {
@@ -189,39 +222,54 @@ async function ownedChild(root: string, name: string): Promise<string> {
 }
 
 async function freezePackedSource(sourceRoot: string, options: FreezeOptions): Promise<FrozenPackageArtifact> {
+  options.signal?.throwIfAborted()
   await mkdir(path.resolve(options.artifactRoot), { recursive: true })
   const artifactRoot = await realpath(options.artifactRoot)
-  const packageRoot = await ownedChild(artifactRoot, 'package')
-  const npmCache = await ownedChild(artifactRoot, 'npm-cache')
-  const npmTemp = await ownedChild(artifactRoot, 'npm-temp')
+  let packageRoot: string | undefined
   try {
-    const [npmCommand, ...npmPrefix] = await npmPackArgv(options.runner, options.signal)
-    await runChecked(options.runner, [npmCommand, ...npmPrefix, 'pack', '--ignore-scripts', '--pack-destination', packageRoot], sourceRoot, {
-      ...options,
-      env: {
-        NPM_CONFIG_CACHE: npmCache,
-        NPM_CONFIG_IGNORE_SCRIPTS: 'true',
-        NO_UPDATE_NOTIFIER: '1',
-        TEMP: npmTemp,
-        TMP: npmTemp,
-      },
-    })
-  } finally {
-    await Promise.all([
-      rm(npmCache, { recursive: true, force: true }),
-      rm(npmTemp, { recursive: true, force: true }),
+    packageRoot = await ownedChild(artifactRoot, 'package')
+    const ownedPackageRoot = packageRoot
+    const npmCache = await ownedChild(artifactRoot, 'npm-cache')
+    const npmTemp = await ownedChild(artifactRoot, 'npm-temp')
+    await runWithBestEffortCleanup(async () => {
+      const [npmCommand, ...npmPrefix] = await npmPackArgv(options.runner, options.signal)
+      options.signal?.throwIfAborted()
+      await runChecked(options.runner, [npmCommand, ...npmPrefix, 'pack', '--ignore-scripts', '--pack-destination', ownedPackageRoot], sourceRoot, {
+        ...options,
+        env: {
+          NPM_CONFIG_CACHE: npmCache,
+          NPM_CONFIG_IGNORE_SCRIPTS: 'true',
+          NO_UPDATE_NOTIFIER: '1',
+          TEMP: npmTemp,
+          TMP: npmTemp,
+        },
+      })
+      options.signal?.throwIfAborted()
+    }, [
+      () => rm(npmCache, { recursive: true, force: true }),
+      () => rm(npmTemp, { recursive: true, force: true }),
     ])
-  }
-  const tarball = await packedTarball(packageRoot)
-  const artifact = await hashPackedArtifact(tarball)
-  const files = await readPackedFiles(tarball)
-  await chmod(tarball, 0o444)
-  return {
-    installSpec: shellForwardedFileSpec(tarball),
-    artifactRoot,
-    artifactSha256: artifact.sha256,
-    artifactBytes: artifact.bytes,
-    files,
+    options.signal?.throwIfAborted()
+    const tarball = await packedTarball(ownedPackageRoot)
+    options.signal?.throwIfAborted()
+    const artifact = await hashPackedArtifact(tarball, options.signal)
+    options.signal?.throwIfAborted()
+    const files = await readPackedFiles(tarball, undefined, options.signal)
+    options.signal?.throwIfAborted()
+    await chmod(tarball, 0o444)
+    options.signal?.throwIfAborted()
+    const installSpec = shellForwardedFileSpec(tarball)
+    options.signal?.throwIfAborted()
+    return {
+      installSpec,
+      artifactRoot,
+      artifactSha256: artifact.sha256,
+      artifactBytes: artifact.bytes,
+      files,
+    }
+  } catch (error) {
+    if (packageRoot) await rm(packageRoot, { recursive: true, force: true }).catch(() => undefined)
+    throw error
   }
 }
 
@@ -303,4 +351,4 @@ export async function freezeGithubPackage(options: FreezeOptions & {
   })
 }
 
-export const _testing = { readPackedFiles, safeArchivePath, shellForwardedFileSpec }
+export const _testing = { readPackedFiles, runWithBestEffortCleanup, safeArchivePath, shellForwardedFileSpec }

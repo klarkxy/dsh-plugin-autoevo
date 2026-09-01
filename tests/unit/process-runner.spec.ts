@@ -334,6 +334,67 @@ describe('subprocess environment boundary', () => {
     }
   })
 
+  it('retains the truncated fallback for a genuinely missing spill file', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-runner-spill-missing-'))
+    const subprocess = {
+      resolveExecutable: async () => 'git',
+      spawn: () => ({
+        done: Promise.resolve({ exitCode: 0, signal: null }),
+        collected: {
+          stdout: {
+            readFrom: () => ({
+              text: 'bounded tail',
+              lossy: true,
+              spillPath: path.join(root, 'missing-stdout.log'),
+            }),
+          },
+          stderr: { readFrom: () => ({ text: '', lossy: false }) },
+        },
+      }),
+    } as unknown as SubprocessRuntime
+    try {
+      const result = await new DshCommandRunner(subprocess, { commandTimeoutMs: 5_000 } as RuntimeConfig)
+        .run({ argv: ['git', 'status'], cwd: root })
+      expect(result).toMatchObject({ stdout: 'bounded tail', stdoutTruncated: true })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports cancellation that begins during spill collection instead of returning success', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-runner-spill-cancel-'))
+    const spillPath = path.join(root, 'stdout.log')
+    await writeFile(spillPath, 'must not be returned after cancellation')
+    const controller = new AbortController()
+    const subprocess = {
+      resolveExecutable: async () => 'git',
+      spawn: () => ({
+        done: Promise.resolve({ exitCode: 0, signal: null }),
+        collected: {
+          stdout: {
+            readFrom: () => {
+              controller.abort()
+              return { text: 'tail', lossy: true, spillPath }
+            },
+          },
+          stderr: { readFrom: () => ({ text: '', lossy: false }) },
+        },
+      }),
+    } as unknown as SubprocessRuntime
+    try {
+      const running = new DshCommandRunner(subprocess, { commandTimeoutMs: 5_000 } as RuntimeConfig)
+        .run({ argv: ['git', 'status'], cwd: root, signal: controller.signal })
+
+      await expect(running).rejects.toMatchObject({
+        code: 'command_failed',
+        details: { command: 'git', cancelled: true, timedOut: false },
+      })
+      await expect(running).rejects.toThrow(/git was cancelled/i)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('reports cancellation during executable lookup instead of claiming Git is unavailable', async () => {
     const controller = new AbortController()
     const subprocess = {

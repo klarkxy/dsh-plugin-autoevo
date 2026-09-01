@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { _testing } from '../../src/index.js'
+import { _testing } from '../../src/plugin-runtime.js'
 import type { CordisInspectRegistryLike } from '../../src/cordis-inspect-compat.js'
 
 function registryFixture(): CordisInspectRegistryLike {

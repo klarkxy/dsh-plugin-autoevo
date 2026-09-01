@@ -3,7 +3,6 @@ import {
   type ActionCommitment,
   type DecisionPhase,
   type ExecutionEndpoint,
-  type ExecutionLease,
   type ReviewRecord,
   type SelectionReceipt,
 } from '../contracts.js'
@@ -16,7 +15,7 @@ import {
   reviewSnapshotDigest,
 } from '../review/direct-use.js'
 import { hashObject } from '../state/hashes.js'
-import type { CandidateSnapshotItem, InterruptPayload, WorkflowRecord } from './contracts.js'
+import { lookupBuiltinEnablement, type CandidateSnapshotItem, type InterruptPayload, type WorkflowRecord } from './contracts.js'
 
 function frozenIdentityFor(candidate: CandidateSnapshotItem): ActionCommitment['frozenIdentity'] {
   return {
@@ -103,41 +102,14 @@ export function assertBuiltinEnablementBinding(
   candidate: CandidateSnapshotItem
   endpoint: Extract<ExecutionEndpoint, { kind: 'host_bundled_enable' }>
 } {
-  const receipt = workflow.selectionReceipt
-  const commitment = workflow.actionCommitment
-  const candidateId = receipt?.candidateIds.length === 1 ? receipt.candidateIds[0] : undefined
-  const candidate = candidateId
-    ? workflow.candidateSnapshot?.find((item) => item.id === candidateId)
-    : undefined
-  const endpoint = commitment?.endpoint
-  const bundled = candidate?.hostBundled
-  if (!receipt
-    || receipt.phase !== phase
-    || receipt.kind !== 'enable_builtin'
-    || !candidateId
-    || !candidate
-    || candidate.kind !== 'local'
-    || candidate.availability !== 'host_bundled'
-    || !bundled
-    || receipt.candidateDigests[candidateId] !== candidate.digest
-    || !commitment
-    || commitment.selectionReceiptId !== receipt.id
-    || commitment.snapshotDigest !== receipt.snapshotDigest
-    || commitment.requestedAction !== 'enable_builtin'
-    || commitment.candidateId !== candidateId
-    || commitment.candidateDigest !== candidate.digest
-    || endpoint?.kind !== 'host_bundled_enable'
-    || endpoint.packageName !== bundled.packageName
-    || endpoint.version !== bundled.version
-    || endpoint.mountId !== bundled.mountId
-    || !endpoint.targetProfile
-    || commitment.targetProfile !== endpoint.targetProfile) {
+  const binding = lookupBuiltinEnablement(workflow, phase)
+  if (!binding) {
     throw new EvolutionError(
       'review_expired',
       `enable_builtin requires an exact frozen ${phase} candidate, mount, and profile binding`,
     )
   }
-  return { candidate, endpoint }
+  return binding
 }
 
 export function mintActionCommitment(input: {
@@ -198,37 +170,5 @@ export function mintActionCommitment(input: {
     ...(reviewerVerdictDigest ? { reviewerVerdictDigest } : {}),
     ...(manifestDigest ? { frozenManifestDigest: manifestDigest } : {}),
     ...(review ? { frozenInstallSpec: review.installSpec } : {}),
-  }
-}
-
-export function mintExecutionLease(input: {
-  receipt: SelectionReceipt
-  commitment: ActionCommitment
-}): ExecutionLease {
-  if (input.commitment.endpoint.kind === 'none') {
-    throw new EvolutionError('invalid_input', 'Execution lease requires an exact endpoint or bridge closure')
-  }
-  const createdAt = new Date().toISOString()
-  return {
-    id: `lease_${hashObject({
-      commitmentId: input.commitment.id,
-      selectionReceiptId: input.receipt.id,
-      hostTurnId: input.receipt.hostTurnId,
-      createdAt,
-    }).slice(0, 24)}`,
-    commitmentId: input.commitment.id,
-    selectionReceiptId: input.receipt.id,
-    workflowId: input.receipt.workflowId,
-    ownerSessionId: input.receipt.ownerSessionId,
-    bootId: input.receipt.bootId,
-    hostTurnId: input.receipt.hostTurnId,
-    interruptId: input.receipt.interruptId,
-    snapshotDigest: input.receipt.snapshotDigest,
-    ...(input.commitment.candidateId ? { candidateId: input.commitment.candidateId } : {}),
-    ...(input.commitment.candidateDigest ? { candidateDigest: input.commitment.candidateDigest } : {}),
-    requestedAction: input.commitment.requestedAction,
-    endpoint: input.commitment.endpoint,
-    allowedParameterConstraints: input.commitment.allowedParameterConstraints,
-    createdAt,
   }
 }

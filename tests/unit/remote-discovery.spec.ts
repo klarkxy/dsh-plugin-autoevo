@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, _testing } from '../../src/discovery/remote.js'
-import { scopedGithubQuery } from '../../src/github/index.js'
+import { scopedGithubQuery, searchGithubRepositories } from '../../src/github/index.js'
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh',
@@ -10,7 +10,6 @@ const config: RuntimeConfig = {
   gitCommand: 'git',
   dshCommand: 'dsh',
   dshCommandArgs: [],
-  maxCandidates: 5,
   maxFiles: 80,
   maxRepositoryBytes: 1_048_576,
   commandTimeoutMs: 30_000,
@@ -72,6 +71,101 @@ describe('scoped GitHub discovery', () => {
     )
     expect(phrases.join(' ')).not.toMatch(/clarification/i)
     expect(phrases).toEqual(expect.arrayContaining(['autoreview', 'codex', '替我审批']))
+  })
+
+  it('does not invoke a runner when its search signal is already aborted', async () => {
+    const controller = new AbortController()
+    const reason = new Error('pre-aborted')
+    controller.abort(reason)
+    const runner = { run: vi.fn() }
+
+    await expect(searchGithubRepositories({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      query: 'calculator',
+      limit: 20,
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(runner.run).not.toHaveBeenCalled()
+  })
+
+  it('rejects an ignoring runner result when the signal aborts during search', async () => {
+    const controller = new AbortController()
+    const reason = new Error('abort after run')
+    const runner = {
+      run: vi.fn(async () => {
+        controller.abort(reason)
+        return { exitCode: 0, signal: null, stdout: JSON.stringify({ items: [] }), stderr: '' }
+      }),
+    }
+
+    await expect(searchGithubRepositories({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      query: 'calculator',
+      limit: 20,
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(runner.run).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects nonzero search results even when stdout is valid JSON', async () => {
+    await expect(searchGithubRepositories({
+      runner: {
+        run: async () => ({
+          exitCode: 1,
+          signal: null,
+          stdout: JSON.stringify({ items: [searchItem({ full_name: 'acme/should-not-appear' })] }),
+          stderr: 'github failed',
+        }),
+      },
+      config,
+      cwd: 'C:/workspace',
+      query: 'calculator',
+      limit: 20,
+    })).rejects.toMatchObject({ code: 'command_failed' })
+  })
+
+  it('rejects invalid GitHub search response schemas but accepts an empty items array', async () => {
+    for (const invalid of [{}, { items: null }, { items: 'nope' }, { items: {} }, []]) {
+      await expect(searchGithubRepositories({
+        runner: { run: async () => ({ exitCode: 0, signal: null, stdout: JSON.stringify(invalid), stderr: '' }) },
+        config,
+        cwd: 'C:/workspace',
+        query: 'calculator',
+        limit: 20,
+      })).rejects.toMatchObject({ code: 'github_unavailable' })
+    }
+    await expect(searchGithubRepositories({
+      runner: { run: async () => ({ exitCode: 0, signal: null, stdout: JSON.stringify({ items: [] }), stderr: '' }) },
+      config,
+      cwd: 'C:/workspace',
+      query: 'calculator',
+      limit: 20,
+    })).resolves.toEqual([])
+  })
+
+  it('propagates an aborted first query without scheduling a later query', async () => {
+    const controller = new AbortController()
+    const reason = new Error('abort first query')
+    const runner = {
+      run: vi.fn(async () => {
+        controller.abort(reason)
+        return { exitCode: 0, signal: null, stdout: JSON.stringify({ items: [] }), stderr: '' }
+      }),
+    }
+
+    await expect(discoverRemoteCandidates({
+      runner,
+      config,
+      cwd: 'C:/workspace',
+      requirement: 'calculator',
+      queries: ['first', 'second'],
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(runner.run).toHaveBeenCalledTimes(1)
   })
 
   it('searches GitHub with scoped queries and keeps updated metadata', async () => {
@@ -351,7 +445,7 @@ describe('scoped GitHub discovery', () => {
     })
     const result = await discoverRemoteCandidates({
       runner,
-      config: { ...config, maxCandidates: 5 },
+      config,
       cwd: 'C:/workspace',
       requirement: 'specific capability',
       queries: planned,

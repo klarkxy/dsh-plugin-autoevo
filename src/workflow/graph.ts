@@ -1,5 +1,6 @@
 import type { InstallationRecord, ResolutionRecord, ReviewMode, ReviewRecord, WorkflowOptionId } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
+import { assertInstallationLifecycleTuple } from '../installation-lifecycle.js'
 import {
   confirmationFacts,
   createWorkFacts,
@@ -10,7 +11,6 @@ import {
   sameVerificationAttempt,
   selectionFacts,
   type ConsumedVerificationAttempt,
-  type InterruptKind,
   type InterruptPayload,
   type WorkflowExec,
   type WorkflowHost,
@@ -142,13 +142,6 @@ export function interruptPayload(
   throw new EvolutionError('invalid_input', 'Not an interrupt node', { cursor })
 }
 
-export function interruptKind(cursor: WorkflowNodeId): InterruptKind | undefined {
-  if (cursor === 'await_selection' || cursor === 'await_confirmation') {
-    return cursor
-  }
-  return undefined
-}
-
 export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Promise<NodeExecutionResult> {
   if (node === 'resolve_local') return executeResolveLocal(ctx)
   if (node === 'discover_remote') return executeDiscoverRemote(ctx)
@@ -166,9 +159,6 @@ export async function executeNode(node: WorkflowNodeId, ctx: GraphContext): Prom
 
 async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
-  if (!ctx.host.finishManagedWork) {
-    throw new EvolutionError('invalid_input', 'This workflow host does not support managed construction')
-  }
   try {
     const finished = await ctx.host.finishManagedWork(current, ctx.exec, ctx.workflow)
     delete ctx.workflow.lastFailure
@@ -309,43 +299,31 @@ async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResu
   if (selected.length < 1 || selected.length > 3) {
     throw new EvolutionError('invalid_input', 'candidate review requires between one and three sealed targets')
   }
-  if (ctx.host.reviewGithubBatch) {
-    const result = await ctx.host.reviewGithubBatch(
-      current,
-      selected,
-      ctx.workflow.reviewPlan?.mode ?? 'fixed',
-      ctx.exec,
-      ctx.workflow,
-    )
-    if (result.reviews.length === 0) {
-      return {
-        kind: 'next',
-        node: 'await_confirmation',
-        resolution: result.resolution,
-        reviews: [],
-        reviewFailures: result.failures,
-      }
-    }
-    const primary = result.reviews[0]!
+  const result = await ctx.host.reviewGithubBatch(
+    current,
+    selected,
+    ctx.workflow.reviewPlan?.mode ?? 'fixed',
+    ctx.exec,
+    ctx.workflow,
+  )
+  if (result.reviews.length === 0) {
     return {
       kind: 'next',
       node: 'await_confirmation',
       resolution: result.resolution,
-      review: primary,
-      reviews: result.reviews,
+      reviews: [],
       reviewFailures: result.failures,
     }
   }
-  const sealed = ctx.workflow.candidateSnapshot?.find((item) => item.id === selected[0])
-  const repository = sealed?.repository ?? selected[0]!
-  const { resolution, review } = await ctx.host.reviewGithub(
-    current,
-    repository,
-    sealed?.commit ?? ctx.workflow.pendingRef,
-    ctx.exec,
-    ctx.workflow,
-  )
-  return { kind: 'next', node: 'await_confirmation', resolution, review }
+  const primary = result.reviews[0]!
+  return {
+    kind: 'next',
+    node: 'await_confirmation',
+    resolution: result.resolution,
+    review: primary,
+    reviews: result.reviews,
+    reviewFailures: result.failures,
+  }
 }
 
 async function executeReviewExisting(ctx: GraphContext): Promise<NodeExecutionResult> {
@@ -407,16 +385,47 @@ function alreadyAttemptedVerification(workflow: WorkflowRecord, review: ReviewRe
 }
 
 function successTerminalNode(installation: InstallationRecord): WorkflowNodeId | undefined {
-  if (installation.installOutcome === 'verified' && installation.verified === true && installation.installed) {
+  const committed = installation.installPhase === 'completed'
+    && installation.installState === 'installed'
+    && installation.installed === true
+    && installation.removed === false
+    && typeof installation.restartRequired === 'boolean'
+  if (!committed) return undefined
+  if (installation.installOutcome === 'verified' && installation.verified === true) {
     return installation.restartRequired ? 'restart_required' : 'installed'
   }
-  if (installation.installOutcome === 'activated' && installation.installed && installation.verified !== true) {
+  if (installation.installOutcome === 'activated' && installation.verified === false) {
     return installation.restartRequired ? 'restart_required' : 'activated'
   }
-  if (installation.installOutcome === 'awaiting_user_test' && installation.installed && installation.verified !== true) {
+  if (installation.installOutcome === 'awaiting_user_test' && installation.verified === false) {
     return 'awaiting_user_test'
   }
   return undefined
+}
+
+function assertInstallationLifecycleRecord(installation: InstallationRecord): void {
+  if ((installation.retention !== 'temporary' && installation.retention !== 'persistent')
+    || typeof installation.installed !== 'boolean'
+    || typeof installation.loaded !== 'boolean'
+    || typeof installation.verified !== 'boolean'
+    || typeof installation.restartRequired !== 'boolean'
+    || typeof installation.removed !== 'boolean'
+    || (installation.installPhase !== undefined
+      && !['prepared', 'preflight_running', 'preflight_passed', 'destination_installing', 'completed'].includes(installation.installPhase))
+    || (installation.installState !== undefined
+      && !['installed', 'not_installed', 'unknown'].includes(installation.installState))
+    || (installation.installOutcome !== undefined
+      && !['pending', 'verified', 'failed_absent', 'recovery_required', 'activated', 'awaiting_user_test'].includes(installation.installOutcome))
+    || !installation.verification
+    || typeof installation.verification !== 'object'
+    || Array.isArray(installation.verification)) {
+    throw new EvolutionError('invalid_input', 'Linked installation lifecycle state is malformed; no effect was replayed')
+  }
+  try {
+    assertInstallationLifecycleTuple(installation)
+  } catch {
+    throw new EvolutionError('invalid_input', 'Linked installation lifecycle state is contradictory; no effect was replayed')
+  }
 }
 
 function installFailureCode(installation: InstallationRecord): string {
@@ -439,6 +448,7 @@ function assertPendingInstallReceipt(
   install: NonNullable<WorkflowRecord['pendingInstall']>,
   installation: InstallationRecord,
 ): void {
+  assertInstallationLifecycleRecord(installation)
   const installSpecMatches = installation.installSpec === review.installSpec
   if (installation.id !== workflow.pendingInstallationId
     || installation.workflowId !== workflow.id
@@ -450,8 +460,15 @@ function assertPendingInstallReceipt(
   }
 }
 
-function builtinTerminalNode(installation: InstallationRecord | undefined): WorkflowNodeId {
-  return installation?.restartRequired === false ? 'installed' : 'restart_required'
+function builtinTerminalNode(installation: InstallationRecord | undefined): WorkflowNodeId | undefined {
+  if (!installation
+    || installation.installPhase !== 'completed'
+    || installation.installState !== 'installed'
+    || installation.installOutcome !== 'pending'
+    || installation.installed !== true
+    || installation.removed !== false
+    || typeof installation.restartRequired !== 'boolean') return undefined
+  return installation.restartRequired ? 'restart_required' : 'installed'
 }
 
 function projectLinkedInstallation(
@@ -460,6 +477,7 @@ function projectLinkedInstallation(
   review: ReviewRecord,
   installation: InstallationRecord,
 ): NodeExecutionResult {
+  assertInstallationLifecycleRecord(installation)
   if (installation.verification?.attempted) {
     recordVerificationAttempt(ctx.workflow, review, installation)
   }
@@ -484,6 +502,21 @@ function projectLinkedInstallation(
   return { kind: 'done', node: 'recovery_required', resolution: current, review, installation }
 }
 
+async function readOptionalInstallation(
+  ctx: GraphContext,
+  installationId: string,
+): Promise<InstallationRecord | undefined> {
+  try {
+    const installation = await ctx.host.getInstallation(installationId)
+    ctx.exec.signal?.throwIfAborted()
+    return installation
+  } catch (error) {
+    if (ctx.exec.signal?.aborted) throw ctx.exec.signal.reason
+    if (error instanceof EvolutionError && error.code === 'not_found') return undefined
+    throw error
+  }
+}
+
 async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   const review = await ctx.host.latestReview(
@@ -496,9 +529,17 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
   }
   if (alreadyAttemptedVerification(ctx.workflow, review)) {
     const priorInstallationId = ctx.workflow.lastInstallationId ?? ctx.workflow.pendingInstallationId
-    const prior = priorInstallationId
-      ? await ctx.host.getInstallation(priorInstallationId).catch(() => undefined)
-      : undefined
+    let prior: InstallationRecord | undefined
+    if (priorInstallationId) {
+      try {
+        prior = await ctx.host.getInstallation(priorInstallationId)
+      } catch (error) {
+        if (ctx.exec.signal?.aborted) throw ctx.exec.signal.reason
+        if (!(error instanceof EvolutionError) || error.code !== 'not_found') throw error
+      }
+      ctx.exec.signal?.throwIfAborted()
+      if (prior) assertInstallationLifecycleRecord(prior)
+    }
     ctx.workflow.lastFailure = {
       stage: 'verification',
       code: 'verification_already_attempted',
@@ -518,27 +559,28 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
     return { kind: 'next', node: 'await_confirmation', resolution: current, review, ...(prior ? { installation: prior } : {}) }
   }
   if (ctx.workflow.pendingInstallationId) {
-    const linked = await ctx.host.getInstallation(ctx.workflow.pendingInstallationId).catch((error: unknown) => {
-      if (error instanceof EvolutionError && error.code === 'not_found') return undefined
-      throw error
-    })
+    const linked = await readOptionalInstallation(ctx, ctx.workflow.pendingInstallationId)
     if (linked) {
       assertPendingInstallReceipt(ctx.workflow, review, install, linked)
       return projectLinkedInstallation(ctx, current, review, linked)
     }
   }
-  delete ctx.workflow.lastFailure
   try {
     const installation = await ctx.host.installReviewed(review, install, ctx.exec, ctx.workflow)
+    delete ctx.workflow.lastFailure
     return projectLinkedInstallation(ctx, current, review, installation)
   } catch (error) {
-    if (error instanceof EvolutionError && error.code === 'invalid_input') throw error
     const recoveryInstallationId = error instanceof EvolutionError
       && error.details.recoveryRequired === true
       && typeof error.details.installationId === 'string'
       && /^installation_[a-f0-9]{16,64}$/u.test(error.details.installationId)
       ? error.details.installationId
       : undefined
+    if (ctx.exec.signal?.aborted) {
+      if (recoveryInstallationId) throw error
+      throw ctx.exec.signal.reason
+    }
+    if (error instanceof EvolutionError && error.code === 'invalid_input') throw error
     const retryable = !recoveryInstallationId
       && error instanceof EvolutionError
       && error.code === 'command_failed'
@@ -575,25 +617,32 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
   }
   try {
     if (ctx.workflow.pendingInstallationId) {
-      const linked = await ctx.host.getInstallation(ctx.workflow.pendingInstallationId).catch((error: unknown) => {
-        if (error instanceof EvolutionError && error.code === 'not_found') return undefined
-        throw error
-      })
+      const linked = await readOptionalInstallation(ctx, ctx.workflow.pendingInstallationId)
       if (linked) {
         if (linked.workflowId !== ctx.workflow.id) {
           throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
         }
-        if (linked.installPhase === 'completed' && linked.installed) {
-          return { kind: 'done', node: builtinTerminalNode(linked), resolution: current, installation: linked }
+        assertInstallationLifecycleRecord(linked)
+        const terminal = builtinTerminalNode(linked)
+        if (terminal) {
+          return { kind: 'done', node: terminal, resolution: current, installation: linked }
+        }
+        if (linked.installPhase === 'completed' && linked.installOutcome !== 'failed_absent') {
+          return { kind: 'done', node: 'recovery_required', resolution: current, installation: linked }
         }
       }
     }
     const result = await ctx.host.enableBuiltin(ctx.workflow, ctx.exec)
     const installation = result
       ?? await ctx.host.findInstallationForWorkflow?.(ctx.workflow.id)
+    if (installation) assertInstallationLifecycleRecord(installation)
+    const terminal = builtinTerminalNode(installation)
+    if (installation && !terminal) {
+      throw new EvolutionError('invalid_input', 'Built-in enablement returned a non-terminal installation receipt')
+    }
     return {
       kind: 'done',
-      node: builtinTerminalNode(installation),
+      node: terminal ?? 'recovery_required',
       resolution: current,
       ...(installation ? { installation } : {}),
     }
@@ -605,6 +654,7 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
           throw readError
         })
       : undefined
+    if (linked) assertInstallationLifecycleRecord(linked)
     if (linked && linked.workflowId !== ctx.workflow.id) {
       throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
     }
@@ -659,8 +709,8 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
     }
     return { kind: 'next', node: 'await_confirmation', resolution: current, review }
   }
-  if (ctx.host.prepareModify) {
-    let prepared: Awaited<ReturnType<NonNullable<WorkflowHost['prepareModify']>>>
+  {
+    let prepared: Awaited<ReturnType<WorkflowHost['prepareModify']>>
     try {
       prepared = await ctx.host.prepareModify(current, review, ctx.exec, ctx.workflow)
     } catch (error) {
@@ -713,13 +763,12 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
     }
     return { kind: 'done', node: 'modify_authorized', resolution: prepared.resolution, review }
   }
-  return { kind: 'done', node: 'modify_authorized', resolution: current, review }
 }
 
 async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
-  if (ctx.host.prepareCreate) {
-    let prepared: Awaited<ReturnType<NonNullable<WorkflowHost['prepareCreate']>>>
+  {
+    let prepared: Awaited<ReturnType<WorkflowHost['prepareCreate']>>
     try {
       prepared = await ctx.host.prepareCreate(current, ctx.exec, ctx.workflow)
     } catch (error) {
@@ -773,7 +822,6 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
     }
     return { kind: 'done', node: 'create_authorized', resolution: prepared.resolution }
   }
-  return { kind: 'done', node: 'create_authorized', resolution: current }
 }
 
 async function requireResolution(ctx: GraphContext): Promise<ResolutionRecord> {

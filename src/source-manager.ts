@@ -41,6 +41,13 @@ export interface SourceReceipt {
   gitConfigHash: string
   /** Normalized package root inside the managed repository. */
   packagePath?: string
+  /** Durable authority to finish a workflow-release transaction after a crash. */
+  completionProof?: {
+    schemaVersion: 1
+    workflowId: string
+    lockToken: string
+    activeReceiptHash: string
+  }
 }
 
 export interface FinalizedChildCommit extends SourceReceipt {
@@ -52,8 +59,29 @@ interface SourceLock {
   workflowId: string
   createdAt: string
   pid: number
+  lockToken?: string
   headCommit?: string
   branch?: string
+  gitConfigHash?: string
+}
+
+interface SourceLockHandle {
+  sourceId: string
+  workflowId: string
+  lockToken: string
+  acquiredHere: boolean
+}
+
+interface SourceLockRecoveryOwner {
+  schemaVersion?: 1
+  recoveryToken: string
+  workflowId: string
+  pid: number
+  observedLock: string
+  createdAt: string
+  purpose?: 'workflow_completion'
+  completionProofHash?: string
+  ownerLockToken?: string
 }
 
 const FORBIDDEN_UNTRACKED_PREFIXES = [
@@ -114,6 +142,42 @@ export function isLockHolderAlive(pid: number): boolean {
   return isProcessAlive(pid)
 }
 
+type SourceCompletionProof = NonNullable<SourceReceipt['completionProof']>
+
+function isAlreadyExists(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')
+}
+
+function validatedCompletionProof(receipt: SourceReceipt): {
+  proof: SourceCompletionProof
+  activeReceipt: SourceReceipt
+  proofHash: string
+} | undefined {
+  const proof = receipt.completionProof
+  if (!proof
+    || proof.schemaVersion !== 1
+    || receipt.activeWorkflowId !== null
+    || !proof.workflowId
+    || !proof.lockToken
+    || !/^[a-f0-9]{64}$/u.test(proof.activeReceiptHash)) return undefined
+  const { completionProof: _proof, ...withoutProof } = receipt
+  const activeReceipt: SourceReceipt = { ...withoutProof, activeWorkflowId: proof.workflowId }
+  if (hashObject(activeReceipt) !== proof.activeReceiptHash) return undefined
+  return { proof, activeReceipt, proofHash: hashObject(proof) }
+}
+
+function lockMatchesCompletion(
+  lock: SourceLock,
+  proof: SourceCompletionProof,
+  receipt: SourceReceipt,
+): boolean {
+  return lock.workflowId === proof.workflowId
+    && lock.lockToken === proof.lockToken
+    && lock.headCommit === receipt.headCommit
+    && lock.branch === receipt.branch
+    && lock.gitConfigHash === receipt.gitConfigHash
+}
+
 export function sourceIdForRepository(repository: string, packagePath?: string): string {
   const base = repository.toLowerCase().replace(/[^\w.-]+/gu, '_')
   const normalized = normalizePackagePath(packagePath)
@@ -170,6 +234,23 @@ export class SourceManager {
     return target
   }
 
+  private async hasGitDirectory(candidate: string, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    try {
+      await this.accessGitDirectory(candidate)
+      signal?.throwIfAborted()
+      return true
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      if (isNotFound(error)) return false
+      throw error
+    }
+  }
+
+  private async accessGitDirectory(candidate: string): Promise<void> {
+    await access(candidate, constants.F_OK)
+  }
+
   /** True when `candidate` is inside the managed sources root for this session. */
   async pathUnderSourceRoot(candidate: string, workspaceCwd?: string): Promise<boolean> {
     return isPathInside(
@@ -202,6 +283,14 @@ export class SourceManager {
       throw new EvolutionError('unsafe_path', 'Managed source id is not a safe single path segment', { sourceId })
     }
     return path.join(this.controlRoot, `${sourceId}.lock`)
+  }
+
+  private lockRecoveryPath(sourceId: string): string {
+    return `${this.lockPath(sourceId)}.recovery`
+  }
+
+  private completionRecoveryTakeoverPath(sourceId: string): string {
+    return `${this.lockRecoveryPath(sourceId)}.workflow-completion-takeover`
   }
 
   private isManagedSourceDir(resolved: string, sourceId: string): boolean {
@@ -406,25 +495,132 @@ export class SourceManager {
   }
 
   async acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void> {
-    const currentReceipt = await this.readReceipt(sourceId)
+    await this.acquireLockInternal(sourceId, workflowId, signal, workspaceCwd)
+  }
+
+  private async writeInitialLock(lockFile: string, body: string): Promise<void> {
+    await writeFile(lockFile, body, { encoding: 'utf8', flag: 'wx' })
+  }
+
+  private async releaseInitialLockIfExact(sourceId: string, lockToken: string, expectedBody: string): Promise<void> {
+    const target = this.lockPath(sourceId)
+    let current: string
+    try {
+      current = await readFile(target, 'utf8')
+    } catch (error) {
+      if (isNotFound(error)) return
+      throw error
+    }
+    if (current !== expectedBody) return
+    await this.releaseLockToken(sourceId, lockToken)
+  }
+
+  private async acquireLockInternal(
+    sourceId: string,
+    workflowId: string,
+    signal: AbortSignal | undefined,
+    workspaceCwd: string | undefined,
+    allowVerifiedReentry = false,
+  ): Promise<SourceLockHandle> {
+    signal?.throwIfAborted()
+    let currentReceipt = await this.readReceipt(sourceId)
+    if (currentReceipt?.completionProof) {
+      const completed = await this.convergeWorkflowCompletion(currentReceipt)
+      if (!completed) {
+        throw new EvolutionError('invalid_input', 'Managed source completion proof failed closed validation')
+      }
+      throw new EvolutionError('invalid_input', 'Completed managed source must be claimed before a new workflow can acquire its lock', {
+        sourceId,
+      })
+    }
     const root = this.resolveWorkingPath(sourceId, workspaceCwd, currentReceipt)
     await mkdir(root, { recursive: true })
     await this.assertPathContainment(sourceId, workspaceCwd)
     const lockFile = this.lockPath(sourceId)
+    const recoveryFile = this.lockRecoveryPath(sourceId)
     await mkdir(path.dirname(lockFile), { recursive: true })
+    if (await this.lockPublicationBarrierExists(sourceId)) {
+      throw new EvolutionError('invalid_input', 'Managed source lock recovery is already owned; refusing concurrent takeover', {
+        sourceId,
+      })
+    }
+    signal?.throwIfAborted()
+    if (allowVerifiedReentry) {
+      if (!currentReceipt
+        || currentReceipt.activeWorkflowId !== workflowId
+        || currentReceipt.completionProof) {
+        throw new EvolutionError('invalid_input', 'Managed source resume requires an active receipt owned by this workflow', {
+          sourceId,
+        })
+      }
+      let raw: string
+      try {
+        raw = await readFile(lockFile, 'utf8')
+      } catch (error) {
+        if (isNotFound(error)) {
+          throw new EvolutionError('invalid_input', 'Managed source resume requires its existing workflow lock', { sourceId })
+        }
+        throw error
+      }
+      const existing = JSON.parse(raw) as SourceLock
+      if (existing.workflowId === workflowId && existing.pid === process.pid) {
+        if (!existing.lockToken
+          || existing.headCommit !== currentReceipt.headCommit
+          || existing.branch !== currentReceipt.branch
+          || existing.gitConfigHash !== currentReceipt.gitConfigHash) {
+          throw new EvolutionError('invalid_input', 'Managed source resume lock failed exact receipt validation', { sourceId })
+        }
+        const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+        signal?.throwIfAborted()
+        const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+        signal?.throwIfAborted()
+        const gitConfigHash = await this.gitConfigHash(sourceId, workspaceCwd)
+        signal?.throwIfAborted()
+        if (head !== currentReceipt.headCommit || branch !== currentReceipt.branch || gitConfigHash !== currentReceipt.gitConfigHash) {
+          throw new EvolutionError('invalid_input', 'Managed source changed before verified workflow reentry', { sourceId })
+        }
+        return { sourceId, workflowId, lockToken: existing.lockToken, acquiredHere: false }
+      }
+    }
+    const initialLock: SourceLock = {
+      workflowId,
+      createdAt: new Date().toISOString(),
+      pid: process.pid,
+      lockToken: randomUUID(),
+    }
+    const initialBody = `${JSON.stringify(initialLock, null, 2)}\n`
+    let initialPublished = false
     try {
-      await writeFile(lockFile, `${JSON.stringify({
-        workflowId,
-        createdAt: new Date().toISOString(),
-        pid: process.pid,
-      } satisfies SourceLock, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
-      return
+      await this.writeInitialLock(lockFile, initialBody)
+      initialPublished = true
+      signal?.throwIfAborted()
+      if (await this.lockPublicationBarrierExists(sourceId)) {
+        await this.releaseLockToken(sourceId, initialLock.lockToken!)
+        initialPublished = false
+        throw new EvolutionError('invalid_input', 'Managed source lock recovery started during publication; refusing takeover', {
+          sourceId,
+        })
+      }
+      return { sourceId, workflowId, lockToken: initialLock.lockToken!, acquiredHere: true }
     } catch (error) {
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') throw error
+      if (initialPublished) {
+        await this.releaseLockToken(sourceId, initialLock.lockToken!).catch(() => undefined)
+        throw error
+      }
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
+        await this.releaseInitialLockIfExact(sourceId, initialLock.lockToken!, initialBody).catch(() => undefined)
+        throw error
+      }
     }
 
-    const existing = JSON.parse(await readFile(lockFile, 'utf8')) as SourceLock
-    if (existing.workflowId === workflowId && existing.pid === process.pid) return
+    const observedLock = await readFile(lockFile, 'utf8')
+    const existing = JSON.parse(observedLock) as SourceLock
+    if (existing.workflowId === workflowId && existing.pid === process.pid) {
+      throw new EvolutionError('invalid_input', 'Managed source is already locked by this workflow invocation', {
+        sourceId,
+        activeWorkflowId: workflowId,
+      })
+    }
 
     if (isLockHolderAlive(existing.pid)) {
       throw new EvolutionError('invalid_input', 'Managed source is locked by another active workflow', {
@@ -433,15 +629,23 @@ export class SourceManager {
       })
     }
 
-    // Stale lock recovery only after repository state revalidation against the lock receipt.
-    const status = await this.git(root, ['status', '--porcelain'], signal).catch(() => null)
-    const head = await this.git(root, ['rev-parse', 'HEAD'], signal).catch(() => null)
-    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal).catch(() => null)
-    const lockedReceipt = await this.readReceipt(sourceId).catch(() => undefined)
-    const gitSecurityHash = await this.gitConfigHash(sourceId, workspaceCwd).catch(() => null)
+    // Automatic recovery is intentionally limited to the same active workflow.
+    // Completed/null receipts and cross-workflow takeovers remain fail-closed.
+    const status = await this.git(root, ['status', '--porcelain'], signal)
+    signal?.throwIfAborted()
+    const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    signal?.throwIfAborted()
+    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    signal?.throwIfAborted()
+    const lockedReceipt = await this.readReceipt(sourceId)
+    signal?.throwIfAborted()
+    const gitSecurityHash = await this.gitConfigHash(sourceId, workspaceCwd)
+    signal?.throwIfAborted()
     const matches = Boolean(lockedReceipt
-      && lockedReceipt.activeWorkflowId === existing.workflowId
-      && existing.headCommit && existing.branch
+      && existing.workflowId === workflowId
+      && lockedReceipt.activeWorkflowId === workflowId
+      && existing.headCommit
+      && existing.branch
       && head === existing.headCommit
       && branch === existing.branch
       && lockedReceipt.headCommit === head
@@ -454,8 +658,443 @@ export class SourceManager {
         activeWorkflowId: existing.workflowId,
       })
     }
-    await rm(lockFile, { force: true })
-    await this.acquireLock(sourceId, workflowId, signal, workspaceCwd)
+    const recoveryOwner: SourceLockRecoveryOwner = {
+      recoveryToken: randomUUID(),
+      workflowId,
+      pid: process.pid,
+      observedLock,
+      createdAt: new Date().toISOString(),
+    }
+    if (await this.optionalFile(this.completionRecoveryTakeoverPath(sourceId)) !== undefined) {
+      throw new EvolutionError('invalid_input', 'Managed source workflow-completion takeover blocks stale-lock recovery', {
+        sourceId,
+      })
+    }
+    try {
+      await writeFile(recoveryFile, `${JSON.stringify(recoveryOwner, null, 2)}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+      })
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+        throw new EvolutionError('invalid_input', 'Managed source lock recovery is already owned; refusing concurrent takeover', {
+          sourceId,
+        })
+      }
+      throw error
+    }
+    try {
+      signal?.throwIfAborted()
+      const latestObservedLock = await readFile(lockFile, 'utf8')
+      if (latestObservedLock !== observedLock) {
+        throw new EvolutionError('invalid_input', 'Managed source lock changed during stale-lock recovery', {
+          sourceId,
+        })
+      }
+
+      // Revalidate under the recovery-owner marker. Every current publisher
+      // checks that marker before attempting `wx`, so the observed lock cannot be
+      // replaced while this owner performs the handoff.
+      const revalidatedStatus = await this.git(root, ['status', '--porcelain'], signal)
+      signal?.throwIfAborted()
+      const revalidatedHead = await this.git(root, ['rev-parse', 'HEAD'], signal)
+      signal?.throwIfAborted()
+      const revalidatedBranch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+      signal?.throwIfAborted()
+      const revalidatedReceipt = await this.readReceipt(sourceId)
+      const revalidatedConfigHash = await this.gitConfigHash(sourceId, workspaceCwd)
+      signal?.throwIfAborted()
+      if (revalidatedStatus !== ''
+        || revalidatedHead !== head
+        || revalidatedBranch !== branch
+        || revalidatedConfigHash !== gitSecurityHash
+        || revalidatedReceipt?.activeWorkflowId !== workflowId
+        || revalidatedReceipt.headCommit !== head
+        || revalidatedReceipt.branch !== branch
+        || revalidatedReceipt.gitConfigHash !== gitSecurityHash) {
+        throw new EvolutionError('invalid_input', 'Managed source changed during stale-lock recovery', { sourceId })
+      }
+    } catch (error) {
+      await this.releaseRecoveryOwner(sourceId, recoveryOwner.recoveryToken).catch(() => undefined)
+      throw error
+    }
+
+    const quarantine = `${lockFile}.${randomUUID()}.stale`
+    let published = false
+    let quarantined = false
+    try {
+      if (!(await this.staleRecoveryOwnerStillOwned(sourceId, recoveryOwner.recoveryToken))) {
+        throw new EvolutionError('invalid_input', 'Managed source stale-lock recovery ownership changed before publication', {
+          sourceId,
+        })
+      }
+      await rename(lockFile, quarantine)
+      quarantined = true
+      if (await readFile(quarantine, 'utf8') !== observedLock) {
+        throw new EvolutionError('invalid_input', 'Managed source lock changed during stale-lock recovery', { sourceId })
+      }
+      signal?.throwIfAborted()
+      const nextLock: SourceLock = {
+        workflowId,
+        createdAt: new Date().toISOString(),
+        pid: process.pid,
+        lockToken: randomUUID(),
+        headCommit: head,
+        branch,
+        gitConfigHash: gitSecurityHash,
+      }
+      if (!(await this.staleRecoveryOwnerStillOwned(sourceId, recoveryOwner.recoveryToken))) {
+        throw new EvolutionError('invalid_input', 'Managed source stale-lock recovery ownership changed during publication', {
+          sourceId,
+        })
+      }
+      await writeFile(lockFile, `${JSON.stringify(nextLock, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+      published = true
+      if (!(await this.staleRecoveryOwnerStillOwned(sourceId, recoveryOwner.recoveryToken))) {
+        await this.releaseLockToken(sourceId, nextLock.lockToken!)
+        published = false
+        throw new EvolutionError('invalid_input', 'Managed source stale-lock recovery ownership changed after publication', {
+          sourceId,
+        })
+      }
+      signal?.throwIfAborted()
+      await rm(quarantine, { force: true })
+      quarantined = false
+      await this.releaseRecoveryOwner(sourceId, recoveryOwner.recoveryToken)
+      return { sourceId, workflowId, lockToken: nextLock.lockToken!, acquiredHere: true }
+    } catch (error) {
+      if (published) {
+        if (quarantined) await rm(quarantine, { force: true }).catch(() => undefined)
+        await this.releaseRecoveryOwner(sourceId, recoveryOwner.recoveryToken).catch(() => undefined)
+      } else if (quarantined) {
+        const restored = (await this.staleRecoveryOwnerStillOwned(sourceId, recoveryOwner.recoveryToken))
+          && await writeFile(lockFile, observedLock, { encoding: 'utf8', flag: 'wx' })
+            .then(async () => await this.staleRecoveryOwnerStillOwned(sourceId, recoveryOwner.recoveryToken))
+            .catch(() => false)
+        // If another publisher filled the handoff gap, retain the marker. That
+        // publisher's post-wx marker check will roll back only its own token;
+        // the resulting orphan is intentionally fail-closed.
+        if (restored) {
+          await rm(quarantine, { force: true }).catch(() => undefined)
+          await this.releaseRecoveryOwner(sourceId, recoveryOwner.recoveryToken).catch(() => undefined)
+        }
+      } else {
+        await this.releaseRecoveryOwner(sourceId, recoveryOwner.recoveryToken).catch(() => undefined)
+      }
+      throw error
+    }
+  }
+
+  private async releaseRecoveryOwner(sourceId: string, recoveryToken: string): Promise<void> {
+    const target = this.lockRecoveryPath(sourceId)
+    try {
+      const owner = JSON.parse(await readFile(target, 'utf8')) as SourceLockRecoveryOwner
+      if (owner.recoveryToken !== recoveryToken) return
+      await rm(target, { force: true })
+    } catch (error) {
+      if (!isNotFound(error)) throw error
+    }
+  }
+
+  private completionOwnerMatches(
+    owner: SourceLockRecoveryOwner,
+    proofHash: string,
+    lockRaw: string,
+    lockToken: string,
+  ): boolean {
+    return owner.schemaVersion === 1
+      && owner.purpose === 'workflow_completion'
+      && owner.completionProofHash === proofHash
+      && owner.ownerLockToken === lockToken
+      && owner.observedLock === lockRaw
+  }
+
+  private async optionalFile(target: string): Promise<string | undefined> {
+    try {
+      return await readFile(target, 'utf8')
+    } catch (error) {
+      if (isNotFound(error)) return undefined
+      throw error
+    }
+  }
+
+  private async lockPublicationBarrierExists(sourceId: string): Promise<boolean> {
+    const [recoveryOwner, completionTakeover] = await Promise.all([
+      this.optionalFile(this.lockRecoveryPath(sourceId)),
+      this.optionalFile(this.completionRecoveryTakeoverPath(sourceId)),
+    ])
+    return recoveryOwner !== undefined || completionTakeover !== undefined
+  }
+
+  private async staleRecoveryOwnerStillOwned(sourceId: string, recoveryToken: string): Promise<boolean> {
+    if (await this.optionalFile(this.completionRecoveryTakeoverPath(sourceId)) !== undefined) return false
+    const raw = await this.optionalFile(this.lockRecoveryPath(sourceId))
+    if (raw === undefined) return false
+    const owner = JSON.parse(raw) as SourceLockRecoveryOwner
+    return owner.purpose === undefined && owner.recoveryToken === recoveryToken
+  }
+
+  private async acquireCompletionRecoveryOwner(
+    sourceId: string,
+    workflowId: string,
+    proofHash: string,
+    lockRaw: string,
+    lockToken: string,
+  ): Promise<SourceLockRecoveryOwner | undefined> {
+    const target = this.lockRecoveryPath(sourceId)
+    const takeover = this.completionRecoveryTakeoverPath(sourceId)
+    const nextOwner = (): SourceLockRecoveryOwner => ({
+      schemaVersion: 1,
+      recoveryToken: randomUUID(),
+      workflowId,
+      pid: process.pid,
+      observedLock: lockRaw,
+      createdAt: new Date().toISOString(),
+      purpose: 'workflow_completion',
+      completionProofHash: proofHash,
+      ownerLockToken: lockToken,
+    })
+    await mkdir(path.dirname(target), { recursive: true })
+
+    const orphanedTakeover = await this.optionalFile(takeover)
+    if (orphanedTakeover !== undefined) {
+      const stale = JSON.parse(orphanedTakeover) as SourceLockRecoveryOwner
+      if (!this.completionOwnerMatches(stale, proofHash, lockRaw, lockToken)
+        || isLockHolderAlive(stale.pid)) return undefined
+      const owner = nextOwner()
+      try {
+        await writeFile(target, `${JSON.stringify(owner, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error
+        return undefined
+      }
+      try {
+        await rm(takeover, { force: true })
+      } catch (error) {
+        await this.releaseRecoveryOwner(sourceId, owner.recoveryToken).catch(() => undefined)
+        throw error
+      }
+      return owner
+    }
+
+    const owner = nextOwner()
+    try {
+      await writeFile(target, `${JSON.stringify(owner, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+      return owner
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error
+    }
+
+    const observedOwnerRaw = await readFile(target, 'utf8')
+    const observedOwner = JSON.parse(observedOwnerRaw) as SourceLockRecoveryOwner
+    if (!this.completionOwnerMatches(observedOwner, proofHash, lockRaw, lockToken)
+      || isLockHolderAlive(observedOwner.pid)) return undefined
+
+    try {
+      await rename(target, takeover)
+    } catch (error) {
+      if (isNotFound(error)) return undefined
+      throw error
+    }
+    const moved = await readFile(takeover, 'utf8')
+    if (moved !== observedOwnerRaw) {
+      await writeFile(target, moved, { encoding: 'utf8', flag: 'wx' }).catch(() => undefined)
+      return undefined
+    }
+    const replacement = nextOwner()
+    try {
+      await writeFile(target, `${JSON.stringify(replacement, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error
+      return undefined
+    }
+    try {
+      await rm(takeover, { force: true })
+    } catch (error) {
+      await this.releaseRecoveryOwner(sourceId, replacement.recoveryToken).catch(() => undefined)
+      throw error
+    }
+    return replacement
+  }
+
+  private async repositoryMatchesReceipt(receipt: SourceReceipt, signal?: AbortSignal): Promise<boolean> {
+    const root = await this.assertPathContainment(receipt.sourceId)
+    const status = await this.git(root, ['status', '--porcelain'], signal)
+    signal?.throwIfAborted()
+    const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    signal?.throwIfAborted()
+    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    signal?.throwIfAborted()
+    const gitSecurityHash = await this.gitConfigHash(receipt.sourceId)
+    signal?.throwIfAborted()
+    return status === ''
+      && head === receipt.headCommit
+      && branch === receipt.branch
+      && gitSecurityHash === receipt.gitConfigHash
+  }
+
+  private async convergeWorkflowCompletion(
+    receipt: SourceReceipt,
+  ): Promise<SourceReceipt | undefined> {
+    const validated = validatedCompletionProof(receipt)
+    if (!validated) return undefined
+    const lockFile = this.lockPath(receipt.sourceId)
+    const recoveryFile = this.lockRecoveryPath(receipt.sourceId)
+    let lockRaw = await this.optionalFile(lockFile)
+    if (lockRaw === undefined) {
+      const markerRaw = await this.optionalFile(recoveryFile)
+        ?? await this.optionalFile(this.completionRecoveryTakeoverPath(receipt.sourceId))
+      if (markerRaw === undefined) return receipt
+      let marker: SourceLockRecoveryOwner
+      try {
+        marker = JSON.parse(markerRaw) as SourceLockRecoveryOwner
+      } catch {
+        return undefined
+      }
+      if (!marker.observedLock) return undefined
+      lockRaw = marker.observedLock
+    }
+    let lock: SourceLock
+    try {
+      lock = JSON.parse(lockRaw) as SourceLock
+    } catch {
+      return undefined
+    }
+    if (!lockMatchesCompletion(lock, validated.proof, receipt)) return undefined
+    const owner = await this.acquireCompletionRecoveryOwner(
+      receipt.sourceId,
+      validated.proof.workflowId,
+      validated.proofHash,
+      lockRaw,
+      validated.proof.lockToken,
+    )
+    if (!owner) return undefined
+    let markerOwned = true
+    let preserveMarker = false
+    const releaseMarker = async (): Promise<void> => {
+      await this.releaseRecoveryOwner(receipt.sourceId, owner.recoveryToken)
+      if (await this.optionalFile(recoveryFile) !== undefined) {
+        preserveMarker = true
+        throw new EvolutionError('invalid_input', 'Managed source completion recovery ownership changed before marker release')
+      }
+      markerOwned = false
+    }
+    try {
+      const latestReceipt = await this.readReceipt(receipt.sourceId)
+      const latestValidated = latestReceipt ? validatedCompletionProof(latestReceipt) : undefined
+      const latestLockRaw = await this.optionalFile(lockFile)
+      if (!latestReceipt
+        || !latestValidated
+        || latestValidated.proofHash !== validated.proofHash) return undefined
+      if (latestLockRaw !== undefined && latestLockRaw !== lockRaw) {
+        preserveMarker = true
+        return undefined
+      }
+      if (!(await this.repositoryMatchesReceipt(latestReceipt))) return undefined
+
+      try {
+        await this.releaseLockToken(receipt.sourceId, validated.proof.lockToken)
+      } catch (deleteError) {
+        let remainingAfterError: string | undefined
+        try {
+          remainingAfterError = await readFile(lockFile, 'utf8')
+        } catch (readError) {
+          if (!isNotFound(readError)) {
+            preserveMarker = true
+            throw new EvolutionError('invalid_input', 'Managed source completion lock became unreadable after delete failure')
+          }
+        }
+        if (remainingAfterError === undefined) {
+          await releaseMarker()
+          return latestReceipt
+        }
+        if (remainingAfterError === lockRaw) {
+          await releaseMarker()
+          throw deleteError
+        }
+        preserveMarker = true
+        throw new EvolutionError('invalid_input', 'Managed source completion lock changed after delete failure; recovery remains sealed')
+      }
+
+      let remainingLock: string | undefined
+      try {
+        remainingLock = await readFile(lockFile, 'utf8')
+      } catch (error) {
+        if (!isNotFound(error)) {
+          preserveMarker = true
+          throw new EvolutionError('invalid_input', 'Managed source completion lock became unreadable after deletion')
+        }
+      }
+      if (remainingLock === lockRaw) {
+        await releaseMarker()
+        throw new EvolutionError('command_failed', 'Managed source completion could not remove its exact workflow lock')
+      }
+      if (remainingLock !== undefined) {
+        preserveMarker = true
+        return undefined
+      }
+      await releaseMarker()
+      return latestReceipt
+    } finally {
+      if (markerOwned && !preserveMarker) {
+        await this.releaseRecoveryOwner(receipt.sourceId, owner.recoveryToken).catch(() => undefined)
+      }
+    }
+  }
+
+  private async releaseLockToken(sourceId: string, lockToken: string): Promise<void> {
+    const target = this.lockPath(sourceId)
+    try {
+      const lock = JSON.parse(await readFile(target, 'utf8')) as SourceLock
+      if (lock.lockToken !== lockToken) return
+      await this.removeOwnedLockPath(sourceId)
+    } catch (error) {
+      if (!isNotFound(error)) throw error
+    }
+  }
+
+  private async removeOwnedLockPath(sourceId: string): Promise<void> {
+    await rm(this.lockPath(sourceId), { force: true })
+  }
+
+  private async bindOwnedLockLineage(
+    sourceId: string,
+    workflowId: string,
+    lineage: { headCommit: string; branch: string; gitConfigHash: string },
+    signal?: AbortSignal,
+    expectedLockToken?: string,
+  ): Promise<void> {
+    signal?.throwIfAborted()
+    if (await this.lockPublicationBarrierExists(sourceId)) {
+      throw new EvolutionError('invalid_input', 'Managed source lock publication is blocked by recovery ownership')
+    }
+    const target = this.lockPath(sourceId)
+    const current = JSON.parse(await readFile(target, 'utf8')) as SourceLock
+    if (current.workflowId !== workflowId || current.pid !== process.pid || !current.lockToken
+      || (expectedLockToken !== undefined && current.lockToken !== expectedLockToken)) {
+      throw new EvolutionError('invalid_input', 'Managed source lock ownership changed before lineage publication')
+    }
+    const next: SourceLock = { ...current, ...lineage }
+    const temporary = `${target}.${current.lockToken}.tmp`
+    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    try {
+      signal?.throwIfAborted()
+      const latest = JSON.parse(await readFile(target, 'utf8')) as SourceLock
+      if (latest.lockToken !== current.lockToken
+        || (expectedLockToken !== undefined && latest.lockToken !== expectedLockToken)) {
+        throw new EvolutionError('invalid_input', 'Managed source lock ownership changed before lineage publication')
+      }
+      if (await this.lockPublicationBarrierExists(sourceId)) {
+        throw new EvolutionError('invalid_input', 'Managed source lock publication is blocked by recovery ownership')
+      }
+      await rename(temporary, target)
+      if (await this.lockPublicationBarrierExists(sourceId)) {
+        throw new EvolutionError('invalid_input', 'Managed source lock recovery started during lineage publication')
+      }
+      signal?.throwIfAborted()
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined)
+    }
   }
 
   async releaseLock(sourceId: string, workflowId: string): Promise<void> {
@@ -470,18 +1109,64 @@ export class SourceManager {
   }
 
   async completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
     const receipt = await this.readReceipt(sourceId)
-    if (!receipt || receipt.activeWorkflowId !== workflowId) return
-    const root = await this.assertPathContainment(sourceId)
-    const status = await this.git(root, ['status', '--porcelain'], signal)
-    const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
-    const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
-    const gitSecurityHash = await this.gitConfigHash(sourceId)
-    if (status || head !== receipt.headCommit || branch !== receipt.branch || gitSecurityHash !== receipt.gitConfigHash) {
+    if (!receipt) return
+    if (receipt.activeWorkflowId === null) {
+      if (!receipt.completionProof) return
+      const completed = await this.convergeWorkflowCompletion(receipt)
+      if (!completed) {
+        throw new EvolutionError('invalid_input', 'Managed source workflow completion proof failed closed validation')
+      }
+      if (signal?.aborted) throw signal.reason
+      return
+    }
+    if (receipt.activeWorkflowId !== workflowId || receipt.completionProof) return
+    const lockFile = this.lockPath(sourceId)
+    const lockRaw = await readFile(lockFile, 'utf8')
+    const lock = JSON.parse(lockRaw) as SourceLock
+    if (!lock.lockToken
+      || lock.workflowId !== workflowId
+      || lock.headCommit !== receipt.headCommit
+      || lock.branch !== receipt.branch
+      || lock.gitConfigHash !== receipt.gitConfigHash) {
+      throw new EvolutionError('invalid_input', 'Managed source workflow completion lock failed exact lineage validation')
+    }
+    if (!(await this.repositoryMatchesReceipt(receipt, signal))) {
       throw new EvolutionError('review_rejected', 'Managed source cannot release its workflow lock because final repository state changed')
     }
-    await this.writeReceipt({ ...receipt, activeWorkflowId: null })
-    await this.releaseLock(sourceId, workflowId)
+    signal?.throwIfAborted()
+    const latestReceipt = await this.readReceipt(sourceId)
+    const latestLockRaw = await readFile(lockFile, 'utf8')
+    if (!latestReceipt
+      || hashObject(latestReceipt) !== hashObject(receipt)
+      || latestLockRaw !== lockRaw
+      || await this.optionalFile(this.lockRecoveryPath(sourceId)) !== undefined) {
+      throw new EvolutionError('invalid_input', 'Managed source workflow completion authority changed before commit')
+    }
+    signal?.throwIfAborted()
+    const completionProof: SourceCompletionProof = {
+      schemaVersion: 1,
+      workflowId,
+      lockToken: lock.lockToken,
+      activeReceiptHash: hashObject(receipt),
+    }
+    const completedReceipt: SourceReceipt = {
+      ...receipt,
+      activeWorkflowId: null,
+      completionProof,
+    }
+    try {
+      await this.writeReceipt(completedReceipt)
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      throw error
+    }
+    const completed = await this.convergeWorkflowCompletion(completedReceipt)
+    if (!completed) {
+      throw new EvolutionError('invalid_input', 'Managed source workflow completion did not converge')
+    }
+    if (signal?.aborted) throw signal.reason
   }
 
   async assertCleanTree(sourceId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void> {
@@ -549,19 +1234,34 @@ export class SourceManager {
     signal?: AbortSignal
   }): Promise<SourceReceipt> {
     const sourceId = sourceIdForCreate(input.resolutionId)
+    input.signal?.throwIfAborted()
     await this.ensureWorkspaceLayout(input.workspaceCwd)
-    await this.acquireLock(sourceId, input.workflowId, input.signal, input.workspaceCwd)
+    input.signal?.throwIfAborted()
+    const lock = await this.acquireLockInternal(sourceId, input.workflowId, input.signal, input.workspaceCwd)
+    let receiptActivated = false
     try {
       const root = this.sourcePath(sourceId, input.workspaceCwd)
-      if (await access(path.join(root, '.git'), constants.F_OK).then(() => true).catch(() => false)) {
+      let gitDirectoryExists: boolean
+      try {
+        gitDirectoryExists = await this.hasGitDirectory(path.join(root, '.git'), input.signal)
+        input.signal?.throwIfAborted()
+      } catch (error) {
+        if (input.signal?.aborted) throw input.signal.reason
+        throw error
+      }
+      if (gitDirectoryExists) {
         throw new EvolutionError('invalid_input', 'Managed create source already exists; refusing to overwrite', {
           sourceId,
         })
       }
+      input.signal?.throwIfAborted()
       await mkdir(path.join(root, 'lib'), { recursive: true })
+      input.signal?.throwIfAborted()
       await this.git(root, ['init'], input.signal)
+      input.signal?.throwIfAborted()
       await this.ensureHostSourceExcludes(root)
       const branch = `autoevo/${input.workflowId}`
+      input.signal?.throwIfAborted()
       await this.git(root, ['checkout', '-B', branch], input.signal)
       const files = SourceManager.trustedScaffoldFiles(input.packageName ?? `dsh-plugin-${sourceId.slice(-8)}`)
       for (const [relative, body] of Object.entries(files)) {
@@ -569,9 +1269,12 @@ export class SourceManager {
         if (!isPathInside(root, absolute)) {
           throw new EvolutionError('unsafe_path', 'Scaffold path escaped managed source', { relative })
         }
+        input.signal?.throwIfAborted()
         await mkdir(path.dirname(absolute), { recursive: true })
+        input.signal?.throwIfAborted()
         await writeFile(absolute, body, 'utf8')
       }
+      input.signal?.throwIfAborted()
       const headCommit = await this.createHooklessCommit({
         sourceId,
         message: 'chore: trusted AutoEvo plugin scaffold',
@@ -591,17 +1294,18 @@ export class SourceManager {
         activeWorkflowId: input.workflowId,
         gitConfigHash: await this.gitConfigHash(sourceId, input.workspaceCwd),
       }
-      await this.writeReceipt(receipt)
-      await writeFile(this.lockPath(sourceId), `${JSON.stringify({
-        workflowId: input.workflowId,
-        createdAt: new Date().toISOString(),
-        pid: process.pid,
+      await this.bindOwnedLockLineage(sourceId, input.workflowId, {
         headCommit,
         branch,
-      } satisfies SourceLock, null, 2)}\n`, 'utf8')
+        gitConfigHash: receipt.gitConfigHash,
+      }, input.signal, lock.lockToken)
+      input.signal?.throwIfAborted()
+      await this.writeReceipt(receipt)
+      receiptActivated = true
+      input.signal?.throwIfAborted()
       return receipt
     } catch (error) {
-      await this.releaseLock(sourceId, input.workflowId).catch(() => undefined)
+      if (!receiptActivated && lock.acquiredHere) await this.releaseLockToken(sourceId, lock.lockToken).catch(() => undefined)
       throw error
     }
   }
@@ -623,22 +1327,41 @@ export class SourceManager {
     const commit = input.review.sourceSnapshot.commit
     const packagePath = normalizePackagePath(input.review.sourceSnapshot.packagePath)
     const sourceId = sourceIdForRepository(repository, packagePath)
+    input.signal?.throwIfAborted()
     await this.ensureWorkspaceLayout(input.workspaceCwd)
-    await this.acquireLock(sourceId, input.workflowId, input.signal, input.workspaceCwd)
+    input.signal?.throwIfAborted()
+    const lock = await this.acquireLockInternal(sourceId, input.workflowId, input.signal, input.workspaceCwd)
+    let receiptActivated = false
     try {
       const root = this.sourcePath(sourceId, input.workspaceCwd)
-      const exists = await access(path.join(root, '.git'), constants.F_OK).then(() => true).catch(() => false)
+      let exists: boolean
+      try {
+        exists = await this.hasGitDirectory(path.join(root, '.git'), input.signal)
+        input.signal?.throwIfAborted()
+      } catch (error) {
+        if (input.signal?.aborted) throw input.signal.reason
+        throw error
+      }
       if (!exists) {
+        input.signal?.throwIfAborted()
         await mkdir(root, { recursive: true })
+        input.signal?.throwIfAborted()
         await this.git(root, ['init'], input.signal)
+        input.signal?.throwIfAborted()
         await this.git(root, ['remote', 'add', 'origin', `https://github.com/${repository}.git`], input.signal)
       }
+      input.signal?.throwIfAborted()
       await this.ensureHostSourceExcludes(root)
+      input.signal?.throwIfAborted()
       await this.git(root, ['fetch', '--depth=1', 'origin', commit], input.signal)
       const branch = `autoevo/${input.workflowId}`
+      input.signal?.throwIfAborted()
       await this.git(root, ['checkout', '-B', branch, commit], input.signal)
+      input.signal?.throwIfAborted()
       await this.assertCleanTree(sourceId, input.signal, input.workspaceCwd)
+      input.signal?.throwIfAborted()
       const headCommit = await this.git(root, ['rev-parse', 'HEAD'], input.signal)
+      input.signal?.throwIfAborted()
       if (headCommit.toLowerCase() !== commit.toLowerCase()) {
         throw new EvolutionError('review_rejected', 'Managed source HEAD does not match the reviewed commit', {
           expected: commit,
@@ -659,17 +1382,18 @@ export class SourceManager {
         gitConfigHash: await this.gitConfigHash(sourceId, input.workspaceCwd),
         ...(packagePath ? { packagePath } : {}),
       }
-      await this.writeReceipt(receipt)
-      await writeFile(this.lockPath(sourceId), `${JSON.stringify({
-        workflowId: input.workflowId,
-        createdAt: new Date().toISOString(),
-        pid: process.pid,
+      await this.bindOwnedLockLineage(sourceId, input.workflowId, {
         headCommit,
         branch,
-      } satisfies SourceLock, null, 2)}\n`, 'utf8')
+        gitConfigHash: receipt.gitConfigHash,
+      }, input.signal, lock.lockToken)
+      input.signal?.throwIfAborted()
+      await this.writeReceipt(receipt)
+      receiptActivated = true
+      input.signal?.throwIfAborted()
       return receipt
     } catch (error) {
-      await this.releaseLock(sourceId, input.workflowId).catch(() => undefined)
+      if (!receiptActivated && lock.acquiredHere) await this.releaseLockToken(sourceId, lock.lockToken).catch(() => undefined)
       throw error
     }
   }
@@ -773,14 +1497,12 @@ export class SourceManager {
       reviewId: input.reviewId,
       artifactHash: null,
     }
-    await this.writeReceipt(next)
-    await writeFile(this.lockPath(input.sourceId), `${JSON.stringify({
-      workflowId: input.workflowId,
-      createdAt: lock.createdAt,
-      pid: process.pid,
+    await this.bindOwnedLockLineage(input.sourceId, input.workflowId, {
       headCommit,
       branch,
-    } satisfies SourceLock, null, 2)}\n`, 'utf8')
+      gitConfigHash: next.gitConfigHash,
+    }, input.signal)
+    await this.writeReceipt(next)
     return {
       ...next,
       changedFiles: allChangedFiles,
@@ -807,20 +1529,34 @@ export class SourceManager {
   }
 
   async inspectCompletedSource(sourceId: string, signal?: AbortSignal): Promise<SourceReceipt | undefined> {
-    const receipt = await this.readReceipt(sourceId)
+    signal?.throwIfAborted()
+    let receipt = await this.readReceipt(sourceId)
     if (!receipt || receipt.activeWorkflowId) return undefined
+    if (receipt.completionProof) {
+      const completed = await this.convergeWorkflowCompletion(receipt)
+      if (!completed) return undefined
+      receipt = completed
+      if (signal?.aborted) throw signal.reason
+    }
     const lockFile = this.lockPath(sourceId)
     try {
-      const lock = JSON.parse(await readFile(lockFile, 'utf8')) as SourceLock
-      if (isLockHolderAlive(lock.pid)) return undefined
+      await readFile(lockFile, 'utf8')
+      // A completed/null receipt plus any surviving lock is an ambiguous
+      // pre-claim crash. Automatic takeover cannot prove a safe CAS on the
+      // lock pathname, so keep this state fail-closed.
+      return undefined
     } catch (error) {
       if (!isNotFound(error)) throw error
     }
     const root = await this.assertPathContainment(sourceId)
     const status = await this.git(root, ['status', '--porcelain'], signal)
+    signal?.throwIfAborted()
     const head = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    signal?.throwIfAborted()
     const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+    signal?.throwIfAborted()
     const gitSecurityHash = await this.gitConfigHash(sourceId)
+    signal?.throwIfAborted()
     if (status || head !== receipt.headCommit || branch !== receipt.branch || gitSecurityHash !== receipt.gitConfigHash) {
       return undefined
     }
@@ -832,24 +1568,93 @@ export class SourceManager {
     workflowId: string,
     signal?: AbortSignal,
   ): Promise<SourceReceipt> {
+    signal?.throwIfAborted()
     const inspected = await this.inspectCompletedSource(sourceId, signal)
     if (!inspected) {
       throw new EvolutionError('invalid_input', 'Completed managed source is missing, locked, dirty, or drifted')
     }
-    await this.acquireLock(sourceId, workflowId, signal)
-    const next: SourceReceipt = { ...inspected, activeWorkflowId: workflowId }
-    await this.writeReceipt(next)
     const root = await this.assertPathContainment(sourceId)
+    const status = await this.git(root, ['status', '--porcelain'], signal)
+    signal?.throwIfAborted()
     const headCommit = await this.git(root, ['rev-parse', 'HEAD'], signal)
+    signal?.throwIfAborted()
     const branch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
-    await writeFile(this.lockPath(sourceId), `${JSON.stringify({
+    signal?.throwIfAborted()
+    const gitConfigHash = await this.gitConfigHash(sourceId)
+    signal?.throwIfAborted()
+    if (status !== ''
+      || headCommit !== inspected.headCommit
+      || branch !== inspected.branch
+      || gitConfigHash !== inspected.gitConfigHash) {
+      throw new EvolutionError('invalid_input', 'Completed managed source changed before lock publication')
+    }
+
+    const lock: SourceLock = {
       workflowId,
       createdAt: new Date().toISOString(),
       pid: process.pid,
+      lockToken: randomUUID(),
       headCommit,
       branch,
-    } satisfies SourceLock, null, 2)}\n`, 'utf8')
-    return next
+      gitConfigHash,
+    }
+    const lockFile = this.lockPath(sourceId)
+    if (await this.lockPublicationBarrierExists(sourceId)) {
+      throw new EvolutionError('invalid_input', 'Managed source lock recovery is already owned; refusing completed-source claim')
+    }
+    signal?.throwIfAborted()
+    try {
+      await writeFile(lockFile, `${JSON.stringify(lock, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+        throw new EvolutionError('invalid_input', 'Completed managed source was claimed concurrently')
+      }
+      throw error
+    }
+    if (await this.lockPublicationBarrierExists(sourceId)) {
+      await this.releaseLockToken(sourceId, lock.lockToken!)
+      throw new EvolutionError('invalid_input', 'Managed source lock recovery started during completed-source claim')
+    }
+
+    let receiptActivated = false
+    try {
+      signal?.throwIfAborted()
+      const latestReceipt = await this.readReceipt(sourceId)
+      signal?.throwIfAborted()
+      if (!latestReceipt
+        || latestReceipt.activeWorkflowId !== null
+        || JSON.stringify(latestReceipt) !== JSON.stringify(inspected)) {
+        throw new EvolutionError('invalid_input', 'Completed managed source receipt changed during claim')
+      }
+      const lockedStatus = await this.git(root, ['status', '--porcelain'], signal)
+      signal?.throwIfAborted()
+      const lockedHead = await this.git(root, ['rev-parse', 'HEAD'], signal)
+      signal?.throwIfAborted()
+      const lockedBranch = await this.git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], signal)
+      signal?.throwIfAborted()
+      const lockedConfigHash = await this.gitConfigHash(sourceId)
+      signal?.throwIfAborted()
+      if (lockedStatus !== ''
+        || lockedHead !== headCommit
+        || lockedBranch !== branch
+        || lockedConfigHash !== gitConfigHash) {
+        throw new EvolutionError('invalid_input', 'Completed managed source changed while its claim lock was held')
+      }
+      const persistedLock = JSON.parse(await readFile(lockFile, 'utf8')) as SourceLock
+      if (persistedLock.lockToken !== lock.lockToken) {
+        throw new EvolutionError('invalid_input', 'Completed managed source claim lock changed before receipt activation')
+      }
+      signal?.throwIfAborted()
+      const next: SourceReceipt = { ...inspected, activeWorkflowId: workflowId }
+      delete next.completionProof
+      await this.writeReceipt(next)
+      receiptActivated = true
+      signal?.throwIfAborted()
+      return next
+    } catch (error) {
+      if (!receiptActivated) await this.releaseLockToken(sourceId, lock.lockToken!).catch(() => undefined)
+      throw error
+    }
   }
 
   /** Re-enter an already-owned managed source without resetting its lineage. */
@@ -862,9 +1667,9 @@ export class SourceManager {
     // clean managed source remain the same. Reuse the existing lightweight
     // stale-lock revalidation so the same workflow can continue without
     // inventing a second recovery state or asking the user to start over.
-    await this.acquireLock(sourceId, workflowId, signal)
+    const handle = await this.acquireLockInternal(sourceId, workflowId, signal, undefined, true)
     const lock = JSON.parse(await readFile(this.lockPath(sourceId), 'utf8')) as SourceLock
-    if (lock.workflowId !== workflowId || lock.pid !== process.pid) {
+    if (lock.workflowId !== workflowId || lock.pid !== process.pid || lock.lockToken !== handle.lockToken) {
       throw new EvolutionError('invalid_input', 'Managed source lock is not owned by this workflow instance')
     }
     const root = await this.assertPathContainment(sourceId)

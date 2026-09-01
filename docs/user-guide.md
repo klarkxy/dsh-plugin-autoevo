@@ -14,7 +14,7 @@
 ## 2. 安装、升级与首次加载
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.1
 ```
 
 通过 npx 运行 DSH，无需全局安装；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。安装或升级后重启该 profile，让新 bundle 生效。

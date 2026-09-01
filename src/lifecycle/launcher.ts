@@ -5,7 +5,6 @@ import { parse } from 'yaml'
 import type { RuntimeConfig } from '../config.js'
 import type {
   ActivatedFiber,
-  ReviewRecord,
   VerificationEvidence,
   VerificationLayerKind,
   VerificationStatus,
@@ -24,7 +23,6 @@ import { commandResultFailure, type CommandResult, type CommandRunner } from '..
 import { sha256 } from '../state/hashes.js'
 import { resolveStateRoot } from '../workspace-layout.js'
 import { activationTargetsFromPatch } from './bundle-activation.js'
-import { materializeLocalPackage, type MaterializedLocalPackage } from './snapshot.js'
 
 interface SessionFile {
   path: string
@@ -236,20 +234,6 @@ export class DshLauncher {
     private readonly runner: CommandRunner,
     private readonly config: RuntimeConfig,
   ) {}
-
-  materializeLocal(
-    review: ReviewRecord,
-    artifactRoot: string,
-    signal?: AbortSignal,
-  ): Promise<MaterializedLocalPackage> {
-    return materializeLocalPackage({
-      review,
-      artifactRoot,
-      config: this.config,
-      runner: this.runner,
-      ...(signal ? { signal } : {}),
-    })
-  }
 
   private argv(...args: string[]): [string, ...string[]] {
     return [this.config.dshCommand, ...this.config.dshCommandArgs, ...args]

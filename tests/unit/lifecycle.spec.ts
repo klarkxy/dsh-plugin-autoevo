@@ -8,15 +8,16 @@ import { testReview } from '../helpers/records.js'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
-import { POLICY_VERSION, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord, type ReviewRecord, type VerificationEvidence } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import { builtinReceiptSpec } from '../../src/lifecycle/enable-builtin.js'
 import { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { PluginRemover } from '../../src/lifecycle/remove.js'
+import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { StateStore } from '../../src/state/store.js'
 import { sha256 } from '../../src/state/hashes.js'
-import { _testing as snapshotTesting } from '../../src/lifecycle/snapshot.js'
+import { _testing as packageArtifactTesting } from '../../src/lifecycle/package-artifact.js'
 
 const temporary = trackTempDirs()
 
@@ -64,11 +65,67 @@ function config(root: string): RuntimeConfig {
   return testRuntimeConfig(root, { dshHome: path.join(root, 'persistent-dsh-home'), evolutionPreset: true })
 }
 
-function execution(): ToolRunContext {
+function execution(signal?: AbortSignal): ToolRunContext {
   return {
     callId: 'call-1',
     agent: { session: { header: { cwd: process.cwd() } } },
+    ...(signal ? { signal } : {}),
   } as unknown as ToolRunContext
+}
+
+function removalRecord(root: string, id: string, installSpec: string): InstallationRecord {
+  return {
+    schemaVersion: 1,
+    id,
+    createdAt: '2026-08-31T00:00:00.000Z',
+    targetProfile: 'persistent',
+    retention: 'persistent',
+    dshHome: config(root).dshHome,
+    packageName: 'dsh-tool-calculator',
+    installSpec,
+    installPhase: 'completed',
+    installState: 'installed',
+    installOutcome: 'verified',
+    installed: true,
+    loaded: true,
+    verified: true,
+    restartRequired: false,
+    removed: false,
+    verification: {
+      attempted: true,
+      expectedTools: ['calculator'],
+      calledTools: ['calculator'],
+      resultTools: ['calculator'],
+      failedTools: [],
+      sessionFiles: [],
+      taskResultObserved: true,
+      reason: 'verified',
+    },
+  }
+}
+
+function replacementRemovalRecord(
+  parent: InstallationRecord,
+  id: string,
+  installSpec: string,
+  createdAt: string,
+): InstallationRecord {
+  return {
+    ...removalRecord(path.dirname(path.dirname(parent.dshHome)), id, installSpec),
+    dshHome: parent.dshHome,
+    targetProfile: parent.targetProfile,
+    packageName: parent.packageName,
+    createdAt,
+    installPhase: 'completed',
+    predecessorInstallationId: parent.id,
+    replacement: {
+      state: 'new_present',
+      oldSpecDigest: dependencySpecDigest(parent.installSpec),
+      newInstallSpec: installSpec,
+      preparedAt: createdAt,
+      reconciledAt: createdAt,
+    },
+  }
 }
 
 async function installHarness(record: ReviewRecord): Promise<{ root: string, store: StateStore, ctx: Context }> {
@@ -127,8 +184,8 @@ describe('lifecycle validation', () => {
   })
 
   it('rejects shell metacharacters in local artifact paths forwarded by DSH on Windows', () => {
-    expect(() => snapshotTesting.shellForwardedFileSpec('C:\\safe&unsafe\\plugin.tgz')).toThrow(/unsafe/u)
-    expect(snapshotTesting.shellForwardedFileSpec('C:\\safe path\\plugin.tgz')).toMatch(/^file:/u)
+    expect(() => packageArtifactTesting.shellForwardedFileSpec('C:\\safe&unsafe\\plugin.tgz')).toThrow(/unsafe/u)
+    expect(packageArtifactTesting.shellForwardedFileSpec('C:\\safe path\\plugin.tgz')).toMatch(/^file:/u)
   })
 
   it('matches only the exact profile source when the reviewed bundle is active', async () => {
@@ -288,7 +345,9 @@ describe('lifecycle validation', () => {
       retention: 'temporary',
     }, execution())
 
-    expect(observedPhase).toBe('prepared')
+    // Every destination effect, including a temporary trial without preflight,
+    // is now preceded by the durable destination_installing journal.
+    expect(observedPhase).toBe('destination_installing')
     expect(result).toMatchObject({
       id: installationId,
       installFailure: {
@@ -306,6 +365,7 @@ describe('lifecycle validation', () => {
     let verifyHostCalls = 0
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { safe: true } }),
       verifyHost: async () => {
@@ -341,7 +401,8 @@ describe('lifecycle validation', () => {
       override async put(...args: Parameters<StateStore['put']>): Promise<void> {
         if (args[0] === 'installations') {
           this.installationWrites += 1
-          if (this.installationWrites === 2) throw new Error('simulated final receipt failure')
+          // prepared -> destination_installing -> completed
+          if (this.installationWrites === 3) throw new Error('simulated final receipt failure')
         }
         await super.put(...args)
       }
@@ -351,6 +412,7 @@ describe('lifecycle validation', () => {
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
       verifyHost: async (): Promise<VerificationEvidence> => ({
@@ -393,6 +455,7 @@ describe('lifecycle validation', () => {
     const { root, store, ctx } = await installHarness(attestedReview())
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
       verifyHost: async () => { throw new Error('simulated verification interruption') },
@@ -456,9 +519,102 @@ describe('lifecycle validation', () => {
 
     await expect(remover.remove({ installationId }, execution())).resolves.toMatchObject({ removed: true })
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
+    await expect(store.listInstallationsStrict()).resolves.toEqual([
+      expect.objectContaining({ id: installationId, removed: true, installed: false, loaded: false }),
+    ])
   })
 
-  it('removes an owned persistent artifact even when a failed install left no profile dependency', async () => {
+  it.each([
+    ['string removed flag', { removed: 'false' }],
+    ['invalid retention', { retention: 'persistent_typo' }],
+  ])('rejects %s before approval, launcher, cleanup, or receipt writes', async (_name, corrupt) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-corrupt-exact-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'b'.repeat(24)}`
+    await store.put('installations', {
+      ...removalRecord(root, installationId, `github:acme/calculator#${'c'.repeat(40)}`),
+      ...corrupt,
+    } as unknown as InstallationRecord)
+    const approval = vi.fn(async () => 'allowed-once')
+    const ctx = { get: () => ({ request: approval }) } as unknown as Context
+    const launcher = {
+      profileDependencySpec: vi.fn(async () => `github:acme/calculator#${'c'.repeat(40)}`),
+      remove: vi.fn(async () => ({ exitCode: 0 })),
+    } as unknown as DshLauncher
+    const put = vi.spyOn(store, 'put')
+    put.mockClear()
+
+    await expect(new PluginRemover(ctx, config(root), store, launcher)
+      .remove({ installationId }, execution())).rejects.toMatchObject({ code: 'invalid_input' })
+    expect(approval).not.toHaveBeenCalled()
+    expect(launcher.profileDependencySpec).not.toHaveBeenCalled()
+    expect(launcher.remove).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('rejects a legacy removed receipt whose exact persistent dependency is still live', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-live-legacy-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'b'.repeat(24)}`
+    const installSpec = `github:acme/calculator#${'c'.repeat(40)}`
+    await store.put('installations', { ...removalRecord(root, installationId, installSpec), removed: true })
+    const approval = vi.fn(async () => 'allowed-once')
+    const launcher = {
+      profileDependencySpec: vi.fn(async () => installSpec),
+      remove: vi.fn(async () => ({ exitCode: 0 })),
+    } as unknown as DshLauncher
+    const put = vi.spyOn(store, 'put')
+    put.mockClear()
+
+    await expect(new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      launcher,
+    ).remove({ installationId }, execution())).rejects.toMatchObject({ code: 'invalid_input' })
+    expect(launcher.profileDependencySpec).toHaveBeenCalledTimes(1)
+    expect(approval).not.toHaveBeenCalled()
+    expect(launcher.remove).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('normalizes a legacy removed receipt only after persistent absence is proven', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-legacy-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'6'.repeat(24)}`
+    await store.put('installations', {
+      ...removalRecord(root, installationId, `github:acme/calculator#${'c'.repeat(40)}`),
+      removed: true,
+    })
+    const approval = vi.fn(async () => 'allowed-once')
+    const launcher = {
+      profileDependencySpec: vi.fn(async () => undefined),
+      remove: vi.fn(async () => ({ exitCode: 0 })),
+    } as unknown as DshLauncher
+
+    await expect(new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      launcher,
+    ).remove({ installationId }, execution())).resolves.toMatchObject({ removed: true })
+    expect(approval).not.toHaveBeenCalled()
+    expect(launcher.remove).not.toHaveBeenCalled()
+    await expect(store.listInstallationsStrict()).resolves.toEqual([
+      expect.objectContaining({
+        id: installationId,
+        removed: true,
+        installed: false,
+        verified: false,
+        restartRequired: true,
+      }),
+    ])
+  })
+
+  it('cleans an owned failed_absent artifact without removing a profile dependency', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-'))
     temporary.push(root)
     const store = new StateStore(root)
@@ -478,10 +634,13 @@ describe('lifecycle validation', () => {
       installSpec: `file:${path.join(artifactRoot, 'plugin.tgz').replaceAll('\\', '/')}`,
       ownedArtifactRoot: artifactRoot,
       artifactSha256: 'e'.repeat(64),
+      installPhase: 'completed',
+      installState: 'not_installed',
+      installOutcome: 'failed_absent',
       installed: false,
       loaded: false,
       verified: false,
-      restartRequired: true,
+      restartRequired: false,
       removed: false,
       verification: {
         attempted: false,
@@ -499,7 +658,7 @@ describe('lifecycle validation', () => {
     const launcher = {
       remove: async () => { removalCalled = true; return { exitCode: 1, signal: null, stdout: '', stderr: 'not installed' } },
       hasProfileDependency: async () => false,
-      profileDependencySpec: async () => undefined,
+      profileDependencySpec: async () => `github:acme/replacement#${'9'.repeat(40)}`,
     } as unknown as DshLauncher
     const remover = new PluginRemover(ctx, config(root), store, launcher)
 
@@ -599,6 +758,99 @@ describe('lifecycle validation', () => {
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false, id: installationId })
   })
 
+  it('preserves exact cancellation and starts no remove effect when approval ignores its signal', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-approval-abort-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'8'.repeat(24)}`
+    const installSpec = `github:acme/calculator#${'8'.repeat(40)}`
+    await store.put('installations', removalRecord(root, installationId, installSpec))
+    const controller = new AbortController()
+    const reason = new Error('remove approval cancelled')
+    const remove = vi.fn()
+    const ctx = {
+      get: () => ({
+        request: async () => {
+          controller.abort(reason)
+          return 'allowed-once'
+        },
+      }),
+    } as unknown as Context
+    const launcher = {
+      profileDependencySpec: async () => installSpec,
+      remove,
+    } as unknown as DshLauncher
+
+    await expect(new PluginRemover(ctx, config(root), store, launcher)
+      .remove({ installationId }, execution(controller.signal))).rejects.toBe(reason)
+    expect(remove).not.toHaveBeenCalled()
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false })
+  })
+
+  it('persists confirmed absence after a remove effect observes cancellation, then throws the exact reason', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-effect-abort-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'9'.repeat(24)}`
+    const installSpec = `github:acme/calculator#${'9'.repeat(40)}`
+    await store.put('installations', removalRecord(root, installationId, installSpec))
+    const controller = new AbortController()
+    const reason = new Error('remove effect cancelled')
+    const profileDependencySpec = vi.fn()
+      .mockResolvedValueOnce(installSpec)
+      .mockResolvedValueOnce(installSpec)
+      .mockResolvedValueOnce(undefined)
+    const remove = vi.fn(async () => {
+      controller.abort(reason)
+      return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+    })
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+
+    await expect(new PluginRemover(ctx, config(root), store, {
+      profileDependencySpec,
+      remove,
+    } as unknown as DshLauncher).remove({ installationId }, execution(controller.signal))).rejects.toBe(reason)
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(profileDependencySpec).toHaveBeenCalledTimes(3)
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
+  })
+
+  it('prioritizes recovery when cancelled removal state cannot be persisted', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-persist-abort-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const installationId = `installation_${'a'.repeat(24)}`
+    const installSpec = `github:acme/calculator#${'a'.repeat(40)}`
+    await store.put('installations', removalRecord(root, installationId, installSpec))
+    const originalPut = store.put.bind(store)
+    vi.spyOn(store, 'put').mockImplementation(async (kind, record) => {
+      if (kind === 'installations') throw new Error('remove settlement persistence failed')
+      return originalPut(kind, record)
+    })
+    const controller = new AbortController()
+    const reason = new Error('remove persistence cancelled')
+    const profileDependencySpec = vi.fn()
+      .mockResolvedValueOnce(installSpec)
+      .mockResolvedValueOnce(installSpec)
+      .mockResolvedValueOnce(undefined)
+    const remove = vi.fn(async () => {
+      controller.abort(reason)
+      return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+    })
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const operation = new PluginRemover(ctx, config(root), store, {
+      profileDependencySpec,
+      remove,
+    } as unknown as DshLauncher).remove({ installationId }, execution(controller.signal))
+
+    await expect(operation).rejects.toMatchObject({
+      code: 'command_failed',
+      details: { installationId, recoveryRequired: true, stage: 'remove' },
+    })
+    await expect(operation).rejects.not.toBe(reason)
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false })
+  })
+
   it('refuses a stale persistent receipt when the exact live dependency spec changed', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-stale-'))
     temporary.push(root)
@@ -646,6 +898,135 @@ describe('lifecycle validation', () => {
     await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: false, installSpec: oldSpec })
   })
 
+  it('rejects stale A but removes canonical C in an A(S)-B(T)-C(S) chain', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-lineage-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const specS = `github:acme/calculator#${'a'.repeat(40)}`
+    const specT = `github:acme/calculator#${'b'.repeat(40)}`
+    const first = { ...removalRecord(root, `installation_${'1'.repeat(24)}`, specS), installPhase: 'completed' as const }
+    const second = replacementRemovalRecord(first, `installation_${'2'.repeat(24)}`, specT, '2026-08-31T00:01:00.000Z')
+    const third = replacementRemovalRecord(second, `installation_${'3'.repeat(24)}`, specS, '2026-08-31T00:02:00.000Z')
+    for (const item of [first, second, third]) await store.put('installations', item)
+    const approval = vi.fn(async () => 'allowed-once')
+    const remove = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
+    const profileDependencySpec = vi.fn()
+      .mockResolvedValueOnce(specS)
+      .mockResolvedValueOnce(specS)
+      .mockResolvedValueOnce(specS)
+      .mockResolvedValueOnce(undefined)
+    const remover = new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      { profileDependencySpec, remove } as unknown as DshLauncher,
+    )
+
+    await expect(remover.remove({ installationId: first.id }, execution()))
+      .rejects.toThrow(/not the unique canonical live receipt/i)
+    expect(approval).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+
+    await expect(remover.remove({ installationId: third.id }, execution()))
+      .resolves.toMatchObject({ removed: true })
+    expect(approval).toHaveBeenCalledTimes(1)
+    expect(remove).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks a newly committed child after removal approval and before effect', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-postapproval-child-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const oldSpec = `github:acme/calculator#${'a'.repeat(40)}`
+    const newSpec = `github:acme/calculator#${'b'.repeat(40)}`
+    const parent = { ...removalRecord(root, `installation_${'4'.repeat(24)}`, oldSpec), installPhase: 'completed' as const }
+    const child = replacementRemovalRecord(parent, `installation_${'5'.repeat(24)}`, newSpec, '2026-08-31T00:03:00.000Z')
+    await store.put('installations', parent)
+    const approval = vi.fn(async () => {
+      await store.put('installations', child)
+      return 'allowed-once'
+    })
+    const remove = vi.fn()
+    const profileDependencySpec = vi.fn().mockResolvedValueOnce(oldSpec).mockResolvedValueOnce(newSpec)
+    const remover = new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      { profileDependencySpec, remove } as unknown as DshLauncher,
+    )
+
+    await expect(remover.remove({ installationId: parent.id }, execution()))
+      .rejects.toThrow(/not the unique canonical live receipt/i)
+    expect(approval).toHaveBeenCalledTimes(1)
+    expect(remove).not.toHaveBeenCalled()
+    await expect(store.getInstallation(parent.id)).resolves.toMatchObject({ removed: false })
+    await expect(store.getInstallation(child.id)).resolves.toMatchObject({ removed: false })
+  })
+
+  it('fails closed before approval when same-spec replacement branches are ambiguous', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-ambiguous-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const spec = `github:acme/calculator#${'a'.repeat(40)}`
+    const parent = { ...removalRecord(root, `installation_${'6'.repeat(24)}`, spec), installPhase: 'completed' as const }
+    const first = replacementRemovalRecord(parent, `installation_${'7'.repeat(24)}`, spec, '2026-08-31T00:04:00.000Z')
+    const second = replacementRemovalRecord(parent, `installation_${'8'.repeat(24)}`, spec, '2026-08-31T00:05:00.000Z')
+    for (const item of [parent, first, second]) await store.put('installations', item)
+    const approval = vi.fn()
+    const remove = vi.fn()
+    const remover = new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      { profileDependencySpec: async () => spec, remove } as unknown as DshLauncher,
+    )
+
+    await expect(remover.remove({ installationId: first.id }, execution())).rejects.toMatchObject({
+      code: 'command_failed',
+      details: { stage: 'remove', ambiguousCount: 2 },
+    })
+    expect(approval).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it('rejects removal before approval when a corrupt canonical same-spec child is skipped by tolerant reads', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-corrupt-child-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const spec = `github:acme/calculator#${'a'.repeat(40)}`
+    const parent = { ...removalRecord(root, `installation_${'9'.repeat(24)}`, spec), installPhase: 'completed' as const }
+    await store.put('installations', parent)
+    const corruptChildId = `installation_${'a'.repeat(24)}`
+    await writeFile(path.join(store.root, 'installations', `${corruptChildId}.json`), JSON.stringify({
+      schemaVersion: 1,
+      id: corruptChildId,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      targetProfile: parent.targetProfile,
+      retention: parent.retention,
+      dshHome: parent.dshHome,
+      packageName: parent.packageName,
+      predecessorInstallationId: parent.id,
+      installSpec: spec,
+    }), 'utf8')
+    const approval = vi.fn()
+    const live = vi.fn(async () => spec)
+    const remove = vi.fn()
+    const remover = new PluginRemover(
+      { get: () => ({ request: approval }) } as unknown as Context,
+      config(root),
+      store,
+      { profileDependencySpec: live, remove } as unknown as DshLauncher,
+    )
+
+    await expect(remover.remove({ installationId: parent.id }, execution())).rejects.toMatchObject({
+      code: 'invalid_input',
+      details: { diagnosticCount: 1 },
+    })
+    expect(live).not.toHaveBeenCalled()
+    expect(approval).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+  })
+
   it('removes an exact AutoEvo-owned built-in mount from its receipt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-builtin-'))
     temporary.push(root)
@@ -682,7 +1063,7 @@ describe('lifecycle validation', () => {
     })
     const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
     const launcher = {
-      dumpConfig: async () => ({ exitCode: 0, signal: null, stdout: 'profile without opt-in mount', stderr: '' }),
+      dumpConfig: async () => ({ exitCode: 0, signal: null, stdout: '[]\n', stderr: '' }),
     } as unknown as DshLauncher
 
     await expect(new PluginRemover(ctx, config(root), store, launcher)
@@ -744,6 +1125,7 @@ describe('lifecycle validation', () => {
     const verifyHostArgs: unknown[] = []
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' }, safe: true } }),
       verifyHost: async (input: unknown) => {

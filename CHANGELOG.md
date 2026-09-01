@@ -2,6 +2,14 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
+## 1.2.1
+
+- Move the public Policy contract to V14. Unfinished V13 workflows and their grants cannot resume; start again from the current top-level requirement. Completed installations and historical receipts remain readable.
+- Stop minting `ExecutionLease`. Authorization is `SelectionReceipt` plus `ActionCommitment`. The public `ExecutionLease` type, the `leased` lifecycle state, and lease re-signing are removed. Model-supplied `executionLease` / `lease` fields are still rejected.
+- Historical workflow JSON that still contains `executionLease` is stripped on read and never written back.
+- Publish exclusive installation receipts through a complete temp file plus exclusive link so concurrent Windows creates cannot read a partial JSON body.
+- Keep the default local and pull-request gate to in-process Vitest, lint, typecheck, and build. Pack-spawning Vitest, DSH acceptance, and live marketplace E2E run at `pnpm check:release` and on release tags.
+
 ## 1.2.0
 
 - Add a completion-first fault-repair workflow that seals the repair objective, requires explicit confirmation in a fresh top-level user turn, and then launches a temporary Host-owned standard coding Agent with unrestricted local repair authority.

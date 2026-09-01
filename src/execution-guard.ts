@@ -1,6 +1,6 @@
 import path from 'node:path'
 import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
-import { TOOL_NAMES, type ExecutionLease } from './contracts.js'
+import { TOOL_NAMES } from './contracts.js'
 import { isNewCordisDefinition } from './creation-guard.js'
 import {
   CORDIS_MUTATION_TOOL_NAMES,
@@ -116,27 +116,6 @@ export function skillTargetFromArguments(args: unknown): string | undefined {
   }
   if (found.size !== 1) return undefined
   return [...found][0]
-}
-
-export function leaseAllowsExecution(
-  lease: ExecutionLease | undefined,
-  exec: Pick<ToolExecution, 'name' | 'arguments'>,
-): boolean {
-  if (!lease) return false
-  const endpoint = lease.endpoint
-  const name = normalizeEndpointName(exec.name)
-  if (endpoint.kind === 'exact_tool') {
-    return name.length > 0 && name === normalizeEndpointName(endpoint.name)
-  }
-  if (endpoint.kind !== 'bridge') return false
-  const allowed = endpoint.tools.map((tool) => normalizeEndpointName(tool))
-  if (!allowed.includes(name)) return false
-  const target = bridgeTargetFromArguments(exec.arguments)
-  if (!target) return false
-  if (target !== endpoint.target) return false
-  const exactTarget = lease.allowedParameterConstraints.exactTarget
-  if (exactTarget !== undefined && target !== exactTarget) return false
-  return true
 }
 
 function matchesSet(name: string, set: Set<string>): boolean {
@@ -263,21 +242,21 @@ export class ExecutionGuard {
     if (matchesSet(name, PARENT_DENIED_CORDIS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PARENT_DENIED_CORDIS_TOOLS))
       || isNewCordisDefinition(exec)) {
-      return 'Capability Evolution Policy V13 denies Cordis live mutation in the parent session; use the Search-first workflow.'
+      return 'Capability Evolution Policy V14 denies Cordis live mutation in the parent session; use the Search-first workflow.'
     }
     if (matchesSet(name, SEARCH_BYPASS_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, SEARCH_BYPASS_TOOLS))) {
-      return 'Capability Evolution Policy V13 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
+      return 'Capability Evolution Policy V14 denies direct or nested find_dsh_plugin; start or resume capability_workflow.'
     }
     if (matchesSet(name, SKILL_TOOLS)) {
       const target = skillTargetFromArguments(exec.arguments)
       if (!target || target === 'cordis-plugin-development') {
-        return 'Capability Evolution Policy V13 denies loading cordis-plugin-development in the parent session.'
+        return 'Capability Evolution Policy V14 denies loading cordis-plugin-development in the parent session.'
       }
     }
     if (matchesSet(name, DELEGATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, DELEGATION_TOOLS))) {
-      return 'Capability Evolution Policy V13 denies ordinary model, subagent, agent, and workflow delegation before a managed construction grant.'
+      return 'Capability Evolution Policy V14 denies ordinary model, subagent, agent, and workflow delegation before a managed construction grant.'
     }
     if (matchesSet(name, PLUGIN_MUTATION_TOOLS)
       || (normalizedBridgeTarget && matchesSet(normalizedBridgeTarget, PLUGIN_MUTATION_TOOLS))) {
@@ -300,7 +279,7 @@ export class ExecutionGuard {
         return 'AutoEvo parent session denies direct DSH plugin install/remove; use capability_workflow_resume / plugin_remove.'
       }
       if (!isSafeParentShell(command)) {
-        return 'Capability Evolution Policy V13 permits only allowlisted read-only shell inspection commands before managed construction.'
+        return 'Capability Evolution Policy V14 permits only allowlisted read-only shell inspection commands before managed construction.'
       }
     }
     return undefined
@@ -422,5 +401,4 @@ export const _testing = {
   normalizeEndpointName,
   bridgeTargetFromArguments,
   skillTargetFromArguments,
-  leaseAllowsExecution,
 }

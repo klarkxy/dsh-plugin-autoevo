@@ -16,6 +16,7 @@ import {
   type CandidateSnapshotItem,
   type InterruptPayload,
   type ValidatedResume,
+  type WorkflowExec,
   type WorkflowRecord,
   type WorkflowView,
 } from './contracts.js'
@@ -26,7 +27,6 @@ import {
   assertBuiltinEnablementBinding,
   endpointForLocalReuse,
   mintActionCommitment,
-  mintExecutionLease,
   mintSelectionReceipt,
 } from './grants.js'
 import { WorkflowEngineRecovery } from './engine-recovery.js'
@@ -50,11 +50,14 @@ function assertResumeDoesNotForgeHostFacts(input: ResumeInput): void {
   }
 }
 
-export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
+export class WorkflowEngine extends WorkflowEngineRecovery {
   async resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
     return await this.withLock(input.workflowId, async () => {
       assertResumeDoesNotForgeHostFacts(input)
-      const workflow = await this.store.getWorkflow(input.workflowId)
+      const workflow = await this.awaitPreEffect(
+        () => this.store.getWorkflow(input.workflowId),
+        exec.signal,
+      )
       const callerSessionId = ownerSessionId(exec.agent)
       if (!callerSessionId || callerSessionId !== workflow.ownerSessionId) {
         throw new EvolutionError('invalid_input', 'Workflow belongs to a different owner session', {
@@ -67,7 +70,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         const resolution = workflow.resolutionId
           ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
           : undefined
-        return await this.view(workflow, resolution)
+        return await this.view(workflow, resolution, {}, exec.signal)
       }
       if (input.navigation?.kind === 'finish_managed_work') {
         return await this.resumeFinishManagedWork(workflow, input, exec)
@@ -107,13 +110,18 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
           interruptId: workflow.interrupt?.interruptId,
         })
       }
+      if (workflow.interrupt.kind !== workflow.cursor) {
+        throw new EvolutionError('invalid_input', 'Workflow interrupt kind does not match its current control node; no decision was applied')
+      }
       if (workflow.cursor === 'await_clarification') {
+        const expectedControl = await this.canonicalInterruptPayload(workflow, undefined, [], exec)
+        this.assertCanonicalInterrupt(workflow, expectedControl)
         const expectedDigest = this.clarificationSnapshotDigest(workflow)
         if (expectedDigest !== workflow.interrupt.snapshotDigest) {
           throw new EvolutionError('invalid_input', 'Clarification interrupt snapshot digest mismatch')
         }
         if (this.creationGuard.isAwaitingFreshUserTurn(exec.agent, workflow.interrupt)) {
-          return await this.view(workflow, undefined, { status: 'parked', alreadyWaiting: true })
+          return await this.view(workflow, undefined, { status: 'parked', alreadyWaiting: true }, exec.signal)
         }
         if (input.decision || !input.navigation) {
           return await this.invalidResumeView(workflow, undefined, exec, input, 'Clarification accepts read-only navigation only')
@@ -161,7 +169,9 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
       }
       const resolution = await this.host.getResolution(workflow.resolutionId)
-      const reviews = await this.reviewsForWorkflow(workflow)
+      const reviews = await this.reviewsForWorkflow(workflow, exec.signal)
+      const expectedControl = await this.canonicalInterruptPayload(workflow, resolution, reviews, exec)
+      this.assertCanonicalInterrupt(workflow, expectedControl)
       const expectedDigest = snapshotDigestFor(workflow.interrupt.kind, resolution, reviews, workflow)
       if (expectedDigest !== workflow.interrupt.snapshotDigest) {
         throw new EvolutionError('invalid_input', 'Interrupt candidate/review snapshot digest mismatch', {
@@ -174,7 +184,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         return await this.view(workflow, resolution, {
           status: 'parked',
           alreadyWaiting: true,
-        })
+        }, exec.signal)
       }
 
       const currentTurnId = this.creationGuard.currentTurnId(exec.agent)
@@ -183,7 +193,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         return await this.view(workflow, resolution, {
           status: 'invalid_resume',
           resumeHint: 'Repeated invalid action is blocked until a fresh user turn.',
-        })
+        }, exec.signal)
       }
       if (workflow.invalidResumeAttempt && workflow.invalidResumeAttempt.hostTurnId !== currentTurnId) {
         delete workflow.invalidResumeAttempt
@@ -248,12 +258,18 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         throw error
       }
 
-      const latest = await this.store.getWorkflow(workflow.id)
-      if (latest.generation !== workflow.generation || latest.status !== 'interrupted') {
+      const latest = await this.awaitPreEffect(
+        () => this.store.getWorkflow(workflow.id),
+        exec.signal,
+      )
+      if (latest.generation !== workflow.generation
+        || latest.status !== 'interrupted'
+        || latest.cursor !== workflow.cursor
+        || latest.interrupt?.interruptId !== input.interruptId) {
         throw new EvolutionError('invalid_input', 'This workflow is already running or has moved on')
       }
       if ((resume.optionId === 'use_this' || resume.optionId === 'apply_recovery') && decisionReview) {
-        await this.clearErroneousVerificationAttempt(latest, decisionReview)
+        await this.clearErroneousVerificationAttempt(latest, decisionReview, exec.signal)
       }
       latest.generation += 1
       latest.status = 'running'
@@ -268,7 +284,6 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       else delete latest.pendingPath
       if (resume.install) latest.pendingInstall = resume.install
       else delete latest.pendingInstall
-      const nextResolution = await this.host.applyDecision(resolution, resume, decisionReview, latest)
       if (decisionReview) {
         // Downstream graph nodes consume lastReviewId; pin it to the exact
         // candidate selected by the model instead of the review display order.
@@ -289,8 +304,44 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         ...(decisionReview ? { review: decisionReview } : {}),
         exec,
       })
+      // The workflow record is the single-Host execution claim. Persist the
+      // consumed interrupt and exact grant before any Host decision or node
+      // can publish side effects. A restart settles this running record
+      // through the ordinary stale-workflow recovery path.
+      await this.checkpoint(latest)
+      let nextResolution: ResolutionRecord
+      try {
+        nextResolution = await this.host.applyDecision(resolution, resume, decisionReview, latest)
+      } catch {
+        return await this.settleCommittedFinalDecisionFailure(latest, resolution, exec)
+      }
       return await this.runUntilPark(latest, exec, undefined, nextResolution)
     })
+  }
+
+  private async settleCommittedFinalDecisionFailure(
+    workflow: WorkflowRecord,
+    resolution: ResolutionRecord,
+    exec: ToolRunContext,
+  ): Promise<WorkflowView> {
+    workflow.cursor = 'recovery_required'
+    workflow.status = 'interrupted'
+    workflow.lastFailure = {
+      stage: 'workflow',
+      code: 'final_decision_application_failed',
+      message: 'The final decision was checkpointed but Host application did not complete; recovery is required.',
+      retryable: false,
+    }
+    delete workflow.interrupt
+    delete workflow.lastDiagnosis
+    delete workflow.invalidResumeAttempt
+    this.clearWorkflowGrant(workflow)
+    this.creationGuard.invalidateHostGrant(exec.agent)
+    await this.host.releaseManagedSource?.(workflow, this.cleanupExec(exec))
+    await this.issueRecoveryInterrupt(workflow, exec)
+    this.syncGuard(workflow, exec, undefined, resolution)
+    if (exec.signal?.aborted) throw exec.signal.reason
+    return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
   }
 
   private async resumeFinishManagedWork(
@@ -300,7 +351,10 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
   ): Promise<WorkflowView> {
     if (input.decision) {
       const resolution = workflow.resolutionId
-        ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
+        ? await this.readOptionalBeforeEffect(
+            () => this.host.getResolution(workflow.resolutionId!),
+            exec.signal,
+          )
         : undefined
       if (!resolution) throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
       return await this.invalidResumeView(
@@ -320,17 +374,23 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     if (!workflow.resolutionId) {
       throw new EvolutionError('invalid_input', 'This workflow has no resolution to resume')
     }
-    const latest = await this.store.getWorkflow(workflow.id)
+    const latest = await this.awaitPreEffect(
+      () => this.store.getWorkflow(workflow.id),
+      exec.signal,
+    )
     if (latest.generation !== workflow.generation || latest.status !== 'interrupted') {
       throw new EvolutionError('invalid_input', 'This workflow is already running or has moved on')
     }
+    const resolution = await this.awaitPreEffect(
+      () => this.host.getResolution(latest.resolutionId!),
+      exec.signal,
+    )
     latest.generation += 1
     latest.status = 'running'
     delete latest.lastFailure
     delete latest.lastDiagnosis
     delete latest.invalidResumeAttempt
     latest.cursor = transition(latest.cursor, 'finish_managed_work')
-    const resolution = await this.host.getResolution(latest.resolutionId!)
     return await this.runUntilPark(latest, exec, undefined, resolution)
   }
 
@@ -456,14 +516,13 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     delete latest.invalidResumeAttempt
 
     if (navigation.kind === 'review_candidates' || navigation.kind === 'review_existing') {
-      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.invalidateHostGrant(exec.agent)
       latest.selectionReceipt = receipt
       latest.actionCommitment = mintActionCommitment({
         receipt,
         action: navigation.kind,
         endpoint: { kind: 'none' },
       })
-      delete latest.executionLease
       latest.reviewPlan = {
         mode: navigation.reviewMode ?? 'fixed',
         candidateIds: pendingReviewIds,
@@ -473,7 +532,7 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
       latest.pendingRepositories = repositories
       latest.cursor = navigation.kind === 'review_existing' ? 'review_existing' : 'review_github'
     } else if (navigation.kind === 'search_more') {
-      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.invalidateHostGrant(exec.agent)
       const currentIds = snapshot.map((item) => item.id)
       latest.seenCandidateIds = [...new Set([...(latest.seenCandidateIds ?? []), ...currentIds])]
       latest.rejectedCandidateIds = [...new Set([...(latest.rejectedCandidateIds ?? []), ...currentIds])]
@@ -496,18 +555,24 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         candidate,
         endpoint,
       })
-      const lease = mintExecutionLease({ receipt, commitment })
-      this.creationGuard.grantHostSelection(exec.agent, receipt, commitment, lease)
+      this.creationGuard.grantHostSelection(exec.agent, receipt, commitment)
       latest.selectionReceipt = receipt
       latest.actionCommitment = commitment
-      latest.executionLease = lease
       latest.cursor = 'reuse_local'
     } else if (navigation.kind === 'enable_builtin') {
       const candidate = builtinCandidate!
       const bundled = candidate.hostBundled!
-      const targetProfile = this.host.enableTargetProfile
-        ? await this.host.enableTargetProfile()
-        : undefined
+      let targetProfile: string | undefined
+      exec.signal?.throwIfAborted()
+      try {
+        targetProfile = this.host.enableTargetProfile
+          ? await this.host.enableTargetProfile(exec as WorkflowExec)
+          : undefined
+        exec.signal?.throwIfAborted()
+      } catch (error) {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        throw error
+      }
       if (!targetProfile) {
         throw new EvolutionError('invalid_input', 'enable_builtin requires an active Host profile')
       }
@@ -524,26 +589,21 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
         },
         targetProfile,
       })
-      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.invalidateHostGrant(exec.agent)
       latest.selectionReceipt = receipt
       latest.actionCommitment = commitment
-      delete latest.executionLease
       latest.cursor = 'await_confirmation'
     } else {
-      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.invalidateHostGrant(exec.agent)
       latest.selectionReceipt = receipt
       latest.actionCommitment = mintActionCommitment({
         receipt,
         action: 'stop',
         endpoint: { kind: 'none' },
       })
-      delete latest.executionLease
       latest.cursor = 'stopped'
     }
 
-    if (!this.host.applyNavigation) {
-      throw new EvolutionError('invalid_input', 'This workflow host does not support read-only navigation')
-    }
     let nextResolution: ResolutionRecord
     try {
       nextResolution = await this.host.applyNavigation(resolution, navigation, repositories)
@@ -556,9 +616,19 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
 
       // The fresh user turn is already consumed. Persist a new retry gate instead
       // of leaving the previous interrupt replayable or the workflow half-running.
-      const currentResolution = await this.host.getResolution(resolution.id).catch(() => resolution)
+      let currentResolution: ResolutionRecord
+      exec.signal?.throwIfAborted()
+      try {
+        currentResolution = await this.host.getResolution(resolution.id)
+        exec.signal?.throwIfAborted()
+      } catch (readError) {
+        if (exec.signal?.aborted) throw exec.signal.reason
+        throw readError
+      }
       const incompleteResolution = { ...currentResolution, remoteDiscoveryComplete: false }
+      exec.signal?.throwIfAborted()
       await this.store.put('resolutions', incompleteResolution)
+      exec.signal?.throwIfAborted()
       latest.lastFailure = {
         stage: 'discovery',
         code: error instanceof EvolutionError ? error.code : 'command_failed',
@@ -643,7 +713,6 @@ export abstract class WorkflowEngineResume extends WorkflowEngineRecovery {
     })
     input.workflow.selectionReceipt = receipt
     input.workflow.actionCommitment = commitment
-    delete input.workflow.executionLease
     this.creationGuard.grantHostSelection(input.exec.agent, receipt, commitment)
   }
 }

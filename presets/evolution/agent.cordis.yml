@@ -1,4 +1,4 @@
-# Capability Evolution agent preset: AutoEvo Policy V13 Search-first workflow.
+# Capability Evolution agent preset: AutoEvo Policy V14 Search-first workflow.
 #
 # The catalog retains Cordis inspect/stop and managed-construction dependencies,
 # while runtime guards keep AutoEvo's search, selection, target-binding, and

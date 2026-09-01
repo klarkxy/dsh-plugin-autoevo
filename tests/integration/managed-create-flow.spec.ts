@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
@@ -209,6 +209,67 @@ describe('managed create vertical flow', () => {
     }))
     const revalidate = service as unknown as { revalidate(review: NonNullable<typeof result.review>): Promise<boolean> }
     await expect(revalidate.revalidate(result.review!)).resolves.toBe(true)
+  }, 60_000)
+
+  it.each([
+    { stage: 'review' as const, expectedReviewPuts: 1, expectedWorkflowPuts: 0 },
+    { stage: 'workflow' as const, expectedReviewPuts: 1, expectedWorkflowPuts: 1 },
+  ])('stops create with the exact abort after the $stage persistence commit and never starts the child', async ({
+    stage,
+    expectedReviewPuts,
+    expectedWorkflowPuts,
+  }) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), `autoevo-managed-create-${stage}-abort-`))
+    temporary.push(root)
+    const preflight = testingCreatorPreflight()
+    const runner = new NativeRunner()
+    const cfg = config(root)
+    const store = new StateStore(cfg.stateDir!)
+    const controller = new AbortController()
+    const reason = new Error(`abort after create ${stage} persistence`)
+    let childRuns = 0
+    const child: ManagedChildHost = {
+      async run() {
+        childRuns += 1
+        throw new Error('managed child must not start after persistence cancellation')
+      },
+    }
+    let reviewPuts = 0
+    let workflowPuts = 0
+    const put = store.put.bind(store)
+    vi.spyOn(store, 'put').mockImplementation(async (kind, record) => {
+      await put(kind, record)
+      if (kind === 'reviews') {
+        reviewPuts += 1
+        if (stage === 'review') controller.abort(reason)
+      }
+      if (kind === 'workflows') {
+        workflowPuts += 1
+        if (stage === 'workflow') controller.abort(reason)
+      }
+    })
+    const service = new CapabilityEvolutionService(
+      { get: () => undefined } as unknown as Context,
+      cfg,
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+      child,
+      undefined,
+      undefined,
+      testingCreatorFoundation(preflight),
+    )
+    const flow = workflow()
+    const agent = { id: 'parent', options: {}, session: { header: { id: 'parent', cwd: root, version: 0, createdAt: 0 } } } as unknown as Agent
+
+    await expect(service.prepareCreate(resolution(root), { agent, signal: controller.signal }, flow)).rejects.toBe(reason)
+    expect({ reviewPuts, workflowPuts, childRuns }).toEqual({
+      reviewPuts: expectedReviewPuts,
+      workflowPuts: expectedWorkflowPuts,
+      childRuns: 0,
+    })
+    expect(await service.sources.readReceipt(flow.managedSourceId!)).toMatchObject({ activeWorkflowId: null })
+    await expect(readFile(service.sources.lockPath(flow.managedSourceId!), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   }, 60_000)
 
   it('checkpoints cancelled parent edits, reports recovery, and releases the source lock with an aborted signal', async () => {

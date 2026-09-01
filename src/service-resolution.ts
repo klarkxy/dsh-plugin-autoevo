@@ -146,7 +146,7 @@ export function authorizationForResolution(
   resolution: ResolutionRecord,
   reviews: readonly ReviewRecord[] = [],
 ): ResolutionAuthorization {
-  const legacy = resolution.schemaVersion !== 2 || resolution.policyVersion !== POLICY_VERSION || !resolution.authorization
+  const legacy = resolution.policyVersion !== POLICY_VERSION || !resolution.authorization
   if (legacy) {
     return {
       state: 'selection_required',

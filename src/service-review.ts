@@ -12,7 +12,7 @@ import {
   reviewLocalPlugin,
 } from './review/index.js'
 import type { SourceManager } from './source-manager.js'
-import { hashObject, sha256 } from './state/hashes.js'
+import { sha256 } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import type { WorkflowExec, WorkflowRecord } from './workflow/contracts.js'
 import { resolveStateRoot } from './workspace-layout.js'
@@ -24,25 +24,6 @@ export interface ReviewOrchestrationDeps {
   launcher: DshLauncher
   store: StateStore
   sources: SourceManager
-}
-
-export function lineageRootReview(base: ReviewRecord, reviews: readonly ReviewRecord[]): ReviewRecord {
-  const byId = new Map(reviews.map((item) => [item.id, item]))
-  byId.set(base.id, base)
-  const seen = new Set<string>()
-  let current = base
-  while (current.sourceSnapshot.kind === 'local') {
-    if (seen.has(current.id)) {
-      throw new EvolutionError('invalid_input', 'baseReviewId lineage is cyclic')
-    }
-    seen.add(current.id)
-    const parent = byId.get(current.sourceSnapshot.baseReviewId)
-    if (!parent) {
-      throw new EvolutionError('invalid_input', 'baseReviewId must belong to a GitHub review lineage on the same resolution')
-    }
-    current = parent
-  }
-  return current
 }
 
 export function materialReviewFacts(review: ReviewRecord): unknown {
@@ -89,6 +70,7 @@ export async function dshRuntimeVersion(
     const candidate = result.stdout.trim().split(/\s+/u)[0]
     return candidate ? valid(candidate) ?? undefined : undefined
   } catch {
+    if (signal?.aborted) throw signal.reason
     return undefined
   }
 }
@@ -125,33 +107,47 @@ export async function reviewAndFreezeManagedSource(
     artifactRoot,
     ...(receipt.packagePath ? { packagePath: receipt.packagePath } : {}),
     ...(runtimeVersion ? { runtimeVersion } : {}),
+    ...(input.exec.signal ? { signal: input.exec.signal } : {}),
   })
+  input.exec.signal?.throwIfAborted()
   const review = local.record
   if (!review.artifact) throw new EvolutionError('review_rejected', 'Managed review did not produce a frozen package artifact')
   await deps.store.put('reviews', review)
+  input.exec.signal?.throwIfAborted()
   await deps.sources.recordReviewedArtifact({
     sourceId: input.sourceId,
     workflowId: input.workflowId,
     reviewId: review.id,
     artifactHash: review.artifact.sha256,
   })
+  input.exec.signal?.throwIfAborted()
   const waiting = withNextStep(waitingConfirmation(input.resolution, review))
   await deps.store.put('resolutions', waiting)
+  input.exec.signal?.throwIfAborted()
   return { resolution: waiting, review }
 }
 
 export async function revalidateReview(
   _deps: Pick<ReviewOrchestrationDeps, 'runner' | 'config' | 'store' | 'sources'>,
   review: ReviewRecord,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  signal?.throwIfAborted()
   if (review.artifact && review.installSpec?.startsWith('file:')) {
     const artifactPath = path.resolve(review.installSpec.slice('file:'.length))
     const ownedRoot = path.resolve(review.artifact.ownedRoot)
     const relative = path.relative(ownedRoot, artifactPath)
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false
-    const current = await readFile(artifactPath).catch(() => undefined)
-    return Boolean(current && sha256(current) === review.artifact.sha256)
+    try {
+      const current = await readFile(artifactPath, { signal })
+      signal?.throwIfAborted()
+      const currentSha256 = sha256(current)
+      signal?.throwIfAborted()
+      return currentSha256 === review.artifact.sha256
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      return false
+    }
   }
   // Historical source-only reviews remain readable, but are not current
   // installation authority. A fresh formal review creates a frozen artifact.

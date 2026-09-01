@@ -702,6 +702,29 @@ describe('AgentWorkflowViewV2', () => {
     expect(JSON.stringify(card)).not.toContain('token=abc')
   })
 
+  it('reports a committed restart parent as recovery-required until its fixed child converges', () => {
+    const workflow = baseWorkflow('activated')
+    workflow.status = 'completed'
+    workflow.recovery = {
+      action: 'cleanup_and_restart',
+      hostTurnId: `turn_${'1'.repeat(24)}`,
+      cleanup: 'removed',
+      restartRequired: false,
+      restartedAsWorkflowId: `workflow_${'2'.repeat(24)}`,
+      restart: {
+        requirement: workflow.requirement,
+        normalized: workflow.requirement,
+        cwd: 'C:/workspace',
+        intent: { operation: 'discover_or_reuse', requiredSurface: 'any' },
+      },
+      completedAt: '2026-08-31T00:00:00.000Z',
+    }
+
+    const card = compactAgentView({ workflow, resolution: resolution(), lifecycleState: 'recovery_required' })
+    expect(card.state).toBe('recovery_required')
+    expect(card.available_tools).toContain('capability_workflow_recover')
+  })
+
   it('shows the bounded install diagnostic and exit code to the operating agent', () => {
     const workflow = baseWorkflow('await_confirmation')
     workflow.lastFailure = {

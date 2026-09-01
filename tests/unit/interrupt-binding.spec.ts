@@ -117,6 +117,36 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     getInstallation(id) {
       return store.getInstallation(id)
     },
+    async applyNavigation(current) {
+      return current
+    },
+    async listInstallProfiles() {
+      return ['web']
+    },
+    managedWorkAvailable() {
+      return true
+    },
+    async refineRemote(current) {
+      return current
+    },
+    async previewGithubCandidates() {
+      return { previews: [], failures: [] }
+    },
+    async reviewExisting() {
+      throw new Error('not used')
+    },
+    async reviewGithubBatch() {
+      throw new Error('not used')
+    },
+    async prepareModify() {
+      throw new Error('not used')
+    },
+    async prepareCreate() {
+      throw new Error('not used')
+    },
+    async finishManagedWork() {
+      throw new Error('not used')
+    },
   }
 }
 
@@ -126,7 +156,7 @@ describe('interrupt binding and host-turn decisions', () => {
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()), false)
     const turn = exec()
     const started = await engine.start('calculator', turn)
     expect(started.workflow.interrupt?.interruptId).toMatch(/^interrupt_/u)
@@ -147,7 +177,7 @@ describe('interrupt binding and host-turn decisions', () => {
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()), false)
     const owner = exec('session-owner')
     const started = await engine.start('calculator', owner)
     const other = exec('session-other')
@@ -164,7 +194,7 @@ describe('interrupt binding and host-turn decisions', () => {
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()), false)
     const turn = exec()
     const started = await engine.start('calculator', turn)
     const interruptId = started.workflow.interrupt!.interruptId
@@ -180,7 +210,7 @@ describe('interrupt binding and host-turn decisions', () => {
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()), false)
     const turn = exec()
     remember(guard, turn.agent, '先停')
     const started = await engine.start('calculator', turn)
@@ -206,13 +236,13 @@ describe('interrupt binding and host-turn decisions', () => {
     temporary.push(root)
     const store = new StateStore(root)
     const guard1 = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_old' })
-    const engine1 = new WorkflowEngine(store, guard1, host(store, resolution()))
+    const engine1 = new WorkflowEngine(store, guard1, host(store, resolution()), false)
     const turn = exec()
     const started = await engine1.start('calculator', turn)
     const oldInterrupt = started.workflow.interrupt!.interruptId
 
     const guard2 = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_new' })
-    const engine2 = new WorkflowEngine(store, guard2, host(store, resolution()))
+    const engine2 = new WorkflowEngine(store, guard2, host(store, resolution()), false)
     remember(guard2, turn.agent, '先停')
     await expect(engine2.resume({
       workflowId: started.workflow.id,
@@ -226,12 +256,12 @@ describe('interrupt binding and host-turn decisions', () => {
     expect(reissued.interrupt?.interruptId).not.toBe(oldInterrupt)
   })
 
-  it('rejects candidate snapshot digest mismatch', async () => {
+  it('rejects candidate snapshot changes before applying the persisted interrupt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bind-snap-'))
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_test_1' })
-    const engine = new WorkflowEngine(store, guard, host(store, resolution()))
+    const engine = new WorkflowEngine(store, guard, host(store, resolution()), false)
     const turn = exec()
     const started = await engine.start('calculator', turn)
     const mutated = await store.getWorkflow(started.workflow.id)
@@ -250,7 +280,7 @@ describe('interrupt binding and host-turn decisions', () => {
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
       decision: { action: 'stop' },
-    }, turn)).rejects.toThrow(/snapshot digest mismatch/i)
+    }, turn)).rejects.toThrow(/canonical Host control/i)
   })
 
   it('reuses an unfinished workflow for the same session, cwd, and normalized requirement', async () => {

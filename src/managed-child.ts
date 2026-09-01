@@ -313,6 +313,7 @@ export class DshManagedChildHost implements ManagedChildHost {
   constructor(
     private readonly ctx: Context,
     private readonly runner: CommandRunner,
+    private readonly probeSandbox: typeof probeWorkspaceWriteSandbox = probeWorkspaceWriteSandbox,
   ) {}
 
   async run(request: ManagedChildRequest): Promise<ManagedChildResult> {
@@ -391,6 +392,7 @@ export class DshManagedChildHost implements ManagedChildHost {
       return disposePromise
     }
 
+    let primaryFailed = false
     try {
       if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
         throw new EvolutionError('invalid_input', 'Created child is not owned by the initiating parent Agent')
@@ -398,18 +400,19 @@ export class DshManagedChildHost implements ManagedChildHost {
       if (path.resolve(handle.agent.session.header.cwd ?? '') !== cwd) {
         throw new EvolutionError('invalid_input', 'Created child cwd does not match the managed source repository')
       }
-      const sandbox = await probeWorkspaceWriteSandbox({
+      const sandbox = await this.probeSandbox({
         sandbox: services.sandbox,
         sandboxPolicy: services.sandboxPolicy,
         fs: services.fs,
         runner: this.runner,
       }, handle.agent.session, cwd, request.signal)
+      request.signal?.throwIfAborted()
 
       handle.agent.followup(createUserMessage({
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
         content: [{ type: 'text', text: childInstruction(cwd, request.workOrder, budgetLimits) }],
       }))
-      await waitForIdleOrAbort(handle, request.signal, dispose)
+      await waitForIdleOrAbort(handle, request.signal)
       assertCompletedTurn(handle.agent)
       const taskResult = assistantText(handle.agent)
       if (!taskResult.endsWith(CHILD_RESULT_MARKER)) {
@@ -423,8 +426,15 @@ export class DshManagedChildHost implements ManagedChildHost {
         creator: mintCreatorReceipt(preflight, childSessionId),
         hostObservedChecks: shellObserver.snapshot(),
       }
+    } catch (error) {
+      primaryFailed = true
+      throw error
     } finally {
-      await dispose()
+      try {
+        await dispose()
+      } catch (error) {
+        if (!primaryFailed) throw error
+      }
     }
   }
 }
@@ -459,14 +469,12 @@ function managedChildCancelled(): EvolutionError {
 async function waitForIdleOrAbort(
   handle: AgentHandle,
   signal: AbortSignal | undefined,
-  dispose: () => Promise<void>,
 ): Promise<void> {
   if (!signal) {
     await handle.agent.whenIdle()
     return
   }
   if (signal.aborted) {
-    await dispose()
     throw managedChildCancelled()
   }
 
@@ -481,7 +489,6 @@ async function waitForIdleOrAbort(
       aborted,
     ])
     if (outcome === 'aborted') {
-      await dispose()
       throw managedChildCancelled()
     }
   } finally {

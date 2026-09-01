@@ -70,12 +70,6 @@ function normalizeRefinementRepository(value: string, allowGithubRootUrl: boolea
   return validateGithubRepository(`${match.groups?.owner}/${match.groups?.name}`)
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new EvolutionError('command_failed', 'Workflow cancelled')
-  }
-}
-
 export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
   async start(
     requirement: string,
@@ -110,39 +104,24 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     const workflowId = newWorkflowId(originalRequirement)
     await this.supersedePendingClarifications(sessionId, cwd, this.creationGuard.currentTurnId(exec.agent), workflowId, exec)
     await this.invalidateStalePolicyWorkflows(sessionId, normalized, exec)
-    const existing = await this.findReusableWorkflow(sessionId, cwd, normalized, intent)
+    const existing = await this.findReusableWorkflow(sessionId, cwd, normalized, intent, exec.signal)
     if (existing) {
       return await this.withLock(existing.id, async () => {
         const latest = await this.store.getWorkflow(existing.id)
+        exec.signal?.throwIfAborted()
         if (latest.status === 'running') {
           if (latest.bootId === this.creationGuard.bootId) {
             throw new EvolutionError('invalid_input', 'This workflow is already running')
           }
-          latest.bootId = this.creationGuard.bootId
-          latest.cursor = 'recovery_required'
-          latest.status = 'interrupted'
-          latest.lastFailure = {
-            stage: 'workflow',
-            code: 'service_restart_incomplete',
-            message: 'The service restarted while this workflow was running. Side effects are not retried automatically; recovery is required.',
-            retryable: false,
-          }
-          delete latest.interrupt
-          this.clearWorkflowGrant(latest)
-          this.creationGuard.setConstructionRoot(exec.agent, undefined)
-          this.creationGuard.invalidateExecutionLease(exec.agent)
-          await this.host.releaseManagedSource?.(latest, exec as WorkflowExec).catch(() => undefined)
-          await this.issueRecoveryInterrupt(latest, exec)
-          this.syncGuard(latest, exec, undefined)
-          const interruptedResolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
-          return await this.view(latest, interruptedResolution, { status: 'parked', alreadyWaiting: true })
+          return await this.settleStaleRunningWorkflow(latest, exec)
         }
         if (latest.bootId !== this.creationGuard.bootId && latest.status === 'interrupted' && latest.interrupt) {
-          this.creationGuard.invalidateExecutionLease(exec.agent)
+          this.creationGuard.invalidateHostGrant(exec.agent)
           await this.reissueInterrupt(latest, exec)
         }
         let resolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
-        return await this.view(latest, resolution)
+        exec.signal?.throwIfAborted()
+        return await this.view(latest, resolution, {}, exec.signal)
       })
     }
 
@@ -155,6 +134,41 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     })
   }
 
+  /**
+   * Seal one exact old-boot running workflow without retrying its current node.
+   * Callers must hold the workflow's in-memory lock and must reread the record
+   * under that lock before entering this settlement.
+   */
+  protected async settleStaleRunningWorkflow(
+    workflow: WorkflowRecord,
+    exec: ToolRunContext,
+  ): Promise<WorkflowView> {
+    if (workflow.status !== 'running' || workflow.bootId === this.creationGuard.bootId) {
+      throw new EvolutionError('invalid_input', 'Workflow is not an old-boot running workflow')
+    }
+    workflow.bootId = this.creationGuard.bootId
+    workflow.cursor = 'recovery_required'
+    workflow.status = 'interrupted'
+    workflow.lastFailure = {
+      stage: 'workflow',
+      code: 'service_restart_incomplete',
+      message: 'The service restarted while this workflow was running. Side effects are not retried automatically; recovery is required.',
+      retryable: false,
+    }
+    delete workflow.interrupt
+    this.clearWorkflowGrant(workflow)
+    this.creationGuard.setConstructionRoot(exec.agent, undefined)
+    this.creationGuard.invalidateHostGrant(exec.agent)
+    await this.host.releaseManagedSource?.(workflow, this.cleanupExec(exec))
+    exec.signal?.throwIfAborted()
+    await this.issueRecoveryInterrupt(workflow, exec)
+    this.syncGuard(workflow, exec, undefined)
+    const resolution = workflow.resolutionId
+      ? await this.awaitPreEffect(() => this.host.getResolution(workflow.resolutionId!), exec.signal)
+      : undefined
+    return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
+  }
+
   private async supersedePendingClarifications(
     sessionId: string,
     cwd: string,
@@ -163,7 +177,14 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     exec: ToolRunContext,
   ): Promise<void> {
     if (!currentTurnId) return
-    const workflows = await this.store.listWorkflows()
+    let workflows: WorkflowRecord[]
+    try {
+      workflows = await this.store.listWorkflowsStrict()
+    } catch (error) {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      throw error
+    }
+    exec.signal?.throwIfAborted()
     const pending = workflows.filter((item) => item.policyVersion === POLICY_VERSION
       && item.ownerSessionId === sessionId
       && item.cwd === cwd
@@ -173,6 +194,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     for (const item of pending) {
       await this.withLock(item.id, async () => {
         const latest = await this.store.getWorkflow(item.id)
+        exec.signal?.throwIfAborted()
         if (latest.status !== 'interrupted' || latest.cursor !== 'await_clarification') return
         delete latest.interrupt
         this.clearWorkflowGrant(latest)
@@ -183,7 +205,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         await this.checkpoint(latest)
       })
     }
-    if (pending.length > 0) this.creationGuard.invalidateExecutionLease(exec.agent)
+    if (pending.length > 0) this.creationGuard.invalidateHostGrant(exec.agent)
   }
 
   protected async startFresh(
@@ -226,7 +248,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       intent,
       ...(recoveredFromWorkflowId ? { recoveredFromWorkflowId } : {}),
     }
-    this.creationGuard.invalidateExecutionLease(exec.agent)
+    this.creationGuard.invalidateHostGrant(exec.agent)
     const guardGeneration = this.creationGuard.beginResolution(exec.agent)
     return await this.withLock(workflow.id, () => this.runUntilPark(workflow, exec, guardGeneration))
   }
@@ -266,7 +288,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       }
       await this.checkpoint(workflow)
       this.syncGuard(workflow, exec, undefined, nextResolution)
-      return await this.view(workflow, nextResolution)
+      return await this.view(workflow, nextResolution, {}, exec.signal)
     })
   }
 
@@ -275,7 +297,6 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     input: Pick<DiscoveryRefineInput, 'queries' | 'repositories'>,
     options: { allowGithubRootUrl?: boolean; turnId?: string } = {},
   ): PreparedDiscoveryRefinement {
-    if (!this.host.refineRemote) throw new EvolutionError('invalid_input', 'This workflow host does not support autonomous refinement')
     const budget = workflow.discoveryBudget ?? discoveryBudget()
     const turnId = options.turnId ?? budget.activeTurnId ?? 'turn_unknown'
     const turnQueriesUsed = budget.activeTurnId === turnId ? activeDiscoveryQueriesUsed(budget) : []
@@ -338,7 +359,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     refinement: PreparedDiscoveryRefinement,
     exec: ToolRunContext,
   ): Promise<ResolutionRecord> {
-    const nextResolution = await this.host.refineRemote!(resolution, {
+    const nextResolution = await this.host.refineRemote(resolution, {
       queries: refinement.queries,
       repositories: refinement.repositories,
     }, exec as WorkflowExec)
@@ -385,7 +406,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       })
       let sealed = selected.map((item) => item!)
       let packageSelectorRequired = false
-      if (previewTargets.length > 0 && this.host.previewGithubCandidates) {
+      if (previewTargets.length > 0) {
         const resolution = workflow.resolutionId ? await this.host.getResolution(workflow.resolutionId) : undefined
         if (!resolution) throw new EvolutionError('invalid_input', 'Discovery preview requires the current resolution')
         const result = await this.host.previewGithubCandidates(resolution, previewTargets, exec as WorkflowExec)
@@ -414,7 +435,10 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
 
   async diagnose(input: WorkflowDiagnoseInput, exec: ToolRunContext): Promise<WorkflowView> {
     return await this.withLock(input.workflowId, async () => {
-      const workflow = await this.store.getWorkflow(input.workflowId)
+      const workflow = await this.awaitPreEffect(
+        () => this.store.getWorkflow(input.workflowId),
+        exec.signal,
+      )
       this.assertOwner(workflow, exec)
       const probes = [...new Set(input.probes)].slice(0, 8)
       if (probes.length === 0) throw new EvolutionError('invalid_input', 'Diagnose requires at least one probe')
@@ -430,12 +454,18 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         })
       }
       const resolution = workflow.resolutionId
-        ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
+        ? await this.readOptionalBeforeEffect(
+            () => this.host.getResolution(workflow.resolutionId!),
+            exec.signal,
+          )
         : undefined
-      const reviews = await this.reviewsForWorkflow(workflow)
+      const reviews = await this.reviewsForWorkflow(workflow, exec.signal)
       const installationId = this.installationReceiptId(workflow)
       const installation = installationId
-        ? await this.host.getInstallation(installationId).catch(() => undefined)
+        ? await this.readOptionalBeforeEffect(
+            () => this.host.getInstallation(installationId),
+            exec.signal,
+          )
         : undefined
       const diagnosticAvailable = Boolean(
         workflow.lastFailure
@@ -577,9 +607,13 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           usedRecordReads: 1 + (reviews.length > 0 ? 1 : 0) + (installation ? 1 : 0),
         },
       }
+      exec.signal?.throwIfAborted()
       workflow.lastDiagnosis = diagnosis
-      await this.checkpoint(workflow)
-      return await this.view(workflow, resolution, { diagnosis, skipLinkedReads: true })
+      await this.awaitPreEffect(() => this.checkpoint(workflow), exec.signal)
+      return await this.awaitPreEffect(
+        () => this.view(workflow, resolution, { diagnosis, skipLinkedReads: true }, exec.signal),
+        exec.signal,
+      )
     })
   }
 
@@ -589,18 +623,25 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
     guardGeneration?: number,
     resolution?: WorkflowView['resolution'],
   ): Promise<WorkflowView> {
-    if (!resolution && workflow.resolutionId) {
-      resolution = await this.host.getResolution(workflow.resolutionId)
-    }
+    let durableOutcomeCommitted = false
     try {
+      if (!resolution && workflow.resolutionId) {
+        resolution = await this.awaitPreEffect(
+          () => this.host.getResolution(workflow.resolutionId!),
+          exec.signal,
+        )
+      }
       while (true) {
-        throwIfAborted(exec.signal)
-        await this.checkpoint(workflow)
+        exec.signal?.throwIfAborted()
+        await this.awaitPreEffect(() => this.checkpoint(workflow), exec.signal)
         this.syncGuard(workflow, exec, guardGeneration, resolution)
 
         if (MODEL_CONTROL_NODES.has(workflow.cursor)) {
           if (!resolution && workflow.resolutionId) {
-            resolution = await this.host.getResolution(workflow.resolutionId)
+            resolution = await this.awaitPreEffect(
+              () => this.host.getResolution(workflow.resolutionId!),
+              exec.signal,
+            )
           }
           if (!resolution) throw new EvolutionError('invalid_input', 'Discovery checkpoint is missing a resolution')
           workflow.status = 'interrupted'
@@ -609,7 +650,11 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             this.creationGuard.setConstructionRoot(exec.agent, workflow.pendingPath)
             await this.checkpoint(workflow)
             this.syncGuard(workflow, exec, guardGeneration, resolution)
-            return await this.view(workflow, resolution)
+            durableOutcomeCommitted = true
+            exec.signal?.throwIfAborted()
+            const committed = await this.view(workflow, resolution, {}, exec.signal)
+            exec.signal?.throwIfAborted()
+            return committed
           }
           workflow.discoveryPool = candidateSnapshotFor(
             resolution,
@@ -623,47 +668,71 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           delete workflow.candidateSnapshot
           this.clearWorkflowGrant(workflow)
           this.creationGuard.setConstructionRoot(exec.agent, undefined)
-          this.creationGuard.invalidateExecutionLease(exec.agent)
+          this.creationGuard.invalidateHostGrant(exec.agent)
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
-          return await this.view(workflow, resolution)
+          durableOutcomeCommitted = true
+          exec.signal?.throwIfAborted()
+          const committed = await this.view(workflow, resolution, {}, exec.signal)
+          exec.signal?.throwIfAborted()
+          return committed
         }
 
         if (INTERRUPT_NODES.has(workflow.cursor)) {
           this.creationGuard.setConstructionRoot(exec.agent, undefined)
           if (workflow.cursor === 'await_clarification') {
-            this.creationGuard.invalidateExecutionLease(exec.agent)
+            this.creationGuard.invalidateHostGrant(exec.agent)
             await this.issueClarificationInterrupt(workflow, exec)
             this.syncGuard(workflow, exec, guardGeneration, undefined)
-            return await this.view(workflow, undefined)
+            durableOutcomeCommitted = true
+            exec.signal?.throwIfAborted()
+            const committed = await this.view(workflow, undefined, {}, exec.signal)
+            exec.signal?.throwIfAborted()
+            return committed
           }
           if (!resolution && workflow.resolutionId) {
-            resolution = await this.host.getResolution(workflow.resolutionId)
+            resolution = await this.awaitPreEffect(
+              () => this.host.getResolution(workflow.resolutionId!),
+              exec.signal,
+            )
           }
           if (!resolution) {
             throw new EvolutionError('invalid_input', 'Workflow interrupt is missing a resolution')
           }
+          this.assertResolutionInterruptShape(workflow, resolution)
           if (!workflow.candidateSnapshot) {
             workflow.candidateSnapshot = candidateSnapshotFor(resolution, excludedCandidateIds(workflow))
           }
           if (workflow.cursor === 'await_selection' || workflow.cursor === 'await_confirmation') {
-            this.creationGuard.invalidateExecutionLease(exec.agent)
+            this.creationGuard.invalidateHostGrant(exec.agent)
             if (workflow.actionCommitment?.requestedAction === 'use_this'
               || workflow.actionCommitment?.requestedAction === 'apply_recovery') {
               this.clearWorkflowGrant(workflow)
             }
           }
-          const reviews = await this.reviewsForWorkflow(workflow)
+          const reviews = await this.awaitPreEffect(
+            () => this.reviewsForWorkflow(workflow),
+            exec.signal,
+          )
           workflow.status = 'interrupted'
           const installProfiles = workflow.cursor === 'await_confirmation'
-            ? await this.host.listInstallProfiles?.() ?? []
+            ? await this.awaitPreEffect(
+                async () => await this.host.listInstallProfiles(),
+                exec.signal,
+              )
             : []
           const managedActionsAvailable = workflow.cursor === 'await_confirmation'
             || workflow.cursor === 'await_selection'
-            ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
+            ? await this.awaitPreEffect(
+                async () => await this.host.managedWorkAvailable(exec as WorkflowExec),
+                exec.signal,
+              )
             : true
           const retryableInstall = workflow.cursor === 'await_confirmation'
-            ? await this.retryableInstall(workflow)
+            ? await this.awaitPreEffect(
+                () => this.retryableInstall(workflow, exec.signal),
+                exec.signal,
+              )
             : undefined
           const base = interruptPayload(workflow.cursor, resolution, reviews, {
             ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
@@ -677,7 +746,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           if (!sessionId) {
             throw new EvolutionError('invalid_input', 'Cannot issue interrupt without an owner session')
           }
-          const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+          const validAfterTurnId = this.requireHostTurnId(exec, 'issue a workflow interrupt')
           const snapshotDigest = snapshotDigestFor(base.kind, resolution, reviews, workflow)
           workflow.bootId = this.creationGuard.bootId
           workflow.ownerSessionId = sessionId
@@ -696,7 +765,11 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           }
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
-          return await this.view(workflow, resolution)
+          durableOutcomeCommitted = true
+          exec.signal?.throwIfAborted()
+          const committed = await this.view(workflow, resolution, {}, exec.signal)
+          exec.signal?.throwIfAborted()
+          return committed
         }
 
         if (TERMINAL_NODES.has(workflow.cursor)) {
@@ -706,14 +779,22 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           if (workflow.cursor === 'recovery_required') {
             await this.issueRecoveryInterrupt(workflow, exec)
             this.syncGuard(workflow, exec, guardGeneration, resolution)
-            return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true })
+            durableOutcomeCommitted = true
+            exec.signal?.throwIfAborted()
+            const committed = await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
+            exec.signal?.throwIfAborted()
+            return committed
           }
           this.markInstallCompletion(workflow, exec)
           workflow.status = 'completed'
           delete workflow.interrupt
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
-          return await this.view(workflow, resolution)
+          durableOutcomeCommitted = true
+          exec.signal?.throwIfAborted()
+          const committed = await this.view(workflow, resolution, {}, exec.signal)
+          exec.signal?.throwIfAborted()
+          return committed
         }
 
         workflow.status = 'running'
@@ -727,7 +808,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           }).slice(0, 24)}`
           // Persist the workflow backlink before the installer can perform any
           // profile mutation. A restart can now reconcile the one exact receipt.
-          await this.checkpoint(workflow)
+          await this.awaitPreEffect(() => this.checkpoint(workflow), exec.signal)
         }
         const result = await executeNode(workflow.cursor, {
           host: this.host,
@@ -735,6 +816,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           exec: exec as WorkflowExec,
           ...(resolution ? { resolution } : {}),
         })
+        exec.signal?.throwIfAborted()
         if (result.resolution) resolution = result.resolution
         if (result.node === 'await_discovery' && result.resolution) {
           workflow.discoveryPool = candidateSnapshotFor(
@@ -786,25 +868,34 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         if (workflow.cursor === 'recovery_required') {
           await this.issueRecoveryInterrupt(workflow, exec)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
-          return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true })
+          durableOutcomeCommitted = true
+          exec.signal?.throwIfAborted()
+          const committed = await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
+          exec.signal?.throwIfAborted()
+          return committed
         }
         this.markInstallCompletion(workflow, exec)
         workflow.status = 'completed'
         delete workflow.interrupt
         await this.checkpoint(workflow)
         this.syncGuard(workflow, exec, guardGeneration, resolution)
-        return await this.view(workflow, resolution)
+        durableOutcomeCommitted = true
+        exec.signal?.throwIfAborted()
+        const committed = await this.view(workflow, resolution, {}, exec.signal)
+        exec.signal?.throwIfAborted()
+        return committed
       }
     } catch (error) {
+      if (durableOutcomeCommitted && exec.signal?.aborted) throw exec.signal.reason
       this.creationGuard.setConstructionRoot(exec.agent, undefined)
-      this.creationGuard.invalidateExecutionLease(exec.agent)
-      await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec).catch(() => undefined)
+      this.creationGuard.invalidateHostGrant(exec.agent)
+      await this.host.releaseManagedSource?.(workflow, this.cleanupExec(exec))
       workflow.status = 'failed'
       workflow.error = {
         code: error instanceof EvolutionError ? error.code : 'command_failed',
         message: error instanceof Error ? error.message : String(error),
       }
-      await this.checkpoint(workflow).catch(() => undefined)
+      await this.checkpoint(workflow)
       throw error
     }
   }

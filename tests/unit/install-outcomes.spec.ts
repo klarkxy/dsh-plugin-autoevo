@@ -153,6 +153,7 @@ function launcherWithHost(evidence: VerificationEvidence, sourceMatches = true) 
   const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
   const launcher = {
     install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+    profileTargetAbsent: async () => true,
     profileSourceMatches: async () => sourceMatches,
     readInstalledVerificationFixtures: async () => jsonFixtures(),
     verifyHost,
@@ -253,6 +254,7 @@ describe('fail-closed install outcomes', () => {
     const install = vi.fn(async (..._args: unknown[]) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
     const retryLauncher = {
       install,
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => hostPassedEvidence,
@@ -333,6 +335,7 @@ describe('fail-closed install outcomes', () => {
     const install = vi.fn(async (..._args: unknown[]) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
     const retryLauncher = {
       install,
+      profileTargetAbsent: async () => true,
       profileStoreFingerprint: async () => profileStoreFingerprint,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
@@ -493,11 +496,15 @@ describe('fail-closed install outcomes', () => {
     expect(result.installOutcome).toBe('failed_absent')
   })
 
-  it('returns recovery_required when the install command fails but the target is present', async () => {
+  it('returns recovery_required with unknown state when a failed target is present but exact source is unproven', async () => {
     const { root, store, ctx } = await setup(review())
+    const profileTargetAbsent = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false)
     const launcher = {
       install: async () => { throw new Error('timeout after manifest update') },
-      profileTargetAbsent: async () => false,
+      profileTargetAbsent,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -508,7 +515,8 @@ describe('fail-closed install outcomes', () => {
     }, execution())
     expect(result).toMatchObject({
       installOutcome: 'recovery_required',
-      installState: 'installed',
+      // Presence alone cannot prove that the reviewed source won the mutation.
+      installState: 'unknown',
       installed: false,
       verified: false,
     })
@@ -516,9 +524,13 @@ describe('fail-closed install outcomes', () => {
 
   it('returns recovery_required when reconciliation is unknown after command failure', async () => {
     const { root, store, ctx } = await setup(review())
+    const profileTargetAbsent = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockRejectedValue(new Error('profile unreadable'))
     const launcher = {
       install: async () => { throw new Error('timeout') },
-      profileTargetAbsent: async () => { throw new Error('profile unreadable') },
+      profileTargetAbsent,
     } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     const result = await installer.install({
@@ -859,6 +871,90 @@ describe('fail-closed install outcomes', () => {
     expect(install).not.toHaveBeenCalled()
   })
 
+  it('refuses an existing persistent destination even when isolated preflight is disabled', async () => {
+    const { root, store } = await setup(attestedReview())
+    const request = vi.fn(async () => 'allowed-once')
+    const install = vi.fn()
+    const launcher = {
+      profileTargetAbsent: vi.fn(async () => false),
+      install,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      { get: () => ({ request }) } as unknown as Context,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
+    expect(request).not.toHaveBeenCalled()
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('rechecks absence without preflight and rejects a destination that appears before mutation', async () => {
+    const { root, store } = await setup(attestedReview())
+    const request = vi.fn(async () => 'allowed-once')
+    const profileTargetAbsent = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false)
+    const install = vi.fn()
+    const launcher = {
+      profileTargetAbsent,
+      install,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      { get: () => ({ request }) } as unknown as Context,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
+    expect(profileTargetAbsent).toHaveBeenCalledTimes(2)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('preserves exact cancellation when destination absence read throws after abort', async () => {
+    const { root, store } = await setup(attestedReview())
+    const controller = new AbortController()
+    const reason = new Error('cancel destination absence read')
+    const request = vi.fn(async () => 'allowed-once')
+    const install = vi.fn()
+    const launcher = {
+      profileTargetAbsent: vi.fn(async () => {
+        controller.abort(reason)
+        throw new Error('profile read failed')
+      }),
+      install,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      { get: () => ({ request }) } as unknown as Context,
+      config(root),
+      store,
+      launcher,
+      async () => true,
+    )
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, { ...execution(), signal: controller.signal })).rejects.toBe(reason)
+    expect(request).not.toHaveBeenCalled()
+    expect(install).not.toHaveBeenCalled()
+  })
+
   it('persists a same-package replacement when the frozen old spec still matches live profile state', async () => {
     const oldSpec = `github:acme/calculator#${'c'.repeat(40)}`
     const newCommit = 'd'.repeat(40)
@@ -880,11 +976,14 @@ describe('fail-closed install outcomes', () => {
       id: predecessorId,
       createdAt: '2026-08-01T00:00:00.000Z',
       reviewId: `review_${'c'.repeat(64)}`,
-      targetProfile: 'web',
+      targetProfile: process.platform === 'win32' ? 'WEB' : 'web',
       retention: 'persistent',
-      dshHome: path.join(root, 'persistent-dsh-home'),
-      packageName: 'dsh-tool-calculator',
+      dshHome: process.platform === 'win32'
+        ? path.join(root, 'persistent-dsh-home').toUpperCase()
+        : path.join(root, 'persistent-dsh-home'),
+      packageName: 'DSH-TOOL-CALCULATOR',
       installSpec: oldSpec,
+      installPhase: 'completed',
       installState: 'installed',
       installOutcome: 'awaiting_user_test',
       installed: true,
@@ -892,6 +991,7 @@ describe('fail-closed install outcomes', () => {
       verified: false,
       restartRequired: true,
       removed: false,
+      supersededByInstallationId: `installation_${'9'.repeat(24)}`,
       verification: {
         attempted: false,
         expectedTools: ['calculator'],
@@ -903,6 +1003,17 @@ describe('fail-closed install outcomes', () => {
         reason: 'predecessor',
       },
     })
+    const normalizedPredecessor = await store.getInstallation(predecessorId)
+    const { supersededByInstallationId: _ignoredForward, ...foreignPredecessor } = normalizedPredecessor
+    void _ignoredForward
+    await store.put('installations', {
+      ...foreignPredecessor,
+      id: `installation_${'a'.repeat(24)}`,
+      dshHome: path.join(root, 'foreign-dsh-home'),
+      targetProfile: 'web',
+      packageName: 'dsh-tool-calculator',
+    })
+    const strictHistory = vi.spyOn(store, 'listInstallationsStrictExcluding')
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileTargetAbsent: async () => false,
@@ -927,12 +1038,151 @@ describe('fail-closed install outcomes', () => {
         packageName: 'dsh-tool-calculator',
         oldSpecDigest: dependencySpecDigest(oldSpec),
         oldDependencySpec: oldSpec,
-        predecessorInstallationId: predecessorId,
+        predecessorInstallationId: `installation_${'8'.repeat(24)}`,
       },
     }, execution())
     expect(result.replacement?.state).toBe('new_present')
     expect(result.predecessorInstallationId).toBe(predecessorId)
-    expect((await store.getInstallation(predecessorId)).supersededByInstallationId).toBe(result.id)
+    expect(strictHistory).toHaveBeenCalledWith(result.id)
+    expect(await strictHistory.mock.results[0]?.value).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: result.id }),
+    ]))
+    expect((await store.getInstallation(predecessorId)).supersededByInstallationId)
+      .toBe(`installation_${'9'.repeat(24)}`)
+  })
+
+  it.each(['ambiguous', 'corrupt', 'other-provisional'] as const)('keeps a successful replacement but clears stale predecessor input when history is %s', async (mode) => {
+    const oldSpec = `github:acme/calculator#${'c'.repeat(40)}`
+    const current = attestedReview()
+    const { root, store, ctx } = await setup(current)
+    const predecessor = (id: string) => ({
+      schemaVersion: 1 as const,
+      id,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      targetProfile: 'web',
+      retention: 'persistent' as const,
+      dshHome: config(root).dshHome,
+      packageName: 'dsh-tool-calculator',
+      installSpec: oldSpec,
+      installPhase: 'completed' as const,
+      installState: 'installed' as const,
+      installOutcome: 'verified' as const,
+      installed: true,
+      loaded: true,
+      verified: true,
+      restartRequired: false,
+      removed: false,
+      verification: {
+        attempted: true,
+        expectedTools: [],
+        calledTools: [],
+        resultTools: [],
+        failedTools: [],
+        sessionFiles: [],
+        taskResultObserved: true,
+        reason: 'predecessor',
+      },
+    })
+    if (mode === 'ambiguous') {
+      vi.spyOn(store, 'listInstallationsStrictExcluding').mockResolvedValue([
+        predecessor(`installation_${'1'.repeat(24)}`),
+        predecessor(`installation_${'2'.repeat(24)}`),
+      ])
+    } else if (mode === 'corrupt') {
+      vi.spyOn(store, 'listInstallationsStrictExcluding').mockRejectedValue(new EvolutionError('invalid_input', 'corrupt history'))
+    } else {
+      const base = predecessor(`installation_${'1'.repeat(24)}`)
+      await store.put('installations', base)
+      await store.put('installations', {
+        ...base,
+        id: `installation_${'2'.repeat(24)}`,
+        createdAt: '2026-08-01T00:00:01.000Z',
+        installPhase: 'prepared',
+        installState: 'unknown',
+        installOutcome: 'pending',
+        installed: false,
+        loaded: false,
+        verified: false,
+        predecessorInstallationId: base.id,
+        replacement: {
+          state: 'prepared',
+          oldSpecDigest: dependencySpecDigest(base.installSpec),
+          newInstallSpec: base.installSpec,
+          preparedAt: '2026-08-01T00:00:01.000Z',
+        },
+      })
+    }
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => false,
+      profileDependencySpec: async () => oldSpec,
+      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec.startsWith('file:'),
+      verifyHost: async () => hostPassedEvidence,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+        evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' },
+      }), undefined, 'autoevo-verify',
+    )
+
+    const result = await installer.install({
+      reviewId: current.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      replacement: {
+        profile: 'web',
+        packageName: 'dsh-tool-calculator',
+        oldSpecDigest: dependencySpecDigest(oldSpec),
+        oldDependencySpec: oldSpec,
+        predecessorInstallationId: `installation_${'9'.repeat(24)}`,
+      },
+    }, execution())
+
+    expect(result.installOutcome).toBe('verified')
+    expect(result.predecessorInstallationId).toBeUndefined()
+    await expect(store.getInstallation(result.id)).resolves.not.toHaveProperty('predecessorInstallationId')
+  })
+
+
+  it('records final receipt ambiguity without invoking a stale Loader rollback after hot-load', async () => {
+    const current = attestedReview()
+    const { root, store, ctx } = await setup(current)
+    const installationId = `installation_${'f'.repeat(24)}`
+    const originalPut = store.put.bind(store)
+    let installationWrites = 0
+    vi.spyOn(store, 'put').mockImplementation(async (kind, value) => {
+      if (kind === 'installations') {
+        installationWrites += 1
+        if (installationWrites === 3) throw new Error('final receipt write rejected')
+      }
+      await originalPut(kind, value)
+    })
+    const staleRollback = vi.fn(async () => undefined)
+    const { launcher } = launcherWithHost(hostPassedEvidence)
+    const installer = new PluginInstaller(
+      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+        evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded before receipt failure' },
+        // A legacy/injected callback must not regain authority over the Loader.
+        rollback: staleRollback,
+      }),
+    )
+
+    await expect(installer.install({
+      reviewId: current.id,
+      installationId,
+      targetProfile: 'persistent',
+      retention: 'persistent',
+    }, execution())).rejects.toMatchObject({ code: 'command_failed', details: { recoveryRequired: true } })
+    expect(staleRollback).not.toHaveBeenCalled()
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({
+      installState: 'unknown',
+      installOutcome: 'recovery_required',
+      installed: false,
+      loaded: false,
+      verified: false,
+      hotReload: { attempted: true, loaded: true, method: 'loader' },
+    })
   })
 
   it('refuses replacement when the live spec drifted from the frozen installed target', async () => {
@@ -1005,6 +1255,7 @@ describe('fail-closed install outcomes', () => {
     const verifyHost = vi.fn(async () => { throw new Error('route/provider must not spawn Host verification') })
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost,
@@ -1052,6 +1303,7 @@ describe('fail-closed install outcomes', () => {
     }))
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({}),
       verifyHost,
@@ -1108,16 +1360,11 @@ describe('fail-closed install outcomes', () => {
       },
     }) } as unknown as Context
     let installs = 0
-    let materializes = 0
     let verifyHostCalls = 0
     const launcher = {
       install: async () => {
         installs += 1
         throw new Error('must not install')
-      },
-      materializeLocal: async () => {
-        materializes += 1
-        throw new Error('must not materialize')
       },
       verifyHost: async () => {
         verifyHostCalls += 1
@@ -1134,7 +1381,6 @@ describe('fail-closed install outcomes', () => {
     }, execution())).rejects.toThrow(/manual_runtime cannot be installed as a temporary trial/i)
     expect(approvals).toBe(0)
     expect(installs).toBe(0)
-    expect(materializes).toBe(0)
     expect(verifyHostCalls).toBe(0)
     expect(store.installationWrites).toBe(0)
   })
@@ -1151,6 +1397,7 @@ describe('fail-closed install outcomes', () => {
     const verifyHost = vi.fn(async () => { throw new Error('unattested fixtures must not spawn Host verification') })
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { safe: true, arguments: { expression: '1+1' } } }),
       verifyHost,
@@ -1193,11 +1440,11 @@ describe('fail-closed install outcomes', () => {
     })
   })
 
-  it('reports recovery rather than restart when failed hot-load could not roll back', async () => {
+  it('reports recovery rather than restart when hot-load runtime state is ambiguous', async () => {
     const { root, store, ctx } = await setup(attestedReview())
     const { launcher } = launcherWithHost(hostPassedEvidence)
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation and rollback failed' },
+      evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation state is ambiguous' },
       rollbackFailed: true,
     }), unusedVerifier())
     const result = await installer.install({
@@ -1225,12 +1472,13 @@ describe('fail-closed install outcomes', () => {
       runtimeSurface: attestedSurface([]),
     })
     const { root, store, ctx } = await setup(none)
-    const rollback = vi.fn(async () => ({
-      evidence: { attempted: true, loaded: false, method: 'failed' as const, reason: 'activation and rollback failed' },
+    const ambiguousActivation = vi.fn(async () => ({
+      evidence: { attempted: true, loaded: false, method: 'failed' as const, reason: 'activation state is ambiguous' },
       rollbackFailed: true,
     }))
     const activatedLauncher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({}),
       verifyHost: async (): Promise<VerificationEvidence> => ({
@@ -1249,7 +1497,7 @@ describe('fail-closed install outcomes', () => {
       }),
     } as unknown as DshLauncher
     const activated = await new PluginInstaller(
-      ctx, config(root), store, activatedLauncher, async () => true, undefined, rollback,
+      ctx, config(root), store, activatedLauncher, async () => true, undefined, ambiguousActivation,
     ).install({
       reviewId: none.id,
       targetProfile: 'persistent',
@@ -1261,17 +1509,18 @@ describe('fail-closed install outcomes', () => {
       restartRequired: false,
     })
     expect(activated.verification.reason).toMatch(/explicit recovery/i)
-    expect(rollback).toHaveBeenCalledTimes(1)
+    expect(ambiguousActivation).toHaveBeenCalledTimes(1)
 
     await putFrozenReview(root, store, review())
     const awaitingLauncher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => { throw new Error('manual_runtime must not spawn') },
     } as unknown as DshLauncher
     const awaiting = await new PluginInstaller(
-      ctx, config(root), store, awaitingLauncher, async () => true, undefined, rollback,
+      ctx, config(root), store, awaitingLauncher, async () => true, undefined, ambiguousActivation,
     ).install({
       reviewId: review().id,
       targetProfile: 'persistent',
@@ -1286,7 +1535,7 @@ describe('fail-closed install outcomes', () => {
       verification: { layer: 'manual_runtime', status: 'pending_user_test' },
     })
     expect(awaiting.verification.reason).toMatch(/not activated inside the serving DSH process/i)
-    expect(rollback).toHaveBeenCalledTimes(1)
+    expect(ambiguousActivation).toHaveBeenCalledTimes(1)
   })
 
   it('keeps verificationTask and expectedText as human prompts that never enter verifyHost', async () => {
@@ -1302,6 +1551,7 @@ describe('fail-closed install outcomes', () => {
     })
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost,
@@ -1396,7 +1646,7 @@ describe('fail-closed install outcomes', () => {
       installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
     })
     await putFrozenReview(root, store, local)
-    const launcher = {} as unknown as DshLauncher
+    const launcher = { profileTargetAbsent: async () => true } as unknown as DshLauncher
     const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
     await expect(installer.install({
       reviewId: local.id,

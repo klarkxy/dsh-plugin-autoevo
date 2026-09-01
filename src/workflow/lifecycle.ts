@@ -16,7 +16,6 @@ export type WorkflowLifecycleState =
   | 'skipped'
   | 'awaiting_confirmation'
   | 'committed'
-  | 'leased'
   | 'executing'
   | 'verified'
   | 'activated'
@@ -57,7 +56,7 @@ function installedLifecycle(installation: InstallationRecord | undefined): Workf
 export function lifecycleStateFor(
   workflow: Pick<
     WorkflowRecord,
-    'status' | 'cursor' | 'policyVersion' | 'actionCommitment' | 'executionLease' | 'lastFailure'
+    'status' | 'cursor' | 'policyVersion' | 'actionCommitment' | 'lastFailure' | 'recovery'
   >,
   extras: LifecycleMappingInput = {},
 ): WorkflowLifecycleState {
@@ -67,6 +66,7 @@ export function lifecycleStateFor(
   if ((!readableLegacyCompletion && workflow.policyVersion !== POLICY_VERSION) || workflow.lastFailure?.code === 'policy_restart_required') {
     return 'interrupted'
   }
+  if (workflow.recovery?.action === 'cleanup_and_restart') return 'recovery_required'
 
   const cursor: WorkflowNodeId = workflow.cursor
   if (cursor === 'stopped') return 'stopped'
@@ -81,7 +81,6 @@ export function lifecycleStateFor(
   if (cursor === 'activated') return 'activated'
   if (cursor === 'installed') return installedLifecycle(extras.installation)
 
-  if (workflow.executionLease) return 'leased'
   if (cursor === 'install_verify') return 'executing'
   if (cursor === 'prepare_modify' || cursor === 'prepare_create') {
     return workflow.actionCommitment ? 'committed' : 'executing'

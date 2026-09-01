@@ -39,12 +39,19 @@ export async function resolveBundledDshRoot(input: {
   runner?: Pick<CommandRunner, 'resolveExecutable'>
   signal?: AbortSignal
 }): Promise<string | undefined> {
+  input.signal?.throwIfAborted()
   const candidates: string[] = []
   const fromEnv = process.env.DSH_PACKAGE_ROOT?.trim()
   if (fromEnv) candidates.push(fromEnv)
   candidates.push(path.join(input.dshHome, 'profiles', 'node_modules', ...DSH_PACKAGE.split('/')))
   if (input.runner?.resolveExecutable) {
-    const executable = await input.runner.resolveExecutable(input.config.dshCommand, input.signal).catch(() => undefined)
+    let executable: string | undefined
+    try {
+      executable = await input.runner.resolveExecutable(input.config.dshCommand, input.signal)
+    } catch {
+      if (input.signal?.aborted) throw input.signal.reason
+    }
+    input.signal?.throwIfAborted()
     if (executable) {
       const directory = path.dirname(executable)
       candidates.push(path.basename(directory).toLowerCase() === '.bin'
@@ -53,7 +60,10 @@ export async function resolveBundledDshRoot(input: {
     }
   }
   for (const candidate of candidates) {
-    if (await readManifestName(candidate) === DSH_PACKAGE) return candidate
+    input.signal?.throwIfAborted()
+    const manifestName = await readManifestName(candidate)
+    input.signal?.throwIfAborted()
+    if (manifestName === DSH_PACKAGE) return candidate
   }
   return undefined
 }

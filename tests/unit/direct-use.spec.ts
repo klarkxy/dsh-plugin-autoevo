@@ -10,6 +10,7 @@ import {
   reviewSnapshotDigest,
 } from '../../src/review/direct-use.js'
 import { evaluatePluginContent, needsSemanticReviewer } from '../../src/review/review.js'
+import { reviewIdentity } from '../../src/lifecycle/decide.js'
 import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import { _testing as serviceTesting } from '../../src/service.js'
 import { optionsFor, type WorkflowRecord } from '../../src/workflow/contracts.js'
@@ -245,6 +246,49 @@ describe('direct use eligibility', () => {
       expect(isDirectlyUsableReview(review, workflowFor(review))).toBe(false)
       expect(() => assertDirectUseAllowed(review, workflowFor(review))).toThrow(/cannot authorize installation|does not authorize installation/i)
     }
+  })
+
+  it('default-denies semantically corrupt effect-authority review fields', () => {
+    const opaque = githubReview() as unknown as Record<string, unknown>
+    opaque.sourceSnapshot = {
+      ...(opaque.sourceSnapshot as Record<string, unknown>),
+      kind: 'opaque',
+    }
+    const stringFalse = githubReview({
+      mechanicalFacts: {
+        fit: 'full',
+        missingCapabilities: [],
+        staticRisk: 'low',
+        compatibility: { status: 'compatible', reason: 'ok', runtimeVersion: null },
+        manifest: {
+          kind: 'bundle',
+          packageName: 'dsh-one',
+          materializable: true,
+          installSpec: 'file:C:/workspace/review-artifacts/review-one/package/dsh-one.tgz',
+        },
+        truncated: false,
+        findings: [],
+        evidenceHashes: [],
+        semanticContextRequired: false,
+      },
+    }) as unknown as Record<string, unknown>
+    stringFalse.mechanicalFacts = {
+      ...(stringFalse.mechanicalFacts as Record<string, unknown>),
+      manifest: {
+        ...((stringFalse.mechanicalFacts as Record<string, unknown>).manifest as Record<string, unknown>),
+        materializable: 'false',
+      },
+    }
+    const unsupportedSchema = { ...githubReview(), schemaVersion: 2 } as unknown as ReviewRecord
+
+    for (const corrupt of [opaque, stringFalse, unsupportedSchema] as unknown as ReviewRecord[]) {
+      const workflow = workflowFor(corrupt)
+      expect(isDirectlyUsableReview(corrupt, workflow)).toBe(false)
+      expect(isManagedModificationEligibleReview(corrupt)).toBe(false)
+      expect(confirmationIds(corrupt, workflow)).not.toEqual(expect.arrayContaining(['use_this', 'modify_this']))
+      expect(() => assertDirectUseAllowed(corrupt, workflow)).toThrow(/does not authorize installation/i)
+    }
+    expect(() => reviewIdentity(opaque as unknown as ReviewRecord)).toThrow(/source identity is malformed/i)
   })
 
   it('offers managed modification only from a complete current-policy baseline', () => {

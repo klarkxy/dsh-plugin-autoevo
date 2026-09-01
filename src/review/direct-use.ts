@@ -7,6 +7,51 @@ import { HARD_SKIP_FINDING_CODES } from './review.js'
 
 const DIGEST_RE = /^[a-f0-9]{64}$/u
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function nonemptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function hasExactEffectAuthorityShape(review: ReviewRecord): boolean {
+  if (review.schemaVersion !== 1
+    || !Array.isArray(review.inspectedFiles)
+    || !Array.isArray(review.findings)
+    || !Array.isArray(review.missingCapabilities)
+    || !recordValue(review.manifest)) return false
+  const source = recordValue(review.sourceSnapshot)
+  if (!source) return false
+  if (source.kind === 'github') {
+    if (!nonemptyString(source.repository)
+      || !nonemptyString(source.requestedRef)
+      || !nonemptyString(source.commit)
+      || !nonemptyString(source.defaultBranch)) return false
+  } else if (source.kind === 'local') {
+    if (!nonemptyString(source.path)
+      || !nonemptyString(source.baseReviewId)
+      || !nonemptyString(source.baseCommit)
+      || !nonemptyString(source.statusHash)) return false
+  } else {
+    return false
+  }
+  if (review.mechanicalFacts !== undefined) {
+    const mechanical = recordValue(review.mechanicalFacts)
+    const manifest = mechanical ? recordValue(mechanical.manifest) : undefined
+    if (!mechanical
+      || !manifest
+      || typeof manifest.materializable !== 'boolean'
+      || typeof mechanical.truncated !== 'boolean'
+      || (mechanical.directUseHostBoundary !== undefined
+        && mechanical.directUseHostBoundary !== 'incompatible'
+        && mechanical.directUseHostBoundary !== 'not_materializable')) return false
+  }
+  return true
+}
+
 /** Minimal snapshot context for candidate-digest binding. WorkflowRecord is assignable. */
 export interface ReviewCandidateContext {
   id?: string
@@ -75,6 +120,7 @@ function reviewedArtifactIsOwned(review: ReviewRecord): boolean {
 
 /** Host hard boundaries only. Mechanical recommendation/fit/risk/regex are not boundaries. */
 export function hostDirectUseBoundary(review: ReviewRecord): DirectUseHostBoundary | undefined {
+  if (!hasExactEffectAuthorityShape(review)) return 'not_materializable'
   if (!reviewedArtifactIsOwned(review)) return 'not_materializable'
   if (review.mechanicalFacts?.directUseHostBoundary === 'not_materializable') return 'not_materializable'
   if (review.mechanicalFacts?.manifest.materializable === false) return 'not_materializable'
@@ -105,6 +151,7 @@ export function isDirectlyUsableReview(review: ReviewRecord, _workflow?: ReviewC
 
 /** Managed repair still requires a complete, current-policy review to bind its baseline. */
 export function isManagedModificationEligibleReview(review: ReviewRecord): boolean {
+  if (!hasExactEffectAuthorityShape(review)) return false
   if (review.policyVersion !== POLICY_VERSION || review.fit === 'none' || review.license === null) return false
   if (review.mechanicalFacts?.truncated) return false
   return !review.findings.some((finding) => finding.code === 'review_truncated')

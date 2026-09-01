@@ -28,7 +28,7 @@ Each topic has one canonical home. Interactive flow diagrams (standalone HTML wi
 ## Install
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.1
 ```
 
 - Replace `--profile web` with the profile you actually use; keep the `@deepseek-ai/` prefix (the unscoped `dsh` package on npm is an unrelated project).
@@ -72,7 +72,7 @@ AutoEvo owns workflow, warnings, and evidence records; DSH Core enforces permiss
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm check
+pnpm check:fast
 ```
 
 See the [Developer Guide](docs/developer-guide.en.md).

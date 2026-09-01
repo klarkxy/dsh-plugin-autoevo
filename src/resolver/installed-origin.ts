@@ -21,7 +21,7 @@ export function evolutionTargetFromExactGithub(input: {
   packageName: string
   profile: string
   dependencySpec: string
-  installation?: Pick<InstallationRecord, 'id' | 'reviewId' | 'removed' | 'supersededByInstallationId'>
+  installation?: Pick<InstallationRecord, 'id' | 'reviewId' | 'removed'>
   reviewId?: string
 }): EvolutionTarget | undefined {
   const parsed = parseExactGithubDependency(input.dependencySpec)
@@ -44,19 +44,14 @@ export function evolutionTargetFromProfile(input: {
   packageName: string
   profile: string
   dependencySpec: string
-  installation?: Pick<InstallationRecord, 'id' | 'reviewId' | 'removed' | 'supersededByInstallationId'>
 }): EvolutionTarget | undefined {
   const parsed = parseExactGithubDependency(input.dependencySpec)
   if (!parsed) return undefined
-  const owned = input.installation
-    && !input.installation.removed
-    && !input.installation.supersededByInstallationId
   return evolutionTargetFromExactGithub({
-    kind: owned ? 'owned_chain' : 'github_exact',
+    kind: 'github_exact',
     packageName: input.packageName,
     profile: input.profile,
     dependencySpec: input.dependencySpec,
-    ...(input.installation ? { installation: input.installation } : {}),
   })
 }
 

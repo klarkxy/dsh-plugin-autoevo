@@ -5,8 +5,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import type { ResolutionRecord } from '../../src/contracts.js'
 import { POLICY_VERSION } from '../../src/contracts.js'
+import { CreationGuard } from '../../src/creation-guard.js'
+import type { CommandRunner } from '../../src/process/runner.js'
 import {
   listBundledOptInPackages,
   resolveBundledDshRoot,
@@ -14,8 +17,10 @@ import {
 } from '../../src/resolver/host-bundled.js'
 import { matchConfidence, resolveLocalCapabilities } from '../../src/resolver/local.js'
 import { candidateSnapshotFor } from '../../src/workflow/candidates.js'
+import { CapabilityEvolutionService } from '../../src/service.js'
+import { StateStore } from '../../src/state/store.js'
 import { optionsFor } from '../../src/workflow/contracts.js'
-import type { WorkflowRecord } from '../../src/workflow/contracts.js'
+import type { WorkflowExec, WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const temporary = trackTempDirs()
 
@@ -114,6 +119,143 @@ describe('host-bundled opt-in capabilities', () => {
       if (previous === undefined) delete process.env.DSH_PACKAGE_ROOT
       else process.env.DSH_PACKAGE_ROOT = previous
     }
+  })
+
+  it('rethrows the exact cancellation reason from executable resolution', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancel bundled dsh resolution')
+
+    let failure: unknown
+    try {
+      await resolveBundledDshRoot({
+        dshHome: path.join(os.tmpdir(), 'missing-dsh-home'),
+        config: { dshCommand: 'dsh' },
+        runner: {
+          async resolveExecutable(_command, signal) {
+            expect(signal).toBe(controller.signal)
+            controller.abort(reason)
+            throw reason
+          },
+        },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(reason)
+  })
+
+  it('does not continue bootstrap local resolution after bundled-root cancellation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bundled-bootstrap-cancel-'))
+    temporary.push(root)
+    const controller = new AbortController()
+    const reason = new Error('cancel bootstrap bundled lookup')
+    let localSchemaReads = 0
+    const context = {
+      tools: { schemas: () => { localSchemaReads += 1; return [] } },
+      systemPrompt: { assemble: async () => ({ tools: [] }) },
+      skills: { list: async () => [] },
+    } as unknown as Context
+    const runner: CommandRunner = {
+      async run() { throw new Error('command execution is not expected') },
+      async resolveExecutable(_command, signal) {
+        expect(signal).toBe(controller.signal)
+        controller.abort(reason)
+        throw reason
+      },
+    }
+    const service = new CapabilityEvolutionService(
+      context,
+      testRuntimeConfig(root),
+      runner,
+      new StateStore(root),
+      new CreationGuard({ isEvolutionMode: () => true }),
+    )
+
+    let failure: unknown
+    try {
+      await service.bootstrapResolution(
+        'orbit clock context',
+        { signal: controller.signal } as WorkflowExec,
+      )
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(reason)
+    expect(localSchemaReads).toBe(0)
+  })
+
+  it('does not rewrite enableBuiltin cancellation as bundled-root unavailable', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bundled-enable-cancel-'))
+    temporary.push(root)
+    const controller = new AbortController()
+    const reason = new Error('cancel enable bundled lookup')
+    const runner: CommandRunner = {
+      async run() { throw new Error('command execution is not expected') },
+      async resolveExecutable(_command, signal) {
+        expect(signal).toBe(controller.signal)
+        controller.abort(reason)
+        throw reason
+      },
+    }
+    const store = new StateStore(root)
+    const service = new CapabilityEvolutionService(
+      emptyContext(),
+      testRuntimeConfig(root),
+      runner,
+      store,
+      new CreationGuard({ isEvolutionMode: () => true }),
+    )
+    const candidateId = `candidate_${'a'.repeat(24)}`
+    const workflow = {
+      id: `workflow_${'b'.repeat(24)}`,
+      candidateSnapshot: [{
+        id: candidateId,
+        index: 1,
+        kind: 'local',
+        name: '@deepseek-ai/dsh-orbit-context',
+        identity: '@deepseek-ai/dsh-orbit-context',
+        digest: 'c'.repeat(64),
+        availability: 'host_bundled',
+        hostBundled: {
+          packageName: '@deepseek-ai/dsh-orbit-context',
+          version: '0.1.1-rc.2',
+          mountId: 'orbit-context',
+        },
+      }],
+      selectionReceipt: {
+        id: 'selection_cancel',
+        phase: 'gate2',
+        kind: 'enable_builtin',
+        candidateIds: [candidateId],
+        candidateDigests: { [candidateId]: 'c'.repeat(64) },
+        snapshotDigest: 'd'.repeat(64),
+      },
+      actionCommitment: {
+        selectionReceiptId: 'selection_cancel',
+        snapshotDigest: 'd'.repeat(64),
+        requestedAction: 'enable_builtin',
+        candidateId,
+        candidateDigest: 'c'.repeat(64),
+        targetProfile: 'web',
+        endpoint: {
+          kind: 'host_bundled_enable',
+          packageName: '@deepseek-ai/dsh-orbit-context',
+          version: '0.1.1-rc.2',
+          mountId: 'orbit-context',
+          targetProfile: 'web',
+        },
+      },
+    } as unknown as WorkflowRecord
+
+    let failure: unknown
+    try {
+      await service.enableBuiltin(workflow, { signal: controller.signal } as WorkflowExec)
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(reason)
+    await expect(store.listInstallations()).resolves.toEqual([])
   })
 
   it('offers unmounted opt-in packages as host_bundled candidates and skips mounted ones', async () => {

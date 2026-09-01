@@ -101,14 +101,14 @@ try {
   // isEvolutionMode (no roster on this harness), the section function is the
   // same string as AUTOEVO_AUTONOMY_CONTRACT for an evolution-mode Agent.
   const policyText = policy.text.length > 0 ? policy.text : AUTOEVO_AUTONOMY_CONTRACT
-  assert.match(policyText, /runtime Policy V13/u)
+  assert.match(policyText, /runtime Policy V14/u)
   assert.match(policyText, /authoritative original requirement/u)
   assert.match(policyText, /zero candidates is a valid result/u)
   assert.match(policyText, /fresh top-level user message/u)
   assert.match(policyText, /Public decisions never accept retention/u)
   assert.match(policyText, /ordinary subagent, agent, workflow, or model delegation/u)
   assert.match(policyText, /Claim verified only from a Host tool-roundtrip pass/u)
-  assert.match(policyText, /Pre-V13 unfinished workflows/u)
+  assert.match(policyText, /Pre-V14 unfinished workflows/u)
   assert.doesNotMatch(policyText, /runtime Policy V7/u)
   assert.doesNotMatch(policyText, /independent semantic verifier/u)
   assert.doesNotMatch(policyText, /next_step|agent_directive|await_confirmation|workspace-write/u)
@@ -123,7 +123,7 @@ try {
   assert.match(recoverSchema.description, /sealed recovery interrupt/u)
 
   const packed = await import(pathToFileURL(path.join(projectRoot, 'lib', 'index.js')).href)
-  assert.equal(packed.POLICY_VERSION, '13')
+  assert.equal(packed.POLICY_VERSION, '14')
   assert.deepEqual([...packed.VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
   assert.equal(packed.classifyRuntimeSurface({
     llmDependency: false,
@@ -189,7 +189,7 @@ try {
   const presetBody = await readFile(path.join(presetsRoot, 'preset.yml'), 'utf8')
   assert.match(presetBody, /能力进化/u)
   const composition = await readFile(path.join(presetsRoot, 'agent.cordis.yml'), 'utf8')
-  assert.match(composition, /Policy V13 Search-first workflow/u)
+  assert.match(composition, /Policy V14 Search-first workflow/u)
   assert.match(composition, /disabled: true/u)
   const managed = await readdir(presetsRoot)
   assert.ok(managed.includes('agent.cordis.yml'))

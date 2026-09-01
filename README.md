@@ -28,7 +28,7 @@
 ## 安装
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.0
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.1
 ```
 
 - `--profile web` 换成你实际使用的 profile；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。
@@ -72,7 +72,7 @@ AutoEvo 负责工作流、警告和证据记录；权限、sandbox 与 approval 
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm check
+pnpm check:fast
 ```
 
 详见[开发者指南](docs/developer-guide.md)。

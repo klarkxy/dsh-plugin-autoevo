@@ -29,8 +29,34 @@ function normalizePath(value: string): string {
   return path.resolve(value)
 }
 
-async function exists(candidate: string): Promise<boolean> {
-  return access(candidate).then(() => true).catch(() => false)
+function throwIfAborted(signal?: AbortSignal): void {
+  signal?.throwIfAborted()
+}
+
+async function exists(
+  candidate: string,
+  signal?: AbortSignal,
+  accessPath: (candidate: string) => Promise<void> = access,
+): Promise<boolean> {
+  throwIfAborted(signal)
+  try {
+    await accessPath(candidate)
+    throwIfAborted(signal)
+    return true
+  } catch (error) {
+    throwIfAborted(signal)
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function cleanupProbePaths(
+  candidates: readonly string[],
+  remove: (candidate: string) => Promise<void> = (candidate) => rm(candidate, { force: true }),
+): Promise<void> {
+  const results = await Promise.allSettled(candidates.map((candidate) => remove(candidate)))
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failed) throw failed.reason
 }
 
 async function probeFilesystem(
@@ -41,29 +67,39 @@ async function probeFilesystem(
   outsidePath: string,
   signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal)
   if (fs.sandboxMode === undefined) {
     throw new EvolutionError('invalid_input', 'DSH filesystem provider is not sandbox-enforcing; modify/create cannot proceed', {
       reason: 'unsandboxed_filesystem_provider',
     })
   }
   const resolveOptions = signal ? { signal } : undefined
+  throwIfAborted(signal)
   const workspace = await fs.resolve(cwd, resolveOptions)
+  throwIfAborted(signal)
   const inside = await fs.resolve(insidePath, resolveOptions)
+  throwIfAborted(signal)
   const outside = await fs.resolve(outsidePath, resolveOptions)
+  throwIfAborted(signal)
   if (!fs.contains(workspace, inside) || fs.contains(workspace, outside)) {
     throw new EvolutionError('invalid_input', 'DSH filesystem provider reported an invalid managed-source containment boundary', {
       reason: 'filesystem_containment_mismatch',
     })
   }
+  throwIfAborted(signal)
   await fs.writeText(inside, 'autoevo sandbox probe\n', undefined, signal, policy)
+  throwIfAborted(signal)
   let escaped = false
   try {
+    throwIfAborted(signal)
     await fs.writeText(outside, 'autoevo escape probe\n', undefined, signal, policy)
+    throwIfAborted(signal)
     escaped = true
-  } catch {
+  } catch (error) {
+    throwIfAborted(signal)
     // Expected: the real sandboxed filesystem rejects a write outside workspaceRoot.
   }
-  if (escaped || await exists(outsidePath)) {
+  if (escaped || await exists(outsidePath, signal)) {
     throw new EvolutionError('invalid_input', 'DSH filesystem sandbox accepted an outside-workspace write', {
       reason: 'filesystem_escape_probe_failed',
     })
@@ -79,37 +115,43 @@ async function probeShell(
   outsidePath: string,
   signal?: AbortSignal,
 ): Promise<'full' | 'partial'> {
+  throwIfAborted(signal)
   const script = "require('node:fs').writeFileSync(process.argv[1], 'autoevo shell probe\\n')"
   const inside = sandbox.confine([process.execPath, '-e', script, insidePath], {
     mode: 'workspace-write',
     workspaceRoot: policy.workspaceRoot,
     ...(policy.sessionId ? { sessionId: policy.sessionId } : {}),
   })
+  throwIfAborted(signal)
   const insideResult = await runner.run({
     argv: inside.argv as [string, ...string[]],
     cwd,
     allowFailure: true,
     ...(signal ? { signal } : {}),
   })
-  if (insideResult.exitCode !== 0 || !(await exists(insidePath))) {
+  throwIfAborted(signal)
+  if (insideResult.exitCode !== 0 || !(await exists(insidePath, signal))) {
     throw new EvolutionError('invalid_input', 'DSH shell sandbox rejected an in-workspace write required for modify/create', {
       reason: 'shell_incapable',
       enforcement: inside.enforcement,
     })
   }
 
+  throwIfAborted(signal)
   const outside = sandbox.confine([process.execPath, '-e', script, outsidePath], {
     mode: 'workspace-write',
     workspaceRoot: policy.workspaceRoot,
     ...(policy.sessionId ? { sessionId: policy.sessionId } : {}),
   })
+  throwIfAborted(signal)
   const outsideResult = await runner.run({
     argv: outside.argv as [string, ...string[]],
     cwd,
     allowFailure: true,
     ...(signal ? { signal } : {}),
   })
-  if (outsideResult.exitCode === 0 || await exists(outsidePath)) {
+  throwIfAborted(signal)
+  if (outsideResult.exitCode === 0 || await exists(outsidePath, signal)) {
     throw new EvolutionError('invalid_input', 'DSH shell sandbox accepted an outside-workspace write', {
       reason: 'shell_escape_probe_failed',
       enforcement: outside.enforcement,
@@ -129,6 +171,7 @@ export async function probeWorkspaceWriteSandbox(
   expectedCwd: string,
   signal?: AbortSignal,
 ): Promise<SandboxProbeResult> {
+  throwIfAborted(signal)
   if (!stack?.sandbox || !stack.sandboxPolicy || !stack.fs || !stack.runner) {
     throw new EvolutionError('invalid_input', 'The official DSH sandbox, policy, filesystem, and subprocess services are required for modify/create', {
       reason: 'missing_sandbox_service',
@@ -136,6 +179,7 @@ export async function probeWorkspaceWriteSandbox(
   }
   const cwd = normalizePath(expectedCwd)
   const policy = stack.sandboxPolicy.resolve({ session })
+  throwIfAborted(signal)
   if (policy.mode !== 'workspace-write') {
     throw new EvolutionError('invalid_input', 'Child session sandbox mode must be workspace-write', {
       reason: 'wrong_sandbox_mode',
@@ -160,15 +204,20 @@ export async function probeWorkspaceWriteSandbox(
     throw new EvolutionError('invalid_input', 'Sandbox probe paths did not form the expected containment boundary')
   }
   for (const candidate of [insideFs, insideShell, outsideFs, outsideShell]) {
-    if (await exists(candidate)) {
+    if (await exists(candidate, signal)) {
       throw new EvolutionError('invalid_input', 'Sandbox probe path unexpectedly already exists', { path: candidate })
     }
   }
 
+  const probePaths = [insideFs, insideShell, outsideFs, outsideShell]
+  let primaryFailed = false
+  let result: SandboxProbeResult | undefined
   try {
     await probeFilesystem(stack.fs, policy, cwd, insideFs, outsideFs, signal)
+    throwIfAborted(signal)
     const enforcement = await probeShell(stack.sandbox, stack.runner, policy, cwd, insideShell, outsideShell, signal)
-    return {
+    throwIfAborted(signal)
+    result = {
       ok: true,
       mode: 'workspace-write',
       cwd,
@@ -179,11 +228,21 @@ export async function probeWorkspaceWriteSandbox(
         ? 'Windows sandbox enforcement is integrity-oriented partial isolation; it does not claim confidentiality or network isolation.'
         : `workspace-write sandbox probes passed with ${enforcement} shell enforcement.`,
     }
+  } catch (error) {
+    primaryFailed = true
+    throw error
   } finally {
-    await Promise.all([insideFs, insideShell, outsideFs, outsideShell].map(async (candidate) => {
-      await rm(candidate, { force: true }).catch(() => undefined)
-    }))
+    try {
+      await cleanupProbePaths(probePaths)
+    } catch (error) {
+      if (!primaryFailed) {
+        throwIfAborted(signal)
+        throw error
+      }
+    }
   }
+  throwIfAborted(signal)
+  return result!
 }
 
-export const _testing = { isPathInside, normalizePath }
+export const _testing = { isPathInside, normalizePath, cleanupProbePaths, exists }

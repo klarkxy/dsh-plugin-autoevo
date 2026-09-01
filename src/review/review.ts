@@ -68,11 +68,6 @@ interface GithubTree {
   truncated?: unknown
 }
 
-interface GithubBlob {
-  content?: unknown
-  encoding?: unknown
-}
-
 export interface ContentFile {
   path: string
   content: Uint8Array
@@ -889,24 +884,6 @@ function priority(filePath: string): number {
   return 4
 }
 
-function selectedEntries(entries: readonly TreeEntry[], config: RuntimeConfig): { entries: TreeEntry[]; truncated: boolean } {
-  const valid = entries.filter((entry) => entry.type === 'blob' && typeof entry.sha === 'string' && /^[a-f0-9]{40,64}$/i.test(entry.sha) && safeTreePath(entry.path))
-    .sort((left, right) => priority(left.path as string) - priority(right.path as string) || (left.path as string).localeCompare(right.path as string))
-  const selected: TreeEntry[] = []
-  let bytes = 0
-  let truncated = false
-  for (const entry of valid) {
-    const size = typeof entry.size === 'number' && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-    if (selected.length >= config.maxFiles || bytes + size > config.maxRepositoryBytes) {
-      truncated = true
-      continue
-    }
-    selected.push(entry)
-    bytes += size
-  }
-  return { entries: selected, truncated }
-}
-
 function selectedPreviewEntries(entries: readonly TreeEntry[], config: RuntimeConfig): { entries: TreeEntry[]; truncated: boolean } {
   const previewBytes = Math.min(config.maxRepositoryBytes, 262_144)
   const eligible = entries.filter((entry) => {
@@ -929,43 +906,6 @@ function selectedPreviewEntries(entries: readonly TreeEntry[], config: RuntimeCo
     bytes += size
   }
   return { entries: selected, truncated: selected.length < eligible.length }
-}
-
-async function githubSnapshot(options: {
-  runner: CommandRunner
-  config: RuntimeConfig
-  cwd: string
-  repository: string
-  ref: string
-  preview?: boolean
-  signal?: AbortSignal
-}): Promise<{ sourceSnapshot: Extract<ReviewRecord['sourceSnapshot'], { kind: 'github' }>; snapshot: ContentSnapshot; maintained: boolean }> {
-  const identity = await githubIdentity(options)
-  const { sourceSnapshot, maintained } = identity
-  const repository = sourceSnapshot.repository
-  const commit = { sha: sourceSnapshot.commit }
-  const tree = parseGithub<GithubTree>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/git/trees/${commit.sha}?recursive=1`, options.signal), 'tree data')
-  if (!Array.isArray(tree.tree)) throw new EvolutionError('github_unavailable', 'GitHub did not provide a file tree')
-  const chosen = options.preview
-    ? selectedPreviewEntries(tree.tree as TreeEntry[], options.config)
-    : selectedEntries(tree.tree as TreeEntry[], options.config)
-  const files: ContentFile[] = []
-  let actualBytes = 0
-  let truncated = chosen.truncated || tree.truncated === true
-  for (const entry of chosen.entries) {
-    const filePath = safeTreePath(entry.path)
-    if (!filePath || typeof entry.sha !== 'string') continue
-    const blob = parseGithub<GithubBlob>(await ghApi(options.runner, options.config, options.cwd, `repos/${repository}/git/blobs/${entry.sha}`, options.signal), 'blob data')
-    if (blob.encoding !== 'base64' || typeof blob.content !== 'string') throw new EvolutionError('github_unavailable', 'GitHub returned an unsupported blob encoding', { path: filePath })
-    const content = Buffer.from(blob.content.replace(/[\r\n]/g, ''), 'base64')
-    if (actualBytes + content.byteLength > options.config.maxRepositoryBytes) {
-      truncated = true
-      continue
-    }
-    actualBytes += content.byteLength
-    files.push({ path: filePath, content, blobId: entry.sha })
-  }
-  return { sourceSnapshot, snapshot: { files, truncated }, maintained }
 }
 
 async function githubIdentity(options: {
@@ -1170,22 +1110,12 @@ export async function reviewGithubPluginWithFiles(options: {
   packagePath?: string
   resolutionId: string
   requirement: string
-  artifactRoot?: string
+  artifactRoot: string
   runtimeVersion?: string
   signal?: AbortSignal
 }): Promise<GithubReviewEvidence> {
-  if (!options.artifactRoot) {
-    const legacy = await githubSnapshot(options)
-    const record = evaluatePluginContent({
-      resolutionId: options.resolutionId,
-      requirement: options.requirement,
-      sourceSnapshot: legacy.sourceSnapshot,
-      files: legacy.snapshot.files,
-      truncated: legacy.snapshot.truncated,
-      maintained: legacy.maintained,
-      ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
-    })
-    return { record, files: legacy.snapshot.files }
+  if (!options.artifactRoot.trim()) {
+    throw new EvolutionError('invalid_input', 'Formal GitHub review requires a Host-owned artifact root')
   }
   const result = await githubIdentity(options)
   const artifact = await freezeGithubPackage({
@@ -1220,29 +1150,6 @@ function reviewedArtifact(artifact: FrozenPackageArtifact): ReviewedArtifact {
     entryCount: artifact.files.length,
     ownedRoot: artifact.artifactRoot,
   }
-}
-
-export async function reviewGithubPlugin(options: {
-  runner: CommandRunner
-  config: RuntimeConfig
-  cwd: string
-  repository: string
-  ref: string
-  resolutionId: string
-  requirement: string
-  runtimeVersion?: string
-  signal?: AbortSignal
-}): Promise<ReviewRecord> {
-  const result = await githubSnapshot(options)
-  return evaluatePluginContent({
-    resolutionId: options.resolutionId,
-    requirement: options.requirement,
-    sourceSnapshot: result.sourceSnapshot,
-    files: result.snapshot.files,
-    truncated: result.snapshot.truncated,
-    maintained: result.maintained,
-    ...(options.runtimeVersion ? { runtimeVersion: options.runtimeVersion } : {}),
-  })
 }
 
 function isWithin(root: string, target: string): boolean {
@@ -1408,8 +1315,20 @@ export async function inspectLocalPackageDirectory(root: string, config: Runtime
   return roots ? inspectLiteralPackageRoots(root, roots, config) : inspectLocalDirectory(root, config)
 }
 
-async function git(runner: CommandRunner, config: RuntimeConfig, cwd: string, args: string[]): Promise<string> {
-  const result = await runner.run({ argv: [config.gitCommand, ...args], cwd })
+async function git(
+  runner: CommandRunner,
+  config: RuntimeConfig,
+  cwd: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted()
+  const result = await runner.run({
+    argv: [config.gitCommand, ...args],
+    cwd,
+    ...(signal ? { signal } : {}),
+  })
+  signal?.throwIfAborted()
   return result.stdout.trim()
 }
 
@@ -1432,17 +1351,19 @@ export async function reviewLocalPlugin(options: {
   lineageRootCommit?: string
   /** Pack/review this package while retaining the repository root as source provenance. */
   packagePath?: string
+  signal?: AbortSignal
 }): Promise<LocalReviewResult> {
+  options.signal?.throwIfAborted()
   if (!/^review_[a-f0-9]{16,64}$/.test(options.baseReviewId)) throw new EvolutionError('invalid_input', 'Invalid base review id')
   const workspace = await realpath(options.workspaceRoot)
   const target = await realpath(options.path)
   if (!isWithin(workspace, target)) throw new EvolutionError('unsafe_path', 'Local review path is outside the current workspace')
-  const gitRoot = await git(options.runner, options.config, target, ['-C', target, 'rev-parse', '--show-toplevel'])
+  const gitRoot = await git(options.runner, options.config, target, ['-C', target, 'rev-parse', '--show-toplevel'], options.signal)
   const canonicalRoot = await realpath(gitRoot)
   if (canonicalRoot !== target || !isWithin(workspace, canonicalRoot)) {
     throw new EvolutionError('unsafe_path', 'Local review path must be a Git worktree root inside the current workspace')
   }
-  const head = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'rev-parse', 'HEAD'])
+  const head = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'rev-parse', 'HEAD'], options.signal)
   if (!/^[a-f0-9]{40}$/i.test(head)) throw new EvolutionError('command_failed', 'Git did not provide an exact base commit')
   const lineageRoot = options.lineageRootCommit ?? head
   if (!/^[a-f0-9]{40}$/i.test(lineageRoot)) throw new EvolutionError('invalid_input', 'lineageRootCommit must be a 40-character commit')
@@ -1451,7 +1372,9 @@ export async function reviewLocalPlugin(options: {
       argv: [options.config.gitCommand, '-C', canonicalRoot, 'merge-base', '--is-ancestor', lineageRoot, head],
       cwd: canonicalRoot,
       allowFailure: true,
+      ...(options.signal ? { signal: options.signal } : {}),
     })
+    options.signal?.throwIfAborted()
     if (ancestry.exitCode !== 0) {
       throw new EvolutionError(
         'review_rejected',
@@ -1465,18 +1388,28 @@ export async function reviewLocalPlugin(options: {
     ? await realpath(path.join(canonicalRoot, ...packagePath.split('/')))
     : canonicalRoot
   if (!isWithin(canonicalRoot, packageRoot)) throw new EvolutionError('unsafe_path', 'Local package path escaped its managed repository')
-  const status = await git(options.runner, options.config, canonicalRoot, ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'])
+  const status = await git(
+    options.runner,
+    options.config,
+    canonicalRoot,
+    ['-C', canonicalRoot, 'status', '--porcelain=v1', '--untracked-files=all'],
+    options.signal,
+  )
+  options.signal?.throwIfAborted()
   const artifact = options.artifactRoot
     ? await freezeLocalPackage({
         sourceRoot: packageRoot,
         artifactRoot: options.artifactRoot,
         config: options.config,
         runner: options.runner,
+        ...(options.signal ? { signal: options.signal } : {}),
       })
     : undefined
+  options.signal?.throwIfAborted()
   const snapshot = artifact
     ? { files: artifact.files, truncated: false }
     : await inspectLocalPackageDirectory(packageRoot, options.config)
+  options.signal?.throwIfAborted()
   // A Host-committed managed change has a clean worktree, so status alone is
   // always the SHA-256 of empty text. Bind the local identity to exact HEAD as
   // well as any residual status to distinguish reviewed commits truthfully.

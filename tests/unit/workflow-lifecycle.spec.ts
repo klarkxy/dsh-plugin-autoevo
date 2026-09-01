@@ -157,14 +157,6 @@ describe('public workflow lifecycle mapping', () => {
       expected: 'committed',
     },
     {
-      name: 'maps an execution lease to leased',
-      overrides: {
-        cursor: 'await_confirmation',
-        executionLease: { id: 'l1' } as NonNullable<WorkflowRecord['executionLease']>,
-      },
-      expected: 'leased',
-    },
-    {
       name: 'maps install_verify to executing',
       overrides: { cursor: 'install_verify' },
       expected: 'executing',
@@ -265,6 +257,28 @@ describe('public workflow lifecycle mapping', () => {
       overrides: { status: 'completed', cursor: 'activated' },
       expected: 'activated',
       terminal: 'activated',
+    },
+    {
+      name: 'keeps a committed cleanup-and-restart parent in recovery until child convergence',
+      overrides: {
+        status: 'completed',
+        cursor: 'activated',
+        recovery: {
+          action: 'cleanup_and_restart',
+          hostTurnId: `turn_${'1'.repeat(24)}`,
+          cleanup: 'removed',
+          restartRequired: false,
+          restartedAsWorkflowId: `workflow_${'2'.repeat(24)}`,
+          restart: {
+            requirement: 'calculator',
+            normalized: 'calculator',
+            cwd: 'C:/workspace',
+            intent: { operation: 'discover_or_reuse', requiredSurface: 'any' },
+          },
+          completedAt: '2026-08-31T00:00:00.000Z',
+        },
+      },
+      expected: 'recovery_required',
     },
     {
       name: 'maps an activated install outcome to activated',

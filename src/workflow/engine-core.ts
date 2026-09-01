@@ -18,6 +18,7 @@ import {
   COMPLETED_CLEANUP_NODES,
   INTERRUPT_NODES,
   isInterruptKind,
+  type InterruptPayload,
   type WorkflowDiagnosis,
   type WorkflowExec,
   type WorkflowHost,
@@ -43,8 +44,44 @@ export abstract class WorkflowEngineCore {
     protected readonly store: StateStore,
     protected readonly creationGuard: CreationGuard,
     protected readonly host: WorkflowHost,
-    protected readonly requireHostCapturedRequirement = false,
+    protected readonly requireHostCapturedRequirement = true,
   ) {}
+
+  protected requireHostTurnId(exec: ToolRunContext, purpose: string): string {
+    const turnId = this.creationGuard.currentTurnId(exec.agent)
+    if (turnId) return turnId
+    if (!this.requireHostCapturedRequirement) return `turn_${'0'.repeat(24)}`
+    throw new EvolutionError('invalid_input', `Cannot ${purpose} without a current Host user turn`)
+  }
+
+  protected async awaitPreEffect<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted()
+    try {
+      const result = await operation()
+      signal?.throwIfAborted()
+      return result
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      throw error
+    }
+  }
+
+  protected async readOptionalBeforeEffect<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    try {
+      return await this.awaitPreEffect(operation, signal)
+    } catch (error) {
+      if (error instanceof EvolutionError && error.code === 'not_found') return undefined
+      throw error
+    }
+  }
+
+  protected cleanupExec(exec: ToolRunContext): WorkflowExec {
+    const { signal: _ignoredSignal, ...cleanup } = exec
+    return cleanup as WorkflowExec
+  }
 
   protected assertSameOwner(workflow: WorkflowRecord, exec: ToolRunContext): void {
     const sessionId = ownerSessionId(exec.agent)
@@ -77,29 +114,37 @@ export abstract class WorkflowEngineCore {
   protected clearWorkflowGrant(workflow: WorkflowRecord): void {
     delete workflow.selectionReceipt
     delete workflow.actionCommitment
-    delete workflow.executionLease
   }
 
   protected settleTerminalGrant(workflow: WorkflowRecord, exec: ToolRunContext): void {
     if (workflow.cursor === 'reuse_local') return
     if (workflow.cursor === 'stopped') {
-      delete workflow.executionLease
-      this.creationGuard.invalidateExecutionLease(exec.agent)
+      this.creationGuard.invalidateHostGrant(exec.agent)
       return
     }
     this.clearWorkflowGrant(workflow)
-    this.creationGuard.invalidateExecutionLease(exec.agent)
+    this.creationGuard.invalidateHostGrant(exec.agent)
   }
 
-  protected async reviewsForWorkflow(workflow: WorkflowRecord): Promise<ReviewRecord[]> {
+  protected async reviewsForWorkflow(
+    workflow: WorkflowRecord,
+    signal?: AbortSignal,
+  ): Promise<ReviewRecord[]> {
     const ids = [...new Set([
       ...Object.values(workflow.reviewIdsByCandidate ?? {}),
       ...(workflow.lastReviewId ? [workflow.lastReviewId] : []),
     ])]
     const reviews: ReviewRecord[] = []
     for (const id of ids) {
-      const review = await this.host.getReview(id).catch(() => undefined)
-      if (review) reviews.push(review)
+      signal?.throwIfAborted()
+      try {
+        const review = await this.host.getReview(id)
+        signal?.throwIfAborted()
+        reviews.push(review)
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason
+        if (!(error instanceof EvolutionError) || error.code !== 'not_found') throw error
+      }
     }
     return reviews.sort((left, right) => {
       const rank = (review: ReviewRecord): number => {
@@ -111,18 +156,98 @@ export abstract class WorkflowEngineCore {
     })
   }
 
-  protected async retryableInstall(workflow: WorkflowRecord): Promise<import('./contracts.js').RetryableInstallContext | undefined> {
+  protected assertResolutionInterruptShape(
+    workflow: WorkflowRecord,
+    resolution: ResolutionRecord,
+  ): void {
+    if (resolution.id !== workflow.resolutionId
+      || resolution.schemaVersion !== 2
+      || (resolution.remoteDiscoveryComplete !== undefined
+        && typeof resolution.remoteDiscoveryComplete !== 'boolean')) {
+      throw new EvolutionError('invalid_input', 'Workflow resolution control state is malformed; no decision was applied')
+    }
+  }
+
+  protected async canonicalInterruptPayload(
+    workflow: WorkflowRecord,
+    resolution: ResolutionRecord | undefined,
+    reviews: ReviewRecord[],
+    exec: ToolRunContext,
+  ): Promise<Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'>> {
+    const signal = exec.signal
+    signal?.throwIfAborted()
+    if (workflow.cursor === 'await_clarification') {
+      return interruptPayload('await_clarification', undefined, reviews, { workflow })
+    }
+    if (!resolution) {
+      throw new EvolutionError('invalid_input', 'Workflow interrupt is missing its exact resolution')
+    }
+    this.assertResolutionInterruptShape(workflow, resolution)
+    const installProfiles = workflow.cursor === 'await_confirmation'
+      ? await this.awaitPreEffect(async () => await this.host.listInstallProfiles(), signal)
+      : []
+    const managedActionsAvailable = workflow.cursor === 'await_confirmation'
+      || workflow.cursor === 'await_selection'
+      ? await this.awaitPreEffect(
+          async () => await this.host.managedWorkAvailable(exec as WorkflowExec),
+          signal,
+        )
+      : true
+    const retryableInstall = workflow.cursor === 'await_confirmation'
+      ? await this.retryableInstall(workflow, signal)
+      : undefined
+    signal?.throwIfAborted()
+    return interruptPayload(workflow.cursor, resolution, reviews, {
+      ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
+      ...(installProfiles.length > 0 ? { installProfiles } : {}),
+      ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
+      workflow,
+      managedActionsAvailable,
+      ...(retryableInstall ? { retryableInstall } : {}),
+    })
+  }
+
+  protected assertCanonicalInterrupt(
+    workflow: WorkflowRecord,
+    expected: Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'>,
+  ): void {
+    if (!workflow.interrupt
+      || workflow.interrupt.kind !== workflow.cursor
+      || hashObject({
+        kind: workflow.interrupt.kind,
+        options: workflow.interrupt.options,
+        facts: workflow.interrupt.facts,
+      }) !== hashObject({
+        kind: expected.kind,
+        options: expected.options,
+        facts: expected.facts,
+      })) {
+      throw new EvolutionError('invalid_input', 'Workflow interrupt policy no longer matches canonical Host control; no decision was applied')
+    }
+  }
+
+  protected async retryableInstall(
+    workflow: WorkflowRecord,
+    signal?: AbortSignal,
+  ): Promise<import('./contracts.js').RetryableInstallContext | undefined> {
     if (!workflow.lastInstallationId) return undefined
-    const installation = await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+    const installation = await this.readOptionalBeforeEffect(
+      () => this.host.getInstallation(workflow.lastInstallationId!),
+      signal,
+    )
     return installation ? retryableInstallContext(workflow, installation) : undefined
   }
 
   protected async clearErroneousVerificationAttempt(
     workflow: WorkflowRecord,
     review: ReviewRecord,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!workflow.lastInstallationId) return
-    const installation = await this.host.getInstallation(workflow.lastInstallationId).catch(() => undefined)
+    const installation = await this.readOptionalBeforeEffect(
+      () => this.host.getInstallation(workflow.lastInstallationId!),
+      signal,
+    )
     if (!installation || retryableInstallContext(workflow, installation)?.reviewId !== review.id) return
     const attempts = workflow.consumedVerificationAttempts ?? []
     const layer = review.runtimeSurface?.verificationLayer ?? installation.verification.layer ?? 'unspecified'
@@ -166,9 +291,17 @@ export abstract class WorkflowEngineCore {
     cwd: string,
     requirementNormalized: string,
     intent: RequestIntent,
+    signal?: AbortSignal,
   ): Promise<WorkflowRecord | undefined> {
     const wanted = intentIdentity(intent)
-    const workflows = await this.store.listWorkflows()
+    let workflows: WorkflowRecord[]
+    try {
+      workflows = await this.store.listWorkflowsStrict()
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason
+      throw error
+    }
+    signal?.throwIfAborted()
     const matches = workflows
       .filter((item) => isUnfinished(item.status)
         && item.ownerSessionId === sessionId
@@ -187,7 +320,14 @@ export abstract class WorkflowEngineCore {
     requirementNormalized: string,
     exec: ToolRunContext,
   ): Promise<void> {
-    const workflows = await this.store.listWorkflows()
+    let workflows: WorkflowRecord[]
+    try {
+      workflows = await this.store.listWorkflowsStrict()
+    } catch (error) {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      throw error
+    }
+    exec.signal?.throwIfAborted()
     const stale = workflows.filter((item) => isUnfinished(item.status)
       && item.ownerSessionId === sessionId
       && item.requirementNormalized === requirementNormalized
@@ -195,6 +335,7 @@ export abstract class WorkflowEngineCore {
     for (const item of stale) {
       await this.withLock(item.id, async () => {
         const latest = await this.store.getWorkflow(item.id)
+        exec.signal?.throwIfAborted()
         if (isUnfinished(latest.status) && latest.policyVersion !== POLICY_VERSION) {
           await this.invalidateLegacyPolicyWorkflow(latest, exec)
         }
@@ -208,8 +349,10 @@ export abstract class WorkflowEngineCore {
   ): Promise<void> {
     delete workflow.interrupt
     this.clearWorkflowGrant(workflow)
-    this.creationGuard.invalidateExecutionLease(exec.agent)
-    await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec).catch(() => undefined)
+    this.creationGuard.invalidateHostGrant(exec.agent)
+    exec.signal?.throwIfAborted()
+    await this.host.releaseManagedSource?.(workflow, exec as WorkflowExec)
+    exec.signal?.throwIfAborted()
     workflow.status = 'completed'
     workflow.lastFailure = {
       stage: 'workflow',
@@ -221,44 +364,30 @@ export abstract class WorkflowEngineCore {
   }
 
   protected async reissueInterrupt(workflow: WorkflowRecord, exec: ToolRunContext): Promise<void> {
-    this.creationGuard.invalidateExecutionLease(exec.agent)
+    this.creationGuard.invalidateHostGrant(exec.agent)
     if (workflow.cursor === 'recovery_required') {
-      await this.issueRecoveryInterrupt(workflow, exec)
+      await this.awaitPreEffect(() => this.issueRecoveryInterrupt(workflow, exec), exec.signal)
       return
     }
     if (workflow.cursor === 'await_clarification') {
-      await this.issueClarificationInterrupt(workflow, exec)
+      await this.awaitPreEffect(() => this.issueClarificationInterrupt(workflow, exec), exec.signal)
       return
     }
     if (!workflow.resolutionId || !INTERRUPT_NODES.has(workflow.cursor)) return
-    const resolution = await this.host.getResolution(workflow.resolutionId)
+    const resolution = await this.awaitPreEffect(
+      () => this.host.getResolution(workflow.resolutionId!),
+      exec.signal,
+    )
     if (!workflow.candidateSnapshot) {
       workflow.candidateSnapshot = candidateSnapshotFor(resolution, excludedCandidateIds(workflow))
     }
-    const reviews = await this.reviewsForWorkflow(workflow)
-    const installProfiles = workflow.cursor === 'await_confirmation'
-      ? await this.host.listInstallProfiles?.() ?? []
-      : []
-    const managedActionsAvailable = workflow.cursor === 'await_confirmation'
-      || workflow.cursor === 'await_selection'
-      ? await this.host.managedWorkAvailable?.(exec as WorkflowExec) ?? true
-      : true
-    const retryableInstall = workflow.cursor === 'await_confirmation'
-      ? await this.retryableInstall(workflow)
-      : undefined
-    const base = interruptPayload(workflow.cursor, resolution, reviews, {
-      ...(workflow.lastFailure ? { lastFailure: workflow.lastFailure } : {}),
-      ...(installProfiles.length > 0 ? { installProfiles } : {}),
-      ...(workflow.pendingPath ? { pendingPath: workflow.pendingPath } : {}),
-      workflow,
-      managedActionsAvailable,
-      ...(retryableInstall ? { retryableInstall } : {}),
-    })
+    const reviews = await this.reviewsForWorkflow(workflow, exec.signal)
+    const base = await this.canonicalInterruptPayload(workflow, resolution, reviews, exec)
     const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
     if (!sessionId) {
       throw new EvolutionError('invalid_input', 'Cannot reissue interrupt without an owner session')
     }
-    const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+    const validAfterTurnId = this.requireHostTurnId(exec, 'reissue a workflow interrupt')
     const snapshotDigest = snapshotDigestFor(base.kind, resolution, reviews, workflow)
     workflow.bootId = this.creationGuard.bootId
     workflow.interrupt = {
@@ -275,7 +404,7 @@ export abstract class WorkflowEngineCore {
       snapshotDigest,
     }
     workflow.status = 'interrupted'
-    await this.checkpoint(workflow)
+    await this.awaitPreEffect(() => this.checkpoint(workflow), exec.signal)
   }
 
   protected clarificationSnapshotDigest(workflow: WorkflowRecord): string {
@@ -294,7 +423,7 @@ export abstract class WorkflowEngineCore {
     if (!workflow.clarificationQuestion) {
       throw new EvolutionError('invalid_input', 'Clarification checkpoint is missing its question')
     }
-    const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+    const validAfterTurnId = this.requireHostTurnId(exec, 'issue a clarification interrupt')
     const snapshotDigest = this.clarificationSnapshotDigest(workflow)
     const base = interruptPayload('await_clarification', undefined, [], { workflow })
     workflow.bootId = this.creationGuard.bootId
@@ -319,7 +448,7 @@ export abstract class WorkflowEngineCore {
   protected async issueRecoveryInterrupt(workflow: WorkflowRecord, exec: ToolRunContext): Promise<void> {
     const sessionId = workflow.ownerSessionId ?? ownerSessionId(exec.agent)
     if (!sessionId) throw new EvolutionError('invalid_input', 'Cannot issue recovery control without an owner session')
-    const validAfterTurnId = this.creationGuard.currentTurnId(exec.agent) ?? `turn_${'0'.repeat(24)}`
+    const validAfterTurnId = this.requireHostTurnId(exec, 'issue a recovery interrupt')
     const snapshotDigest = this.recoverySnapshotDigest(workflow)
     workflow.bootId = this.creationGuard.bootId
     workflow.ownerSessionId = sessionId
@@ -413,23 +542,25 @@ export abstract class WorkflowEngineCore {
       diagnosis?: WorkflowDiagnosis
       skipLinkedReads?: boolean
     } = {},
+    signal?: AbortSignal,
   ): Promise<WorkflowView> {
+    signal?.throwIfAborted()
     const current = resolution ?? (!extras.skipLinkedReads && workflow.resolutionId
-      ? await this.host.getResolution(workflow.resolutionId).catch(() => undefined)
+      ? await this.readOptionalBeforeEffect(() => this.host.getResolution(workflow.resolutionId!), signal)
       : undefined)
     const review = workflow.lastReviewId
-      ? await this.host.getReview(workflow.lastReviewId).catch(() => undefined)
+      ? await this.readOptionalBeforeEffect(() => this.host.getReview(workflow.lastReviewId!), signal)
       : undefined
-    const reviews = await this.reviewsForWorkflow(workflow)
+    const reviews = await this.reviewsForWorkflow(workflow, signal)
     const installationId = this.installationReceiptId(workflow)
     const installation = installationId
-      ? await this.host.getInstallation(installationId).catch(() => undefined)
+      ? await this.readOptionalBeforeEffect(() => this.host.getInstallation(installationId), signal)
       : undefined
     const lifecycleState = lifecycleStateFor(workflow, {
       ...(reviews.length > 0 ? { reviews } : {}),
       ...(installation ? { installation } : {}),
     })
-    return JSON.parse(JSON.stringify({
+    const result = JSON.parse(JSON.stringify({
       workflow,
       lifecycleState,
       ...(current ? { resolution: current } : {}),
@@ -441,6 +572,8 @@ export abstract class WorkflowEngineCore {
       ...(extras.alreadyWaiting ? { alreadyWaiting: true } : {}),
       ...(extras.resumeHint ? { resumeHint: extras.resumeHint } : {}),
     })) as WorkflowView
+    signal?.throwIfAborted()
+    return result
   }
 
   protected async invalidResumeView(
@@ -450,6 +583,7 @@ export abstract class WorkflowEngineCore {
     input: ResumeInput,
     summary: string,
   ): Promise<WorkflowView> {
+    exec.signal?.throwIfAborted()
     const hostTurnId = this.creationGuard.currentTurnId(exec.agent) ?? 'turn_unknown'
     const fingerprint = hashObject({ navigation: input.navigation, decision: input.decision })
     const prior = workflow.invalidResumeAttempt
@@ -459,12 +593,19 @@ export abstract class WorkflowEngineCore {
       fingerprint,
       count: repeated ? Math.min(2, prior.count + 1) : 1,
     }
-    await this.checkpoint(workflow)
+    exec.signal?.throwIfAborted()
+    try {
+      await this.checkpoint(workflow)
+      exec.signal?.throwIfAborted()
+    } catch (error) {
+      if (exec.signal?.aborted) throw exec.signal.reason
+      throw error
+    }
     return await this.view(workflow, resolution, {
       status: 'invalid_resume',
       resumeHint: workflow.invalidResumeAttempt.count >= 2
         ? `Repeated invalid action is blocked until a fresh user turn. ${summary}`
         : summary,
-    })
+    }, exec.signal)
   }
 }

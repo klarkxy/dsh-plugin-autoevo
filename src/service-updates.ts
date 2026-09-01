@@ -43,10 +43,19 @@ export async function checkCapabilityUpdates(
   deps: UpdateTrackingDeps,
   options: { signal?: AbortSignal } = {},
 ): Promise<CapabilityUpdateReport> {
-  const records = (await deps.store.listInstallations()).filter((record) => !record.removed)
+  let installationHistory
+  try {
+    installationHistory = await deps.store.listInstallationsStrict()
+  } catch (error) {
+    if (options.signal?.aborted) throw options.signal.reason
+    throw error
+  }
+  options.signal?.throwIfAborted()
+  const records = installationHistory.filter((record) => !record.removed)
   const updates: CapabilityUpdateEntry[] = []
   const skipped: SkippedInstallation[] = []
   for (const record of records) {
+    options.signal?.throwIfAborted()
     const parsed = parseExactGithubDependency(record.installSpec)
     if (!parsed) {
       skipped.push({
@@ -72,11 +81,13 @@ export async function checkCapabilityUpdates(
         repository: parsed.repository,
         ...(options.signal ? { signal: options.signal } : {}),
       })
+      options.signal?.throwIfAborted()
       entry.upstreamSha = upstream.latestCommit.sha
       entry.upstreamCommittedAt = upstream.latestCommit.date
       entry.latestRelease = upstream.latestRelease
       entry.updateAvailable = upstream.latestCommit.sha.toLowerCase() !== parsed.commit.toLowerCase()
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason
       entry.error = error instanceof Error ? error.message : String(error)
     }
     updates.push(entry)

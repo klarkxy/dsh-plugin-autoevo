@@ -1,10 +1,10 @@
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { parse } from 'yaml'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { ExecutionEndpoint } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
@@ -13,12 +13,15 @@ import {
   builtinReceiptSpec,
   disableBuiltinMount,
   enableBuiltinMount,
+  _testing as builtinTesting,
   parseBuiltinReceiptSpec,
 } from '../../src/lifecycle/enable-builtin.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { sha256 } from '../../src/state/hashes.js'
 
 const temporary = trackTempDirs()
+
+afterEach(() => builtinTesting.resetPatchFileOps())
 
 const ENDPOINT: Extract<ExecutionEndpoint, { kind: 'host_bundled_enable' }> = {
   kind: 'host_bundled_enable',
@@ -29,6 +32,8 @@ const ENDPOINT: Extract<ExecutionEndpoint, { kind: 'host_bundled_enable' }> = {
 }
 
 const TEMPLATE_PATCH = '# Your patch layer for this dsh profile, applied after every bundle layer:\n[]\n'
+const ENABLED_DUMP = '- id: time-context\n  name: "@deepseek-ai/dsh-time-context"\n'
+const DISABLED_DUMP = '[]\n'
 
 const EXEC = {
   callId: 'call-enable-builtin',
@@ -68,17 +73,133 @@ async function seed(root: string, patchBody = TEMPLATE_PATCH): Promise<{
 }
 
 function launcherWith(dump: { exitCode: number | null, stdout?: string, stderr?: string }): DshLauncher {
+  const stdout = dump.stdout === 'time-context'
+    ? ENABLED_DUMP
+    : dump.stdout === '' || dump.stdout === 'composed profile without opt-in mount' || dump.stdout?.startsWith('profile without')
+      ? DISABLED_DUMP
+      : dump.stdout ?? ''
   return {
     dumpConfig: async () => ({
       exitCode: dump.exitCode,
       signal: null,
-      stdout: dump.stdout ?? '',
+      stdout,
       stderr: dump.stderr ?? '',
     }),
   } as unknown as DshLauncher
 }
 
 describe('enableBuiltinMount', () => {
+  it('accepts only an exact direct YAML dump row for the selected built-in identity', () => {
+    expect(builtinTesting.dumpCompositionMatches(ENABLED_DUMP, ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(true)
+    expect(builtinTesting.dumpCompositionMatches('- id: time-context\n  name: "@deepseek-ai/dsh-time-context"\n  config: !!js "dshHomePath(\'value\')"\n', ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(true)
+    expect(builtinTesting.dumpCompositionMatches('"time-context"\n', ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(false)
+    expect(builtinTesting.dumpCompositionMatches('# time-context\n[]\n', ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(false)
+    expect(builtinTesting.dumpCompositionMatches('- id: time-context\n  name: "@deepseek-ai/dsh-other"\n', ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(false)
+    expect(builtinTesting.dumpCompositionMatches(`${ENABLED_DUMP}${ENABLED_DUMP}`, ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(false)
+    expect(builtinTesting.dumpCompositionMatches('- not: an-array-entry\n', ENDPOINT.mountId, ENDPOINT.packageName, true)).toBe(false)
+    expect(builtinTesting.dumpCompositionMatches(DISABLED_DUMP, ENDPOINT.mountId, ENDPOINT.packageName, false)).toBe(true)
+  })
+
+  it('cleans an owned atomic temp after a landed temp-write rejection and preserves the original error', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-atomic-write-'))
+    temporary.push(root)
+    const patchPath = path.join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    const failure = new Error('temp write rejected after landing')
+    builtinTesting.setPatchFileOps({
+      writeFile: async (target, body, options) => {
+        await writeFile(target, body, options)
+        throw failure
+      },
+    })
+
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP)).rejects.toBe(failure)
+    await expect(readdir(root)).resolves.not.toContainEqual(expect.stringMatching(/\.tmp$/u))
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
+  })
+
+  it('accepts a rename that landed the exact postimage before rejecting and cleans its temp', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-atomic-rename-'))
+    temporary.push(root)
+    const patchPath = path.join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    const failure = new Error('rename rejected after landing')
+    builtinTesting.setPatchFileOps({
+      rename: async (temporaryPath, target) => {
+        await rename(temporaryPath, target)
+        throw failure
+      },
+    })
+
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP)).resolves.toBeUndefined()
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(ENABLED_DUMP)
+    await expect(readdir(root)).resolves.not.toContainEqual(expect.stringMatching(/\.tmp$/u))
+  })
+
+  it('honors abort between temp write and preimage read without renaming the target', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-atomic-abort-'))
+    temporary.push(root)
+    const patchPath = path.join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    const controller = new AbortController()
+    const reason = new Error('abort before patch rename')
+    builtinTesting.setPatchFileOps({
+      writeFile: async (target, body, options) => {
+        await writeFile(target, body, options)
+        controller.abort(reason)
+      },
+    })
+
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP, controller.signal)).rejects.toBe(reason)
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
+    await expect(readdir(root)).resolves.not.toContainEqual(expect.stringMatching(/\.tmp$/u))
+  })
+
+  it('does not let best-effort temp cleanup replace the primary atomic write error', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-atomic-cleanup-'))
+    temporary.push(root)
+    const patchPath = path.join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    const failure = new Error('primary atomic write error')
+    builtinTesting.setPatchFileOps({
+      writeFile: async (target, body, options) => {
+        await writeFile(target, body, options)
+        throw failure
+      },
+      rm: async () => { throw new Error('cleanup error') },
+    })
+
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP)).rejects.toBe(failure)
+  })
+
+  it('refuses a stale preimage or replacement target without overwriting either', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-atomic-conflict-'))
+    temporary.push(root)
+    const patchPath = path.join(root, 'cordis.patch.yml')
+    const external = '- id: external\n  name: external-package\n'
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    builtinTesting.setPatchFileOps({
+      writeFile: async (target, body, options) => {
+        await writeFile(target, body, options)
+        if (String(target).endsWith('.tmp')) await writeFile(patchPath, external)
+      },
+    })
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP)).rejects.toMatchObject({ code: 'review_expired' })
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(external)
+
+    const replacement = '- id: replacement\n  name: replacement-package\n'
+    const failure = new Error('rename rejected after replacement')
+    await writeFile(patchPath, TEMPLATE_PATCH)
+    builtinTesting.setPatchFileOps({
+      rename: async (_temporaryPath, target) => {
+        await writeFile(target, replacement)
+        throw failure
+      },
+    })
+    await expect(builtinTesting.writePatchAtomically(patchPath, TEMPLATE_PATCH, ENABLED_DUMP)).rejects.toBe(failure)
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(replacement)
+  })
+
   it('appends an insert row to the profile patch layer and verifies the composition', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-write-'))
     temporary.push(root)
@@ -95,7 +216,7 @@ describe('enableBuiltinMount', () => {
         dumpConfig: async () => {
           expect(await readFile(patchPath, 'utf8')).not.toBe(TEMPLATE_PATCH)
           events.push('profile-write')
-          return { exitCode: 0, signal: null, stdout: '... time-context ...', stderr: '' }
+          return { exitCode: 0, signal: null, stdout: ENABLED_DUMP, stderr: '' }
         },
       } as unknown as DshLauncher,
       dshHome,
@@ -142,7 +263,7 @@ describe('enableBuiltinMount', () => {
     const dumpConfig = vi.fn(async () => ({
       exitCode: 0,
       signal: null,
-      stdout: 'time-context',
+      stdout: ENABLED_DUMP,
       stderr: '',
     }))
     const request = vi.fn(async () => 'denied')
@@ -168,13 +289,114 @@ describe('enableBuiltinMount', () => {
     expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
   })
 
+  it('preserves the exact abort reason and starts no profile write when approval ignores cancellation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-approval-abort-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const controller = new AbortController()
+    const reason = new Error('approval ignored abort')
+    const exec = { ...EXEC, signal: controller.signal } as ToolRunContext
+    const dumpConfig = vi.fn()
+
+    await expect(enableBuiltinMount({
+      ctx: { get: () => ({ request: async () => {
+        controller.abort(reason)
+        return 'allowed-once'
+      } }) } as unknown as Context,
+      exec,
+      requirement: 'current time',
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(dumpConfig).not.toHaveBeenCalled()
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
+  })
+
+  it('rejects conflicting exec and explicit cancellation signals before any profile effect', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-signal-conflict-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const exec = { ...EXEC, signal: new AbortController().signal } as ToolRunContext
+    const signal = new AbortController().signal
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(),
+      exec,
+      launcher: { dumpConfig: vi.fn() } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+      signal,
+    })).rejects.toMatchObject({ code: 'invalid_input' })
+    await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
+  })
+
+  it('leaves the postimage for recovery when cancellation starts after the atomic rename', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-postwrite-abort-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const controller = new AbortController()
+    const reason = new Error('abort after profile rename')
+    const exec = { ...EXEC, signal: controller.signal } as ToolRunContext
+    const dumpConfig = vi.fn()
+    builtinTesting.setPatchFileOps({
+      rename: async (temporaryPath, target) => {
+        await rename(temporaryPath, target)
+        controller.abort(reason)
+      },
+    })
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(),
+      exec,
+      launcher: { dumpConfig } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+      signal: controller.signal,
+    })).rejects.toBe(reason)
+    expect(dumpConfig).not.toHaveBeenCalled()
+    await expect(readFile(patchPath, 'utf8')).resolves.toContain('time-context')
+  })
+
+  it('leaves the postimage for retry when dump-config throws after the write', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-dump-throw-'))
+    temporary.push(root)
+    const { bundledRoot, dshHome, patchPath } = await seed(root)
+    const first = await enableBuiltinMount({
+      ...approvedMutation(),
+      launcher: { dumpConfig: async () => { throw new Error('dump threw after evaluating patch') } } as unknown as DshLauncher,
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    }).then(() => undefined, (error: unknown) => error)
+    expect(first).toBeInstanceOf(Error)
+    await expect(readFile(patchPath, 'utf8')).resolves.toContain('time-context')
+
+    await expect(enableBuiltinMount({
+      ...approvedMutation(),
+      launcher: launcherWith({ exitCode: 0, stdout: 'time-context' }),
+      dshHome,
+      bundledRoot,
+      endpoint: ENDPOINT,
+      cwd: root,
+    })).resolves.toMatchObject({ wrote: false })
+  })
+
   it('refuses to overwrite a profile patch changed while approval was pending', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-approval-drift-'))
     temporary.push(root)
     const { bundledRoot, dshHome, patchPath } = await seed(root)
     const changed = "- id: user-change\n  disabled: true\n"
     const beforeProfileWrite = vi.fn(async () => {})
-    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }))
+    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: ENABLED_DUMP, stderr: '' }))
 
     await expect(enableBuiltinMount({
       ...approvedMutation(async () => {
@@ -199,7 +421,7 @@ describe('enableBuiltinMount', () => {
     temporary.push(root)
     const { bundledRoot, dshHome, patchPath } = await seed(root)
     const beforeProfileWrite = vi.fn(async () => {})
-    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }))
+    const dumpConfig = vi.fn(async () => ({ exitCode: 0, signal: null, stdout: ENABLED_DUMP, stderr: '' }))
     const manifestPath = path.join(
       bundledRoot,
       'node_modules',
@@ -307,7 +529,7 @@ describe('enableBuiltinMount', () => {
     expect(failure).toMatchObject({ code: 'invalid_input' })
   })
 
-  it('rolls the patch layer back when the composition check fails', async () => {
+  it('leaves the written patch for write-ahead recovery when the composition check fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-rollback-'))
     temporary.push(root)
     const { bundledRoot, dshHome, patchPath } = await seed(root)
@@ -325,7 +547,7 @@ describe('enableBuiltinMount', () => {
       code: 'command_failed',
       details: { command: 'dsh', exitCode: 1, diagnosticHash: sha256('loader exploded') },
     })
-    expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+    expect(await readFile(patchPath, 'utf8')).toContain('time-context')
   })
 
   it('preserves an external patch edit made during a failed enablement check', async () => {
@@ -362,7 +584,7 @@ describe('enableBuiltinMount', () => {
       launcher: {
         dumpConfig: async () => {
           await writeFile(patchPath, external, 'utf8')
-          return { exitCode: 0, signal: null, stdout: 'time-context', stderr: '' }
+          return { exitCode: 0, signal: null, stdout: ENABLED_DUMP, stderr: '' }
         },
       } as unknown as DshLauncher,
       dshHome,
@@ -389,7 +611,7 @@ describe('enableBuiltinMount', () => {
     }).then(() => undefined, (error: unknown) => error)
 
     expect(failure).toMatchObject({ code: 'command_failed' })
-    expect(await readFile(patchPath, 'utf8')).toBe(TEMPLATE_PATCH)
+    expect(await readFile(patchPath, 'utf8')).toContain('time-context')
   })
 
   it('round-trips a built-in receipt and removes only its exact owned row', async () => {
@@ -458,7 +680,7 @@ describe('enableBuiltinMount', () => {
       launcher: {
         dumpConfig: async () => {
           await writeFile(patchPath, external, 'utf8')
-          return { exitCode: 0, signal: null, stdout: 'profile without opt-in mount', stderr: '' }
+          return { exitCode: 0, signal: null, stdout: DISABLED_DUMP, stderr: '' }
         },
       } as unknown as DshLauncher,
       dshHome,

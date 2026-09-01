@@ -95,13 +95,22 @@ function host(store: StateStore, record: ResolutionRecord, applyDecision = vi.fn
     getResolution(id) { return store.getResolution(id) },
     getReview(id) { return store.getReview(id) },
     getInstallation(id) { return store.getInstallation(id) },
+    async listInstallProfiles() { return ['web'] },
+    managedWorkAvailable() { return true },
+    async refineRemote(current) { return current },
+    async previewGithubCandidates() { return { previews: [], failures: [] } },
+    async reviewExisting() { throw new Error('not used') },
+    async reviewGithubBatch() { throw new Error('not used') },
+    async prepareModify() { throw new Error('not used') },
+    async prepareCreate() { throw new Error('not used') },
+    async finishManagedWork() { throw new Error('not used') },
   }
 }
 
-describe('Policy V13 legacy invalidation', () => {
-  it('exports Policy V13 contracts and semantic hosts for consumers', () => {
-    expect(POLICY_VERSION).toBe('13')
-    expect(exportedPolicyVersion).toBe('13')
+describe('Policy V14 legacy invalidation', () => {
+  it('exports Policy V14 contracts and semantic hosts for consumers', () => {
+    expect(POLICY_VERSION).toBe('14')
+    expect(exportedPolicyVersion).toBe('14')
     expect(typeof DshSemanticReviewerHost).toBe('function')
     expect(typeof DshSemanticVerifierHost).toBe('function')
     expect(typeof lifecycleStateFor).toBe('function')
@@ -265,7 +274,7 @@ describe('Policy V13 legacy invalidation', () => {
       const engine = new WorkflowEngine(store, guard, {
         ...host(store, record, applyDecision),
         installReviewed,
-      })
+      }, false)
       const turn = exec()
       const started = await engine.start('calculator', turn)
       const legacy = await store.getWorkflow(started.workflow.id)
@@ -289,21 +298,6 @@ describe('Policy V13 legacy invalidation', () => {
         selectionReceiptId: `receipt_${policyVersion}`,
         snapshotDigest: 'a'.repeat(64),
         frozenIdentity: { kind: 'none' },
-        requestedAction: 'use_this',
-        endpoint: { kind: 'none' },
-        allowedParameterConstraints: {},
-        createdAt: '2026-08-17T00:00:00.000Z',
-      }
-      legacy.executionLease = {
-        id: `lease_${policyVersion}`,
-        commitmentId: `commit_${policyVersion}`,
-        selectionReceiptId: `receipt_${policyVersion}`,
-        workflowId: legacy.id,
-        ownerSessionId: 'session-1',
-        bootId: 'boot_engine',
-        hostTurnId: `turn_${policyVersion}`,
-        interruptId,
-        snapshotDigest: 'a'.repeat(64),
         requestedAction: 'use_this',
         endpoint: { kind: 'none' },
         allowedParameterConstraints: {},
@@ -333,7 +327,6 @@ describe('Policy V13 legacy invalidation', () => {
       expect(restarted.workflow.interrupt).toBeUndefined()
       expect(restarted.workflow.selectionReceipt).toBeUndefined()
       expect(restarted.workflow.actionCommitment).toBeUndefined()
-      expect(restarted.workflow.executionLease).toBeUndefined()
       expect(restarted.workflow.lastFailure).toMatchObject({
         stage: 'workflow',
         code: 'policy_restart_required',
@@ -342,14 +335,14 @@ describe('Policy V13 legacy invalidation', () => {
     },
   )
 
-  it('starts a fresh V13 workflow instead of replaying an unfinished old-policy one', async () => {
+  it('starts a fresh V14 workflow instead of replaying an unfinished old-policy one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-policy-start-'))
     temporary.push(root)
     const store = new StateStore(root)
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_engine' })
     const record = resolution()
     const applyDecision = vi.fn(async (current: ResolutionRecord) => current)
-    const engine = new WorkflowEngine(store, guard, host(store, record, applyDecision))
+    const engine = new WorkflowEngine(store, guard, host(store, record, applyDecision), false)
     const turn = exec()
     const started = await engine.start('calculator', turn)
     const legacy = await store.getWorkflow(started.workflow.id)

@@ -105,29 +105,36 @@ export function applyIntentToCandidate(
   else if (intent.operation === 'evolve_existing' && candidate.availability === 'installed_in_profile' && requestFit === 'full') {
     requestFit = 'partial'
   }
+  const evolutionTarget = candidate.profileEvidence
+    ? named && intent.operation !== 'reuse_existing'
+      ? evolutionTargetFromProfile({
+          packageName: candidate.profileEvidence.packageName,
+          profile: candidate.profileEvidence.profile,
+          dependencySpec: candidate.profileEvidence.dependencySpec,
+        })
+      : undefined
+    : candidate.evolutionTarget
   const knownSource = candidate.availability === 'known_source'
-    || candidate.evolutionTarget?.kind === 'failed_install'
-    || candidate.evolutionTarget?.kind === 'reviewed_snapshot'
+    || evolutionTarget?.kind === 'failed_install'
+    || evolutionTarget?.kind === 'reviewed_snapshot'
   if (knownSource && requestFit !== 'none') requestFit = 'partial'
   // host_bundled candidates must be mounted before use; they are never
   // "usable unchanged", so they take enable_builtin instead of reuse_local.
   const reuseEligible = !knownSource && candidate.availability !== 'host_bundled'
     && surfaceMatch && named && semanticFit === 'full'
-  const evolutionTarget = candidate.profileEvidence && named && intent.operation !== 'reuse_existing'
-    ? evolutionTargetFromProfile({
-        packageName: candidate.profileEvidence.packageName,
-        profile: candidate.profileEvidence.profile,
-        dependencySpec: candidate.profileEvidence.dependencySpec,
-      })
-    : candidate.evolutionTarget
-  return {
+  const next: LocalCapabilityCandidate = {
     ...candidate,
     semanticFit,
     fit: requestFit,
     surfaceMatch,
     reuseEligible,
-    ...(evolutionTarget ? { evolutionTarget } : {}),
   }
+  // Profile evidence is the live authority for an installed candidate. Never
+  // retain a historical lineage target when that evidence cannot reconstruct
+  // the exact current GitHub commit.
+  if (candidate.profileEvidence) delete next.evolutionTarget
+  if (evolutionTarget) next.evolutionTarget = evolutionTarget
+  return next
 }
 
 export function suppressesRemoteDiscovery(candidates: readonly LocalCapabilityCandidate[]): boolean {

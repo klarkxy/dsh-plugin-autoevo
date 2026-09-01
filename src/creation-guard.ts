@@ -2,7 +2,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type {
   ActionCommitment,
-  ExecutionLease,
   ResolutionAuthorization,
   ResolutionRecord,
   ReviewRecord,
@@ -45,7 +44,6 @@ interface AgentGateState {
   sessionId?: string
   selectionReceipt?: SelectionReceipt
   actionCommitment?: ActionCommitment
-  executionLease?: ExecutionLease
   constructionRoot?: string
 }
 
@@ -115,7 +113,6 @@ function shellCommandText(args: unknown): string {
 function clearHostGrant(state: AgentGateState): void {
   delete state.selectionReceipt
   delete state.actionCommitment
-  delete state.executionLease
 }
 
 function preservesHostGrant(state: ResolutionAuthorization['state']): boolean {
@@ -124,24 +121,6 @@ function preservesHostGrant(state: ResolutionAuthorization['state']): boolean {
     || state === 'modify_review'
     || state === 'create_authorized'
     || state === 'stopped'
-}
-
-function hostGrantUnchanged(
-  lease: ExecutionLease,
-  receipt: SelectionReceipt,
-  commitment: ActionCommitment,
-): boolean {
-  return lease.selectionReceiptId === receipt.id
-    && lease.commitmentId === commitment.id
-    && lease.workflowId === receipt.workflowId
-    && lease.snapshotDigest === receipt.snapshotDigest
-    && lease.snapshotDigest === commitment.snapshotDigest
-    && (lease.candidateId ?? '') === (commitment.candidateId ?? '')
-    && (lease.candidateDigest ?? '') === (commitment.candidateDigest ?? '')
-    && lease.requestedAction === commitment.requestedAction
-    && lease.interruptId === receipt.interruptId
-    && hashObject(lease.endpoint) === hashObject(commitment.endpoint)
-    && hashObject(lease.allowedParameterConstraints) === hashObject(commitment.allowedParameterConstraints)
 }
 
 export function isNewCordisDefinition(exec: Pick<ToolExecution, 'name' | 'arguments'>): boolean {
@@ -236,7 +215,6 @@ export class CreationGuard {
       : newTurnId(sessionId, state.turnSequence)
     state.lastUserMessage = text
     state.sessionId = sessionId
-    this.resignLeaseIfUnchanged(state, sessionId)
     this.states.set(agent, state)
     return true
   }
@@ -334,13 +312,11 @@ export class CreationGuard {
 
   /**
    * Host-owned grant. Never accepted from ResumeInput.
-   * `lease` is omitted when the commitment endpoint is `none`.
    */
   grantHostSelection(
     agent: Agent | undefined,
     receipt: SelectionReceipt,
     commitment: ActionCommitment,
-    lease?: ExecutionLease,
   ): void {
     if (!agent) {
       throw new EvolutionError('invalid_input', 'A live Agent session is required to grant a Host selection')
@@ -352,7 +328,7 @@ export class CreationGuard {
         actual: sessionId,
       })
     }
-    if (receipt.bootId !== this.bootId || (lease && lease.bootId !== this.bootId)) {
+    if (receipt.bootId !== this.bootId) {
       throw new EvolutionError('invalid_input', 'Selection grant was invalidated by a service restart', {
         expectedBootId: this.bootId,
         receiptBootId: receipt.bootId,
@@ -368,48 +344,15 @@ export class CreationGuard {
         currentTurnId: state?.currentTurnId,
       })
     }
-    if (lease) {
-      if (
-        lease.selectionReceiptId !== receipt.id
-        || lease.commitmentId !== commitment.id
-        || lease.workflowId !== receipt.workflowId
-        || lease.hostTurnId !== receipt.hostTurnId
-        || lease.snapshotDigest !== receipt.snapshotDigest
-        || hashObject(lease.endpoint) !== hashObject(commitment.endpoint)
-        || hashObject(lease.allowedParameterConstraints) !== hashObject(commitment.allowedParameterConstraints)
-      ) {
-        throw new EvolutionError('invalid_input', 'Execution lease is not bound to the current receipt and commitment')
-      }
-      if (lease.endpoint.kind === 'none') {
-        throw new EvolutionError('invalid_input', 'Execution lease requires an exact endpoint or bridge closure')
-      }
-    }
     state.selectionReceipt = receipt
     state.actionCommitment = commitment
-    if (lease) state.executionLease = lease
-    else delete state.executionLease
   }
 
-  invalidateExecutionLease(agent: Agent | undefined): void {
+  invalidateHostGrant(agent: Agent | undefined): void {
     if (!agent) return
     const state = this.states.get(agent)
     if (!state) return
     clearHostGrant(state)
-  }
-
-  activeExecutionLease(agent: Agent | undefined): ExecutionLease | undefined {
-    if (!agent) return undefined
-    const state = this.states.get(agent)
-    const lease = state?.executionLease
-    const receipt = state?.selectionReceipt
-    const commitment = state?.actionCommitment
-    if (!state || !lease || !receipt || !commitment) return undefined
-    const sessionId = ownerSessionId(agent) ?? state.sessionId
-    if (lease.bootId !== this.bootId || receipt.bootId !== this.bootId) return undefined
-    if (!sessionId || lease.ownerSessionId !== sessionId || receipt.ownerSessionId !== sessionId) return undefined
-    if (!state.currentTurnId || lease.hostTurnId !== state.currentTurnId) return undefined
-    if (!hostGrantUnchanged(lease, receipt, commitment)) return undefined
-    return lease
   }
 
   setWaiting(
@@ -519,9 +462,6 @@ export class CreationGuard {
     }
     if (commitment.endpoint.kind !== 'none') {
       throw new EvolutionError('review_rejected', 'Install commitment must not fabricate a post-install execution endpoint')
-    }
-    if (state.executionLease) {
-      throw new EvolutionError('review_rejected', 'Install is authorized by the Host commitment, not an execution lease')
     }
     if (commitment.reviewId !== review.id) {
       throw new EvolutionError('review_rejected', 'Install commitment is bound to a different review', {
@@ -672,33 +612,6 @@ export class CreationGuard {
 
   authorization(agent: Agent): ResolutionAuthorization | undefined {
     return this.states.get(agent)?.authorization
-  }
-
-  private resignLeaseIfUnchanged(state: AgentGateState, sessionId: string): void {
-    const lease = state.executionLease
-    if (!lease) return
-    const receipt = state.selectionReceipt
-    const commitment = state.actionCommitment
-    const turnId = state.currentTurnId
-    if (!receipt || !commitment || !turnId) {
-      clearHostGrant(state)
-      return
-    }
-    if (lease.bootId !== this.bootId || lease.ownerSessionId !== sessionId || receipt.ownerSessionId !== sessionId) {
-      clearHostGrant(state)
-      return
-    }
-    if (!hostGrantUnchanged(lease, receipt, commitment) || lease.endpoint.kind === 'none') {
-      clearHostGrant(state)
-      return
-    }
-    if (lease.hostTurnId === turnId) return
-    state.executionLease = {
-      ...lease,
-      id: `lease_${hashObject({ previous: lease.id, turnId }).slice(0, 24)}`,
-      hostTurnId: turnId,
-      createdAt: new Date().toISOString(),
-    }
   }
 }
 

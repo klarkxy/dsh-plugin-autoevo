@@ -131,7 +131,7 @@ async function assertPackedCurrentPolicy(packedRoot) {
     'utf8',
   ).catch(() => '')
   const packedJs = `${packedIndex}\n${packedEvolution}\n${packedDriver}`
-  assert.match(packedEvolution, /runtime Policy V13/u)
+  assert.match(packedEvolution, /runtime Policy V14/u)
   assert.doesNotMatch(packedEvolution, /runtime Policy V10/u)
 
   const {
@@ -143,9 +143,9 @@ async function assertPackedCurrentPolicy(packedRoot) {
   const { AUTOEVO_AUTONOMY_CONTRACT } = await import(
     pathToFileURL(path.join(projectRoot, 'lib', 'evolution-mode.js')).href
   )
-  assert.equal(POLICY_VERSION, '13')
+  assert.equal(POLICY_VERSION, '14')
   assert.deepEqual([...VERIFICATION_LAYER_KINDS], ['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
-  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V13/u)
+  assert.match(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V14/u)
   assert.doesNotMatch(AUTOEVO_AUTONOMY_CONTRACT, /runtime Policy V10/u)
 
   assert.equal(classifyRuntimeSurface(surface()), 'bundle_activation')
@@ -194,7 +194,7 @@ async function assertPackedCurrentPolicy(packedRoot) {
   assert.match(userGuide, /restartRequired: true/u)
 
   const developerGuide = await readFile(path.join(packedRoot, 'docs', 'developer-guide.md'), 'utf8')
-  assert.match(developerGuide, /Policy V13/u)
+  assert.match(developerGuide, /Policy V14/u)
   assert.match(developerGuide, /pnpm check:release/u)
 
   await access(path.join(packedRoot, 'README.en.md'))
@@ -227,10 +227,10 @@ async function assertPackedCurrentPolicy(packedRoot) {
   assert.doesNotMatch(skill, /finish_managed_work/u)
   assert.match(state, /completed `awaiting_user_test`/u)
   assert.match(state, /two legal modes that must not be mixed/u)
-  assert.match(state, /Policy V13 workflow/u)
+  assert.match(state, /Policy V14 workflow/u)
 
   const preset = await readFile(path.join(packedRoot, 'presets', 'evolution', 'agent.cordis.yml'), 'utf8')
-  assert.match(preset, /Policy V13/u)
+  assert.match(preset, /Policy V14/u)
   assert.match(preset, /tool-subagent-control/u)
   assert.doesNotMatch(preset, /independent semantic verifier/u)
 }

@@ -213,6 +213,24 @@ function throwIfCommandAborted(command: string, signal: AbortSignal): void {
   if (signal.aborted) throw signalFailure(command, signal)
 }
 
+async function readSpillFile(
+  spillPath: string,
+  command: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  throwIfCommandAborted(command, signal)
+  try {
+    const text = await readFile(spillPath, { encoding: 'utf8', signal })
+    throwIfCommandAborted(command, signal)
+    return text
+  } catch {
+    // Missing/unreadable spill output retains the existing truncated fallback,
+    // but cancellation and deadlines must remain command failures.
+    throwIfCommandAborted(command, signal)
+    return undefined
+  }
+}
+
 function effectiveEnvironment(
   command: string,
   requested: NodeJS.ProcessEnv = {},
@@ -343,13 +361,17 @@ export class DshCommandRunner implements CommandRunner {
     }
     throwIfCommandAborted(command, signal)
     const stdoutRead = handle.collected.stdout?.readFrom(0)
+    throwIfCommandAborted(command, signal)
     const stderrRead = handle.collected.stderr?.readFrom(0)
+    throwIfCommandAborted(command, signal)
     const stdoutSpill = stdoutRead?.lossy && stdoutRead.spillPath
-      ? await readFile(stdoutRead.spillPath, 'utf8').catch(() => undefined)
+      ? await readSpillFile(stdoutRead.spillPath, command, signal)
       : undefined
+    throwIfCommandAborted(command, signal)
     const stderrSpill = stderrRead?.lossy && stderrRead.spillPath
-      ? await readFile(stderrRead.spillPath, 'utf8').catch(() => undefined)
+      ? await readSpillFile(stderrRead.spillPath, command, signal)
       : undefined
+    throwIfCommandAborted(command, signal)
     const stdout = stdoutSpill ?? stdoutRead?.text ?? ''
     const stderr = stderrSpill ?? stderrRead?.text ?? ''
     const result: CommandResult = {

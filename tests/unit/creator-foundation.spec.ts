@@ -223,8 +223,10 @@ describe('Creator records and legacy workflow JSON', () => {
     const store = new StateStore(root)
     const legacy = workflowRecord()
     await store.put('workflows', legacy)
+    const onDisk = JSON.parse(await readFile(path.join(root, 'workflows', `${legacy.id}.json`), 'utf8')) as { schemaVersion: number }
+    expect(onDisk.schemaVersion).toBe(1)
     const loaded = await store.getWorkflow(legacy.id)
-    expect(loaded.schemaVersion).toBe(1)
+    expect(loaded.schemaVersion).toBe(3)
     expect(loaded.creatorRecords).toBeUndefined()
     expect(creatorAgentFacts(loaded.creatorRecords)).toBeUndefined()
 
@@ -240,7 +242,7 @@ describe('Creator records and legacy workflow JSON', () => {
     }
     await store.put('workflows', withCreator)
     const roundtrip = await store.getWorkflow(legacy.id)
-    expect(roundtrip.schemaVersion).toBe(2)
+    expect(roundtrip.schemaVersion).toBe(3)
     expect(roundtrip.creatorRecords?.[0]?.receipt?.childSessionId).toBe('persist-child')
 
     const card = compactAgentView({

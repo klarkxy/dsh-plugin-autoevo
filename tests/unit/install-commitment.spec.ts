@@ -1,5 +1,10 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type {
   ActionCommitment,
   DecisionReceipt,
@@ -8,6 +13,10 @@ import type {
 } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { POLICY_VERSION } from '../../src/contracts.js'
+import { PluginInstaller } from '../../src/lifecycle/install.js'
+import type { DshLauncher } from '../../src/lifecycle/launcher.js'
+import { StateStore } from '../../src/state/store.js'
+import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import {
   frozenManifestDigest,
   isDirectlyUsableReview,
@@ -263,7 +272,7 @@ describe('final use_this Host commitment', () => {
       .toThrow(/current host user turn/i)
   })
 
-  it('cannot replay the install grant after settlement and does not mint a lease for endpoint none', () => {
+  it('cannot replay the install grant after settlement', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
     guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
@@ -274,11 +283,71 @@ describe('final use_this Host commitment', () => {
     const commitment = commitmentFor(receipt, bound, workflow)
     expect(commitment.endpoint).toEqual({ kind: 'none' })
     guard.grantHostSelection(session, receipt, commitment)
-    expect(guard.activeExecutionLease(session)).toBeUndefined()
-    guard.invalidateExecutionLease(session)
+    guard.invalidateHostGrant(session)
     expect(() => guard.assertInstallAuthorized(session, bound, {
       id: bound.resolutionId,
       decisions: [decisionReceipt(bound)],
     }, { workflow, receipt, commitment, retention: 'temporary' })).toThrow(/current Host action commitment/i)
+  })
+})
+
+const temporary = trackTempDirs()
+
+describe('install grant owns usability', () => {
+  function exec(): ToolRunContext {
+    return {
+      callId: 'call-1',
+      rootCallId: 'call-1',
+      token: Symbol('call-1'),
+      signal: new AbortController().signal,
+      agent: agent(),
+    } as unknown as ToolRunContext
+  }
+
+  it('does not re-assert direct use after authorizeInstall; stale policy still fails without a grant owner', async () => {
+    const root = path.join((await import('node:os')).tmpdir(), `autoevo-grant-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    await mkdir(root, { recursive: true })
+    temporary.push(root)
+    const store = new StateStore(root)
+    const artifactRoot = path.join(root, 'review-artifacts', 'owned')
+    const artifactPath = path.join(artifactRoot, 'package', 'dsh-one.tgz')
+    await mkdir(path.dirname(artifactPath), { recursive: true })
+    await writeFile(artifactPath, 'stale-policy-bytes')
+    const stale = githubReview({
+      policyVersion: '13',
+      installSpec: `file:${artifactPath.replaceAll('\\', '/')}`,
+      artifact: {
+        sha256: 'f'.repeat(64),
+        bytes: 18,
+        entryCount: 1,
+        ownedRoot: artifactRoot,
+      },
+    })
+    await store.put('reviews', stale)
+    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher
+    const withoutGrant = new PluginInstaller(ctx, testRuntimeConfig(root), store, launcher, async () => true)
+    await expect(withoutGrant.install({
+      reviewId: stale.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, exec())).rejects.toThrow(/predates the current policy/i)
+
+    const withGrant = new PluginInstaller(
+      ctx,
+      testRuntimeConfig(root),
+      store,
+      launcher,
+      async () => true,
+      async () => undefined,
+    )
+    await expect(withGrant.install({
+      reviewId: stale.id,
+      targetProfile: 'web',
+      retention: 'persistent',
+    }, exec())).rejects.toThrow(/frozen reviewed package (?:size|bytes) changed|no longer a regular Host-owned file|escaped its Host-owned root/i)
   })
 })

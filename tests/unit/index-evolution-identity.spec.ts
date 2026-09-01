@@ -1,7 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it, vi } from 'vitest'
 import { createEvolutionModeMarker, EVOLUTION_MODE_SERVICE_KEY } from '../../src/evolution-contracts.js'
-import { _testing } from '../../src/index.js'
+import { _testing } from '../../src/plugin-runtime.js'
 
 const agent = { ctx: {} } as Agent
 

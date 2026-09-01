@@ -124,8 +124,116 @@ describe('frozen npm package artifacts', () => {
       },
     }
 
-    await expect(freezeLocalPackage({ sourceRoot, artifactRoot: path.join(root, 'artifact'), config: testRuntimeConfig(root), runner }))
+    const artifactRoot = path.join(root, 'artifact')
+    await expect(freezeLocalPackage({ sourceRoot, artifactRoot, config: testRuntimeConfig(root), runner }))
       .rejects.toThrow(/link or special file/u)
+    await expect(stat(path.join(artifactRoot, 'package'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('removes the owned package directory when the packed archive is malformed', async () => {
+    const root = await tempRoot('autoevo-package-artifact-malformed-', temporary)
+    const sourceRoot = await source(root, 'malformed-package', {}, {})
+    const artifactRoot = path.join(root, 'artifact')
+    const runner: CommandRunner = {
+      async run(request) {
+        await writeFile(path.join(request.argv.at(-1)!, 'malformed-package-1.0.0.tgz'), 'not a gzip archive')
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    }
+
+    await expect(freezeLocalPackage({ sourceRoot, artifactRoot, config: testRuntimeConfig(root), runner }))
+      .rejects.toThrow()
+    await expect(stat(path.join(artifactRoot, 'package'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('removes a partial package directory when the pack runner returns success after aborting', async () => {
+    const root = await tempRoot('autoevo-package-artifact-pack-cancel-', temporary)
+    const sourceRoot = await source(root, 'cancelled-package', {}, {})
+    const artifactRoot = path.join(root, 'artifact')
+    const controller = new AbortController()
+    const reason = new Error('cancel npm pack')
+    const runner: CommandRunner = {
+      async run(request) {
+        const destination = request.argv.at(-1)!
+        await writeFile(path.join(destination, 'partial.tgz'), 'partial')
+        controller.abort(reason)
+        return { exitCode: 0, signal: null, stdout: '', stderr: '' }
+      },
+    }
+
+    let failure: unknown
+    try {
+      await freezeLocalPackage({
+        sourceRoot,
+        artifactRoot,
+        config: testRuntimeConfig(root),
+        runner,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(reason)
+    await expect(stat(path.join(artifactRoot, 'package'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(path.join(artifactRoot, 'npm-cache'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(path.join(artifactRoot, 'npm-temp'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('does not let temporary-directory cleanup failures replace the exact pack error', async () => {
+    const operationError = new Error('exact pack failure')
+    const cleanupError = new Error('cleanup failure')
+    let cleanupCalls = 0
+    let failure: unknown
+    try {
+      await _testing.runWithBestEffortCleanup(
+        async () => { throw operationError },
+        [
+          async () => { cleanupCalls += 1; throw cleanupError },
+          async () => { cleanupCalls += 1 },
+        ],
+      )
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(operationError)
+    expect(cleanupCalls).toBe(2)
+
+    await expect(_testing.runWithBestEffortCleanup(
+      async () => 'packed',
+      [async () => { throw cleanupError }],
+    )).rejects.toBe(cleanupError)
+  })
+
+  it('does not create a package directory when already cancelled', async () => {
+    const root = await tempRoot('autoevo-package-artifact-pre-cancel-', temporary)
+    const sourceRoot = await source(root, 'pre-cancelled-package', {}, {})
+    const artifactRoot = path.join(root, 'artifact')
+    const controller = new AbortController()
+    const reason = new Error('cancel before artifact creation')
+    controller.abort(reason)
+    let calls = 0
+    const runner: CommandRunner = {
+      async run() {
+        calls += 1
+        throw new Error('pack must not start')
+      },
+    }
+
+    let failure: unknown
+    try {
+      await freezeLocalPackage({
+        sourceRoot,
+        artifactRoot,
+        config: testRuntimeConfig(root),
+        runner,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBe(reason)
+    expect(calls).toBe(0)
+    await expect(stat(path.join(artifactRoot, 'package'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('accepts safe long paths carried by tar metadata and reviews their final path', async () => {

@@ -3,10 +3,7 @@ import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { CreationGuard, _testing } from '../../src/creation-guard.js'
 import type {
-  ActionCommitment,
-  ExecutionLease,
   ResolutionAuthorization,
-  SelectionReceipt,
 } from '../../src/contracts.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from '../../src/evolution-contracts.js'
 import {
@@ -412,121 +409,5 @@ describe('evolution protocol automaton', () => {
     expect(guard.rememberUserMessage(agent, { ...message, content: [{ type: 'text', text: '伪造的新决定' }] })).toBe(false)
     expect(guard.currentTurnId(agent)).toBe(firstTurn)
     expect(guard.lastUserMessage(agent)).toBe('继续')
-  })
-})
-
-describe('host-owned execution lease', () => {
-  function sessionAgent(id: string): Agent {
-    return {
-      id,
-      session: { header: { id, cwd: 'C:/workspace', version: 0, createdAt: 0 } },
-    } as unknown as Agent
-  }
-
-  function bindCalculatorLease(guard: CreationGuard, target: Agent, leaseExtras: Partial<ExecutionLease> = {}) {
-    guard.rememberUserMessage(target, { content: [{ type: 'text', text: '用这个本地工具' }] })
-    const sessionId = (target as Agent & { session: { header: { id: string } } }).session.header.id
-    const turnId = guard.currentTurnId(target)!
-    const candidateId = `candidate_${'4'.repeat(24)}`
-    const receipt: SelectionReceipt = {
-      id: `selection_${'1'.repeat(24)}`,
-      workflowId: `workflow_${'2'.repeat(24)}`,
-      interruptId: `interrupt_${'3'.repeat(24)}`,
-      snapshotDigest: 'a'.repeat(64),
-      kind: 'reuse_local',
-      candidateIds: [candidateId],
-      candidateDigests: { [candidateId]: 'b'.repeat(64) },
-      hostTurnId: turnId,
-      ownerSessionId: sessionId,
-      bootId: guard.bootId,
-      createdAt: '2026-08-19T00:00:00.000Z',
-    }
-    const commitment: ActionCommitment = {
-      id: `commitment_${'5'.repeat(24)}`,
-      selectionReceiptId: receipt.id,
-      snapshotDigest: receipt.snapshotDigest,
-      candidateId,
-      candidateDigest: 'b'.repeat(64),
-      frozenIdentity: {
-        kind: 'local',
-        name: 'calculator',
-        identity: 'calculator',
-        availability: 'available',
-        fit: 'full',
-      },
-      requestedAction: 'reuse_local',
-      endpoint: { kind: 'exact_tool', name: 'calculator' },
-      allowedParameterConstraints: {},
-      createdAt: '2026-08-19T00:00:00.000Z',
-    }
-    const lease: ExecutionLease = {
-      id: `lease_${'6'.repeat(24)}`,
-      commitmentId: commitment.id,
-      selectionReceiptId: receipt.id,
-      workflowId: receipt.workflowId,
-      ownerSessionId: sessionId,
-      bootId: guard.bootId,
-      hostTurnId: turnId,
-      interruptId: receipt.interruptId,
-      snapshotDigest: receipt.snapshotDigest,
-      candidateId,
-      candidateDigest: 'b'.repeat(64),
-      requestedAction: 'reuse_local',
-      endpoint: commitment.endpoint,
-      allowedParameterConstraints: commitment.allowedParameterConstraints,
-      createdAt: '2026-08-19T00:00:00.000Z',
-      ...leaseExtras,
-    }
-    guard.grantHostSelection(target, receipt, commitment, lease)
-    return { receipt, commitment, lease }
-  }
-
-  it('exposes the active lease only for the current host turn', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_lease' })
-    const target = sessionAgent('session-lease')
-    const bound = bindCalculatorLease(guard, target)
-    const active = guard.activeExecutionLease(target)
-    expect(active?.id).toBe(bound.lease.id)
-    expect(active?.hostTurnId).toBe(guard.currentTurnId(target))
-    expect(active?.endpoint).toEqual({ kind: 'exact_tool', name: 'calculator' })
-  })
-
-  it('silently re-signs the same grant onto the next fresh user turn without changing endpoint or constraints', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_lease' })
-    const target = sessionAgent('session-lease')
-    const bound = bindCalculatorLease(guard, target)
-    const firstTurn = bound.lease.hostTurnId
-    guard.rememberUserMessage(target, { content: [{ type: 'text', text: '继续用它' }] })
-    const resigned = guard.activeExecutionLease(target)
-    expect(resigned).toMatchObject({
-      selectionReceiptId: bound.receipt.id,
-      commitmentId: bound.commitment.id,
-      endpoint: { kind: 'exact_tool', name: 'calculator' },
-      allowedParameterConstraints: {},
-    })
-    expect(resigned?.hostTurnId).toBe(guard.currentTurnId(target))
-    expect(resigned?.hostTurnId).not.toBe(firstTurn)
-    expect(resigned?.id).not.toBe(bound.lease.id)
-  })
-
-  it('returns undefined after invalidate', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_lease' })
-    const target = sessionAgent('session-lease')
-    bindCalculatorLease(guard, target)
-    guard.invalidateExecutionLease(target)
-    expect(guard.activeExecutionLease(target)).toBeUndefined()
-  })
-
-  it('fails closed across session, boot, and commitment mismatch', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_lease' })
-    const owner = sessionAgent('session-owner')
-    const other = sessionAgent('session-other')
-    bindCalculatorLease(guard, owner)
-    expect(guard.activeExecutionLease(other)).toBeUndefined()
-
-    expect(() => bindCalculatorLease(guard, owner, { bootId: 'boot_other' }))
-      .toThrow(/invalidated by a service restart/i)
-    expect(() => bindCalculatorLease(guard, owner, { commitmentId: `commitment_${'f'.repeat(24)}` }))
-      .toThrow(/not bound to the current receipt and commitment/i)
   })
 })

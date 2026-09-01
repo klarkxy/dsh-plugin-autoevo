@@ -2,7 +2,6 @@ import type {
   ActionCommitment,
   AuthorizationAction,
   EvolutionTarget,
-  ExecutionLease,
   InstallationRecord,
   InstallFailureRecovery,
   InstallRecoveryPlan,
@@ -309,6 +308,13 @@ export interface WorkflowRecoveryRecord {
   installationId?: string
   restartRequired: boolean
   restartedAsWorkflowId: string
+  /** Fixed restart plan used to finish child publication after cancellation/crash. */
+  restart?: {
+    requirement: string
+    normalized: string
+    cwd: string
+    intent: RequestIntent
+  }
   completedAt: string
 }
 
@@ -502,7 +508,6 @@ export interface WorkflowRecord {
   rejectedCandidateIds?: string[]
   selectionReceipt?: SelectionReceipt
   actionCommitment?: ActionCommitment
-  executionLease?: ExecutionLease
   reviewPlan?: ReviewPlan
   reviewQueue?: string[]
   reviewedCandidateIds?: string[]
@@ -685,12 +690,12 @@ export interface WorkflowHost {
     exec: WorkflowExec,
     input?: { queries?: string[] },
   ): Promise<ResolutionRecord>
-  refineRemote?(
+  refineRemote(
     resolution: ResolutionRecord,
     input: { queries: string[]; repositories: string[] },
     exec: WorkflowExec,
   ): Promise<ResolutionRecord>
-  previewGithubCandidates?(
+  previewGithubCandidates(
     resolution: ResolutionRecord,
     candidates: Array<{ candidateId: string; repository: string; ref?: string; packagePath?: string }>,
     exec: WorkflowExec,
@@ -706,13 +711,13 @@ export interface WorkflowHost {
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
-  reviewExisting?(
+  reviewExisting(
     resolution: ResolutionRecord,
     target: EvolutionTarget,
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
-  reviewGithubBatch?(
+  reviewGithubBatch(
     resolution: ResolutionRecord,
     candidateIds: string[],
     mode: ReviewMode,
@@ -736,18 +741,18 @@ export interface WorkflowHost {
     exec: WorkflowExec,
     workflow?: WorkflowRecord,
   ): Promise<InstallationRecord>
-  prepareModify?(
+  prepareModify(
     resolution: ResolutionRecord,
     review: ReviewRecord,
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }>
-  prepareCreate?(
+  prepareCreate(
     resolution: ResolutionRecord,
     exec: WorkflowExec,
     workflow: WorkflowRecord,
   ): Promise<{ resolution: ResolutionRecord; path?: string; review?: ReviewRecord }>
-  finishManagedWork?(
+  finishManagedWork(
     resolution: ResolutionRecord,
     exec: WorkflowExec,
     workflow: WorkflowRecord,
@@ -758,13 +763,13 @@ export interface WorkflowHost {
     review?: ReviewRecord,
     workflow?: WorkflowRecord,
   ): Promise<ResolutionRecord>
-  applyNavigation?(
+  applyNavigation(
     resolution: ResolutionRecord,
     navigation: NavigationInput,
     repositories: string[],
   ): Promise<ResolutionRecord>
   /** Active Host profile an enable_builtin commitment targets, when determinable. */
-  enableTargetProfile?(): Promise<string | undefined>
+  enableTargetProfile?(exec: WorkflowExec): Promise<string | undefined>
   /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
   enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord | void>
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>
@@ -773,9 +778,9 @@ export interface WorkflowHost {
   getInstallation(id: string): Promise<InstallationRecord>
   /** Finds one workflow-owned receipt when a crash happened before lastInstallationId was projected. */
   findInstallationForWorkflow?(workflowId: string): Promise<InstallationRecord | undefined>
-  listInstallProfiles?(): Promise<string[]>
+  listInstallProfiles(): Promise<string[]>
   /** Whether managed child construction (modify/create) is available for this exec. */
-  managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>
+  managedWorkAvailable(exec: WorkflowExec): boolean | Promise<boolean>
   cleanupInstallation?(installationId: string, exec: WorkflowExec): Promise<{
     installationId: string
     removed: boolean
@@ -866,7 +871,10 @@ export function selectionFacts(resolution: ResolutionRecord, workflow?: Workflow
   }
 }
 
-function frozenBuiltinEnablement(workflow?: WorkflowRecord): {
+export function lookupBuiltinEnablement(
+  workflow: WorkflowRecord | undefined,
+  phase: SelectionReceipt['phase'],
+): {
   candidate: CandidateSnapshotItem
   endpoint: Extract<ActionCommitment['endpoint'], { kind: 'host_bundled_enable' }>
 } | undefined {
@@ -879,7 +887,7 @@ function frozenBuiltinEnablement(workflow?: WorkflowRecord): {
   const endpoint = commitment?.endpoint
   const bundled = candidate?.hostBundled
   if (!receipt
-    || receipt.phase !== 'gate1'
+    || receipt.phase !== phase
     || receipt.kind !== 'enable_builtin'
     || !candidateId
     || !candidate
@@ -927,7 +935,7 @@ export function confirmationFacts(
   } = {},
 ): Record<string, unknown> {
   const review = reviews[0]
-  const builtinEnablement = frozenBuiltinEnablement(workflow)
+  const builtinEnablement = lookupBuiltinEnablement(workflow, 'gate1')
   const compact = review ? compactConfirmationFindings(review) : undefined
   const reviewLayer = review?.runtimeSurface?.verificationLayer
   const lastChecks = workflow?.modificationOutcome?.attempts.at(-1)?.checks
@@ -1057,7 +1065,7 @@ export function optionsFor(
     options.push({ ...WORKFLOW_OPTIONS.review_existing, candidateIds: evolvableLocalIds })
   }
   if (kind === 'await_confirmation') {
-    const builtinEnablement = frozenBuiltinEnablement(workflow)
+    const builtinEnablement = lookupBuiltinEnablement(workflow, 'gate1')
     if (builtinEnablement) {
       return [
         { ...WORKFLOW_OPTIONS.enable_builtin, candidateIds: [builtinEnablement.candidate.id] },

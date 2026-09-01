@@ -11,7 +11,6 @@ export interface Config {
   gitCommand?: string
   dshCommand?: string
   dshCommandArgs?: string[]
-  maxCandidates?: number
   maxFiles?: number
   maxRepositoryBytes?: number
   commandTimeoutMs?: number
@@ -31,7 +30,6 @@ export interface RuntimeConfig {
   gitCommand: string
   dshCommand: string
   dshCommandArgs: string[]
-  maxCandidates: number
   maxFiles: number
   maxRepositoryBytes: number
   commandTimeoutMs: number
@@ -48,7 +46,6 @@ export const Config: Schema<Config> = Schema.object({
   gitCommand: Schema.string().default('git').description('git executable.'),
   dshCommand: Schema.string().default('dsh').description('dsh executable.'),
   dshCommandArgs: Schema.array(Schema.string()).default([]).description('Extra arguments forwarded to dsh.'),
-  maxCandidates: Schema.number().min(1).max(105).default(105).description('Deprecated compatibility value; discovery keeps the fixed bounded union of five result pages plus exact repositories.'),
   maxFiles: Schema.number().min(4).max(200).default(200).description('Maximum files in bounded discovery previews; formal review inspects the complete frozen package.'),
   maxRepositoryBytes: Schema.number().min(65_536).max(8_388_608).default(2_097_152).description('Maximum bytes in bounded discovery previews; formal review inspects the complete frozen package.'),
   commandTimeoutMs: Schema.number().min(1_000).max(300_000).default(30_000).description('External command timeout in milliseconds.'),
@@ -65,7 +62,6 @@ export const Config: Schema<Config> = Schema.object({
     gitCommand: 'git executable.',
     dshCommand: 'dsh executable.',
     dshCommandArgs: 'Extra arguments forwarded to dsh.',
-    maxCandidates: 'Deprecated compatibility value; discovery keeps five bounded result pages plus exact repositories.',
     maxFiles: 'Maximum files in discovery previews; not a package eligibility limit.',
     maxRepositoryBytes: 'Maximum bytes in discovery previews; not a package eligibility limit.',
     commandTimeoutMs: 'External command timeout in milliseconds.',
@@ -82,7 +78,6 @@ export const Config: Schema<Config> = Schema.object({
     gitCommand: 'git 可执行文件。',
     dshCommand: 'dsh 可执行文件。',
     dshCommandArgs: '传给 dsh 的额外参数。',
-    maxCandidates: '兼容字段；发现阶段固定保留五个有界结果页与精确仓库的并集。',
     maxFiles: '发现预览最多读取的文件数；不作为安装包资格限制。',
     maxRepositoryBytes: '发现预览最多读取的字节数；不作为安装包资格限制。',
     commandTimeoutMs: '外部命令超时（毫秒）。',
@@ -103,7 +98,6 @@ export function normalizeConfig(input: Config): RuntimeConfig {
     gitCommand: input.gitCommand || 'git',
     dshCommand: input.dshCommand || 'dsh',
     dshCommandArgs: [...(input.dshCommandArgs ?? [])],
-    maxCandidates: input.maxCandidates ?? 105,
     maxFiles: input.maxFiles ?? 200,
     maxRepositoryBytes: input.maxRepositoryBytes ?? 2_097_152,
     commandTimeoutMs: input.commandTimeoutMs ?? 30_000,

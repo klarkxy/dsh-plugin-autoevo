@@ -23,7 +23,7 @@
 
 The grant belongs to the current Agent and current resolution. Starting another workflow revokes it. Managed construction remains bound to the current work order and source receipt. Do not retry after an approval rejection without a new user decision.
 
-Policy-mismatched unfinished state is not executable; start a fresh Policy V13 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself or treat a semantic reviewer as an authorization gate.
+Policy-mismatched unfinished state is not executable; start a fresh Policy V14 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself or treat a semantic reviewer as an authorization gate.
 
 `capability_workflow_diagnose` is read-only and available only after an incomplete or failed stage. It returns redacted facts under a per-failure budget; it never retries, installs, edits, or cleans up. Repeated identical invalid resumes are blocked for the remainder of the current user turn without consuming authorization. After repeated verification or modify failure, present a human decision or diagnosis exit instead of looping.
 

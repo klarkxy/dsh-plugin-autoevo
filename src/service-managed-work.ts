@@ -268,6 +268,7 @@ export async function prepareManagedCreation(
   })
   workflow.managedSourceId = sourceKey
   let reviewId = `scaffold_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 24)}`
+  let managedChildStarted = false
   try {
     const scaffoldBaseId = `review_${hashObject({ sourceId: sourceKey, head: receipt.baseCommit }).slice(0, 64)}`
     const runtimeVersion = await dshRuntimeVersion(deps, resolution.cwd, exec.signal)
@@ -281,9 +282,12 @@ export async function prepareManagedCreation(
       resolutionId: resolution.id,
       requirement: resolution.requirement,
       ...(runtimeVersion ? { runtimeVersion } : {}),
+      ...(exec.signal ? { signal: exec.signal } : {}),
     })
+    exec.signal?.throwIfAborted()
     reviewId = scaffold.record.id
     await deps.store.put('reviews', scaffold.record)
+    exec.signal?.throwIfAborted()
     workflow.lastReviewId = scaffold.record.id
     workflow.lineageTipReviewId = scaffold.record.id
     const workOrder = createCreatorWorkOrder({
@@ -301,9 +305,15 @@ export async function prepareManagedCreation(
     workflow.pendingWorkOrder = workOrder
     workflow.updatedAt = new Date().toISOString()
     await deps.store.put('workflows', workflow)
+    exec.signal?.throwIfAborted()
+    managedChildStarted = true
     const child = await runManagedChild(deps, workflow, parent, receipt.path, workOrder, preflight, exec)
     return finishManagedWork(deps, resolution, exec, workflow, child)
   } catch (error) {
+    if (exec.signal?.aborted && !managedChildStarted) {
+      await deps.sources.completeWorkflow(sourceKey, workflow.id).catch(() => undefined)
+      throw exec.signal.reason
+    }
     if (error instanceof EvolutionError && error.details.recoveryRequired === true) throw error
     if (!(error instanceof EvolutionError && error.details.managedChildCompleted === true)) {
       rememberCreator(workflow, 'create', 'unavailable')

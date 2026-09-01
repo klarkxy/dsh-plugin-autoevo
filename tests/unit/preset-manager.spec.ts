@@ -60,6 +60,46 @@ afterEach(async () => {
 })
 
 describe('materializeEvolutionPreset', () => {
+  it('rejects a successful operation when its migration lock release fails', async () => {
+    const cleanupError = new Error('migration lock release failed')
+    const release = vi.fn(async () => { throw cleanupError })
+
+    await expect(_testing.runWithMigrationLockRelease(
+      async () => ({ status: 'installed' as const }),
+      release,
+    )).rejects.toBe(cleanupError)
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves an exact primary error or abort when migration lock release also fails', async () => {
+    const primaryError = new Error('preset operation failed')
+    const abortReason = new Error('preset operation cancelled')
+    const cleanupError = new Error('migration lock release failed')
+
+    for (const primary of [primaryError, abortReason]) {
+      const release = vi.fn(async () => { throw cleanupError })
+      await expect(_testing.runWithMigrationLockRelease(
+        async () => { throw primary },
+        release,
+      )).rejects.toBe(primary)
+      expect(release).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('does not stage or rename when another migration lock owner is live', async () => {
+    const root = await tempDir('autoevo-preset-live-lock')
+    const dshHome = path.join(root, 'dsh')
+    const templateDir = await writeTemplate(root, baseTemplate)
+    const paths = resolveEvolutionPresetPaths(dshHome)
+    await mkdir(paths.presetsRoot, { recursive: true })
+    const lock = await _testing.acquireMigrationLock(paths.presetsRoot)
+    const renamePath = vi.fn(async () => undefined)
+
+    await expect(materializeEvolutionPreset({ dshHome, enabled: true, templateDir, rename: renamePath })).rejects.toThrow(/already running/i)
+    expect(renamePath).not.toHaveBeenCalled()
+    await _testing.releaseMigrationLock(lock)
+  })
+
   it('skips when disabled without touching the target', async () => {
     const root = await tempDir('autoevo-preset-skip')
     const dshHome = path.join(root, 'dsh')

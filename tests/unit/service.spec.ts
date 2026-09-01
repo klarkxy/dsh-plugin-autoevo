@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
@@ -119,6 +122,179 @@ describe('profile mutation serialization', () => {
   })
 })
 
+describe('built-in target profile resolution', () => {
+  it.each(['return', 'reject'] as const)(
+    'preserves exact cancellation when the profile owner read aborts then %s',
+    async (mode) => {
+      const controller = new AbortController()
+      const reason = new Error(`profile owner ${mode} cancelled`)
+      const currentProfileOwner = vi.fn(async () => {
+        controller.abort(reason)
+        if (mode === 'reject') throw new Error('ordinary profile owner failure')
+        return 'web'
+      })
+      const service = { currentProfileOwner } as unknown as CapabilityEvolutionService
+      const execution = { signal: controller.signal } as WorkflowExec
+
+      await expect(CapabilityEvolutionService.prototype.enableTargetProfile.call(service, execution))
+        .rejects.toBe(reason)
+      expect(currentProfileOwner).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('does not disguise an ordinary profile owner failure as a missing active profile', async () => {
+    const failure = new Error('profile owner unavailable')
+    const service = {
+      currentProfileOwner: vi.fn(async () => { throw failure }),
+    } as unknown as CapabilityEvolutionService
+
+    await expect(CapabilityEvolutionService.prototype.enableTargetProfile.call(service, {} as WorkflowExec))
+      .rejects.toBe(failure)
+  })
+})
+
+describe('bootstrap optional installation history', () => {
+  function managedReviews(): ReviewRecord[] {
+    const root = review('main')
+    root.manifest = { ...root.manifest, packageName: 'dsh-plugin-calculator' }
+    const local: ReviewRecord = {
+      ...root,
+      id: `review_${'f'.repeat(64)}`,
+      createdAt: '2026-08-15T01:00:00.000Z',
+      sourceSnapshot: {
+        kind: 'local',
+        path: 'C:/managed/calculator',
+        baseReviewId: root.id,
+        baseCommit: root.sourceSnapshot.kind === 'github' ? root.sourceSnapshot.commit : 'c'.repeat(40),
+        statusHash: 'f'.repeat(64),
+      },
+      installSpec: 'file:C:/state/review-artifacts/calculator.tgz',
+    }
+    return [root, local]
+  }
+
+  function bootstrapHarness(validateCompletedSnapshot: () => Promise<unknown>): {
+    service: CapabilityEvolutionService
+    put: ReturnType<typeof vi.fn>
+  } {
+    const put = vi.fn(async () => undefined)
+    const service = {
+      ctx: {
+        tools: { schemas: vi.fn(() => []) },
+        systemPrompt: { assemble: vi.fn(async () => ({ tools: [] })) },
+        skills: { list: vi.fn(async () => []) },
+        get: vi.fn(() => undefined),
+      },
+      config: { dshHome: 'C:/missing-dsh-home', dshCommand: 'dsh' },
+      runner: { resolveExecutable: vi.fn(async () => undefined) },
+      store: {
+        listAllReviews: vi.fn(async () => managedReviews()),
+        listInstallationsStrict: vi.fn(async () => []),
+        put,
+      },
+      sources: { validateCompletedSnapshot: vi.fn(validateCompletedSnapshot) },
+      currentProfileOwner: vi.fn(async () => 'web'),
+    } as unknown as CapabilityEvolutionService
+    return { service, put }
+  }
+
+  it('preserves an authoritative local profile candidate when strict history cannot be read', async () => {
+    const dshHome = await mkdtemp(path.join(tmpdir(), 'autoevo-service-history-'))
+    try {
+      const profileRoot = path.join(dshHome, 'profiles', 'web')
+      await mkdir(profileRoot, { recursive: true })
+      await writeFile(path.join(profileRoot, 'package.json'), JSON.stringify({
+        dependencies: {
+          'dsh-plugin-record-sync': `github:anonymous-lab/dsh-plugin-record-sync#${'a'.repeat(40)}`,
+        },
+      }))
+      const put = vi.fn(async () => undefined)
+      const listInstallationsStrict = vi.fn(async () => {
+        throw new EvolutionError('command_failed', 'installation history unavailable')
+      })
+      const service = {
+        ctx: {
+          tools: { schemas: vi.fn(() => []) },
+          systemPrompt: { assemble: vi.fn(async () => ({ tools: [] })) },
+          skills: { list: vi.fn(async () => []) },
+          get: vi.fn(() => undefined),
+        },
+        config: { dshHome, dshCommand: 'dsh' },
+        runner: { resolveExecutable: vi.fn(async () => undefined) },
+        store: {
+          listAllReviews: vi.fn(async () => []),
+          listInstallationsStrict,
+          put,
+        },
+        sources: { validateCompletedSnapshot: vi.fn() },
+        currentProfileOwner: vi.fn(async () => 'web'),
+      } as unknown as CapabilityEvolutionService
+      const exec = {
+        callId: 'bootstrap-call',
+        agent: { session: { header: { cwd: dshHome } } },
+      } as unknown as WorkflowExec
+
+      const result = await CapabilityEvolutionService.prototype.bootstrapResolution.call(
+        service,
+        'repair dsh-plugin-record-sync',
+        exec,
+      )
+
+      expect(listInstallationsStrict).toHaveBeenCalledTimes(1)
+      expect(result.localCandidates).toEqual([expect.objectContaining({
+        kind: 'plugin',
+        name: 'dsh-plugin-record-sync',
+        availability: 'installed_in_profile',
+        profileEvidence: expect.objectContaining({
+          profile: 'web',
+          dependencySpec: `github:anonymous-lab/dsh-plugin-record-sync#${'a'.repeat(40)}`,
+        }),
+      })])
+      expect(put).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(dshHome, { recursive: true, force: true })
+    }
+  })
+
+  it('rethrows the exact abort when optional managed snapshot validation races an ordinary error', async () => {
+    const controller = new AbortController()
+    const reason = new Error('managed snapshot validation cancelled')
+    const { service, put } = bootstrapHarness(async () => {
+      controller.abort(reason)
+      throw new Error('ordinary validation failure')
+    })
+    const exec = {
+      callId: 'bootstrap-abort',
+      agent: { session: { header: { cwd: process.cwd() } } },
+      signal: controller.signal,
+    } as unknown as WorkflowExec
+
+    await expect(CapabilityEvolutionService.prototype.bootstrapResolution.call(
+      service,
+      'calculator',
+      exec,
+    )).rejects.toBe(reason)
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('keeps ordinary managed snapshot validation failure optional', async () => {
+    const { service, put } = bootstrapHarness(async () => {
+      throw new Error('ordinary validation failure')
+    })
+    const exec = {
+      callId: 'bootstrap-optional-validation',
+      agent: { session: { header: { cwd: process.cwd() } } },
+    } as unknown as WorkflowExec
+
+    await expect(CapabilityEvolutionService.prototype.bootstrapResolution.call(
+      service,
+      'calculator',
+      exec,
+    )).resolves.toMatchObject({ requirement: 'calculator' })
+    expect(put).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('built-in enablement failure journal', () => {
   function provisional(wrote: boolean): InstallationRecord {
     return {
@@ -151,6 +327,22 @@ describe('built-in enablement failure journal', () => {
       },
     }
   }
+
+  it('prioritizes an abort that races the initial built-in receipt read over an ordinary read error', async () => {
+    const controller = new AbortController()
+    const reason = new Error('initial receipt read aborted')
+    const read = vi.fn(async () => {
+      controller.abort(reason)
+      throw new Error('ordinary receipt read error')
+    })
+
+    await expect(_testing.initialBuiltinReceipt(
+      { getInstallation: read },
+      `installation_${'a'.repeat(24)}`,
+      controller.signal,
+    )).rejects.toBe(reason)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
 
   it('settles a denied pre-write approval as failed_absent with no ownership claim', () => {
     const result = _testing.failedBuiltinEnablement(

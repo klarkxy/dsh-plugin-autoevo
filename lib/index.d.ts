@@ -21,7 +21,6 @@ interface Config$1 {
   gitCommand?: string;
   dshCommand?: string;
   dshCommandArgs?: string[];
-  maxCandidates?: number;
   maxFiles?: number;
   maxRepositoryBytes?: number;
   commandTimeoutMs?: number;
@@ -40,7 +39,6 @@ interface RuntimeConfig {
   gitCommand: string;
   dshCommand: string;
   dshCommandArgs: string[];
-  maxCandidates: number;
   maxFiles: number;
   maxRepositoryBytes: number;
   commandTimeoutMs: number;
@@ -52,7 +50,7 @@ declare const Config$1: Schema<Config$1>;
 //#endregion
 //#region src/contracts.d.ts
 /** Receipt policy. New resolution/review/workflow records use this value. */
-declare const POLICY_VERSION = "13";
+declare const POLICY_VERSION = "14";
 declare const TOOL_NAMES: readonly ["capability_workflow", "capability_workflow_resume", "capability_workflow_recover", "capability_repair", "capability_repair_resume", "capability_versions", "capability_rollback", "capability_adopt", "capability_updates", "plugin_remove"];
 type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
@@ -496,7 +494,7 @@ interface VerificationVerdict {
   createdAt: string;
 }
 interface InstallationRecord {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   createdAt: string;
   /** Linked review for managed installs; adopted (workflow-external) installs have none. */
@@ -744,27 +742,6 @@ interface ActionCommitment {
   frozenInstallSpec?: string | null;
   targetProfile?: string;
 }
-/**
- * Current-turn execution grant. Bound to commitment + session/boot/workflow + turn watermark.
- * Host may silently re-sign the next continuation only when receipt, commitment, and endpoint are unchanged.
- */
-interface ExecutionLease {
-  id: string;
-  commitmentId: string;
-  selectionReceiptId: string;
-  workflowId: string;
-  ownerSessionId: string;
-  bootId: string;
-  hostTurnId: string;
-  interruptId: string;
-  snapshotDigest: string;
-  candidateId?: string;
-  candidateDigest?: string;
-  requestedAction: ActionCommitment['requestedAction'];
-  endpoint: ExecutionEndpoint;
-  allowedParameterConstraints: ActionCommitment['allowedParameterConstraints'];
-  createdAt: string;
-}
 declare const BRIDGE_EXECUTION_TOOLS: readonly ["tool_search", "tool_describe", "tool_call"];
 declare const FORGED_RESUME_HOST_KEYS: readonly ["selectionReceipt", "actionCommitment", "executionLease", "commitment", "lease", "endpoint", "reviewerVerdict", "verificationVerdict", "verifierVerdict", "verifierRequest"];
 //#endregion
@@ -891,13 +868,13 @@ interface CreatorFoundation {
  * Public workflow lifecycle presentation. Internal `cursor` names stay on the
  * record for graph safety; this field is a deterministic mapping only.
  */
-type WorkflowLifecycleState = 'searched' | 'selected' | 'reviewing' | 'approved' | 'rejected' | 'uncertain' | 'skipped' | 'awaiting_confirmation' | 'committed' | 'leased' | 'executing' | 'verified' | 'activated' | 'awaiting_user_test' | 'recovery_required' | 'restart_required' | 'market_restart_required' | 'market_setup_required' | 'modify_authorized' | 'create_authorized' | 'stopped' | 'interrupted' | 'reuse_local';
+type WorkflowLifecycleState = 'searched' | 'selected' | 'reviewing' | 'approved' | 'rejected' | 'uncertain' | 'skipped' | 'awaiting_confirmation' | 'committed' | 'executing' | 'verified' | 'activated' | 'awaiting_user_test' | 'recovery_required' | 'restart_required' | 'market_restart_required' | 'market_setup_required' | 'modify_authorized' | 'create_authorized' | 'stopped' | 'interrupted' | 'reuse_local';
 interface LifecycleMappingInput {
   reviews?: readonly ReviewRecord[];
   installation?: InstallationRecord;
 }
 /** Map internal cursor/status/grants to the public lifecycle state. Never claims verified early. */
-declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cursor' | 'policyVersion' | 'actionCommitment' | 'executionLease' | 'lastFailure'>, extras?: LifecycleMappingInput): WorkflowLifecycleState;
+declare function lifecycleStateFor(workflow: Pick<WorkflowRecord, 'status' | 'cursor' | 'policyVersion' | 'actionCommitment' | 'lastFailure' | 'recovery'>, extras?: LifecycleMappingInput): WorkflowLifecycleState;
 //#endregion
 //#region src/workflow/contracts.d.ts
 type WorkflowStatus = 'running' | 'interrupted' | 'completed' | 'failed';
@@ -1080,6 +1057,13 @@ interface WorkflowRecoveryRecord {
   installationId?: string;
   restartRequired: boolean;
   restartedAsWorkflowId: string;
+  /** Fixed restart plan used to finish child publication after cancellation/crash. */
+  restart?: {
+    requirement: string;
+    normalized: string;
+    cwd: string;
+    intent: RequestIntent;
+  };
   completedAt: string;
 }
 type WorkflowFailureStage = 'discovery' | 'review' | 'managed_child' | 'install' | 'verification' | 'hot_load' | 'workflow';
@@ -1178,7 +1162,6 @@ interface WorkflowRecord {
   rejectedCandidateIds?: string[];
   selectionReceipt?: SelectionReceipt;
   actionCommitment?: ActionCommitment;
-  executionLease?: ExecutionLease;
   reviewPlan?: ReviewPlan;
   reviewQueue?: string[];
   reviewedCandidateIds?: string[];
@@ -1265,11 +1248,11 @@ interface WorkflowHost {
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec, input?: {
     queries?: string[];
   }): Promise<ResolutionRecord>;
-  refineRemote?(resolution: ResolutionRecord, input: {
+  refineRemote(resolution: ResolutionRecord, input: {
     queries: string[];
     repositories: string[];
   }, exec: WorkflowExec): Promise<ResolutionRecord>;
-  previewGithubCandidates?(resolution: ResolutionRecord, candidates: Array<{
+  previewGithubCandidates(resolution: ResolutionRecord, candidates: Array<{
     candidateId: string;
     repository: string;
     ref?: string;
@@ -1287,11 +1270,11 @@ interface WorkflowHost {
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewExisting?(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+  reviewExisting(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
   }>;
-  reviewGithubBatch?(resolution: ResolutionRecord, candidateIds: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
+  reviewGithubBatch(resolution: ResolutionRecord, candidateIds: string[], mode: ReviewMode, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     reviews: ReviewRecord[];
     failures: Array<{
@@ -1306,26 +1289,26 @@ interface WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
-  prepareModify?(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+  prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
     review?: ReviewRecord;
   }>;
-  prepareCreate?(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+  prepareCreate(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
     review?: ReviewRecord;
   }>;
-  finishManagedWork?(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
+  finishManagedWork(resolution: ResolutionRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
     review?: ReviewRecord;
     continueConstruction?: boolean;
   }>;
   applyDecision(resolution: ResolutionRecord, resume: ValidatedResume, review?: ReviewRecord, workflow?: WorkflowRecord): Promise<ResolutionRecord>;
-  applyNavigation?(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
+  applyNavigation(resolution: ResolutionRecord, navigation: NavigationInput, repositories: string[]): Promise<ResolutionRecord>;
   /** Active Host profile an enable_builtin commitment targets, when determinable. */
-  enableTargetProfile?(): Promise<string | undefined>;
+  enableTargetProfile?(exec: WorkflowExec): Promise<string | undefined>;
   /** Mount a frozen host-bundled opt-in capability into its target profile patch layer. */
   enableBuiltin?(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord | void>;
   latestReview(resolutionId: string, reviewId?: string): Promise<ReviewRecord | undefined>;
@@ -1334,9 +1317,9 @@ interface WorkflowHost {
   getInstallation(id: string): Promise<InstallationRecord>;
   /** Finds one workflow-owned receipt when a crash happened before lastInstallationId was projected. */
   findInstallationForWorkflow?(workflowId: string): Promise<InstallationRecord | undefined>;
-  listInstallProfiles?(): Promise<string[]>;
+  listInstallProfiles(): Promise<string[]>;
   /** Whether managed child construction (modify/create) is available for this exec. */
-  managedWorkAvailable?(exec: WorkflowExec): boolean | Promise<boolean>;
+  managedWorkAvailable(exec: WorkflowExec): boolean | Promise<boolean>;
   cleanupInstallation?(installationId: string, exec: WorkflowExec): Promise<{
     installationId: string;
     removed: boolean;
@@ -1369,7 +1352,6 @@ interface AgentGateState {
   sessionId?: string;
   selectionReceipt?: SelectionReceipt;
   actionCommitment?: ActionCommitment;
-  executionLease?: ExecutionLease;
   constructionRoot?: string;
 }
 interface UserFacingMessage {
@@ -1420,11 +1402,9 @@ declare class CreationGuard {
   consumeDecisionTurn(agent: Agent | undefined, interrupt: DecisionTurnBoundary): ClaimedHostTurn;
   /**
    * Host-owned grant. Never accepted from ResumeInput.
-   * `lease` is omitted when the commitment endpoint is `none`.
    */
-  grantHostSelection(agent: Agent | undefined, receipt: SelectionReceipt, commitment: ActionCommitment, lease?: ExecutionLease): void;
-  invalidateExecutionLease(agent: Agent | undefined): void;
-  activeExecutionLease(agent: Agent | undefined): ExecutionLease | undefined;
+  grantHostSelection(agent: Agent | undefined, receipt: SelectionReceipt, commitment: ActionCommitment): void;
+  invalidateHostGrant(agent: Agent | undefined): void;
   setWaiting(agent: Agent | undefined, kind?: AgentGateState['waitingKind'], watermarkTurnId?: string): void;
   applyResolutionAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization, generation: number | undefined): boolean;
   applyReviewAuthorization(agent: Agent | undefined, authorization: ResolutionAuthorization): boolean;
@@ -1439,7 +1419,6 @@ declare class CreationGuard {
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
   private managedConstructionDenial;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
-  private resignLeaseIfUnchanged;
 }
 //#endregion
 //#region src/execution-guard.d.ts
@@ -1581,6 +1560,31 @@ declare class DshSemanticVerifierHost implements SemanticVerifierHost {
 //#region src/state/store.d.ts
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
 type StoredRecord = ResolutionRecord | ReviewRecord | InstallationRecord | WorkflowRecord;
+type InstallationExclusiveCreateResult = {
+  status: 'created';
+  installation: InstallationRecord;
+} | {
+  status: 'existing';
+  installation: InstallationRecord;
+};
+interface AdoptionClaim {
+  installationId: string;
+  observedSpecDigest: string;
+  dshHome: string;
+  profile: string;
+  packageName: string;
+  observedSpec: string;
+  configuredBundle: boolean;
+  claimToken: string;
+  createdAt: string;
+}
+type AdoptionClaimResult = {
+  status: 'claimed';
+  claim: AdoptionClaim;
+} | {
+  status: 'existing';
+  claim: AdoptionClaim;
+};
 interface StateRecordDiagnostic {
   kind: RecordKind;
   recordId?: string;
@@ -1592,31 +1596,37 @@ interface StateRecordDiagnostic {
 declare class StateStore {
   private readonly resolveRoot;
   private readonly diagnostics;
+  private readonly strictDiagnosticKeys;
   constructor(root: string | (() => string));
   get root(): string;
   trialRoot(installationId: string): string;
   put(kind: RecordKind, record: StoredRecord): Promise<void>;
+  createInstallationExclusive(record: InstallationRecord): Promise<InstallationExclusiveCreateResult>;
+  claimAdoption(input: Omit<AdoptionClaim, 'observedSpecDigest' | 'claimToken' | 'createdAt'>): Promise<AdoptionClaimResult>;
   stateDiagnostics(): StateRecordDiagnostic[];
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
   getWorkflow(id: string): Promise<WorkflowRecord>;
   listWorkflows(): Promise<WorkflowRecord[]>;
+  listWorkflowsStrict(): Promise<WorkflowRecord[]>;
   listInstallations(): Promise<InstallationRecord[]>;
+  listInstallationsStrict(): Promise<InstallationRecord[]>;
+  listInstallationsStrictExcluding(excludedInstallationId: string): Promise<InstallationRecord[]>;
+  private listInstallationsStrictPass;
   findInstallationForWorkflow(workflowId: string): Promise<InstallationRecord | undefined>;
   listAllReviews(): Promise<ReviewRecord[]>;
   listReviews(resolutionId: string): Promise<ReviewRecord[]>;
   private readReviews;
+  private writeAppendOnly;
+  private writeTemporary;
+  private renameTemporary;
+  private removeTemporary;
+  private wasWrittenExactly;
   private recordDiagnostic;
   private list;
+  private listPass;
   private get;
-}
-//#endregion
-//#region src/lifecycle/snapshot.d.ts
-interface MaterializedLocalPackage {
-  installSpec: string;
-  artifactRoot: string;
-  artifactSha256: string;
 }
 //#endregion
 //#region src/lifecycle/launcher.d.ts
@@ -1624,7 +1634,6 @@ declare class DshLauncher {
   private readonly runner;
   private readonly config;
   constructor(runner: CommandRunner, config: RuntimeConfig);
-  materializeLocal(review: ReviewRecord, artifactRoot: string, signal?: AbortSignal): Promise<MaterializedLocalPackage>;
   private argv;
   private childEnv;
   /** Read the store that owns the profile's existing node_modules tree once. */
@@ -1955,8 +1964,6 @@ declare class Loader extends EntryTree {
 //#region src/lifecycle/hot-load.d.ts
 interface HotReloadAttempt {
   evidence: HotReloadEvidence;
-  /** Restore the exact previous Loader group after later receipt failure. */
-  rollback?: () => Promise<void>;
   rollbackFailed?: boolean;
 }
 //#endregion
@@ -1970,19 +1977,20 @@ type ProfileHotLoader = (input: {
   packageName: string;
   expectedTools: readonly string[];
   agent?: ToolRunContext['agent'];
+  signal?: AbortSignal;
 }) => Promise<HotReloadAttempt>;
 declare class PluginInstaller {
   private readonly ctx;
   private readonly config;
   private readonly store;
   private readonly launcher;
-  private readonly revalidate;
+  private readonly _revalidate;
   private readonly authorizeInstall?;
   private readonly semanticVerifier?;
   private readonly preflightProfile?;
   private readonly resolveDestinationProfile?;
   private readonly hotLoader;
-  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined, preflightProfile?: string | undefined, resolveDestinationProfile?: (() => Promise<string>) | undefined);
+  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, _revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined, preflightProfile?: string | undefined, resolveDestinationProfile?: (() => Promise<string>) | undefined);
   private removeOwnedDirectory;
   private assertPersistentDestination;
   private assertReplacementBinding;
@@ -1997,6 +2005,7 @@ declare class PluginInstaller {
   private requestInstallApproval;
   private assertArtifactUnchangedAfterApproval;
   private writeProvisionalReceipt;
+  private settleInterruptedAttempt;
   private runIsolatedPreflight;
   private prepareDestinationMutation;
   private runDestinationInstall;
@@ -2022,6 +2031,14 @@ declare class PluginRemover {
   private readonly resolveDestinationProfile?;
   constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, resolveDestinationProfile?: (() => Promise<string>) | undefined);
   private assertPersistentOwner;
+  private recoveryRequired;
+  private assertCanonicalLiveReceipt;
+  private cleanupOwned;
+  private persistInterruptedRemoval;
+  private removedRecord;
+  private canonicalRemovalTombstone;
+  private reconcileLegacyRemovalTombstone;
+  private settleInterruptedRemoval;
   /**
    * Uninstalls exactly one installation receipt.
    * Never deletes a managed source repository under the workspace sources dir.
@@ -2140,6 +2157,13 @@ interface SourceReceipt {
   gitConfigHash: string;
   /** Normalized package root inside the managed repository. */
   packagePath?: string;
+  /** Durable authority to finish a workflow-release transaction after a crash. */
+  completionProof?: {
+    schemaVersion: 1;
+    workflowId: string;
+    lockToken: string;
+    activeReceiptHash: string;
+  };
 }
 interface FinalizedChildCommit extends SourceReceipt {
   changedFiles: string[];
@@ -2158,6 +2182,8 @@ declare class SourceManager {
   /** @deprecated Use sourceRootFor(workspaceCwd). Kept for explicit sourceDir unit and integration tests. */
   get sourceRoot(): string;
   sourcePath(sourceId: string, workspaceCwd?: string): string;
+  private hasGitDirectory;
+  private accessGitDirectory;
   /** True when `candidate` is inside the managed sources root for this session. */
   pathUnderSourceRoot(candidate: string, workspaceCwd?: string): Promise<boolean>;
   /**
@@ -2167,6 +2193,8 @@ declare class SourceManager {
   private resolveWorkingPath;
   receiptPath(sourceId: string): string;
   lockPath(sourceId: string): string;
+  private lockRecoveryPath;
+  private completionRecoveryTakeoverPath;
   private isManagedSourceDir;
   /** Containment of a realpath'd managed source against canonicalized base roots. */
   private isCanonicalManagedSourceDir;
@@ -2192,6 +2220,20 @@ declare class SourceManager {
   private gitConfigHash;
   private disabledHooksPath;
   acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
+  private writeInitialLock;
+  private releaseInitialLockIfExact;
+  private acquireLockInternal;
+  private releaseRecoveryOwner;
+  private completionOwnerMatches;
+  private optionalFile;
+  private lockPublicationBarrierExists;
+  private staleRecoveryOwnerStillOwned;
+  private acquireCompletionRecoveryOwner;
+  private repositoryMatchesReceipt;
+  private convergeWorkflowCompletion;
+  private releaseLockToken;
+  private removeOwnedLockPath;
+  private bindOwnedLockLineage;
   releaseLock(sourceId: string, workflowId: string): Promise<void>;
   completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
   assertCleanTree(sourceId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
@@ -2297,6 +2339,8 @@ interface OrphanedInstallation {
   packageName: string;
   dependencySpec: string;
   configuredBundle: boolean;
+  adoptable?: false;
+  adoptionReason?: string;
   repository?: string;
   commit?: string;
 }
@@ -2381,10 +2425,10 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   diagnose(input: WorkflowDiagnoseInput, exec: ToolRunContext): Promise<WorkflowView>;
   recover(input: WorkflowRecoveryInput, exec: ToolRunContext): Promise<WorkflowView>;
   remove(input: RemoveInput, exec: ToolRunContext): Promise<RemovalResult>;
-  listVersions(input: VersionsInput): Promise<CapabilityVersionList>;
+  listVersions(input: VersionsInput, exec?: ToolRunContext): Promise<CapabilityVersionList>;
   rollback(input: RollbackInput, exec: ToolRunContext): Promise<InstallationRecord>;
-  scanOrphans(): Promise<OrphanScan>;
-  adopt(input: AdoptInput): Promise<InstallationRecord>;
+  scanOrphans(exec: ToolRunContext): Promise<OrphanScan>;
+  adopt(input: AdoptInput, exec: ToolRunContext): Promise<InstallationRecord>;
   checkUpdates(exec: ToolRunContext): Promise<CapabilityUpdateReport>;
   private adoptDeps;
   private versionTrackingDeps;
@@ -2460,7 +2504,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   findInstallationForWorkflow(workflowId: string): Promise<InstallationRecord | undefined>;
   listInstallProfiles(): Promise<string[]>;
   managedWorkAvailable(exec: WorkflowExec): boolean;
-  enableTargetProfile(): Promise<string | undefined>;
+  enableTargetProfile(exec: WorkflowExec): Promise<string | undefined>;
   enableBuiltin(workflow: WorkflowRecord, exec: WorkflowExec): Promise<InstallationRecord>;
   private currentProfileOwner;
   private persistReviewed;
@@ -2472,15 +2516,7 @@ declare const name = "autoevo";
 declare const inject: readonly ["tools", "skills", "subprocess", "systemPrompt"];
 type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
-declare function createIsEvolutionMode(ctx: Context): (agent: Agent) => boolean;
-declare function installCordisInspectCompatibilityWhenAvailable(ctx: Context): void;
-declare function receiptOwnedRoots(stateRoot: string): string[];
-declare const _testing: {
-  createIsEvolutionMode: typeof createIsEvolutionMode;
-  installCordisInspectCompatibilityWhenAvailable: typeof installCordisInspectCompatibilityWhenAvailable;
-  receiptOwnedRoots: typeof receiptOwnedRoots;
-};
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, type ExecutionLease, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, _testing, apply, classifyRuntimeSurface, hostLayerSuccess, inject, inspectLoadedToolSafety, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
+export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, apply, classifyRuntimeSurface, hostLayerSuccess, inject, inspectLoadedToolSafety, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
 //# sourceMappingURL=index.d.ts.map

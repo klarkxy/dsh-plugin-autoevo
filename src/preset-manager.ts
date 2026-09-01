@@ -378,40 +378,222 @@ async function isPidAlive(pid: number): Promise<boolean> {
   return isProcessAlive(pid)
 }
 
-async function acquireMigrationLock(presetsRoot: string): Promise<string> {
-  const lockFile = migrationLockPath(presetsRoot)
-  const payload = `${JSON.stringify({
+interface MigrationLockBody {
+  pid: number
+  createdAt: string
+  lockToken?: string
+}
+
+interface MigrationLockHandle {
+  lockFile: string
+  lockToken: string
+}
+
+interface MigrationLockTesting {
+  token?: () => string
+  isProcessAlive?: (pid: number) => boolean | Promise<boolean>
+  beforeRecoveryMarker?: () => Promise<void>
+  writeLock?: (lockFile: string, payload: string) => Promise<void>
+  afterLockWrite?: () => Promise<void>
+}
+
+interface RecoveryMarker {
+  recoveryToken: string
+  observedLock: string
+}
+
+function migrationRecoveryMarkerPath(lockFile: string): string {
+  return `${lockFile}.recovery`
+}
+
+function migrationBusy(): Error {
+  return new Error('AutoEvo evolution preset migration is already running')
+}
+
+function serializeMigrationLock(body: MigrationLockBody): string {
+  return `${JSON.stringify(body, null, 2)}\n`
+}
+
+function isMigrationLockBody(value: unknown): value is MigrationLockBody {
+  if (!value || typeof value !== 'object') return false
+  const body = value as Record<string, unknown>
+  return Number.isInteger(body.pid)
+    && typeof body.pid === 'number'
+    && body.pid > 0
+    && typeof body.createdAt === 'string'
+    && body.createdAt.length > 0
+    && (body.lockToken === undefined || (typeof body.lockToken === 'string' && body.lockToken.length > 0))
+}
+
+async function readMigrationLock(lockFile: string): Promise<{ raw: string; body: MigrationLockBody }> {
+  const raw = await readFile(lockFile, 'utf8')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('AutoEvo refused migration lock recovery: lock body is invalid')
+  }
+  if (!isMigrationLockBody(parsed)) {
+    throw new Error('AutoEvo refused migration lock recovery: lock body is invalid')
+  }
+  return { raw, body: parsed }
+}
+
+async function readRecoveryMarker(markerFile: string): Promise<string | undefined> {
+  try {
+    return await readFile(markerFile, 'utf8')
+  } catch (error) {
+    if (isNotFound(error)) return undefined
+    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function assertNoRecoveryMarker(markerFile: string): Promise<void> {
+  if ((await readRecoveryMarker(markerFile)) !== undefined) throw migrationBusy()
+}
+
+async function removeMigrationLockIfOwned(handle: MigrationLockHandle): Promise<void> {
+  let current: { body: MigrationLockBody }
+  try {
+    current = await readMigrationLock(handle.lockFile)
+  } catch (error) {
+    if (isNotFound(error)) return
+    throw error
+  }
+  if (current.body.lockToken !== handle.lockToken) return
+  try {
+    await unlink(handle.lockFile)
+  } catch (error) {
+    if (!isNotFound(error)) throw error
+  }
+}
+
+async function publishMigrationLock(
+  lockFile: string,
+  markerFile: string,
+  token: string,
+  testing: MigrationLockTesting,
+  expectedMarker?: string,
+): Promise<MigrationLockHandle> {
+  if (expectedMarker !== undefined) {
+    if ((await readRecoveryMarker(markerFile)) !== expectedMarker) throw migrationBusy()
+  } else {
+    await assertNoRecoveryMarker(markerFile)
+  }
+  const handle = { lockFile, lockToken: token }
+  const payload = serializeMigrationLock({
     pid: process.pid,
     createdAt: new Date().toISOString(),
-  }, null, 2)}\n`
+    lockToken: token,
+  })
   try {
-    await writeFile(lockFile, payload, { encoding: 'utf8', flag: 'wx' })
-    return lockFile
+    await (testing.writeLock ?? ((target, body) => writeFile(target, body, { encoding: 'utf8', flag: 'wx' })))(lockFile, payload)
+    await testing.afterLockWrite?.()
+    if (expectedMarker !== undefined) {
+      if ((await readRecoveryMarker(markerFile)) !== expectedMarker) throw migrationBusy()
+    } else {
+      await assertNoRecoveryMarker(markerFile)
+    }
+    return handle
   } catch (error) {
+    await removeMigrationLockIfOwned(handle).catch(() => undefined)
+    throw error
+  }
+}
+
+async function acquireMigrationLock(
+  presetsRoot: string,
+  testing: MigrationLockTesting = {},
+): Promise<MigrationLockHandle> {
+  const lockFile = migrationLockPath(presetsRoot)
+  const markerFile = migrationRecoveryMarkerPath(lockFile)
+  const nextToken = testing.token ?? randomSuffix
+  try {
+    return await publishMigrationLock(lockFile, markerFile, nextToken(), testing)
+  } catch (error) {
+    if (error instanceof Error && /already running/u.test(error.message)) throw error
     if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
       throw error
     }
   }
+
+  let observed: { raw: string; body: MigrationLockBody }
   try {
-    const existing = JSON.parse(await readFile(lockFile, 'utf8')) as { pid?: number }
-    if (await isPidAlive(Number(existing.pid))) {
-      throw new Error('AutoEvo evolution preset migration is already running')
-    }
-    await unlink(lockFile)
+    observed = await readMigrationLock(lockFile)
   } catch (error) {
-    if (error instanceof Error && /already running/u.test(error.message)) throw error
-    // Fail closed on unreadable/permissioned lock.
     throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
   }
-  await writeFile(lockFile, payload, { encoding: 'utf8', flag: 'wx' })
-  return lockFile
+
+  let alive: boolean
+  try {
+    alive = await (testing.isProcessAlive ?? isPidAlive)(observed.body.pid)
+  } catch (error) {
+    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (alive) throw migrationBusy()
+
+  await testing.beforeRecoveryMarker?.()
+  const recoveryToken = nextToken()
+  const marker = `${JSON.stringify({ recoveryToken, observedLock: observed.raw } satisfies RecoveryMarker, null, 2)}\n`
+  try {
+    await writeFile(markerFile, marker, { encoding: 'utf8', flag: 'wx' })
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw migrationBusy()
+    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  let unlinked = false
+  try {
+    const current = await readMigrationLock(lockFile)
+    if (current.raw !== observed.raw || (await readRecoveryMarker(markerFile)) !== marker) {
+      throw migrationBusy()
+    }
+    await unlink(lockFile)
+    unlinked = true
+
+    const replacement = await publishMigrationLock(lockFile, markerFile, nextToken(), {
+      ...testing,
+      afterLockWrite: async () => {
+        await testing.afterLockWrite?.()
+        if ((await readRecoveryMarker(markerFile)) !== marker) throw migrationBusy()
+      },
+    }, marker)
+    try {
+      await unlink(markerFile)
+    } catch (error) {
+      if (!isNotFound(error)) throw error
+    }
+    return replacement
+  } catch (error) {
+    if (!unlinked) {
+      const currentMarker = await readRecoveryMarker(markerFile).catch(() => undefined)
+      if (currentMarker === marker) await unlink(markerFile).catch(() => undefined)
+    }
+    if (error instanceof Error && /already running/u.test(error.message)) throw error
+    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
-async function releaseMigrationLock(lockFile: string): Promise<void> {
+async function releaseMigrationLock(handle: MigrationLockHandle): Promise<void> {
+  await removeMigrationLockIfOwned(handle)
+}
+
+async function runWithMigrationLockRelease<T>(
+  operation: () => Promise<T>,
+  release: () => Promise<void>,
+): Promise<T> {
+  let operationFailed = false
   try {
-    await unlink(lockFile)
+    return await operation()
   } catch (error) {
-    if (!isNotFound(error)) throw error
+    operationFailed = true
+    throw error
+  } finally {
+    try {
+      await release()
+    } catch (error) {
+      if (!operationFailed) throw error
+    }
   }
 }
 
@@ -466,12 +648,10 @@ export async function materializeEvolutionPreset(
   const renamePath = options.rename ?? rename
 
   const lockFile = await acquireMigrationLock(presetsRoot)
-  try {
+  return await runWithMigrationLockRelease(async () => {
     await recoverInterruptedMigration(presetsRoot, targetDir, renamePath, options.logger)
     return await materializeEvolutionPresetLocked(options, paths, presetsRoot, targetDir, renamePath)
-  } finally {
-    await releaseMigrationLock(lockFile).catch(() => undefined)
-  }
+  }, async () => await releaseMigrationLock(lockFile))
 }
 
 async function materializeEvolutionPresetLocked(
@@ -614,6 +794,7 @@ export const _testing = {
   listExactChildren,
   acquireMigrationLock,
   releaseMigrationLock,
+  runWithMigrationLockRelease,
   recoverInterruptedMigration,
   migrationLockPath,
   isPidAlive,

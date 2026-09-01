@@ -190,14 +190,12 @@ function repairCancelled(): EvolutionError {
 async function waitForIdleOrAbort(
   handle: AgentHandle,
   signal: AbortSignal | undefined,
-  dispose: () => Promise<void>,
 ): Promise<void> {
   if (!signal) {
     await handle.agent.whenIdle()
     return
   }
   if (signal.aborted) {
-    await dispose()
     throw repairCancelled()
   }
   let onAbort: (() => void) | undefined
@@ -211,7 +209,6 @@ async function waitForIdleOrAbort(
       aborted,
     ])
     if (outcome === 'aborted') {
-      await dispose()
       throw repairCancelled()
     }
   } finally {
@@ -272,6 +269,7 @@ export class DshRepairChildHost implements RepairChildHost {
       disposePromise ??= handle.dispose()
       return disposePromise
     }
+    let primaryFailed = false
     try {
       if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
         throw new EvolutionError('invalid_input', 'Created repair Agent is not owned by the initiating parent Agent')
@@ -283,7 +281,7 @@ export class DshRepairChildHost implements RepairChildHost {
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
         content: [{ type: 'text', text: repairInstruction(request) }],
       }))
-      await waitForIdleOrAbort(handle, request.signal, dispose)
+      await waitForIdleOrAbort(handle, request.signal)
       assertCompletedRepair(handle.agent)
       const taskResult = assistantText(handle.agent)
       if (!taskResult.endsWith(REPAIR_RESULT_MARKER)) {
@@ -296,8 +294,15 @@ export class DshRepairChildHost implements RepairChildHost {
         permissionSource,
         agentPreset: REPAIR_PRESET_ID,
       }
+    } catch (error) {
+      primaryFailed = true
+      throw error
     } finally {
-      await dispose()
+      try {
+        await dispose()
+      } catch (error) {
+        if (!primaryFailed) throw error
+      }
     }
   }
 }
