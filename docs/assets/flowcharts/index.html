@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSH AutoEvo · Flowcharts 流程图</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --card: #ffffff; --text: #1a1d21; --muted: #5b6470;
+    --border: #e3e6ea; --accent: #3b6fe0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1114; --card: #181c21; --text: #e8eaed; --muted: #9aa4b0;
+      --border: #2a313a; --accent: #6d9dff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 24px; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 32px; font-size: 0.95rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 24px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  .links { display: flex; gap: 12px; font-size: 0.9rem; }
+  .links a {
+    color: var(--accent); border: 1px solid var(--border); border-radius: 999px;
+    padding: 2px 14px; text-decoration: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .links a:hover { border-color: var(--accent); }
+  footer { margin-top: 40px; font-size: 0.85rem; color: var(--muted); }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>DSH AutoEvo · Flowcharts</h1>
+  <p class="sub">架构与工作流程图 / Architecture &amp; workflow diagrams</p>
+
+  <div class="card">
+    <h2>Main Workflow · 主工作流程</h2>
+    <div class="links">
+      <a href="autoevo-main-workflow.html">中文</a>
+      <a href="autoevo-main-workflow-en.html">English</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Managed Work · 托管工作</h2>
+    <div class="links">
+      <a href="autoevo-managed-work.html">中文</a>
+      <a href="autoevo-managed-work-en.html">English</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Install Outcomes · 安装结果</h2>
+    <div class="links">
+      <a href="autoevo-install-outcomes.html">中文</a>
+      <a href="autoevo-install-outcomes-en.html">English</a>
+    </div>
+  </div>
+
+  <footer>
+    Source: <a href="https://github.com/klarkxy/dsh-plugin-autoevo">github.com/klarkxy/dsh-plugin-autoevo</a>
+  </footer>
+</main>
+</body>
+</html>

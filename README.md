@@ -23,7 +23,7 @@
 | 状态机、数据布局和运行时接缝 | [架构说明](docs/architecture.md) |
 | 信任边界、安装门槛和验证证据 | [安全模型](docs/security.md) |
 
-每类内容只有一个权威出处。交互流程图（独立 HTML，可缩放、搜索与导出）：[主工作流](docs/assets/flowcharts/autoevo-main-workflow.html) · [安装结果状态机](docs/assets/flowcharts/autoevo-install-outcomes.html) · [托管施工](docs/assets/flowcharts/autoevo-managed-work.html)。
+每类内容只有一个权威出处。交互流程图（独立 HTML，可缩放、搜索与导出）：[主工作流](docs/assets/flowcharts/autoevo-main-workflow.html) · [安装结果状态机](docs/assets/flowcharts/autoevo-install-outcomes.html) · [托管施工](docs/assets/flowcharts/autoevo-managed-work.html)。在线浏览（GitHub Pages）：<https://klarkxy.github.io/dsh-plugin-autoevo/>。
 
 ## 安装
 
