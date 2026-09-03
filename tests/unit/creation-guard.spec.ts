@@ -6,12 +6,11 @@ import type {
   ResolutionAuthorization,
 } from '../../src/contracts.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from '../../src/evolution-contracts.js'
-import {
-  CREATOR_SKILL_MARKER,
-  CREATOR_SKILL_NAME,
-  CREATOR_SKILL_PROVIDER,
-  OFFICIAL_CREATOR_SKILL_NAME,
-} from '../../src/creator-skill.js'
+
+const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
+const CREATOR_SKILL_PROVIDER = 'dsh-plugin-autoevo'
+const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v2'
+const OFFICIAL_CREATOR_SKILL_NAME = 'cordis-plugin-development'
 
 const agent = {} as Agent
 const otherAgent = {} as Agent

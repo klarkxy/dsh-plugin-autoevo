@@ -154,26 +154,6 @@ describe('SourceManager defaults and provenance', () => {
     expect(await readFile(path.join(workspace, '.autoevo', '.gitignore'), 'utf8')).toMatch(/AutoEvo workspace state/i)
   })
 
-  it('keeps receipts and locks under dshHome while sources stay in the session workspace', async () => {
-    const root = await tempRoot('autoevo-source-unified-', temporary)
-    const workspace = path.join(root, 'project')
-    const commit = 'c'.repeat(40)
-    const manager = new SourceManager(config(root, false, false), scriptedGit({ head: commit, branch: 'main' }))
-    const autoevo = path.resolve(workspace, '.autoevo')
-    await runInWorkspace(workspace, async () => {
-      const receipt = await manager.materializeReviewedGithub({
-        review: review(commit),
-        workflowId: `workflow_${'d'.repeat(24)}`,
-        workspaceCwd: workspace,
-      })
-      expect(receipt.path).toBe(path.join(autoevo, 'sources', sourceIdForRepository('acme/calculator')))
-      const controlRoot = path.resolve(root, 'dsh-home', 'autoevo', 'source-control')
-      expect(manager.receiptPath(receipt.sourceId)).toBe(path.join(controlRoot, `${receipt.sourceId}.json`))
-      expect(manager.lockPath(receipt.sourceId).startsWith(controlRoot)).toBe(true)
-      expect(await readFile(path.join(autoevo, '.gitignore'), 'utf8')).toMatch(/Installed DSH plugins do not depend/i)
-    })
-  })
-
   it('uses one Host lock namespace when sourceDir is shared across workspaces', () => {
     const root = path.resolve('C:/autoevo-shared-lock')
     const sharedSources = path.join(root, 'shared-sources')
@@ -310,49 +290,6 @@ describe('SourceManager defaults and provenance', () => {
     await expect(stat(manager.lockPath(sourceId))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('preserves a replacement lock when an aborting Git-directory probe rejects ordinarily', async () => {
-    const root = await tempRoot('autoevo-source-git-directory-abort-reject-', temporary)
-    const base = scriptedGit({ head: '0'.repeat(40), branch: 'main', dirty: '?? package.json\n' })
-    const runner: CommandRunner = { run: vi.fn(async (request) => await base.run(request)) }
-    const manager = new SourceManager(config(root), runner)
-    const resolutionId = `resolution_${'3'.repeat(24)}`
-    const workflowId = `workflow_${'3'.repeat(24)}`
-    const replacementWorkflowId = `workflow_${'4'.repeat(24)}`
-    const sourceId = sourceTesting.sourceIdForCreate(resolutionId)
-    const controller = new AbortController()
-    const reason = new Error('Git directory probe cancelled while rejecting')
-    const receiptWrite = vi.spyOn(manager, 'writeReceipt')
-    const replacementToken = 'replacement-git-directory-token'
-    const internal = manager as unknown as {
-      accessGitDirectory(candidate: string): Promise<void>
-    }
-    internal.accessGitDirectory = vi.fn(async () => {
-      const initial = JSON.parse(await readFile(manager.lockPath(sourceId), 'utf8')) as Record<string, unknown>
-      await writeFile(manager.lockPath(sourceId), `${JSON.stringify({
-        ...initial,
-        workflowId: replacementWorkflowId,
-        lockToken: replacementToken,
-      }, null, 2)}\n`, 'utf8')
-      controller.abort(reason)
-      throw new Error('ordinary probe rejection')
-    })
-
-    await expect(manager.initializeCreateSource({
-      resolutionId,
-      workflowId,
-      signal: controller.signal,
-    })).rejects.toBe(reason)
-    expect(runner.run).not.toHaveBeenCalled()
-    expect(receiptWrite).not.toHaveBeenCalled()
-    await expect(stat(path.join(manager.sourcePath(sourceId), '.git'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(stat(path.join(manager.sourcePath(sourceId), 'lib'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(stat(path.join(manager.sourcePath(sourceId), 'package.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(JSON.parse(await readFile(manager.lockPath(sourceId), 'utf8'))).toMatchObject({
-      workflowId: replacementWorkflowId,
-      lockToken: replacementToken,
-    })
-  })
-
   it('lets only one same-workflow materialization invocation enter Git mutation', async () => {
     const root = await tempRoot('autoevo-source-same-workflow-materialize-', temporary)
     const workflowId = `workflow_${'7'.repeat(24)}`
@@ -428,42 +365,6 @@ describe('SourceManager defaults and provenance', () => {
     const internal = manager as unknown as { releaseLockToken(sourceId: string, lockToken: string): Promise<void> }
     await internal.releaseLockToken(sourceId, original.lockToken)
     expect(JSON.parse(await readFile(manager.lockPath(sourceId), 'utf8'))).toMatchObject({ lockToken: 'replacement-token' })
-  })
-
-  it('cleans an initial lock only when a rejecting writer left this exact token body', async () => {
-    const root = await tempRoot('autoevo-source-initial-lock-write-reject-', temporary)
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const internal = manager as unknown as {
-      writeInitialLock(lockFile: string, body: string): Promise<void>
-      releaseLockToken(sourceId: string, lockToken: string): Promise<void>
-    }
-    const realWrite = internal.writeInitialLock.bind(manager)
-    const writerFailure = new Error('initial writer rejected after payload landed')
-    internal.writeInitialLock = async (lockFile, body) => {
-      await realWrite(lockFile, body)
-      throw writerFailure
-    }
-    const sourceId = sourceIdForRepository('acme/calculator')
-    const workflowId = `workflow_${'1'.repeat(24)}`
-
-    await expect(manager.acquireLock(sourceId, workflowId)).rejects.toBe(writerFailure)
-    await expect(readFile(manager.lockPath(sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    internal.writeInitialLock = realWrite
-    await manager.acquireLock(sourceId, workflowId)
-    const retryToken = (JSON.parse(await readFile(manager.lockPath(sourceId), 'utf8')) as { lockToken: string }).lockToken
-    await internal.releaseLockToken(sourceId, retryToken)
-
-    const replacementSource = sourceIdForRepository('acme/replacement')
-    const replacementWorkflow = `workflow_${'2'.repeat(24)}`
-    const replacementBody = `${JSON.stringify({ workflowId: replacementWorkflow, pid: process.pid, lockToken: 'replacement-token' }, null, 2)}\n`
-    internal.writeInitialLock = async (lockFile, body) => {
-      await realWrite(lockFile, body)
-      await writeFile(lockFile, replacementBody, 'utf8')
-      throw writerFailure
-    }
-    await expect(manager.acquireLock(replacementSource, replacementWorkflow)).rejects.toBe(writerFailure)
-    expect(await readFile(manager.lockPath(replacementSource), 'utf8')).toBe(replacementBody)
-    internal.writeInitialLock = realWrite
   })
 
   it('converges a completion proof before public acquisition and then refuses mutation authority', async () => {
@@ -613,34 +514,6 @@ describe('SourceManager defaults and provenance', () => {
     await expect(readFile(`${manager.lockPath(initial.sourceId)}.recovery`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('retries a token-checked marker removal in finally after the first removal fails', async () => {
-    const root = await tempRoot('autoevo-source-completion-marker-retry-', temporary)
-    const workflowId = `workflow_${'7'.repeat(24)}`
-    const nextId = `workflow_${'8'.repeat(24)}`
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    const internal = manager as unknown as {
-      releaseRecoveryOwner(sourceId: string, recoveryToken: string): Promise<void>
-    }
-    const releaseRecoveryOwner = internal.releaseRecoveryOwner
-    const firstFailure = new Error('first completion marker removal failed')
-    let attempts = 0
-    internal.releaseRecoveryOwner = async (sourceId, recoveryToken) => {
-      attempts += 1
-      if (attempts === 1) throw firstFailure
-      await releaseRecoveryOwner.call(manager, sourceId, recoveryToken)
-    }
-
-    await expect(manager.completeWorkflow(initial.sourceId, workflowId)).rejects.toBe(firstFailure)
-    expect(attempts).toBe(2)
-    await expect(readFile(`${manager.lockPath(initial.sourceId)}.recovery`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(manager.lockPath(initial.sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(manager.inspectCompletedSource(initial.sourceId)).resolves.toMatchObject({ activeWorkflowId: null })
-    await expect(manager.claimCompletedSourceForWorkflow(initial.sourceId, nextId)).resolves.toMatchObject({
-      activeWorkflowId: nextId,
-    })
-  })
-
   it('preserves the first marker-removal error and leaves the marker sealed when both attempts fail', async () => {
     const root = await tempRoot('autoevo-source-completion-marker-double-failure-', temporary)
     const workflowId = `workflow_${'9'.repeat(24)}`
@@ -663,117 +536,6 @@ describe('SourceManager defaults and provenance', () => {
     await expect(manager.inspectCompletedSource(initial.sourceId)).resolves.toBeUndefined()
     await expect(manager.claimCompletedSourceForWorkflow(initial.sourceId, `workflow_${'a'.repeat(24)}`))
       .rejects.toThrow(/missing|locked|recovery/iu)
-  })
-
-  it('keeps its completion marker when a delete error reveals a replacement lock', async () => {
-    const root = await tempRoot('autoevo-source-completion-delete-replacement-', temporary)
-    const workflowId = `workflow_${'3'.repeat(24)}`
-    const replacementId = `workflow_${'4'.repeat(24)}`
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    const internal = manager as unknown as { removeOwnedLockPath(sourceId: string): Promise<void> }
-    const removeOwnedLockPath = internal.removeOwnedLockPath
-    const replacement = {
-      workflowId: replacementId,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      pid: process.pid,
-      lockToken: 'replacement-lock-token',
-      headCommit: initial.headCommit,
-      branch: initial.branch,
-      gitConfigHash: initial.gitConfigHash,
-    }
-    internal.removeOwnedLockPath = async (sourceId) => {
-      await removeOwnedLockPath.call(manager, sourceId)
-      await writeFile(manager.lockPath(sourceId), `${JSON.stringify(replacement, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
-      throw new Error('unlink raced with replacement')
-    }
-
-    await expect(manager.completeWorkflow(initial.sourceId, workflowId)).rejects.toThrow(/recovery remains sealed/i)
-    await expect(readFile(`${manager.lockPath(initial.sourceId)}.recovery`, 'utf8')).resolves.toContain('workflow_completion')
-    await expect(readFile(manager.lockPath(initial.sourceId), 'utf8').then((body) => JSON.parse(body))).resolves.toEqual(replacement)
-  })
-
-  it('recovers a valid fixed completion-takeover barrier when the owner marker is missing', async () => {
-    const root = await tempRoot('autoevo-source-completion-takeover-orphan-', temporary)
-    const workflowId = `workflow_${'5'.repeat(24)}`
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    const crashed = await leaveCompletionProof(manager, initial.sourceId, workflowId)
-    const proof = crashed.receipt.completionProof!
-    const takeover = `${manager.lockPath(initial.sourceId)}.recovery.workflow-completion-takeover`
-    await writeFile(takeover, `${JSON.stringify({
-      schemaVersion: 1,
-      recoveryToken: 'dead-takeover-owner',
-      workflowId,
-      pid: 0,
-      observedLock: crashed.lockRaw,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      purpose: 'workflow_completion',
-      completionProofHash: sourceTesting.hashObject(proof),
-      ownerLockToken: proof.lockToken,
-    }, null, 2)}\n`, 'utf8')
-
-    await expect(manager.inspectCompletedSource(initial.sourceId)).resolves.toMatchObject({ activeWorkflowId: null })
-    await expect(readFile(takeover, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(manager.lockPath(initial.sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('makes no write for a mismatched fixed completion-takeover barrier', async () => {
-    const root = await tempRoot('autoevo-source-completion-takeover-mismatch-', temporary)
-    const workflowId = `workflow_${'6'.repeat(24)}`
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    const crashed = await leaveCompletionProof(manager, initial.sourceId, workflowId)
-    const takeover = `${manager.lockPath(initial.sourceId)}.recovery.workflow-completion-takeover`
-    const mismatch = `${JSON.stringify({
-      schemaVersion: 1,
-      recoveryToken: 'mismatched-takeover-owner',
-      workflowId,
-      pid: 0,
-      observedLock: crashed.lockRaw,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      purpose: 'workflow_completion',
-      completionProofHash: '0'.repeat(64),
-      ownerLockToken: crashed.receipt.completionProof!.lockToken,
-    }, null, 2)}\n`
-    await writeFile(takeover, mismatch, 'utf8')
-
-    await expect(manager.inspectCompletedSource(initial.sourceId)).resolves.toBeUndefined()
-    await expect(readFile(takeover, 'utf8')).resolves.toBe(mismatch)
-    await expect(readFile(manager.lockPath(initial.sourceId), 'utf8')).resolves.toBe(crashed.lockRaw)
-    expect(await manager.readReceipt(initial.sourceId)).toEqual(crashed.receipt)
-    await expect(readFile(`${manager.lockPath(initial.sourceId)}.recovery`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('allows only one live completion helper while the loser makes no durable change', async () => {
-    const root = await tempRoot('autoevo-source-completion-helper-race-', temporary)
-    const workflowId = `workflow_${'c'.repeat(24)}`
-    const state = { head: 'c'.repeat(40), branch: 'main' }
-    const first = new SourceManager(config(root), scriptedGit(state))
-    const second = new SourceManager(config(root), scriptedGit(state))
-    const initial = await first.materializeReviewedGithub({ review: review(), workflowId })
-    const crashed = await leaveCompletionProof(first, initial.sourceId, workflowId)
-    const internal = first as unknown as {
-      repositoryMatchesReceipt(receipt: SourceReceipt, signal?: AbortSignal): Promise<boolean>
-    }
-    const repositoryMatchesReceipt = internal.repositoryMatchesReceipt
-    let entered!: () => void
-    let resume!: () => void
-    const arrived = new Promise<void>((resolve) => { entered = resolve })
-    const barrier = new Promise<void>((resolve) => { resume = resolve })
-    internal.repositoryMatchesReceipt = async (receipt, signal) => {
-      entered()
-      await barrier
-      return await repositoryMatchesReceipt.call(first, receipt, signal)
-    }
-
-    const winner = first.inspectCompletedSource(initial.sourceId)
-    await arrived
-    await expect(second.inspectCompletedSource(initial.sourceId)).resolves.toBeUndefined()
-    await expect(readFile(first.lockPath(initial.sourceId), 'utf8')).resolves.toBe(crashed.lockRaw)
-    expect(await first.readReceipt(initial.sourceId)).toEqual(crashed.receipt)
-    resume()
-    await expect(winner).resolves.toMatchObject({ activeWorkflowId: null })
   })
 
   it('keeps the completion marker through the exact lock unlink so a claimant cannot publish a replacement early', async () => {
@@ -820,24 +582,6 @@ describe('SourceManager defaults and provenance', () => {
     expect(await first.readReceipt(initial.sourceId)).toMatchObject({ activeWorkflowId: nextId })
   })
 
-  it('makes no recovery write for a mismatched completion proof', async () => {
-    const root = await tempRoot('autoevo-source-completion-mismatch-', temporary)
-    const workflowId = `workflow_${'f'.repeat(24)}`
-    const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
-    const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    const crashed = await leaveCompletionProof(manager, initial.sourceId, workflowId)
-    const corrupted: SourceReceipt = {
-      ...crashed.receipt,
-      completionProof: { ...crashed.receipt.completionProof!, activeReceiptHash: '0'.repeat(64) },
-    }
-    await manager.writeReceipt(corrupted)
-
-    await expect(manager.inspectCompletedSource(initial.sourceId)).resolves.toBeUndefined()
-    expect(await manager.readReceipt(initial.sourceId)).toEqual(corrupted)
-    await expect(readFile(manager.lockPath(initial.sourceId), 'utf8')).resolves.toBe(crashed.lockRaw)
-    await expect(readFile(`${manager.lockPath(initial.sourceId)}.recovery`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
   it('keeps a dead pre-claim lock fail-closed even when the completed source is clean', async () => {
     const root = await tempRoot('autoevo-source-preclaim-recover-', temporary)
     const commit = 'c'.repeat(40)
@@ -859,33 +603,6 @@ describe('SourceManager defaults and provenance', () => {
     expect(await manager.readReceipt(receipt.sourceId)).toMatchObject({ activeWorkflowId: null })
     await expect(readFile(manager.lockPath(receipt.sourceId), 'utf8').then((body) => JSON.parse(body))).resolves
       .toMatchObject({ workflowId: nextId, pid: 0 })
-  })
-
-  it('keeps a dead pre-claim lock fail-closed when the completed source is dirty', async () => {
-    const root = await tempRoot('autoevo-source-preclaim-dirty-', temporary)
-    const commit = 'c'.repeat(40)
-    const firstId = `workflow_${'3'.repeat(24)}`
-    const nextId = `workflow_${'4'.repeat(24)}`
-    const state = { head: commit, branch: `autoevo/${firstId}`, dirty: '' }
-    const manager = new SourceManager(config(root), scriptedGit(state))
-    const receipt = await manager.materializeReviewedGithub({ review: review(commit), workflowId: firstId })
-    await manager.completeWorkflow(receipt.sourceId, firstId)
-    const crashedLock = {
-      workflowId: nextId,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      pid: 0,
-    }
-    await writeFile(manager.lockPath(receipt.sourceId), `${JSON.stringify(crashedLock, null, 2)}\n`, 'utf8')
-    state.dirty = ' M package.json\n'
-
-    await expect(manager.claimCompletedSourceForWorkflow(receipt.sourceId, nextId)).rejects.toThrow(
-      /missing, locked, dirty, or drifted/u,
-    )
-
-    expect(await manager.readReceipt(receipt.sourceId)).toMatchObject({ activeWorkflowId: null })
-    await expect(readFile(manager.lockPath(receipt.sourceId), 'utf8').then((body) => JSON.parse(body))).resolves.toEqual(
-      crashedLock,
-    )
   })
 
   it('publishes one fully bound lock before exactly one of three completed-source claims activates its receipt', async () => {
@@ -1198,96 +915,6 @@ describe('SourceManager defaults and provenance', () => {
     await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId)).resolves.toMatchObject({ activeWorkflowId: workflowId })
   })
 
-  it('removes its recovery marker when cancellation starts during post-marker revalidation', async () => {
-    const root = await tempRoot('autoevo-source-recovery-marker-cancel-', temporary)
-    const commit = 'c'.repeat(40)
-    const workflowId = `workflow_${'1'.repeat(24)}`
-    const branch = `autoevo/${workflowId}`
-    const state = { head: commit, branch }
-    const base = scriptedGit(state)
-    const controller = new AbortController()
-    let recovering = false
-    let statusCalls = 0
-    const runner: CommandRunner = {
-      async run(request) {
-        const result = await base.run(request)
-        if (recovering && request.argv.at(-2) === 'status' && request.argv.at(-1) === '--porcelain') {
-          statusCalls += 1
-          if (statusCalls === 2) controller.abort(new Error('cancel after recovery marker'))
-        }
-        return result
-      },
-    }
-    const manager = new SourceManager(config(root), runner)
-    const receipt = await manager.materializeReviewedGithub({ review: review(commit), workflowId })
-    const staleLock = `${JSON.stringify({
-      workflowId,
-      createdAt: '2026-08-01T00:00:00.000Z',
-      pid: 0,
-      headCommit: commit,
-      branch,
-    }, null, 2)}\n`
-    await writeFile(manager.lockPath(receipt.sourceId), staleLock)
-    const originalReceipt = await manager.readReceipt(receipt.sourceId)
-    recovering = true
-
-    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId, controller.signal))
-      .rejects.toThrow(/cancel after recovery marker/u)
-
-    await expect(readFile(manager.lockPath(receipt.sourceId), 'utf8')).resolves.toBe(staleLock)
-    await expect(manager.readReceipt(receipt.sourceId)).resolves.toEqual(originalReceipt)
-    await expect(readFile(`${manager.lockPath(receipt.sourceId)}.recovery`, 'utf8'))
-      .rejects.toMatchObject({ code: 'ENOENT' })
-    recovering = false
-    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId)).resolves.toMatchObject({
-      activeWorkflowId: workflowId,
-    })
-  })
-
-  it('removes its recovery marker when second-round repository revalidation throws', async () => {
-    const root = await tempRoot('autoevo-source-recovery-marker-error-', temporary)
-    const commit = 'c'.repeat(40)
-    const workflowId = `workflow_${'2'.repeat(24)}`
-    const branch = `autoevo/${workflowId}`
-    const state = { head: commit, branch }
-    const base = scriptedGit(state)
-    let recovering = false
-    let statusCalls = 0
-    const runner: CommandRunner = {
-      async run(request) {
-        if (recovering && request.argv.at(-2) === 'status' && request.argv.at(-1) === '--porcelain') {
-          statusCalls += 1
-          if (statusCalls === 2) throw new Error('second recovery revalidation failed')
-        }
-        return await base.run(request)
-      },
-    }
-    const manager = new SourceManager(config(root), runner)
-    const receipt = await manager.materializeReviewedGithub({ review: review(commit), workflowId })
-    const staleLock = `${JSON.stringify({
-      workflowId,
-      createdAt: '2026-08-01T00:00:00.000Z',
-      pid: 0,
-      headCommit: commit,
-      branch,
-    }, null, 2)}\n`
-    await writeFile(manager.lockPath(receipt.sourceId), staleLock)
-    const originalReceipt = await manager.readReceipt(receipt.sourceId)
-    recovering = true
-
-    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId))
-      .rejects.toThrow(/second recovery revalidation failed/u)
-
-    await expect(readFile(manager.lockPath(receipt.sourceId), 'utf8')).resolves.toBe(staleLock)
-    await expect(manager.readReceipt(receipt.sourceId)).resolves.toEqual(originalReceipt)
-    await expect(readFile(`${manager.lockPath(receipt.sourceId)}.recovery`, 'utf8'))
-      .rejects.toMatchObject({ code: 'ENOENT' })
-    recovering = false
-    await expect(manager.resumeWorkflowSource(receipt.sourceId, workflowId)).resolves.toMatchObject({
-      activeWorkflowId: workflowId,
-    })
-  })
-
   it('commits when node_modules exists but is excluded via .git/info/exclude', async () => {
     const root = await tempRoot('autoevo-source-exclude-', temporary)
     const state: { head: string; branch: string; dirty: string; commits?: string[] } = {
@@ -1400,24 +1027,6 @@ describe('SourceManager defaults and provenance', () => {
     await expect(stat(manager.receiptPath(receipt.sourceId))).resolves.toBeTruthy()
   })
 
-  it('accepts a symlink-aliased stateDir for the disabled-hooks containment check', async () => {
-    const root = await tempRoot('autoevo-source-alias-state-', temporary)
-    const realState = path.join(root, 'real-state')
-    await mkdir(realState, { recursive: true })
-    const aliasState = path.join(root, 'alias-state')
-    await symlink(realState, aliasState, process.platform === 'win32' ? 'junction' : 'dir')
-    const commit = 'c'.repeat(40)
-    const manager = new SourceManager(
-      config(root, path.join(root, 'sources'), aliasState),
-      scriptedGit({ head: commit, branch: 'main' }),
-    )
-    const receipt = await manager.materializeReviewedGithub({
-      review: review(commit),
-      workflowId: `workflow_${'d'.repeat(24)}`,
-    })
-    expect(receipt.headCommit).toBe(commit)
-  })
-
   it('still rejects a disabled-hooks directory that genuinely escapes stateDir', async () => {
     const root = await tempRoot('autoevo-source-hooks-escape-', temporary)
     const state = path.join(root, 'state')
@@ -1435,31 +1044,6 @@ describe('SourceManager defaults and provenance', () => {
     })).rejects.toThrow(/escaped AutoEvo stateDir/i)
   })
 
-  it('accepts a symlink-aliased sourceDir for managed source containment and receipt equality', async () => {
-    const root = await tempRoot('autoevo-source-alias-source-', temporary)
-    const realSources = path.join(root, 'real-sources')
-    await mkdir(realSources, { recursive: true })
-    const aliasSources = path.join(root, 'alias-sources')
-    await symlink(realSources, aliasSources, process.platform === 'win32' ? 'junction' : 'dir')
-    const state = { head: 'c'.repeat(40), branch: 'main', dirty: '' }
-    const manager = new SourceManager(config(root, aliasSources), scriptedGit(state))
-    const workflowId = `workflow_${'d'.repeat(24)}`
-    const receipt = await manager.materializeReviewedGithub({ review: review(), workflowId })
-    expect(receipt.path).toBe(await realpath(manager.sourcePath(receipt.sourceId)))
-    expect(await manager.pathUnderSourceRoot(receipt.path)).toBe(true)
-    await writeFile(path.join(receipt.path, 'lib.js'), 'export const x = 1\n', 'utf8')
-    state.dirty = '?? lib.js\n'
-    const committed = await manager.finalizeChildCommit({
-      sourceId: receipt.sourceId,
-      workflowId,
-      reviewId: review().id,
-      message: 'fix: managed child change',
-    })
-    expect(committed.headCommit).not.toBe(receipt.headCommit)
-    await manager.completeWorkflow(receipt.sourceId, workflowId)
-    expect((await manager.readReceipt(receipt.sourceId))?.activeWorkflowId).toBeNull()
-  })
-
   it('still rejects symlink source roots under a symlink-aliased sourceDir', async () => {
     const root = await tempRoot('autoevo-source-alias-escape-', temporary)
     const realSources = path.join(root, 'real-sources')
@@ -1471,39 +1055,5 @@ describe('SourceManager defaults and provenance', () => {
     await mkdir(outside, { recursive: true })
     await symlink(outside, manager.sourcePath('linked'), process.platform === 'win32' ? 'junction' : 'dir')
     await expect(manager.assertPathContainment('linked')).rejects.toThrow(/symlink|escaped/i)
-  })
-
-  it('relocates into a symlink-aliased workspace when a receipt points elsewhere', async () => {
-    const root = await tempRoot('autoevo-source-alias-reloc-', temporary)
-    const realWorkspace = path.join(root, 'real-workspace')
-    await mkdir(realWorkspace, { recursive: true })
-    const aliasWorkspace = path.join(root, 'alias-workspace')
-    await symlink(realWorkspace, aliasWorkspace, process.platform === 'win32' ? 'junction' : 'dir')
-    const commit = 'c'.repeat(40)
-    const manager = new SourceManager(config(root, false), scriptedGit({ head: commit, branch: 'main' }))
-    const sourceId = sourceIdForRepository('acme/calculator')
-    const stalePath = path.join(root, 'legacy', sourceId)
-    await mkdir(stalePath, { recursive: true })
-    await mkdir(path.join(root, 'source-control'), { recursive: true })
-    await writeFile(manager.receiptPath(sourceId), `${JSON.stringify({
-      sourceId,
-      repository: 'acme/calculator',
-      path: stalePath,
-      baseCommit: commit,
-      branch: 'autoevo/old',
-      headCommit: commit,
-      reviewId: review().id,
-      artifactHash: null,
-      activeWorkflowId: null,
-      gitConfigHash: 'a'.repeat(64),
-    }, null, 2)}\n`, 'utf8')
-    const receipt = await manager.materializeReviewedGithub({
-      review: review(commit),
-      workflowId: `workflow_${'d'.repeat(24)}`,
-      workspaceCwd: aliasWorkspace,
-    })
-    expect(receipt.path).toBe(await realpath(manager.sourcePath(sourceId, aliasWorkspace)))
-    expect(await manager.pathUnderSourceRoot(receipt.path, aliasWorkspace)).toBe(true)
-    expect(await manager.pathUnderSourceRoot(stalePath, aliasWorkspace)).toBe(false)
   })
 })

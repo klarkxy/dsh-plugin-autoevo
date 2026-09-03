@@ -90,6 +90,8 @@ async function packedRelativeFiles(root, relative = '') {
   return files
 }
 
+const publishedLocalData = /(?:tests[\\/]|fixtures[\\/]|\bheadless\b|\bworkflow_[a-f0-9]{8,}|(?:^|[^A-Za-z0-9])[a-z]:[\\/]|\/(?:Users|home)\/)/iu
+
 function assertPackedArtifactIsolation(relativePaths) {
   const excluded = /^(?:tests|evals|examples|coverage|node_modules|\.dsh|\.autoevo|\.worker-leases|\.pnpm-store|\.tmp)(?:\/|$)|(?:^|\/)(?:debug|snapshots?)(?:\/|$)|\.(?:log|tmp)$/iu
   for (const relativePath of relativePaths) {
@@ -114,7 +116,7 @@ async function assertPackedUserDocsAreGeneric(packedRoot) {
     const markdown = await readFile(path.join(packedRoot, relativePath), 'utf8')
     assert.doesNotMatch(
       markdown,
-      /(?:tests[\\/]|fixtures[\\/]|\bheadless\b|\bworkflow_[a-f0-9]{8,}|[a-z]:[\\/]|\/(?:Users|home)\/)/iu,
+      publishedLocalData,
       `published user documentation must not contain test or local data: ${relativePath}`,
     )
   }

@@ -36,7 +36,6 @@ import {
   selectInstallVerificationLayer,
 } from '../host-verification-driver.js'
 import { assertSafePackageName } from '../package-name.js'
-import { isTransientPnpmRecoveryCode } from '../process/runner.js'
 import { assertDirectUseAllowed, type InstallCommitmentBinding } from '../review/direct-use.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
@@ -158,11 +157,6 @@ type RecoveryInstallOptions = {
 function parsedInstallRecovery(value: unknown): InstallFailureRecovery | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const item = value as Record<string, unknown>
-  if (item.kind === 'same_authority_once'
-    && item.owner === 'pnpm'
-    && isTransientPnpmRecoveryCode(item.code)) {
-    return { kind: 'same_authority_once', owner: 'pnpm', code: item.code }
-  }
   if (item.kind === 'profile_store_mismatch'
     && item.owner === 'pnpm'
     && item.code === 'ERR_PNPM_UNEXPECTED_STORE') {
@@ -714,57 +708,6 @@ export class PluginInstaller {
     return { expectedProfileStoreFingerprint: recovery.profileStoreFingerprint }
   }
 
-  private async installWithTransientRetry(input: {
-    dshHome: string
-    profile: string
-    installSpec: string
-    cwd: string
-    packageName: string
-    signal?: AbortSignal
-    options?: {
-      forwardCredentials?: boolean
-      minimumReleaseAgeExcludes?: string[]
-      expectedProfileStoreFingerprint?: string
-    }
-  }): Promise<void> {
-    input.signal?.throwIfAborted()
-    try {
-      await this.launcher.install(
-        input.dshHome,
-        input.profile,
-        input.installSpec,
-        input.cwd,
-        input.signal,
-        input.options,
-      )
-      input.signal?.throwIfAborted()
-    } catch (error) {
-      if (input.signal?.aborted) throw input.signal.reason
-      const sealedRecovery = Boolean(input.options?.minimumReleaseAgeExcludes?.length
-        || input.options?.expectedProfileStoreFingerprint)
-      if (sealedRecovery) throw error
-      const failure = installFailure(error, 'install')
-      if (failure.recovery?.kind !== 'same_authority_once') throw error
-      const absent = await this.launcher.profileTargetAbsent(
-        input.dshHome,
-        input.profile,
-        input.packageName,
-      ).catch(() => false)
-      input.signal?.throwIfAborted()
-      if (!absent) throw error
-      input.signal?.throwIfAborted()
-      await this.launcher.install(
-        input.dshHome,
-        input.profile,
-        input.installSpec,
-        input.cwd,
-        input.signal,
-        input.options,
-      )
-      input.signal?.throwIfAborted()
-    }
-  }
-
   private async resolvePredecessor(
     replacement: ReplacementTarget,
     currentInstallationId: string,
@@ -1280,15 +1223,15 @@ export class PluginInstaller {
       throw exec.signal.reason
     }
     try {
-      await this.installWithTransientRetry({
-        dshHome: preflightHome,
-        profile: this.preflightProfile,
+      await this.launcher.install(
+        preflightHome,
+        this.preflightProfile,
         installSpec,
         cwd,
-        packageName,
-        signal: exec.signal,
-        options: { forwardCredentials: false },
-      })
+        exec.signal,
+        { forwardCredentials: false },
+      )
+      exec.signal?.throwIfAborted()
     } catch (error) {
       if (exec.signal?.aborted) {
         await this.settleInterruptedAttempt(attempt, 'preflight')
@@ -1496,18 +1439,18 @@ export class PluginInstaller {
     } = attempt
     exec.signal?.throwIfAborted()
     try {
-      await this.installWithTransientRetry({
+      await this.launcher.install(
         dshHome,
-        profile: input.targetProfile,
+        input.targetProfile,
         installSpec,
         cwd,
-        packageName,
-        signal: exec.signal,
-        ...(recoveryInstallOptions.minimumReleaseAgeExcludes?.length
+        exec.signal,
+        recoveryInstallOptions.minimumReleaseAgeExcludes?.length
           || recoveryInstallOptions.expectedProfileStoreFingerprint
-          ? { options: recoveryInstallOptions }
-          : {}),
-      })
+          ? recoveryInstallOptions
+          : undefined,
+      )
+      exec.signal?.throwIfAborted()
     } catch (error) {
       if (exec.signal?.aborted) {
         await this.settleInterruptedAttempt(attempt, 'destination')

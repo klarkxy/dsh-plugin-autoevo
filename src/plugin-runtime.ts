@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
@@ -43,14 +43,6 @@ export function installCordisInspectCompatibilityWhenAvailable(ctx: Context): vo
   })
 }
 
-interface ReceiptRootCacheEntry {
-  mtimeMs: number
-  size: number
-  roots: string[]
-}
-
-const receiptOwnedRootCache = new Map<string, ReceiptRootCacheEntry>()
-
 function parseOwnedArtifactRoots(filePath: string): string[] {
   const record = JSON.parse(readFileSync(filePath, 'utf8')) as { ownedArtifactRoot?: unknown }
   return typeof record.ownedArtifactRoot === 'string' && record.ownedArtifactRoot.trim()
@@ -61,34 +53,17 @@ function parseOwnedArtifactRoots(filePath: string): string[] {
 export function receiptOwnedRoots(stateRoot: string): string[] {
   const directory = path.join(stateRoot, 'installations')
   try {
-    const listed = readdirSync(directory)
+    return readdirSync(directory)
       .filter((entry) => /^installation_[a-f0-9]{16,64}\.json$/u.test(entry))
       .map((entry) => path.join(directory, entry))
-    const seen = new Set(listed)
-    for (const cachedPath of [...receiptOwnedRootCache.keys()]) {
-      if (path.dirname(cachedPath) === directory && !seen.has(cachedPath)) {
-        receiptOwnedRootCache.delete(cachedPath)
-      }
-    }
-    return listed.flatMap((filePath) => {
+      .flatMap((filePath) => {
       try {
-        const stats = statSync(filePath)
-        const cached = receiptOwnedRootCache.get(filePath)
-        if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
-          return cached.roots
-        }
-        const roots = parseOwnedArtifactRoots(filePath)
-        receiptOwnedRootCache.set(filePath, { mtimeMs: stats.mtimeMs, size: stats.size, roots })
-        return roots
+        return parseOwnedArtifactRoots(filePath)
       } catch {
-        receiptOwnedRootCache.delete(filePath)
         return []
       }
     })
   } catch {
-    for (const cachedPath of [...receiptOwnedRootCache.keys()]) {
-      if (path.dirname(cachedPath) === directory) receiptOwnedRootCache.delete(cachedPath)
-    }
     return []
   }
 }

@@ -188,15 +188,13 @@ describe('effect-aware install cancellation', () => {
     expect(approvalInstall).not.toHaveBeenCalled()
   })
 
-  it('never retries a transient install failure after cancellation', async () => {
+  it('settles a cancelled install without starting another attempt', async () => {
     const current = await fixture()
     const controller = new AbortController()
-    const reason = new Error('cancel transient retry')
+    const reason = new Error('cancel install')
     const install = vi.fn(async () => {
       controller.abort(reason)
-      throw new EvolutionError('command_failed', 'transient pnpm failure', {
-        recovery: { kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_EPERM' },
-      })
+      throw new EvolutionError('command_failed', 'cancelled pnpm failure')
     })
     const installationId = `installation_${'3'.repeat(24)}`
     await expect(installer({

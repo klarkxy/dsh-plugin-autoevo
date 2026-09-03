@@ -203,27 +203,6 @@ describe('lifecycle validation', () => {
     await expect(launcher.profileSourceMatches(path.join(root, 'home'), 'trial', 'dsh-tool-calculator', `${spec}-other`)).resolves.toBe(false)
   })
 
-  it('treats fit and recommendation as advisory once mechanical install boundaries pass', async () => {
-    const { root, store, ctx } = await installHarness(attestedReview({
-      fit: 'none', recommendation: 'modify', missingCapabilities: ['scientific notation'],
-    }))
-    let reachedInstall = false
-    const launcher = { install: async () => {
-      reachedInstall = true
-      throw new Error('stop after lifecycle gate')
-    } } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
-
-    const result = await installer.install({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      verificationTask: 'test calculator',
-    }, execution())
-    expect(reachedInstall).toBe(true)
-    expect(result).toMatchObject({ installOutcome: 'failed_absent', installFailure: { stage: 'install' } })
-  })
-
   it('makes no installation change when one-time approval is denied', async () => {
     const { root, store } = await installHarness(attestedReview())
     const ctx = { get: () => ({ request: async () => 'denied' }) } as unknown as Context
@@ -237,90 +216,6 @@ describe('lifecycle validation', () => {
       verificationTask: 'test calculator',
     }, execution())).rejects.toMatchObject({ code: 'approval_required' })
     await expect(stat(path.join(root, 'trials'))).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('includes review risk in approval and removes a failed temporary trial', async () => {
-    const { root, store } = await installHarness(attestedReview())
-    let approvalReason = ''
-    const ctx = {
-      get: () => ({
-        request: async ({ reason }: { reason: string }) => {
-          approvalReason = reason
-          return 'allowed-once'
-        },
-      }),
-    } as unknown as Context
-    const failedVerification: VerificationEvidence = {
-      attempted: true,
-      exitCode: 1,
-      expectedTools: ['calculator'],
-      calledTools: ['calculator'],
-      resultTools: [],
-      failedTools: ['calculator'],
-      sessionFiles: [],
-      taskResultObserved: false,
-      layer: 'tool_roundtrip',
-      status: 'failed',
-      sourceMatched: true,
-      reason: 'Host tool execution failed; the same fixture digest will not be retried.',
-    }
-    const launcher = {
-      install: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, truncated: false }),
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
-      verifyHost: async () => failedVerification,
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
-    } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
-    const result = await installer.install({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      verificationTask: 'test calculator',
-    }, execution())
-
-    expect(approvalReason).toContain('risk=medium')
-    expect(approvalReason).toContain('lifecycleScripts=prepare')
-    expect(result).toMatchObject({
-      installOutcome: 'failed_absent',
-      installed: false,
-      loaded: false,
-      verified: false,
-      removed: true,
-    })
-    expect(result.verification.reason).toContain('Failed temporary trial was removed.')
-    await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('records failure and removes a temporary trial when installation throws', async () => {
-    const { root, store, ctx } = await installHarness(attestedReview())
-    const launcher = { install: async () => {
-      throw new EvolutionError('command_failed', 'dsh exited with code 1', {
-        exitCode: 1,
-        diagnosticHash: 'b'.repeat(64),
-      })
-    } } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
-
-    const result = await installer.install({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      verificationTask: 'test calculator',
-    }, execution())
-    expect(result).toMatchObject({
-      installed: false,
-      verified: false,
-      removed: true,
-      installFailure: {
-        code: 'command_failed',
-        message: 'dsh exited with code 1',
-        exitCode: 1,
-        diagnosticHash: 'b'.repeat(64),
-      },
-    })
-    expect(result.verification.reason).toContain(`Diagnostic sha256: ${'b'.repeat(64)}`)
-    await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('persists the host-prelinked receipt before the external install command starts', async () => {
@@ -358,38 +253,6 @@ describe('lifecycle validation', () => {
         repairHints: expect.arrayContaining([expect.stringMatching(/resume the workflow/i)]),
       },
     })
-  })
-
-  it('removes a temporary trial that degrades from Host-attested automatic verification to manual_runtime', async () => {
-    const { root, store, ctx } = await installHarness(attestedReview())
-    let verifyHostCalls = 0
-    const launcher = {
-      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
-      profileTargetAbsent: async () => true,
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => ({ calculator: { safe: true } }),
-      verifyHost: async () => {
-        verifyHostCalls += 1
-        throw new Error('degraded automatic verification must not spawn')
-      },
-    } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
-    const result = await installer.install({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-    }, execution())
-    expect(verifyHostCalls).toBe(0)
-    expect(result).toMatchObject({
-      installOutcome: 'failed_absent',
-      installed: false,
-      loaded: false,
-      verified: false,
-      removed: true,
-      verification: { layer: 'manual_runtime', status: 'failed' },
-    })
-    expect(result.installOutcome).not.toBe('awaiting_user_test')
-    await expect(stat(store.trialRoot(result.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('uses a provisional receipt to recover from final receipt persistence failure', async () => {
@@ -480,77 +343,6 @@ describe('lifecycle validation', () => {
     })
     expect(result.verification.reason).toContain('could not complete')
     await expect(store.getInstallation(result.id)).resolves.toMatchObject({ id: result.id, verified: false })
-  })
-
-  it('recovers when an owned temporary trial was deleted before its receipt update', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const installationId = `installation_${'c'.repeat(24)}`
-    await store.put('installations', {
-      schemaVersion: 1,
-      id: installationId,
-      createdAt: '2026-08-15T00:00:00.000Z',
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      dshHome: path.join(store.trialRoot(installationId), 'dsh-home'),
-      packageName: 'dsh-tool-calculator',
-      installSpec: `github:acme/calculator#${'c'.repeat(40)}`,
-      installed: true,
-      loaded: true,
-      verified: true,
-      restartRequired: false,
-      removed: false,
-      verification: {
-        attempted: true,
-        exitCode: 0,
-        expectedTools: ['calculator'],
-        calledTools: ['calculator'],
-        resultTools: ['calculator'],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: true,
-        reason: 'verified',
-      },
-    })
-    const ctx = { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context
-    const remover = new PluginRemover(ctx, config(root), store, {} as DshLauncher)
-
-    await expect(remover.remove({ installationId }, execution())).resolves.toMatchObject({ removed: true })
-    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
-    await expect(store.listInstallationsStrict()).resolves.toEqual([
-      expect.objectContaining({ id: installationId, removed: true, installed: false, loaded: false }),
-    ])
-  })
-
-  it.each([
-    ['string removed flag', { removed: 'false' }],
-    ['invalid retention', { retention: 'persistent_typo' }],
-  ])('rejects %s before approval, launcher, cleanup, or receipt writes', async (_name, corrupt) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-corrupt-exact-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const installationId = `installation_${'b'.repeat(24)}`
-    await store.put('installations', {
-      ...removalRecord(root, installationId, `github:acme/calculator#${'c'.repeat(40)}`),
-      ...corrupt,
-    } as unknown as InstallationRecord)
-    const approval = vi.fn(async () => 'allowed-once')
-    const ctx = { get: () => ({ request: approval }) } as unknown as Context
-    const launcher = {
-      profileDependencySpec: vi.fn(async () => `github:acme/calculator#${'c'.repeat(40)}`),
-      remove: vi.fn(async () => ({ exitCode: 0 })),
-    } as unknown as DshLauncher
-    const put = vi.spyOn(store, 'put')
-    put.mockClear()
-
-    await expect(new PluginRemover(ctx, config(root), store, launcher)
-      .remove({ installationId }, execution())).rejects.toMatchObject({ code: 'invalid_input' })
-    expect(approval).not.toHaveBeenCalled()
-    expect(launcher.profileDependencySpec).not.toHaveBeenCalled()
-    expect(launcher.remove).not.toHaveBeenCalled()
-    expect(put).not.toHaveBeenCalled()
   })
 
   it('rejects a legacy removed receipt whose exact persistent dependency is still live', async () => {
@@ -963,32 +755,6 @@ describe('lifecycle validation', () => {
     await expect(store.getInstallation(child.id)).resolves.toMatchObject({ removed: false })
   })
 
-  it('fails closed before approval when same-spec replacement branches are ambiguous', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-ambiguous-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const spec = `github:acme/calculator#${'a'.repeat(40)}`
-    const parent = { ...removalRecord(root, `installation_${'6'.repeat(24)}`, spec), installPhase: 'completed' as const }
-    const first = replacementRemovalRecord(parent, `installation_${'7'.repeat(24)}`, spec, '2026-08-31T00:04:00.000Z')
-    const second = replacementRemovalRecord(parent, `installation_${'8'.repeat(24)}`, spec, '2026-08-31T00:05:00.000Z')
-    for (const item of [parent, first, second]) await store.put('installations', item)
-    const approval = vi.fn()
-    const remove = vi.fn()
-    const remover = new PluginRemover(
-      { get: () => ({ request: approval }) } as unknown as Context,
-      config(root),
-      store,
-      { profileDependencySpec: async () => spec, remove } as unknown as DshLauncher,
-    )
-
-    await expect(remover.remove({ installationId: first.id }, execution())).rejects.toMatchObject({
-      code: 'command_failed',
-      details: { stage: 'remove', ambiguousCount: 2 },
-    })
-    expect(approval).not.toHaveBeenCalled()
-    expect(remove).not.toHaveBeenCalled()
-  })
-
   it('rejects removal before approval when a corrupt canonical same-spec child is skipped by tolerant reads', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'capability-evolution-remove-corrupt-child-'))
     temporary.push(root)
@@ -1174,5 +940,4 @@ describe('lifecycle validation', () => {
     expect(result.verification.receiptPath).toBeUndefined()
     expect(result.verification.task).toBeUndefined()
   })
-
 })

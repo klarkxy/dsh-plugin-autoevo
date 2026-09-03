@@ -15,6 +15,7 @@ import {
 } from './plugin-runtime.js'
 import { materializeEvolutionPreset } from './preset-manager.js'
 import { DshCommandRunner } from './process/runner.js'
+import { installRuntimeObservations } from './runtime-observations.js'
 import { CapabilityEvolutionService } from './service.js'
 import { StateStore } from './state/store.js'
 import { createTools } from './tools.js'
@@ -115,11 +116,11 @@ export function apply(ctx: Context, input: Config): void {
   installCordisInspectCompatibilityWhenAvailable(ctx)
   const store = new StateStore(() => resolveStateRoot(config))
   const runner = new DshCommandRunner(ctx.subprocess, config)
+  const isEvolutionMode = createIsEvolutionMode(ctx)
   const creationGuard = new CreationGuard({
-    isEvolutionMode: createIsEvolutionMode(ctx),
+    isEvolutionMode,
     bootId: newBootId(),
   })
-  const isEvolutionMode = createIsEvolutionMode(ctx)
   const service = new CapabilityEvolutionService(ctx, config, runner, store, creationGuard)
 
   void materializeEvolutionPreset({
@@ -142,6 +143,7 @@ export function apply(ctx: Context, input: Config): void {
       context.agent && isEvolutionMode(context.agent) ? POLICY : ''
     ),
   })
+  installRuntimeObservations(ctx, { isEvolutionMode })
   ctx.on('agent/inbox/claimed', (payload) => {
     if (isTrustedTopLevelUserMessage(payload.message)) {
       creationGuard.rememberUserMessage(payload.agent, payload.message)

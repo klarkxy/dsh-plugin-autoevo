@@ -68,6 +68,8 @@ When an ordinary workflow, project permission, plugin/Profile, or DSH Host fault
 
 AutoEvo owns workflow, warnings, and evidence records; DSH Core enforces permissions, sandboxes, and approvals. The default flow remains read-only or managed. Full-access fault repair also uses DSH Core's official permission preset and requires fresh user confirmation. Installed or repaired code ultimately runs with the current user's authority. See the [Security Model](docs/security.md) (Chinese) for the full trust boundary.
 
+In a Capability Evolution session, the Host also watches the same Agent for tool failures, consecutive identical tool calls, and LLM request-error events. After 3 hits inside 5 minutes, the next system prompt includes a read-only hint (no raw arguments, error text, or raw error codes) suggesting the existing `capability_workflow` only when it is relevant to the user's current capability need. The hint is not authorization and does not start the workflow. This observation style is inspired by the MIT project [dsh-auto-evolve](https://github.com/lispking/dsh-auto-evolve).
+
 ## Develop
 
 ```powershell

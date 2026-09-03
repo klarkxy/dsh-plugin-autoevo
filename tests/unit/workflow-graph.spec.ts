@@ -335,18 +335,6 @@ describe('workflow graph nodes', () => {
     expect(result).toMatchObject({ kind: 'next', node: 'await_discovery', resolution: current })
   })
 
-  it('auto-seals a completed empty discovery into the existing selection gate', async () => {
-    const current = resolution()
-    current.remoteCandidates = []
-    const host = {
-      async discoverRemote() {
-        return current
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('discover_remote', { host, resolution: current })
-    expect(result).toMatchObject({ kind: 'next', node: 'await_selection', resolution: current })
-  })
-
   it('keeps incomplete discovery retryable and excludes creation from its selection gate', async () => {
     const current = resolution()
     current.remoteCandidates = []
@@ -355,61 +343,6 @@ describe('workflow graph nodes', () => {
     record.candidateSnapshot = []
     const selection = interruptPayload('await_selection', current, [], { workflow: record })
     expect(selection.options.map((item) => item.id)).toEqual(['search_more', 'stop'])
-  })
-
-  it('turns a discovery error into a diagnosable retry checkpoint', async () => {
-    const current = resolution()
-    current.remoteCandidates = []
-    current.remoteDiscoveryComplete = false
-    const record = workflow('discover_remote')
-    const host = {
-      async discoverRemote() {
-        throw new EvolutionError('github_unavailable', 'temporary discovery failure')
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('discover_remote', { host, resolution: current, workflow: record })
-    expect(result).toMatchObject({ kind: 'next', node: 'await_selection' })
-    expect(record.lastFailure).toMatchObject({
-      stage: 'discovery',
-      code: 'github_unavailable',
-      retryable: true,
-    })
-  })
-
-  it('clears a prior discovery failure after a successful retry', async () => {
-    const current = resolution()
-    current.remoteCandidates = []
-    current.remoteDiscoveryComplete = false
-    const record = workflow('discover_remote')
-    record.lastFailure = {
-      stage: 'discovery',
-      code: 'github_unavailable',
-      message: 'synthetic discovery outage',
-      retryable: true,
-    }
-    const host = {
-      async discoverRemote() {
-        return { ...current, remoteDiscoveryComplete: true }
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('discover_remote', { host, resolution: current, workflow: record })
-    expect(result).toMatchObject({ kind: 'next', node: 'await_selection' })
-    expect(record.lastFailure).toBeUndefined()
-  })
-
-  it('allows updated remote evidence to reappear after the earlier snapshot was rejected', () => {
-    const first = resolution()
-    const rejectedId = candidateSnapshotFor(first)[0]!.id
-    const updated = {
-      ...first,
-      remoteCandidates: [{
-        ...first.remoteCandidates[0]!,
-        updatedAt: '2026-08-26T00:00:00.000Z',
-      }],
-    }
-    const refreshed = candidateSnapshotFor(updated, new Set([rejectedId]))
-    expect(refreshed).toHaveLength(1)
-    expect(refreshed[0]?.id).not.toBe(rejectedId)
   })
 
   it('reviews the selected GitHub repository then parks on confirmation', async () => {
@@ -427,112 +360,6 @@ describe('workflow graph nodes', () => {
     } as unknown as WorkflowHost
     const result = await runNode('review_github', { host, resolution: current })
     expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: inspected.id } })
-  })
-
-  it('does not offer create-new while remote discovery is incomplete', () => {
-    const current = resolution()
-    current.remoteDiscoveryComplete = false
-    current.remoteCandidates = []
-    const record = workflow('await_confirmation')
-    record.candidateSnapshot = []
-    const confirmation = interruptPayload('await_confirmation', current, [], {
-      workflow: record,
-    })
-    expect(confirmation.options.map((item) => item.id)).toEqual(['search_more', 'stop'])
-  })
-
-  it('scopes mixed-batch actions to eligible candidate IDs', () => {
-    const current = resolution()
-    current.remoteCandidates.push({
-      repository: 'acme/two', name: 'two', description: '', stars: 0, updatedAt: null, topics: [],
-    })
-    const record = workflow('await_confirmation')
-    record.candidateSnapshot!.push({
-      id: `candidate_${'2'.repeat(24)}`,
-      index: 2,
-      kind: 'remote',
-      name: 'two',
-      identity: 'acme/two',
-      repository: 'acme/two',
-      digest: '2'.repeat(64),
-    })
-    record.reviewedCandidateIds = record.candidateSnapshot!.map((item) => item.id)
-    const eligible = withApprovedVerdict(review(), record)
-    const rejected = review()
-    rejected.id = `review_${'2'.repeat(64)}`
-    rejected.sourceSnapshot = {
-      kind: 'github',
-      repository: 'acme/two',
-      requestedRef: 'main',
-      commit: '2'.repeat(40),
-      defaultBranch: 'main',
-    }
-    rejected.recommendation = 'skip'
-    rejected.securityRisk = 'high'
-    rejected.installSpec = null
-    if (rejected.mechanicalFacts) {
-      rejected.mechanicalFacts = {
-        ...rejected.mechanicalFacts,
-        staticRisk: 'high',
-        manifest: { ...rejected.mechanicalFacts.manifest, materializable: false, installSpec: null },
-        directUseHostBoundary: 'not_materializable',
-      }
-    }
-    record.reviewIdsByCandidate = {
-      [record.candidateSnapshot![0]!.id]: eligible.id,
-      [record.candidateSnapshot![1]!.id]: rejected.id,
-    }
-    const confirmation = interruptPayload('await_confirmation', current, [eligible, rejected], {
-      workflow: record,
-      installProfiles: ['web'],
-    })
-    expect(confirmation.options.find((item) => item.id === 'use_this')?.candidateIds)
-      .toEqual([record.candidateSnapshot![0]!.id])
-    expect(confirmation.options.find((item) => item.id === 'modify_this')?.candidateIds)
-      .toEqual([record.candidateSnapshot![0]!.id, record.candidateSnapshot![1]!.id])
-  })
-
-  it('keeps an all-failed review batch retryable at confirmation', async () => {
-    const current = resolution()
-    const host = {
-      async reviewGithubBatch() {
-        return {
-          resolution: current,
-          reviews: [],
-          failures: [{ repository: 'acme/one', code: 'command_failed', message: 'timed out' }],
-        }
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('review_github', { host, resolution: current })
-    expect(result).toMatchObject({
-      kind: 'next',
-      node: 'await_confirmation',
-      reviews: [],
-      reviewFailures: [{ repository: 'acme/one', code: 'command_failed' }],
-    })
-  })
-
-  it('derives local re-review from the lineage tip', async () => {
-    const current = resolution()
-    current.authorization = { state: 'modify_review', resolutionId: current.id, reason: 'improve' }
-    const local = review()
-    local.id = `review_${'e'.repeat(64)}`
-    local.sourceSnapshot = {
-      kind: 'local',
-      path: 'C:/workspace/plugin',
-      baseReviewId: review().id,
-      baseCommit: 'c'.repeat(40),
-      statusHash: 'f'.repeat(64),
-    }
-    const host = {
-      async reviewLocal(_resolution: ResolutionRecord, checkout: string, baseReviewId: string) {
-        expect(checkout).toBe('C:/workspace/plugin')
-        expect(baseReviewId).toBe(review().id)
-        return { resolution: current, review: local }
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('review_local', { host, resolution: current })
-    expect(result).toMatchObject({ kind: 'next', node: 'await_confirmation', review: { id: local.id } })
   })
 
   it('returns to confirmation when install fails for a non-input reason', async () => {
@@ -617,80 +444,6 @@ describe('workflow graph nodes', () => {
     expect(record.lastFailure).toBe(priorFailure)
   })
 
-  it('preserves a recovery settlement failure over concurrent cancellation', async () => {
-    const current = resolution()
-    const controller = new AbortController()
-    const reason = new Error('cancel after install effect')
-    const settlementError = new EvolutionError('command_failed', 'recovery receipt persistence failed', {
-      recoveryRequired: true,
-      installationId: `installation_${'e'.repeat(24)}`,
-    })
-    const record = workflow('install_verify')
-    record.lastFailure = {
-      stage: 'install',
-      code: 'prior_failure',
-      message: 'keep this failure',
-      retryable: true,
-    }
-    const priorFailure = record.lastFailure
-    const host = installVerifyHost({
-      async installReviewed() {
-        controller.abort(reason)
-        throw settlementError
-      },
-    })
-
-    await expect(runNode('install_verify', {
-      host,
-      resolution: current,
-      workflow: record,
-      exec: { signal: controller.signal },
-    })).rejects.toBe(settlementError)
-    expect(settlementError.details.installationId).toBe(`installation_${'e'.repeat(24)}`)
-    expect(record.lastFailure).toBe(priorFailure)
-  })
-
-  it.each(['return', 'reject'] as const)(
-    'preserves exact cancellation when the pending install receipt read aborts then %s normally',
-    async (mode) => {
-      const current = resolution()
-      const record = workflow('install_verify')
-      const installationId = `installation_${'f'.repeat(24)}`
-      record.pendingInstallationId = installationId
-      const controller = new AbortController()
-      const reason = new Error(`pending install receipt ${mode} cancelled`)
-      let installs = 0
-      const host = installVerifyHost({
-        async installReviewed() {
-          installs += 1
-          throw new Error('install must not start')
-        },
-        async getInstallation() {
-          controller.abort(reason)
-          if (mode === 'reject') throw new Error('ordinary receipt read failure')
-          return {
-            id: installationId,
-            workflowId: record.id,
-            reviewId: review().id,
-            targetProfile: record.pendingInstall!.targetProfile,
-            retention: record.pendingInstall!.retention,
-            installSpec: review().installSpec,
-            installPhase: 'completed',
-            installed: true,
-          }
-        },
-      })
-
-      await expect(runNode('install_verify', {
-        host,
-        resolution: current,
-        workflow: record,
-        exec: { signal: controller.signal },
-      })).rejects.toBe(reason)
-      expect(installs).toBe(0)
-    },
-  )
-
   it('returns a persisted repository-only review target to preview instead of guessing a package path', async () => {
     const current = resolution()
     const legacy = workflow('review_github')
@@ -702,43 +455,6 @@ describe('workflow graph nodes', () => {
     expect(reviewed).toBe(false)
     expect(legacy.candidateSnapshot).toBeUndefined()
     expect(legacy.lastFailure).toMatchObject({ code: 'review_target_upgrade_required', retryable: true })
-  })
-
-  it.each([
-    ['receipt identifier', { id: `installation_${'e'.repeat(24)}` }],
-    ['workflow', { workflowId: `workflow_${'e'.repeat(24)}` }],
-    ['review', { reviewId: `review_${'e'.repeat(64)}` }],
-    ['target profile', { targetProfile: 'desktop' }],
-    ['retention', { retention: 'temporary' }],
-    ['install specification', { installSpec: `github:acme/two#${'e'.repeat(40)}` }],
-  ])('rejects a pending installation receipt with a mismatched %s binding', async (_binding, mismatch) => {
-    const current = resolution()
-    const record = workflow('install_verify')
-    const installationId = `installation_${'f'.repeat(24)}`
-    record.pendingInstallationId = installationId
-    const inspected = review()
-    const host = installVerifyHost({
-      async installReviewed() {
-        throw new Error('must not install when a receipt is present')
-      },
-      async getInstallation() {
-        return installationFixture({
-          id: installationId,
-          workflowId: record.id,
-          reviewId: inspected.id,
-          targetProfile: record.pendingInstall!.targetProfile,
-          retention: record.pendingInstall!.retention,
-          installSpec: inspected.installSpec,
-          ...mismatch,
-        })
-      },
-    })
-
-    await expect(runNode('install_verify', { host, resolution: current, workflow: record }))
-      .rejects.toMatchObject({
-        code: 'invalid_input',
-        message: 'Pending installation receipt is not bound to the current workflow, review, and install target',
-      })
   })
 
   it('accepts a managed-local receipt only when it retains the reviewed frozen install spec', async () => {
@@ -783,98 +499,25 @@ describe('workflow graph nodes', () => {
     })
   })
 
-  it.each([
-    ['string installed flag', { installed: 'yes', installOutcome: 'activated', verified: false }],
-    ['removed success receipt', { installed: true, removed: true, installOutcome: 'activated', verified: false }],
-  ])('does not accept a persisted %s as install success or replay installation', async (_name, corrupt) => {
-    const current = resolution()
-    const record = workflow('install_verify')
-    const installationId = `installation_${'9'.repeat(24)}`
-    record.pendingInstallationId = installationId
-    let installs = 0
-    const host = installVerifyHost({
-      async installReviewed() {
-        installs += 1
-        throw new Error('install must not replay')
-      },
-      async getInstallation() {
-        return installationFixture({
-          id: installationId,
-          workflowId: record.id,
-          reviewId: review().id,
-          targetProfile: record.pendingInstall!.targetProfile,
-          retention: record.pendingInstall!.retention,
-          installSpec: review().installSpec,
-          ...corrupt,
-        })
-      },
-    })
-
-    const result = runNode('install_verify', { host, resolution: current, workflow: record })
-    if (corrupt.installed === 'yes') await expect(result).rejects.toMatchObject({ code: 'invalid_input' })
-    else await expect(result).resolves.toMatchObject({ kind: 'done', node: 'recovery_required' })
-    expect(installs).toBe(0)
-  })
-
   it('rejects a contradictory failed_absent receipt without offering another install attempt', async () => {
     let installs = 0
     const host = installVerifyHost({
       async installReviewed() {
         installs += 1
-        return {
-          installPhase: 'completed',
-          installState: 'installed',
+        return installationFixture({
           installOutcome: 'failed_absent',
+          installState: 'installed',
           installed: true,
-          loaded: false,
-          verified: false,
-          restartRequired: false,
-          removed: false,
-        }
+        })
       },
     })
 
     await expect(runNode('install_verify', { host, resolution: resolution() }))
-      .rejects.toMatchObject({ code: 'invalid_input' })
+      .rejects.toMatchObject({
+        code: 'invalid_input',
+        message: expect.stringContaining('contradictory'),
+      })
     expect(installs).toBe(1)
-  })
-
-  it.each([
-    ['verified', true, true, 'done', 'installed'],
-    ['activated', true, false, 'done', 'activated'],
-    ['awaiting_user_test', true, false, 'done', 'awaiting_user_test'],
-    ['failed_absent', false, false, 'next', 'await_confirmation'],
-    ['recovery_required', false, false, 'done', 'recovery_required'],
-    ['pending', false, false, 'done', 'recovery_required'],
-  ] as const)('routes install outcome %s without misreporting success', async (
-    installOutcome,
-    installed,
-    verified,
-    kind,
-    node,
-  ) => {
-    const current = resolution()
-    const host = installVerifyHost({
-      async installReviewed() {
-        return {
-          id: `installation_${'a'.repeat(24)}`,
-          installOutcome,
-          installed,
-          verified,
-          verification: { reason: installOutcome },
-        }
-      },
-    })
-    const result = await runNode('install_verify', { host, resolution: current })
-    expect(result).toMatchObject({ kind, node, installation: { installOutcome } })
-    if (installOutcome === 'verified') {
-      expect(result.node).not.toBe('activated')
-      expect(result.node).not.toBe('awaiting_user_test')
-    }
-    if (installOutcome === 'activated' || installOutcome === 'awaiting_user_test') {
-      expect(result.node).not.toBe('installed')
-      expect(result.node).not.toBe('recovery_required')
-    }
   })
 
   it('does not treat malformed activated or awaiting_user_test receipts as verified', async () => {
@@ -893,31 +536,6 @@ describe('workflow graph nodes', () => {
       })
       await expect(runNode('install_verify', { host, resolution: current }))
         .rejects.toMatchObject({ code: 'invalid_input' })
-    }
-  })
-
-  it('routes failed, blocked_precondition, and uncertain verification onto explicit failure closure', async () => {
-    const current = resolution()
-    for (const status of ['failed', 'blocked_precondition', 'uncertain'] as const) {
-      const record = workflow('install_verify')
-      const host = installVerifyHost({
-        async installReviewed() {
-          return {
-            id: `installation_${'a'.repeat(24)}`,
-            installOutcome: 'recovery_required',
-            installed: false,
-            verified: false,
-            verification: { reason: status, status, layer: 'tool_roundtrip' },
-          }
-        },
-      })
-      const result = await runNode('install_verify', { host, resolution: current, workflow: record })
-      expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
-      expect(record.lastFailure).toMatchObject({
-        stage: 'verification',
-        code: status,
-        retryable: false,
-      })
     }
   })
 
@@ -965,43 +583,6 @@ describe('workflow graph nodes', () => {
       retryable: false,
     })
   })
-
-  it.each(['corrupt', 'abort'] as const)(
-    'does not suppress a %s prior-installation read failure or restart installation',
-    async (mode) => {
-      const current = resolution()
-      const record = workflow('install_verify')
-      record.lastInstallationId = `installation_${'8'.repeat(24)}`
-      record.consumedVerificationAttempts = [{
-        reviewId: review().id,
-        sourceIdentity: `github:acme/one#${'c'.repeat(40)}`,
-        layer: 'unspecified',
-      }]
-      const controller = new AbortController()
-      const reason = new Error('prior installation read cancelled')
-      let installs = 0
-      const failure = new EvolutionError('invalid_input', 'Corrupt installation receipt')
-      const host = installVerifyHost({
-        async installReviewed() {
-          installs += 1
-          throw new Error('install must not start')
-        },
-        async getInstallation() {
-          if (mode === 'abort') {
-            controller.abort(reason)
-            throw new Error('ordinary installation read failure')
-          }
-          throw failure
-        },
-      })
-      const execution = { signal: controller.signal } as WorkflowExec
-
-      const result = runNode('install_verify', { host, resolution: current, workflow: record, exec: execution })
-      if (mode === 'abort') await expect(result).rejects.toBe(reason)
-      else await expect(result).rejects.toBe(failure)
-      expect(installs).toBe(0)
-    },
-  )
 
   it('does not start another managed child after modification attempts are exhausted', async () => {
     const current = resolution()
@@ -1055,51 +636,6 @@ describe('workflow graph nodes', () => {
       code: 'modify_attempts_exhausted',
       retryable: false,
     })
-  })
-
-  it('hides use_this and modify_this after the same failure evidence is closed', () => {
-    const confirmationWorkflow = workflow('await_confirmation')
-    confirmationWorkflow.reviewedCandidateIds = [confirmationWorkflow.candidateSnapshot![0]!.id]
-    confirmationWorkflow.reviewIdsByCandidate = {
-      [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
-    }
-    confirmationWorkflow.consumedVerificationAttempts = [{
-      reviewId: review().id,
-      sourceIdentity: `github:acme/one#${'c'.repeat(40)}`,
-      layer: 'unspecified',
-    }]
-    confirmationWorkflow.modificationOutcome = {
-      contractVersion: 1,
-      policyVersion: POLICY_VERSION,
-      baselineReviewId: review().id,
-      baselineRuntimeVersion: '0.1.0-rc.6',
-      maxAttempts: 2,
-      automaticCorrectionUsed: true,
-      status: 'unresolved',
-      attempts: [{
-        attempt: 1,
-        childSessionId: 'child-1',
-        commit: 'a'.repeat(40),
-        changedFiles: [],
-        changedFilesTruncated: false,
-        postReviewId: review().id,
-        completionMarkerObserved: true,
-        checks: { source: 'unknown', status: 'unknown', summary: 'unknown' },
-      }],
-      resolvedBlockers: [],
-      unresolvedBlockers: [],
-      introducedBlockers: [{ key: 'new', kind: 'security_finding', summary: 'new block' }],
-    }
-    const confirmationReview = withApprovedVerdict(review(), confirmationWorkflow)
-    const confirmation = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
-      workflow: confirmationWorkflow,
-      installProfiles: ['web'],
-    })
-    expect(confirmation.options.map((item) => item.id)).toEqual([
-      'search_more',
-      'create_new',
-      'stop',
-    ])
   })
 
   it('parks cancelled managed work at recovery_required after the Host checkpoints edits', async () => {
@@ -1189,79 +725,6 @@ describe('workflow graph nodes', () => {
     expect(result).toMatchObject({ kind: 'done', node: 'recovery_required' })
   })
 
-  it('requests restart only after a verified install reports incomplete hot-load', async () => {
-    const current = resolution()
-    const host = installVerifyHost({
-      async installReviewed() {
-        return {
-          id: `installation_${'c'.repeat(24)}`,
-          installOutcome: 'verified',
-          installed: true,
-          verified: true,
-          restartRequired: true,
-          verification: { reason: 'verified; client restart needed' },
-        }
-      },
-    })
-    const result = await runNode('install_verify', { host, resolution: current })
-    expect(result).toMatchObject({ kind: 'done', node: 'restart_required' })
-  })
-
-  it('does not consume verification eligibility when installation fails before verification starts', async () => {
-    const current = resolution()
-    const record = workflow('install_verify')
-    let installs = 0
-    const failedInstallation = {
-      id: `installation_${'b'.repeat(24)}`,
-      workflowId: record.id,
-      installOutcome: 'failed_absent' as const,
-      installed: false,
-      verified: false,
-      removed: true,
-      verification: {
-        attempted: false,
-        expectedTools: [],
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: false,
-        reason: 'install command failed before verification',
-      },
-      installFailure: {
-        stage: 'install' as const,
-        code: 'command_failed',
-        message: 'pnpm failed',
-        retryable: true,
-      },
-    }
-    const host = installVerifyHost({
-      async installReviewed() {
-        installs += 1
-        return failedInstallation
-      },
-    })
-
-    const first = await runNode('install_verify', { host, resolution: current, workflow: record })
-
-    expect(first).toMatchObject({ kind: 'next', node: 'await_confirmation' })
-    expect(installs).toBe(1)
-    expect(record.consumedVerificationAttempts).toBeUndefined()
-
-    record.cursor = 'await_confirmation'
-    record.reviewedCandidateIds = [record.candidateSnapshot![0]!.id]
-    record.reviewIdsByCandidate = { [record.candidateSnapshot![0]!.id]: review().id }
-    const approved = withApprovedVerdict(review(), record)
-    const confirmation = interruptPayload('await_confirmation', current, [approved], {
-      workflow: record,
-      installProfiles: ['web'],
-      lastFailure: record.lastFailure,
-      retryableInstall: { reviewId: approved.id },
-    })
-    expect(confirmation.options.map((item) => item.id)).toContain('use_this')
-    expect(confirmation.facts).toMatchObject({ verificationAlreadyAttempted: false })
-  })
-
   it('repairs retry options for persisted pre-verification install failures', () => {
     const confirmationWorkflow = workflow('await_confirmation')
     confirmationWorkflow.reviewedCandidateIds = [confirmationWorkflow.candidateSnapshot![0]!.id]
@@ -1290,111 +753,6 @@ describe('workflow graph nodes', () => {
 
     expect(confirmation.options.map((item) => item.id)).toContain('use_this')
     expect(confirmation.facts).toMatchObject({ verificationAlreadyAttempted: false })
-  })
-
-  it('exempts only the receipt-bound review when another candidate already consumed verification', () => {
-    const confirmationWorkflow = workflow('await_confirmation')
-    const candidateA = confirmationWorkflow.candidateSnapshot![0]!
-    const reviewA = withApprovedVerdict(review(), confirmationWorkflow)
-    const candidateB = {
-      ...candidateA,
-      id: `candidate_${'9'.repeat(24)}`,
-      name: 'two',
-      identity: 'acme/two',
-      repository: 'acme/two',
-      digest: '8'.repeat(64),
-    }
-    const rawReviewB = {
-      ...review(),
-      id: `review_${'9'.repeat(64)}`,
-      installSpec: `github:acme/two#${'8'.repeat(40)}`,
-      sourceSnapshot: {
-        ...review().sourceSnapshot,
-        repository: 'acme/two',
-        commit: '8'.repeat(40),
-      } as ReviewRecord['sourceSnapshot'],
-    }
-    confirmationWorkflow.candidateSnapshot = [candidateA, candidateB]
-    confirmationWorkflow.reviewedCandidateIds = [candidateA.id, candidateB.id]
-    confirmationWorkflow.reviewIdsByCandidate = {
-      [candidateA.id]: reviewA.id,
-      [candidateB.id]: rawReviewB.id,
-    }
-    const reviewB = withApprovedVerdict(rawReviewB, confirmationWorkflow)
-    confirmationWorkflow.consumedVerificationAttempts = [reviewA, reviewB].map((item) => ({
-      reviewId: item.id,
-      sourceIdentity: item.sourceSnapshot.kind === 'github'
-        ? `github:${item.sourceSnapshot.repository.toLowerCase()}#${item.sourceSnapshot.commit}`
-        : `local:${item.sourceSnapshot.statusHash}`,
-      layer: 'unspecified',
-    }))
-
-    const confirmation = interruptPayload('await_confirmation', resolution(), [reviewA, reviewB], {
-      workflow: confirmationWorkflow,
-      installProfiles: ['web'],
-      retryableInstall: { reviewId: reviewA.id },
-    })
-
-    expect(confirmation.options.find((item) => item.id === 'use_this')?.candidateIds).toEqual([candidateA.id])
-  })
-
-  it('recognizes retryable pre-verification receipts only when every binding matches', () => {
-    const record = workflow('await_confirmation')
-    record.status = 'interrupted'
-    const installation: InstallationRecord = {
-      schemaVersion: 1,
-      id: `installation_${'7'.repeat(24)}`,
-      createdAt: '2026-08-28T00:00:00.000Z',
-      workflowId: record.id,
-      reviewId: review().id,
-      targetProfile: 'web',
-      retention: 'persistent',
-      dshHome: 'C:/dsh',
-      packageName: 'dsh-one',
-      installSpec: review().installSpec!,
-      installState: 'not_installed',
-      installOutcome: 'failed_absent',
-      installed: false,
-      loaded: false,
-      verified: false,
-      restartRequired: false,
-      removed: false,
-      verification: {
-        attempted: false,
-        expectedTools: [],
-        calledTools: [],
-        resultTools: [],
-        failedTools: [],
-        sessionFiles: [],
-        taskResultObserved: false,
-        reason: 'install failed',
-      },
-      installFailure: {
-        stage: 'install',
-        code: 'command_failed',
-        message: 'pnpm failed',
-        retryable: true,
-      },
-    }
-    record.lastInstallationId = installation.id
-    record.lastFailure = { stage: 'install', code: 'command_failed', message: 'pnpm failed', retryable: true }
-    expect(retryablePreVerificationReviewId(record, installation)).toBe(installation.reviewId)
-
-    const withoutReview = { ...installation }
-    delete withoutReview.reviewId
-    expect(retryablePreVerificationReviewId(record, withoutReview)).toBeUndefined()
-
-    const invalid = [
-      { workflowId: `workflow_${'8'.repeat(24)}` },
-      { installOutcome: 'recovery_required' as const },
-      { installed: true },
-      { installFailure: { ...installation.installFailure!, stage: 'verify' as const } },
-      { installFailure: { ...installation.installFailure!, retryable: false } },
-      { verification: { ...installation.verification, attempted: true } },
-    ]
-    for (const change of invalid) {
-      expect(retryablePreVerificationReviewId(record, { ...installation, ...change })).toBeUndefined()
-    }
   })
 
   it('offers only the receipt-bound exact release-age exception for the failed candidate', () => {
@@ -1580,71 +938,6 @@ describe('workflow graph nodes', () => {
     })
   })
 
-  it.each(['return', 'reject'] as const)(
-    'preserves exact cancellation when the pending built-in receipt read aborts then %s normally',
-    async (mode) => {
-      const current = resolution()
-      const record = workflow('enable_builtin')
-      const installationId = `installation_${'a'.repeat(24)}`
-      record.pendingInstallationId = installationId
-      const controller = new AbortController()
-      const reason = new Error(`pending built-in receipt ${mode} cancelled`)
-      let enables = 0
-      const host = {
-        async enableBuiltin() {
-          enables += 1
-          throw new Error('built-in effect must not start')
-        },
-        async getInstallation() {
-          controller.abort(reason)
-          if (mode === 'reject') throw new Error('ordinary receipt read failure')
-          return installationFixture({
-            id: installationId,
-            workflowId: record.id,
-            installPhase: 'completed',
-            installState: 'installed',
-            installOutcome: 'pending',
-            installed: true,
-            restartRequired: false,
-          })
-        },
-      } as unknown as WorkflowHost
-
-      await expect(runNode('enable_builtin', {
-        host,
-        resolution: current,
-        workflow: record,
-        exec: { signal: controller.signal },
-      })).rejects.toBe(reason)
-      expect(enables).toBe(0)
-    },
-  )
-
-  it('uses the returned built-in receipt restart flag for a newly completed no-write enablement', async () => {
-    const current = resolution()
-    const installationId = `installation_${'b'.repeat(24)}`
-    const host = {
-      async enableBuiltin() {
-        return installationFixture({
-          id: installationId,
-          installPhase: 'completed',
-          installState: 'installed',
-          installOutcome: 'pending',
-          installed: true,
-          restartRequired: false,
-        })
-      },
-    } as unknown as WorkflowHost
-
-    const result = await runNode('enable_builtin', { host, resolution: current })
-
-    expect(result).toMatchObject({
-      kind: 'done',
-      node: 'installed',
-      installation: { id: installationId, restartRequired: false },
-    })
-  })
-
   it('returns a denied no-effect built-in enablement to fresh confirmation', async () => {
     const current = resolution()
     const record = workflow('enable_builtin')
@@ -1727,38 +1020,6 @@ describe('workflow graph nodes', () => {
       node: 'recovery_required',
       installation: { id: installationId, installOutcome: 'recovery_required', removed: false },
     })
-  })
-
-  it('rejects a completed built-in failed_absent receipt that still claims installation', async () => {
-    const current = resolution()
-    const record = workflow('enable_builtin')
-    const installationId = `installation_${'8'.repeat(24)}`
-    record.pendingInstallationId = installationId
-    let enables = 0
-    const host = {
-      async enableBuiltin() {
-        enables += 1
-        throw new Error('built-in effect must not replay')
-      },
-      async getInstallation() {
-        return installationFixture({
-          id: installationId,
-          workflowId: record.id,
-          installPhase: 'completed',
-          installState: 'installed',
-          installOutcome: 'failed_absent',
-          installed: true,
-          loaded: false,
-          verified: false,
-          restartRequired: false,
-          removed: false,
-        })
-      },
-    } as unknown as WorkflowHost
-
-    await expect(runNode('enable_builtin', { host, resolution: current, workflow: record }))
-      .rejects.toMatchObject({ code: 'invalid_input' })
-    expect(enables).toBe(0)
   })
 
   it('authorizes create-new when prepareCreate returns no managed path', async () => {

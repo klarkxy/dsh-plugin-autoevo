@@ -50,22 +50,13 @@ describe('subprocess environment boundary', () => {
     })
   })
 
-  it('fails closed when a release-age report is malformed instead of treating it as transient', () => {
+  it('rejects a malformed release-age recovery report', () => {
     const stderr = [
       '[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 2 lockfile entries failed verification:',
       '  ds-harness-remote@0.3.35 was published 8 minutes ago',
       'ERR_PNPM_META_FETCH_FAIL ECONNRESET',
     ].join('\n')
     expect(_testing.commandFailureRecovery({ exitCode: 1, signal: null, stdout: '', stderr })).toBeUndefined()
-  })
-
-  it('classifies an allowlisted pnpm network failure for one same-authority retry', () => {
-    expect(_testing.commandFailureRecovery({
-      exitCode: 1,
-      signal: null,
-      stdout: '',
-      stderr: 'ERR_PNPM_FETCH_503 registry unavailable',
-    })).toEqual({ kind: 'same_authority_once', owner: 'pnpm', code: 'ERR_PNPM_FETCH_503' })
   })
 
   it('classifies pnpm store mismatch without retaining either store path', () => {

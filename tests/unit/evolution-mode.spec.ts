@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
-  AUTOEVO_AUTONOMY_CONTRACT,
   name,
   inject,
   readEvolutionModeMarker,
 } from '../../src/evolution-mode.js'
-import { creatorSkillRegistration } from '../../src/creator-skill.js'
 import {
   EVOLUTION_MODE_OWNER,
   EVOLUTION_MODE_PROTOCOL_VERSION,
@@ -18,7 +16,7 @@ import {
 function mockContext(overrides?: {
   getValue?: unknown
 }) {
-  const register = vi.fn<(registration: ReturnType<typeof creatorSkillRegistration>) => () => void>()
+  const register = vi.fn()
   register.mockReturnValue(() => undefined)
   const section = vi.fn<(input: { name: string; order: number; text: string }) => () => void>()
   section.mockReturnValue(() => undefined)
@@ -50,18 +48,6 @@ describe('evolution-mode entry', () => {
     expect(register).not.toHaveBeenCalled()
 
     expect(section).not.toHaveBeenCalled()
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('runtime Policy V14')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('supposedly temporary capability')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host captures the latest top-level user message verbatim')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one clarification_question')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('zero candidates is a valid result')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Public decisions never accept retention')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Host-owned managed child use its bounded filesystem, shell, build, test, and skill surface')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Dependency mutation, nested collaboration, Git writes, plugin mutation, publication/release/deploy')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('When the Agent supplies no queries and no clarification is pending')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Materializing declared dependencies with `pnpm install --ignore-scripts`')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Pre-V14 unfinished workflows')
-
     expect(provide).toHaveBeenCalledTimes(1)
     expect(provide.mock.calls[0]![0]).toBe(EVOLUTION_MODE_SERVICE_KEY)
     const marker = provide.mock.calls[0]![1]

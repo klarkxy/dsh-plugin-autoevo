@@ -324,8 +324,6 @@ function validateAdoptionClaim(
 
 export class StateStore {
   private readonly resolveRoot: () => string
-  private readonly diagnostics = new Map<string, StateRecordDiagnostic>()
-  private readonly strictDiagnosticKeys = new Set<string>()
 
   constructor(root: string | (() => string)) {
     this.resolveRoot = typeof root === 'function' ? root : () => root
@@ -355,7 +353,6 @@ export class StateStore {
       } catch (error) {
         if (!await this.wasWrittenExactly(target, body)) throw error
       }
-      this.diagnostics.delete(`${kind}/${path.basename(target)}`)
     } finally {
       await this.removeTemporary(temporary).catch(() => undefined)
     }
@@ -370,12 +367,10 @@ export class StateStore {
     const body = `${JSON.stringify(record, null, 2)}\n`
     try {
       await this.writeAppendOnly(target, body)
-      this.diagnostics.delete(`installations/${path.basename(target)}`)
       return { status: 'created', installation: record }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         if (await this.wasWrittenExactly(target, body)) {
-          this.diagnostics.delete(`installations/${path.basename(target)}`)
           return { status: 'created', installation: record }
         }
         throw error
@@ -421,11 +416,6 @@ export class StateStore {
         diagnosticHash: sha256(cause instanceof Error ? cause.message : String(cause)),
       })
     }
-  }
-
-  stateDiagnostics(): StateRecordDiagnostic[] {
-    return [...this.diagnostics.values()].sort((left, right) =>
-      `${left.kind}/${left.fileName}`.localeCompare(`${right.kind}/${right.fileName}`))
   }
 
   async getResolution(id: string): Promise<ResolutionRecord> {
@@ -552,7 +542,6 @@ export class StateStore {
     kind: RecordKind,
     fileName: string,
     error: unknown,
-    strict = false,
   ): StateRecordDiagnostic {
     const summary = error instanceof SyntaxError
       ? 'State record is not valid JSON.'
@@ -565,9 +554,6 @@ export class StateStore {
       summary,
       diagnosticHash: sha256(error instanceof Error ? error.message : String(error)),
     }
-    const key = `${kind}/${fileName}`
-    this.diagnostics.set(key, diagnostic)
-    if (strict) this.strictDiagnosticKeys.add(key)
     return diagnostic
   }
 
@@ -580,15 +566,6 @@ export class StateStore {
     diagnostics: StateRecordDiagnostic[]
   }> {
     const directory = path.join(this.root, kind)
-    for (const key of this.diagnostics.keys()) {
-      if (!key.startsWith(`${kind}/`)) continue
-      if (strictValidator) {
-        this.diagnostics.delete(key)
-        this.strictDiagnosticKeys.delete(key)
-      } else if (!this.strictDiagnosticKeys.has(key)) {
-        this.diagnostics.delete(key)
-      }
-    }
     let entries: string[]
     try {
       entries = await readdir(directory)
@@ -601,27 +578,14 @@ export class StateStore {
     const expected = new RegExp(`^${KIND_PREFIX[kind]}[a-f0-9]{16,64}\\.json$`, 'u')
     for (const entry of entries.sort()) {
       if (!expected.test(entry)) continue
-      const key = `${kind}/${entry}`
       try {
         const body = await readFile(path.join(directory, entry), 'utf8')
         const record = validateRecord(kind, JSON.parse(body), entry.slice(0, -'.json'.length))
         strictValidator?.(record)
-        if (strictValidator) {
-          this.diagnostics.delete(key)
-          this.strictDiagnosticKeys.delete(key)
-        } else if (!this.strictDiagnosticKeys.has(key)) {
-          this.diagnostics.delete(key)
-        }
         records.push(record)
       } catch (error) {
-        diagnostics.push(this.recordDiagnostic(kind, entry, error, Boolean(strictValidator)))
+        diagnostics.push(this.recordDiagnostic(kind, entry, error))
       }
-    }
-    // A concurrent tolerant read may clear the shared diagnostic map while
-    // this pass is running. Re-publish this pass's fresh diagnostics, while
-    // strictness itself remains based only on the local collection above.
-    for (const diagnostic of diagnostics) {
-      this.diagnostics.set(`${kind}/${diagnostic.fileName}`, diagnostic)
     }
     return { records, diagnostics }
   }
@@ -631,8 +595,6 @@ export class StateStore {
     try {
       const body = await readFile(path.join(this.root, kind, `${id}.json`), 'utf8')
       const record = projectStoredRecord(kind, validateRecord(kind, JSON.parse(body), id))
-      const key = `${kind}/${id}.json`
-      if (!this.strictDiagnosticKeys.has(key)) this.diagnostics.delete(key)
       return record
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

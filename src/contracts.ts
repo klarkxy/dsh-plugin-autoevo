@@ -647,11 +647,6 @@ export interface ReleaseAgePolicyEntry {
 
 export type InstallFailureRecovery =
   | {
-      kind: 'same_authority_once'
-      owner: 'pnpm'
-      code: string
-    }
-  | {
       kind: 'minimum_release_age'
       owner: 'pnpm'
       code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION'

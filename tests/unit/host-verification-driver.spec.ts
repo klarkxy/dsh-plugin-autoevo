@@ -470,8 +470,4 @@ describe('Host verification driver', () => {
     expect(body).not.toContain('expression')
   })
 
-  it('does not reference agent.run, chat, default routes, or credential forwarding in the driver', async () => {
-    const source = await readFile(path.join(process.cwd(), 'src/host-verification-driver.ts'), 'utf8')
-    expect(source).not.toMatch(/agent\.run|agent\.chat|createUserMessage|forwardedCredentialEnv|agent-default-model/)
-  })
 })

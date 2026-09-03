@@ -68,6 +68,8 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 
 AutoEvo 负责工作流、警告和证据记录；权限、sandbox 与 approval 的强制执行属于 DSH Core。默认流程保持只读或受管边界；完整权限故障修理也通过 DSH Core 的官方权限预设实施，并要求新的用户确认。安装或修理的代码最终以当前用户权限运行。完整信任边界见[安全模型](docs/security.md)。
 
+能力进化会话里，Host 还会观察同一 Agent 的工具失败、连续相同工具调用和 LLM request-error。5 分钟内达到 3 次后，下一次 system prompt 会加入一条只读 hint（不含原始参数、错误正文或原始错误码），提示仅在与当前能力需求相关时使用现有 `capability_workflow`。这不是授权，也不会自动调用工作流。观察方式的灵感来自 MIT 项目 [dsh-auto-evolve](https://github.com/lispking/dsh-auto-evolve)。
+
 ## 开发
 
 ```powershell

@@ -63,24 +63,7 @@ const UNEXPECTED_STORE_CODE = 'ERR_PNPM_UNEXPECTED_STORE'
 const MAX_POLICY_ENTRIES = 8
 const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu
 const PACKAGE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/iu
-const TRANSIENT_CODES = new Set([
-  'ERR_PNPM_FETCH_500',
-  'ERR_PNPM_FETCH_502',
-  'ERR_PNPM_FETCH_503',
-  'ERR_PNPM_FETCH_504',
-  'ERR_PNPM_META_FETCH_FAIL',
-  'ECONNRESET',
-  'ENOTFOUND',
-  'ETIMEDOUT',
-  'UND_ERR_CONNECT_TIMEOUT',
-])
-
-export function isTransientPnpmRecoveryCode(value: unknown): value is string {
-  return typeof value === 'string' && TRANSIENT_CODES.has(value)
-}
-
 export type CommandFailureRecovery =
-  | { kind: 'same_authority_once'; owner: 'pnpm'; code: string }
   | { kind: 'profile_store_mismatch'; owner: 'pnpm'; code: typeof UNEXPECTED_STORE_CODE }
   | {
       kind: 'minimum_release_age'
@@ -133,14 +116,12 @@ function commandFailureRecovery(result: CommandResult): CommandFailureRecovery |
   const releaseAge = parseReleaseAgeRecovery(lines)
   if (releaseAge) return releaseAge
   const text = lines.join('\n')
-  // A truncated or malformed policy report must never be downgraded to a
-  // transient network failure merely because both diagnostics were emitted.
+  // A truncated or malformed policy report must not become another recovery kind.
   if (text.includes(MINIMUM_RELEASE_AGE_CODE)) return undefined
   if (text.includes(UNEXPECTED_STORE_CODE)) {
     return { kind: 'profile_store_mismatch', owner: 'pnpm', code: UNEXPECTED_STORE_CODE }
   }
-  const code = [...TRANSIENT_CODES].find((item) => new RegExp(`(?:^|[^A-Z0-9_])${item}(?:$|[^A-Z0-9_])`, 'u').test(text))
-  return code ? { kind: 'same_authority_once', owner: 'pnpm', code } : undefined
+  return undefined
 }
 
 function diagnosticStreamTail(value: string, maxLength: number): string {

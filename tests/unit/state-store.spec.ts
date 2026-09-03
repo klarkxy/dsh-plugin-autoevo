@@ -298,14 +298,6 @@ describe('StateStore lightweight validation', () => {
     await writeFile(path.join(directory, `${badId}.json`), '{ not-json', 'utf8')
 
     await expect(store.listInstallations()).resolves.toEqual([good])
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({
-        kind: 'installations',
-        recordId: badId,
-        code: 'invalid_json',
-        diagnosticHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      }),
-    ])
     await expect(store.listInstallationsStrict()).rejects.toMatchObject({
       code: 'invalid_input',
       details: {
@@ -313,9 +305,6 @@ describe('StateStore lightweight validation', () => {
         diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
       },
     })
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'installations', recordId: badId, code: 'invalid_json' }),
-    ])
     await expect(store.getInstallation(good.id)).resolves.toEqual(good)
     await expect(store.getInstallation(badId)).rejects.toMatchObject({
       code: 'invalid_input',
@@ -347,9 +336,6 @@ describe('StateStore lightweight validation', () => {
     })
     expect(JSON.stringify(failure)).not.toContain(secret)
     expect(JSON.stringify(failure)).not.toContain(root)
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'installations', recordId: badId, code: 'invalid_record' }),
-    ])
   })
 
   it('keeps a semantically malformed basic installation tolerant until a strict read diagnoses it', async () => {
@@ -372,16 +358,12 @@ describe('StateStore lightweight validation', () => {
     await writeFile(path.join(root, 'installations', `${badId}.json`), JSON.stringify(malformed), 'utf8')
 
     await expect(store.listInstallations()).resolves.toEqual([malformed])
-    expect(store.stateDiagnostics()).toEqual([])
     const failure = await store.listInstallationsStrict().then(() => undefined, (error: unknown) => error)
 
     expect(failure).toMatchObject({
       code: 'invalid_input',
       details: { diagnosticCount: 1, diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)] },
     })
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'installations', recordId: badId, code: 'invalid_record' }),
-    ])
     expect(JSON.stringify(failure)).not.toContain(secret)
     expect(JSON.stringify(failure)).not.toContain(root)
   })
@@ -433,16 +415,12 @@ describe('StateStore lightweight validation', () => {
     await writeFile(path.join(root, 'workflows', `${badId}.json`), JSON.stringify(malformed), 'utf8')
 
     await expect(store.listWorkflows()).resolves.toEqual([malformed])
-    expect(store.stateDiagnostics()).toEqual([])
     const failure = await store.listWorkflowsStrict().then(() => undefined, (error: unknown) => error)
 
     expect(failure).toMatchObject({
       code: 'invalid_input',
       details: { diagnosticCount: 1, diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)] },
     })
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'workflows', recordId: badId, code: 'invalid_record' }),
-    ])
     expect(JSON.stringify(failure)).not.toContain(secret)
     expect(JSON.stringify(failure)).not.toContain(root)
   })
@@ -483,7 +461,6 @@ describe('StateStore lightweight validation', () => {
       )
 
       await expect(store.listInstallations()).resolves.toEqual([parent, child])
-      expect(store.stateDiagnostics()).toEqual([])
       await expect(store.listInstallationsStrict()).rejects.toMatchObject({
         code: 'invalid_input',
         details: { diagnosticCount: 1 },
@@ -506,14 +483,12 @@ describe('StateStore lightweight validation', () => {
 
       if (kind === 'installation') {
         await expect(store.listInstallations()).resolves.toEqual([record])
-        expect(store.stateDiagnostics()).toEqual([])
         await expect(store.listInstallationsStrict()).rejects.toMatchObject({
           code: 'invalid_input',
           details: { diagnosticCount: 1 },
         })
       } else {
         await expect(store.listWorkflows()).resolves.toEqual([record])
-        expect(store.stateDiagnostics()).toEqual([])
         await expect(store.listWorkflowsStrict()).rejects.toMatchObject({
           code: 'invalid_input',
           details: { diagnosticCount: 1 },
@@ -521,101 +496,6 @@ describe('StateStore lightweight validation', () => {
       }
     },
   )
-
-  it('keeps a strict scan fail-closed while concurrent tolerant scans refresh shared diagnostics', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-state-concurrent-strict-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const good = installation(`installation_${'a'.repeat(24)}`)
-    await store.put('installations', good)
-    const badId = `installation_${'c'.repeat(24)}`
-    const secret = 'file:C:/private/concurrent-secret-plugin.tgz'
-    const directory = path.join(root, 'installations')
-    const malformed = {
-      schemaVersion: 1,
-      id: badId,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      targetProfile: 'web',
-      retention: 'persistent',
-      dshHome: 'C:/dsh-home',
-      packageName: 'dsh-tool-secret',
-      installSpec: secret,
-    }
-    await writeFile(path.join(directory, `${badId}.json`), JSON.stringify(malformed), 'utf8')
-
-    const [strict, tolerantOne, tolerantTwo] = await Promise.allSettled([
-      store.listInstallationsStrict(),
-      store.listInstallations(),
-      store.listInstallations(),
-    ])
-
-    expect(strict).toMatchObject({
-      status: 'rejected',
-      reason: {
-        code: 'invalid_input',
-        details: { diagnosticCount: 1 },
-      },
-    })
-    expect(tolerantOne).toEqual({ status: 'fulfilled', value: [good, malformed] })
-    expect(tolerantTwo).toEqual({ status: 'fulfilled', value: [good, malformed] })
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'installations', recordId: badId, code: 'invalid_record' }),
-    ])
-    expect(JSON.stringify(strict)).not.toContain(secret)
-    expect(JSON.stringify(strict)).not.toContain(root)
-  })
-
-  it('keeps a strict workflow scan fail-closed while concurrent tolerant scans refresh diagnostics', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-state-concurrent-workflow-strict-'))
-    temporary.push(root)
-    const store = new StateStore(root)
-    const good = validRecoveryWorkflow(root)
-    await store.put('workflows', good)
-    const badId = `workflow_${'8'.repeat(24)}`
-    const secret = 'secret-workflow-requirement-value'
-    const directory = path.join(root, 'workflows')
-    const malformed = {
-      schemaVersion: 2,
-      id: badId,
-      createdAt: '2026-08-31T00:00:00.000Z',
-      updatedAt: '2026-08-31T00:00:01.000Z',
-      requirement: 'calculator',
-      policyVersion: POLICY_VERSION,
-      status: 'invalid-running-status',
-      cursor: 'await_discovery',
-      generation: 1,
-      ownerSessionId: 'session-semantic',
-      cwd: root,
-      requirementNormalized: 'calculator',
-      bootId: 'boot_semantic',
-      privatePayload: secret,
-    }
-    await writeFile(path.join(directory, `${badId}.json`), JSON.stringify(malformed), 'utf8')
-
-    const [strict, tolerantOne, tolerantTwo] = await Promise.allSettled([
-      store.listWorkflowsStrict(),
-      store.listWorkflows(),
-      store.listWorkflows(),
-    ])
-
-    expect(strict).toMatchObject({
-      status: 'rejected',
-      reason: {
-        code: 'invalid_input',
-        details: {
-          diagnosticCount: 1,
-          diagnosticHashes: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
-        },
-      },
-    })
-    expect(tolerantOne).toEqual({ status: 'fulfilled', value: [malformed, good] })
-    expect(tolerantTwo).toEqual({ status: 'fulfilled', value: [malformed, good] })
-    expect(store.stateDiagnostics()).toEqual([
-      expect.objectContaining({ kind: 'workflows', recordId: badId, code: 'invalid_record' }),
-    ])
-    expect(JSON.stringify(strict)).not.toContain(secret)
-    expect(JSON.stringify(strict)).not.toContain(root)
-  })
 
   it('recovers exactly one workflow-linked provisional receipt and rejects ambiguity', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-state-recovery-'))

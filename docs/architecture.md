@@ -74,7 +74,7 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 - `tools`：枚举能力并注册发现、补查、密封短名单、恢复、诊断和精确移除工具（`capability_workflow*`、`plugin_remove`）；
 - `skills`：按 cwd 与 Agent scope 枚举技能；
 - `subprocess`：以 argv、取消信号和输出上限运行 `gh`、`git` 与 DSH CLI；
-- `systemPrompt`：仅向能力进化会话注入复用策略合同；
+- `systemPrompt`：仅向能力进化会话注入复用策略合同；同一 Agent 在 5 分钟内重复遇到工具失败、相同工具调用或 LLM `request-error` 时，可再看到一条不含原始调用与错误内容的只读 hint。它不诊断根因、不授予权限，也不自动启动工作流。观察方式的灵感来自 MIT 项目 [dsh-auto-evolve](https://github.com/lispking/dsh-auto-evolve)。
 - `agentPresets`：确认父会话使用能力进化 preset，并为受管施工子会话挂载受信任的系统级 Creator preset。
 
 父会话保持决策与治理边界，不在托管源内直接施工。获批的创建/修改由 Host 创建 cwd 精确绑定到单个托管源的短生命周期子会话；DSH Core 以该不可变 cwd 作为 `workspace-write` 根，AutoEvo 再限制发布、插件变更、Cordis 运行时变更、嵌套委派，以及 `pnpm add/update/remove/dlx` 与 `npx`。托管根内落实已声明依赖的 `pnpm install --ignore-scripts`（无包参数）是允许的。提示词不是授权边界。
@@ -210,6 +210,7 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 - `src/service-managed-work.ts`：托管施工全周期：Creator 预检、取消保留、modify/create 准备与 finish 收口。
 - `src/semantic-host.ts`：semantic 子 Agent 的共享提交门禁与运行器；`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 分别在 `src/semantic-reviewer.ts` / `src/semantic-verifier.ts`。它们不是安装完成的可信门槛。
 - `src/creation-guard.ts`：Host 用户回合、session/boot/interrupt 绑定与新建拒绝。
+- `src/runtime-observations.ts`：按 Agent 在内存中保留有界的近期失败、重复调用和 request-error 计数，只向能力进化会话生成被动提示。
 - `src/creator-foundation.ts`：Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
 - `src/internal-utils.ts`：`isRecord`、路径包含判断与 PID 存活探测等共享内部工具。
 

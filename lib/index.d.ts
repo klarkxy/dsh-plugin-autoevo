@@ -575,10 +575,6 @@ interface ReleaseAgePolicyEntry {
   reason: string;
 }
 type InstallFailureRecovery = {
-  kind: 'same_authority_once';
-  owner: 'pnpm';
-  code: string;
-} | {
   kind: 'minimum_release_age';
   owner: 'pnpm';
   code: 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION';
@@ -1585,25 +1581,14 @@ type AdoptionClaimResult = {
   status: 'existing';
   claim: AdoptionClaim;
 };
-interface StateRecordDiagnostic {
-  kind: RecordKind;
-  recordId?: string;
-  fileName: string;
-  code: 'invalid_json' | 'invalid_record';
-  summary: string;
-  diagnosticHash: string;
-}
 declare class StateStore {
   private readonly resolveRoot;
-  private readonly diagnostics;
-  private readonly strictDiagnosticKeys;
   constructor(root: string | (() => string));
   get root(): string;
   trialRoot(installationId: string): string;
   put(kind: RecordKind, record: StoredRecord): Promise<void>;
   createInstallationExclusive(record: InstallationRecord): Promise<InstallationExclusiveCreateResult>;
   claimAdoption(input: Omit<AdoptionClaim, 'observedSpecDigest' | 'claimToken' | 'createdAt'>): Promise<AdoptionClaimResult>;
-  stateDiagnostics(): StateRecordDiagnostic[];
   getResolution(id: string): Promise<ResolutionRecord>;
   getReview(id: string): Promise<ReviewRecord>;
   getInstallation(id: string): Promise<InstallationRecord>;
@@ -1996,7 +1981,6 @@ declare class PluginInstaller {
   private assertReplacementBinding;
   private upstreamRepository;
   private assertRecoveryPlanBinding;
-  private installWithTransientRetry;
   private resolvePredecessor;
   private reconcileReplacement;
   install(input: InstallInput, exec: ToolRunContext, binding?: InstallCommitmentBinding): Promise<InstallationRecord>;

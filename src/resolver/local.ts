@@ -3,7 +3,7 @@ import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { LocalCapabilityCandidate, RequestIntent } from '../contracts.js'
 import { DEFAULT_REQUEST_INTENT, TOOL_NAMES } from '../contracts.js'
-import { isWorkflowSkill } from '../creator-skill.js'
+import { OFFICIAL_CREATOR_SKILLS } from '../creator-foundation.js'
 import { applyIntentToCandidate, suppressesRemoteDiscovery } from './intent.js'
 import { resolveHostBundledCapabilities } from './host-bundled.js'
 import { capabilityAnchors, isHeavyNameDropMention, isNameDropMention, normalizeSearchText } from './keywords.js'
@@ -11,6 +11,7 @@ import { resolveLoadedPluginCapabilities } from './plugins.js'
 import { resolveProfilePluginCapabilities } from './profile.js'
 
 const BRIDGE_TOOLS = new Set(['tool_search', 'tool_describe', 'tool_call'])
+const WORKFLOW_SKILLS = new Set(['autoevo-plugin-creator', ...OFFICIAL_CREATOR_SKILLS])
 
 function anchorStrength(anchor: ReturnType<typeof capabilityAnchors>[number], normalizedName: string, normalizedDescription: string): number {
   let strength = 0
@@ -189,7 +190,7 @@ export async function resolveLocalCapabilities(
     ? { cwd, scope, signal: exec.signal }
     : { cwd, signal: exec.signal })
   for (const skill of skills) {
-    if (!skill.invocation.modelInvocable || isWorkflowSkill(skill.name)) continue
+    if (!skill.invocation.modelInvocable || WORKFLOW_SKILLS.has(skill.name)) continue
     const description = [skill.description, skill.whenToUse].filter(Boolean).join(' ')
     const confidence = matchConfidence(requirement, skill.name, description)
     if (confidence < 0.3) continue

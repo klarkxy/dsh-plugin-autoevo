@@ -3,7 +3,6 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { testResolution } from '../helpers/records.js'
 import { rememberRequirementLanguage, _testing as i18nTesting } from '../../src/i18n.js'
 import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
-import { AUTOEVO_AUTONOMY_CONTRACT } from '../../src/evolution-mode.js'
 import { isDirectlyUsableReview } from '../../src/review/direct-use.js'
 import { _testing as serviceTesting } from '../../src/service.js'
 import type { CapabilityEvolutionService } from '../../src/service.js'
@@ -448,15 +447,5 @@ describe('post-modification confirmation after unavailable checks', () => {
     })
     expect(optionsFor('await_confirmation', resolution(), [review], workflow, ['web']).map((item) => item.id))
       .toContain('use_this')
-  })
-})
-
-describe('autonomy contract pre-call acknowledgement', () => {
-  it('requires a short natural-language acknowledgement without adding a gate', () => {
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('Before a long authorized modify, create, or install call')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('one short natural-language acknowledgement')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('may take several minutes')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).toContain('this is not an extra approval gate')
-    expect(AUTOEVO_AUTONOMY_CONTRACT).not.toMatch(/modify_this|create_new|use_this/u)
   })
 })

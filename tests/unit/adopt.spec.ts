@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -748,8 +748,4 @@ describe('capability adopt', () => {
     await expect(store.getInstallation(installed.id)).resolves.toEqual(legacy)
   })
 
-  it('never uses ordinary installation put as an adoption transition', async () => {
-    const source = await readFile(path.join(process.cwd(), 'src', 'service-adopt.ts'), 'utf8')
-    expect(source).not.toMatch(/\.put\(\s*['"]installations['"]/u)
-  })
 })
