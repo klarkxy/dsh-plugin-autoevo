@@ -2,8 +2,8 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { EvolutionError } from './errors.js'
 import { EVOLUTION_PRESET_ID } from './evolution-contracts.js'
-import { isRecord, normalizeLf, toolAliases } from './internal-utils.js'
-import { hashObject, sha256 } from './state/hashes.js'
+import { isRecord, toolAliases } from './internal-utils.js'
+import { hashObject } from './state/hashes.js'
 
 export const CREATOR_PRESET_ID = 'cordis' as const
 export const CREATOR_FOUNDATION_CONTRACT_VERSION = 2 as const
@@ -108,22 +108,11 @@ export interface CreatorFoundation {
    * `parentScope` is the parent Agent itself — DSH tools/skills registries
    * view by Agent, not by `agent.ctx`.
    */
-  preflight(input?: { signal?: AbortSignal; parentCtx?: unknown; parentScope?: unknown }): Promise<CreatorFoundationPreflight>
+  preflight(input?: { signal?: AbortSignal; parentCtx?: Context; parentScope?: unknown }): Promise<CreatorFoundationPreflight>
 }
 
-interface AgentPresetRosterItem {
-  id: string
-  broken?: boolean | string
-  path?: string
-  trust?: string
-}
-
+/** Only `composedPreset` is consumed here; older DSH versions may not expose it. */
 interface AgentPresetsLike {
-  list?(): Promise<readonly AgentPresetRosterItem[] | { presets?: readonly AgentPresetRosterItem[] }>
-  read?(id: string): Promise<string>
-  resolve?(id: string): Promise<AgentPresetRosterItem | undefined>
-  standingKeyFor?(id: string): Promise<unknown>
-  mount?(agentCtx: unknown, id?: string): Promise<{ id: string; trust?: string }>
   composedPreset?(agentCtx: unknown): string | undefined
 }
 
@@ -153,14 +142,6 @@ function rejectCodePreset(actual: string | undefined): void {
       expected: EVOLUTION_PRESET_ID,
     })
   }
-}
-
-export function normalizeComposition(text: string): string {
-  return normalizeLf(text)
-}
-
-export function compositionSha256(text: string): string {
-  return sha256(normalizeComposition(text))
 }
 
 function catalogNameSet(names: readonly string[]): Set<string> {
@@ -302,7 +283,6 @@ function defaultAcceptanceTargets(operation: CreatorOperation): readonly string[
 
 export function assertCreatorReceipt(
   receipt: CreatorFoundationReceipt | undefined,
-  preflight: CreatorFoundationPreflight,
 ): CreatorFoundationReceipt {
   if (!receipt) {
     throw creatorUnavailable('Managed construction did not return a verified Creator foundation receipt')
@@ -315,12 +295,8 @@ export function assertCreatorReceipt(
     })
   }
   assertNotCodePresetId(receipt.presetId)
-  if (receipt.compositionSha256 !== preflight.compositionSha256) {
-    throw creatorUnavailable('Managed construction catalog digest does not match Creator preflight')
-  }
-  if (receipt.requiredToolCatalogDigest !== preflight.requiredToolCatalogDigest) {
-    throw creatorUnavailable('Managed construction required tool catalog digest does not match Creator preflight')
-  }
+  // Digest fields are Host evidence copied from the same preflight object by
+  // mintCreatorReceipt; comparing them back against that preflight proves nothing.
   if (typeof receipt.childSessionId !== 'string' || receipt.childSessionId.trim().length === 0) {
     throw creatorUnavailable('Managed construction Creator foundation receipt is missing the parent session identity')
   }
@@ -340,17 +316,8 @@ export function mintCreatorReceipt(
   }
 }
 
-function serviceFrom(ctx: unknown, name: string): unknown {
-  if (!isRecord(ctx)) return undefined
-  if (typeof ctx.get === 'function') {
-    try {
-      const value = (ctx.get as (key: string) => unknown)(name)
-      if (value !== undefined) return value
-    } catch {
-      // Fall through to an own-property lookup on the same context.
-    }
-  }
-  return ctx[name]
+function serviceFrom(ctx: Context, name: string): unknown {
+  return ctx.get(name) as unknown
 }
 
 function assertNotCodePresetId(id: string): void {
@@ -363,33 +330,9 @@ function assertNotCodePresetId(id: string): void {
   }
 }
 
-async function rosterItems(agentPresets: AgentPresetsLike): Promise<readonly AgentPresetRosterItem[] | undefined> {
-  if (typeof agentPresets.list !== 'function') return undefined
-  const listed = await agentPresets.list()
-  if (Array.isArray(listed)) return listed
-  if (isRecord(listed) && Array.isArray(listed.presets)) return listed.presets as AgentPresetRosterItem[]
-  return []
-}
-
-function compositionLooksMountable(text: string): boolean {
-  const body = normalizeComposition(text).trim()
-  if (body.length === 0) return false
-  if (!/^- id:/mu.test(body)) return false
-  if (!/@deepseek-ai\/dsh-tool-cordis|\bid:\s*tool-cordis\b/u.test(body)) return false
-  if (!/@deepseek-ai\/dsh-tool-skill|\bid:\s*tool-skill\b/u.test(body)) return false
-  if (!/@deepseek-ai\/dsh-tool-todo|\bid:\s*tool-todo\b/u.test(body)) return false
-  if (!/@deepseek-ai\/dsh-tool-fs|\bid:\s*tool-fs\b/u.test(body)) return false
-  return true
-}
-
 function collectSchemaNames(tools: ToolsLike | undefined, scope: unknown): string[] {
   if (!tools || typeof tools.schemas !== 'function') return []
-  let schemas: ReturnType<NonNullable<ToolsLike['schemas']>>
-  try {
-    schemas = tools.schemas(scope)
-  } catch {
-    return []
-  }
+  const schemas = tools.schemas(scope)
   if (!Array.isArray(schemas)) return []
   return schemas.map((item) => {
     if (typeof item === 'string') return item
@@ -451,7 +394,7 @@ export function assertRequiredCreatorCatalog(
 }
 
 export async function collectCreatorCatalog(
-  ctx: unknown,
+  ctx: Context,
   scope: unknown,
   signal?: AbortSignal,
 ): Promise<CreatorCatalog> {
@@ -478,14 +421,17 @@ export async function collectCreatorCatalog(
   }
 }
 
+/**
+ * `agentPresets.mount()` already parsed and mounted the composition, so the
+ * only remaining questions are the exact preset identity/trust and the live
+ * tool catalog the child actually received.
+ */
 export async function assertChildCreatorCatalog(
-  agentCtx: unknown,
+  agentCtx: Context,
   childScope: unknown,
   preflight: CreatorFoundationPreflight,
   mounted: { id: string; trust?: string },
   composedPreset: string | undefined,
-  mountedComposition: string,
-  expectedCompositionSha256: string,
 ): Promise<CreatorCatalog> {
   rejectCodePreset(mounted.id)
   rejectCodePreset(composedPreset)
@@ -496,12 +442,6 @@ export async function assertChildCreatorCatalog(
       actual: composedPreset,
       expected: CREATOR_PRESET_ID,
     })
-  }
-  if (!compositionLooksMountable(mountedComposition)) {
-    throw creatorUnavailable('Managed child Creator cordis composition is missing, empty, or not mountable')
-  }
-  if (compositionSha256(mountedComposition) !== expectedCompositionSha256) {
-    throw creatorUnavailable('Managed child mounted Creator composition changed after Host preflight')
   }
   const catalog = await collectCreatorCatalog(agentCtx, childScope)
   assertRequiredCreatorCatalog(catalog)
@@ -514,7 +454,7 @@ export async function assertChildCreatorCatalog(
 
 export async function preflightCreatorFoundation(
   ctx: Context,
-  input: { signal?: AbortSignal; parentCtx?: unknown; parentScope?: unknown } = {},
+  input: { signal?: AbortSignal; parentCtx?: Context; parentScope?: unknown } = {},
 ): Promise<CreatorFoundationPreflight> {
   const catalogCtx = input.parentCtx ?? ctx
   const catalogScope = input.parentScope ?? catalogCtx
@@ -622,7 +562,6 @@ export const _testing = {
   SHELL_ALIASES,
   SKILL_ALIASES,
   TODO_ALIASES,
-  compositionLooksMountable,
   catalogHas,
   catalogNameSet,
   platformShellName,

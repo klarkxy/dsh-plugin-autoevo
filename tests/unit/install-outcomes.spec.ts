@@ -13,13 +13,6 @@ import { EvolutionError } from '../../src/errors.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { PluginInstaller, _testing as installTesting } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
-import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
-import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
-import {
-  mintVerifierRequest,
-  VERIFIER_VERSION,
-  type SemanticVerifierHost,
-} from '../../src/semantic-verifier.js'
 import { StateStore } from '../../src/state/store.js'
 import { hashObject, sha256 } from '../../src/state/hashes.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
@@ -68,14 +61,6 @@ function execution(): ToolRunContext {
     callId: 'call-1',
     agent: { session: { header: { cwd: process.cwd() } } },
   } as unknown as ToolRunContext
-}
-
-function unusedVerifier(): SemanticVerifierHost {
-  return {
-    async run() {
-      throw new Error('semantic verifier / model path must not drive mechanical verification')
-    },
-  }
 }
 
 const hostPassedEvidence: VerificationEvidence = {
@@ -150,16 +135,14 @@ async function setup(record?: ReviewRecord): Promise<{ root: string; store: Stat
 
 function launcherWithHost(evidence: VerificationEvidence, sourceMatches = true) {
   const verifyHost = vi.fn(async () => evidence)
-  const verify = vi.fn(async () => { throw new Error('LLM verify must not drive mechanical verification') })
   const launcher = {
     install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
     profileTargetAbsent: async () => true,
     profileSourceMatches: async () => sourceMatches,
     readInstalledVerificationFixtures: async () => jsonFixtures(),
     verifyHost,
-    verify,
   } as unknown as DshLauncher
-  return { launcher, verifyHost, verify }
+  return { launcher, verifyHost }
 }
 
 describe('fail-closed install outcomes', () => {
@@ -180,19 +163,20 @@ describe('fail-closed install outcomes', () => {
         diagnosticHash: 'a'.repeat(64),
       }) },
       profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
     expect(result).toMatchObject({
       installOutcome: 'failed_absent',
       installState: 'not_installed',
       installed: false,
       verified: false,
+      removed: false,
       installFailure: {
         summary: 'ERR_PNPM_EPERM failed at [path]; [credential]',
         message: 'dsh exited with code 1',
@@ -233,12 +217,12 @@ describe('fail-closed install outcomes', () => {
         },
       }) },
       profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const failed = await new PluginInstaller(firstCtx, config(root), store, failingLauncher, async () => true).install({
+    const failed = await new PluginInstaller({ ctx: firstCtx, config: config(root), store, launcher: failingLauncher }).install({
       reviewId: currentReview.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution(), { workflow: { id: workflowId } })
     expect(failed.installFailure?.recovery).toMatchObject({
       kind: 'minimum_release_age', scope: 'host_profile', exceptionEligible: true,
@@ -259,11 +243,10 @@ describe('fail-closed install outcomes', () => {
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => hostPassedEvidence,
     } as unknown as DshLauncher
-    const retried = await new PluginInstaller(retryCtx, config(root), store, retryLauncher, async () => true).install({
+    const retried = await new PluginInstaller({ ctx: retryCtx, config: config(root), store, launcher: retryLauncher }).install({
       reviewId: currentReview.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
       recoveryPlan: {
         id: `recovery_${hashObject({
           workflowId,
@@ -309,12 +292,12 @@ describe('fail-closed install outcomes', () => {
       }) },
       profileStoreFingerprint: async () => profileStoreFingerprint,
       profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const failed = await new PluginInstaller(firstCtx, config(root), store, failingLauncher, async () => true).install({
+    const failed = await new PluginInstaller({ ctx: firstCtx, config: config(root), store, launcher: failingLauncher }).install({
       reviewId: currentReview.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution(), { workflow: { id: workflowId } })
     expect(failed.installFailure?.recovery).toEqual({
       kind: 'profile_store_mismatch',
@@ -341,11 +324,10 @@ describe('fail-closed install outcomes', () => {
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => hostPassedEvidence,
     } as unknown as DshLauncher
-    const retried = await new PluginInstaller(retryCtx, config(root), store, retryLauncher, async () => true).install({
+    const retried = await new PluginInstaller({ ctx: retryCtx, config: config(root), store, launcher: retryLauncher }).install({
       reviewId: currentReview.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
       recoveryPlan: {
         id: `recovery_${hashObject({
           workflowId,
@@ -385,12 +367,12 @@ describe('fail-closed install outcomes', () => {
     const launcher = {
       install,
       profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const result = await new PluginInstaller(ctx, config(root), store, launcher, async () => true).install({
+    const result = await new PluginInstaller({ ctx, config: config(root), store, launcher }).install({
       reviewId: currentReview.id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
 
     expect(install).toHaveBeenCalledTimes(1)
@@ -407,13 +389,13 @@ describe('fail-closed install outcomes', () => {
     const launcher = {
       install: async () => { throw new Error('timeout after manifest update') },
       profileTargetAbsent,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
     expect(result).toMatchObject({
       installOutcome: 'recovery_required',
@@ -424,24 +406,24 @@ describe('fail-closed install outcomes', () => {
     })
   })
 
-  it('reports verified success only after Host tool_roundtrip and never calls a semantic verifier', async () => {
+  it('reports verified success only after Host tool_roundtrip', async () => {
     const { root, store, ctx } = await setup(attestedReview())
-    const { launcher, verifyHost, verify } = launcherWithHost(hostPassedEvidence)
-    const verifier = unusedVerifier()
-    const run = vi.spyOn(verifier, 'run')
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
-    }), verifier)
+    const { launcher, verifyHost } = launcherWithHost(hostPassedEvidence)
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
+        evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
+      }),
+    })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
     expect(verifyHost).toHaveBeenCalledTimes(1)
-    expect(verify).not.toHaveBeenCalled()
-    expect(run).not.toHaveBeenCalled()
-    expect(result.verificationVerdict).toBeUndefined()
     expect(result).toMatchObject({
       installOutcome: 'verified',
       installState: 'installed',
@@ -456,18 +438,20 @@ describe('fail-closed install outcomes', () => {
   it('keeps a verified persistent install usable but requests restart when hot-load is unsupported', async () => {
     const { root, store, ctx } = await setup(attestedReview())
     const { launcher } = launcherWithHost(hostPassedEvidence)
-    const verifier = unusedVerifier()
-    const run = vi.spyOn(verifier, 'run')
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'different active profile' },
-    }), verifier)
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
+        evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'different active profile' },
+      }),
+    })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
-    expect(run).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       installOutcome: 'verified',
       installed: true,
@@ -478,79 +462,7 @@ describe('fail-closed install outcomes', () => {
     })
   })
 
-  it('preflights the exact source in isolated minimal DSH before installing into the live profile', async () => {
-    const { root, store, ctx } = await setup(attestedReview())
-    const install = vi.fn(async (
-      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
-    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
-    const verifyHost = vi.fn(async () => hostPassedEvidence)
-    const launcher = {
-      profileTargetAbsent: async () => true,
-      install,
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost,
-    } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx,
-      config(root),
-      store,
-      launcher,
-      async () => true,
-      undefined,
-      async () => ({ evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'restart' } }),
-      unusedVerifier(),
-      'autoevo-verify',
-    )
-    const result = await installer.install({
-      reviewId: review().id,
-      targetProfile: 'web',
-      retention: 'persistent',
-    }, execution())
-
-    expect(install).toHaveBeenCalledTimes(2)
-    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
-    expect(install.mock.calls[1]?.[0]).toBe(config(root).dshHome)
-    expect(install.mock.calls[1]?.[1]).toBe('web')
-    expect(install.mock.calls[0]?.[2]).toBe(install.mock.calls[1]?.[2])
-    expect(result).toMatchObject({
-      installPhase: 'completed',
-      targetProfile: 'web',
-      installOutcome: 'verified',
-      loaded: false,
-      restartRequired: true,
-      preflight: { profile: 'autoevo-verify', passed: true, sourceMatched: true },
-    })
-  })
-
-  it('does not mutate the destination when isolated minimal DSH preflight fails', async () => {
-    const { root, store, ctx } = await setup(attestedReview())
-    const install = vi.fn(async (
-      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
-    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
-    const launcher = {
-      profileTargetAbsent: async () => true,
-      install,
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async () => hostFailedEvidence,
-    } as unknown as DshLauncher
-    const result = await new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    ).install({ reviewId: review().id, targetProfile: 'web', retention: 'persistent' }, execution())
-
-    expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
-    expect(result).toMatchObject({
-      installPhase: 'completed',
-      installOutcome: 'failed_absent',
-      installState: 'not_installed',
-      installed: false,
-      preflight: { passed: false },
-    })
-  })
-
-  it('rechecks destination absence after preflight and refuses a concurrent install race', async () => {
+  it('rechecks destination absence after approval and refuses a concurrent install race', async () => {
     const { root, store, ctx } = await setup(attestedReview())
     let absenceChecks = 0
     const install = vi.fn(async (
@@ -566,9 +478,7 @@ describe('fail-closed install outcomes', () => {
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => hostPassedEvidence,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    )
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     await expect(installer.install({
       reviewId: review().id,
@@ -576,51 +486,10 @@ describe('fail-closed install outcomes', () => {
       retention: 'persistent',
     }, execution())).rejects.toThrow(/refusing to overwrite or remove a user-owned installation/i)
     expect(absenceChecks).toBe(2)
-    expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
+    expect(install).not.toHaveBeenCalled()
   })
 
-  it('rehashes a managed local artifact after preflight before destination mutation', async () => {
-    const { root, store, ctx } = await setup()
-    const local = attestedReview({
-      sourceSnapshot: {
-        kind: 'local',
-        path: path.join(root, 'source'),
-        baseReviewId: `review_${'b'.repeat(64)}`,
-        baseCommit: 'c'.repeat(40),
-        statusHash: 'd'.repeat(64),
-      },
-      installSpec: `file:${path.join(root, 'confirmed.tgz').replaceAll('\\', '/')}`,
-    })
-    const frozen = await putFrozenReview(root, store, local)
-    const install = vi.fn(async (
-      _home: string, _profile: string, _spec: string, _cwd: string, _signal?: AbortSignal,
-    ) => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }))
-    const artifact = frozen.installSpec!.slice('file:'.length)
-    const launcher = {
-      profileTargetAbsent: async () => true,
-      install,
-      profileSourceMatches: async () => true,
-      readInstalledVerificationFixtures: async () => jsonFixtures(),
-      verifyHost: async () => {
-        await writeFile(artifact, 'changed after preflight')
-        return hostPassedEvidence
-      },
-    } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    )
-
-    await expect(installer.install({
-      reviewId: local.id,
-      targetProfile: 'web',
-      retention: 'persistent',
-    }, execution())).rejects.toThrow(/bytes changed between isolated preflight and destination install/i)
-    expect(install).toHaveBeenCalledTimes(1)
-    expect(install.mock.calls[0]?.[1]).toBe('autoevo-verify')
-  })
-
-  it('rehashes the frozen artifact after approval before isolated execution', async () => {
+  it('rehashes the frozen artifact after approval before installation', async () => {
     const { root, store } = await setup()
     const frozen = await putFrozenReview(root, store, attestedReview())
     const artifact = frozen.installSpec!.slice('file:'.length)
@@ -634,28 +503,24 @@ describe('fail-closed install outcomes', () => {
       profileTargetAbsent: async () => true,
       install,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    )
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     await expect(installer.install({
       reviewId: frozen.id,
       targetProfile: 'web',
       retention: 'persistent',
-    }, execution())).rejects.toThrow(/changed after user approval and before isolated preflight/i)
+    }, execution())).rejects.toThrow(/changed after user approval and before installation/i)
     expect(request).toHaveBeenCalledTimes(1)
     expect(install).not.toHaveBeenCalled()
   })
 
-  it('refuses to overwrite an existing destination package before approval or preflight', async () => {
+  it('refuses to overwrite an existing destination package before approval', async () => {
     const { root, store } = await setup(attestedReview())
     const request = vi.fn(async () => 'allowed-once')
     const ctx = { get: () => ({ request }) } as unknown as Context
     const install = vi.fn()
     const launcher = { profileTargetAbsent: async () => false, install } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    )
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     await expect(installer.install({
       reviewId: review().id,
@@ -733,13 +598,15 @@ describe('fail-closed install outcomes', () => {
       verifyHost: async () => hostPassedEvidence,
       readInstalledVerificationFixtures: async () => jsonFixtures(),
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
         evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
       }),
-      undefined,
-      'autoevo-verify',
-    )
+    })
     const result = await installer.install({
       reviewId: current.id,
       targetProfile: 'web',
@@ -762,6 +629,40 @@ describe('fail-closed install outcomes', () => {
       .toBe(`installation_${'9'.repeat(24)}`)
   })
 
+  it('propagates an unreadable installation history instead of silently dropping the predecessor', async () => {
+    const oldSpec = `github:acme/calculator#${'c'.repeat(40)}`
+    const { root, store, ctx } = await setup(attestedReview())
+    vi.spyOn(store, 'listInstallationsStrictExcluding').mockRejectedValue(new Error('installation history unreadable'))
+    const launcher = {
+      install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
+      profileDependencySpec: async () => oldSpec,
+      profileSourceMatches: async (_home: string, _profile: string, _name: string, spec: string) => spec.startsWith('file:'),
+      verifyHost: async () => hostPassedEvidence,
+      readInstalledVerificationFixtures: async () => jsonFixtures(),
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
+        evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
+      }),
+    })
+
+    await expect(installer.install({
+      reviewId: review().id,
+      targetProfile: 'web',
+      retention: 'persistent',
+      replacement: {
+        profile: 'web',
+        packageName: 'dsh-tool-calculator',
+        oldSpecDigest: dependencySpecDigest(oldSpec),
+        oldDependencySpec: oldSpec,
+      },
+    }, execution())).rejects.toThrow('installation history unreadable')
+  })
+
   it('records final receipt ambiguity without invoking a stale Loader rollback after hot-load', async () => {
     const current = attestedReview()
     const { root, store, ctx } = await setup(current)
@@ -777,13 +678,17 @@ describe('fail-closed install outcomes', () => {
     })
     const staleRollback = vi.fn(async () => undefined)
     const { launcher } = launcherWithHost(hostPassedEvidence)
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
         evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded before receipt failure' },
         // A legacy/injected callback must not regain authority over the Loader.
         rollback: staleRollback,
       }),
-    )
+    })
 
     await expect(installer.install({
       reviewId: current.id,
@@ -810,9 +715,7 @@ describe('fail-closed install outcomes', () => {
       profileTargetAbsent: async () => false,
       profileDependencySpec: async () => 'github:acme/calculator#main',
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, undefined, 'autoevo-verify',
-    )
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     await expect(installer.install({
       reviewId: attestedReview().id,
       targetProfile: 'web',
@@ -833,18 +736,13 @@ describe('fail-closed install outcomes', () => {
     const ctx = { get: () => ({ request }) } as unknown as Context
     const profileTargetAbsent = vi.fn(async () => true)
     const launcher = { profileTargetAbsent } as unknown as DshLauncher
-    const installer = new PluginInstaller(
+    const installer = new PluginInstaller({
       ctx,
-      config(root),
+      config: config(root),
       store,
       launcher,
-      async () => true,
-      undefined,
-      undefined,
-      undefined,
-      'autoevo-verify',
-      async () => 'headless',
-    )
+      resolveDestinationProfile: async () => 'headless',
+    })
 
     await expect(installer.install({
       reviewId: review().id,
@@ -885,21 +783,22 @@ describe('fail-closed install outcomes', () => {
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({}),
       verifyHost,
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
-    const verifier = unusedVerifier()
-    const run = vi.spyOn(verifier, 'run')
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
-    }), verifier)
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
+        evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
+      }),
+    })
     const result = await installer.install({
       reviewId: none.id,
       targetProfile: 'persistent',
       retention: 'persistent',
     }, execution())
     expect(verifyHost).toHaveBeenCalledTimes(1)
-    expect(run).not.toHaveBeenCalled()
-    expect(result.verificationVerdict).toBeUndefined()
     expect(result).toMatchObject({
       installOutcome: 'activated',
       installState: 'installed',
@@ -910,8 +809,8 @@ describe('fail-closed install outcomes', () => {
     })
   })
 
-  it('rejects temporary manual_runtime before approval, materialize, install, or receipt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-manual-temp-'))
+  it('rejects temporary retention before approval, install, or receipt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-outcome-temporary-'))
     temporary.push(root)
     class CountingStore extends StateStore {
       installationWrites = 0
@@ -922,14 +821,7 @@ describe('fail-closed install outcomes', () => {
       }
     }
     const store = new CountingStore(root)
-    const manual = attestedReview({
-      runtimeSurface: {
-        ...attestedSurface(),
-        toolFixtures: [{ tool: 'calculator', available: true, safe: false, hostValidated: false }],
-        verificationLayer: 'manual_runtime',
-      },
-    })
-    await store.put('reviews', manual)
+    const current = await putFrozenReview(root, store, attestedReview())
     let approvals = 0
     const ctx = { get: () => ({
       request: async () => {
@@ -937,44 +829,39 @@ describe('fail-closed install outcomes', () => {
         return 'allowed-once'
       },
     }) } as unknown as Context
-    let installs = 0
-    let verifyHostCalls = 0
-    const launcher = {
-      install: async () => {
-        installs += 1
-        throw new Error('must not install')
-      },
-      verifyHost: async () => {
-        verifyHostCalls += 1
-        throw new Error('must not verify')
-      },
-    } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const install = vi.fn()
+    const launcher = { install, profileTargetAbsent: async () => true } as unknown as DshLauncher
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     await expect(installer.install({
-      reviewId: manual.id,
+      reviewId: current.id,
       targetProfile: 'web',
       retention: 'temporary',
-      verificationTask: 'calculate 6 * 7',
-      verificationExpectedText: '42',
-    }, execution())).rejects.toThrow(/manual_runtime cannot be installed as a temporary trial/i)
+    }, execution())).rejects.toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringMatching(/temporary trials are not supported/i),
+    })
     expect(approvals).toBe(0)
-    expect(installs).toBe(0)
-    expect(verifyHostCalls).toBe(0)
+    expect(install).not.toHaveBeenCalled()
     expect(store.installationWrites).toBe(0)
   })
 
   it('reports recovery rather than restart when hot-load runtime state is ambiguous', async () => {
     const { root, store, ctx } = await setup(attestedReview())
     const { launcher } = launcherWithHost(hostPassedEvidence)
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true, undefined, async () => ({
-      evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation state is ambiguous' },
-      rollbackFailed: true,
-    }), unusedVerifier())
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
+        evidence: { attempted: true, loaded: false, method: 'failed', reason: 'activation state is ambiguous' },
+        rollbackFailed: true,
+      }),
+    })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
     expect(result).toMatchObject({
       installOutcome: 'recovery_required',
@@ -1019,9 +906,9 @@ describe('fail-closed install outcomes', () => {
         reason: 'Host loaded the reviewed bundle and Loader/Fiber settled without an Agent turn.',
       }),
     } as unknown as DshLauncher
-    const activated = await new PluginInstaller(
-      ctx, config(root), store, activatedLauncher, async () => true, undefined, ambiguousActivation,
-    ).install({
+    const activated = await new PluginInstaller({
+      ctx, config: config(root), store, launcher: activatedLauncher, hotLoader: ambiguousActivation,
+    }).install({
       reviewId: none.id,
       targetProfile: 'persistent',
       retention: 'persistent',
@@ -1042,9 +929,9 @@ describe('fail-closed install outcomes', () => {
       readInstalledVerificationFixtures: async () => jsonFixtures(),
       verifyHost: async () => { throw new Error('manual_runtime must not spawn') },
     } as unknown as DshLauncher
-    const awaiting = await new PluginInstaller(
-      ctx, config(root), store, awaitingLauncher, async () => true, undefined, ambiguousActivation,
-    ).install({
+    const awaiting = await new PluginInstaller({
+      ctx, config: config(root), store, launcher: awaitingLauncher, hotLoader: ambiguousActivation,
+    }).install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
@@ -1063,16 +950,14 @@ describe('fail-closed install outcomes', () => {
 
   it('requires the target profile to bind the exact reviewed source before verification can succeed', async () => {
     const { root, store, ctx } = await setup(attestedReview())
-    const { launcher, verifyHost, verify } = launcherWithHost(hostPassedEvidence, false)
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const { launcher, verifyHost } = launcherWithHost(hostPassedEvidence, false)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
     expect(verifyHost).not.toHaveBeenCalled()
-    expect(verify).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       installOutcome: 'recovery_required',
       installed: false,
@@ -1096,17 +981,16 @@ describe('fail-closed install outcomes', () => {
     })
     await putFrozenReview(root, store, local)
     const launcher = { profileTargetAbsent: async () => true } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     await expect(installer.install({
       reviewId: local.id,
       targetProfile: 'persistent',
       retention: 'persistent',
       expectedArtifactSha256: 'f'.repeat(64),
-      verificationTask: 'test calculator',
     }, execution())).rejects.toThrow(/receipt does not match the reviewed frozen package/i)
   })
 
-  it('cannot verify when Host tool results are missing, even if a verifier would approve', async () => {
+  it('cannot verify when Host tool results are missing', async () => {
     const { root, store, ctx } = await setup(attestedReview())
     const { launcher } = launcherWithHost({
       ...hostPassedEvidence,
@@ -1117,28 +1001,22 @@ describe('fail-closed install outcomes', () => {
       exitCode: 1,
       reason: 'no successful Host tool result',
     })
-    const verifier = unusedVerifier()
-    const run = vi.spyOn(verifier, 'run')
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, undefined, verifier,
-    )
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     const result = await installer.install({
       reviewId: review().id,
       targetProfile: 'persistent',
       retention: 'persistent',
-      verificationTask: 'test calculator',
-      verificationExpectedText: '42',
     }, execution())
-    expect(run).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       installOutcome: 'recovery_required',
+      installed: false,
       verified: false,
+      removed: false,
     })
   })
-
-
 })
-describe('install authorization uses verdict and hard boundaries', () => {
+
+describe('install receipts and hard boundaries', () => {
   it('records contribution eligibility only for verified full-fit local installs and exposes it on the compact view', async () => {
     async function installLocal(options: {
       fit: ReviewRecord['fit']
@@ -1162,25 +1040,21 @@ describe('install authorization uses verdict and hard boundaries', () => {
         recommendation: 'use',
       })
       await putFrozenReview(root, store, local)
-      const installer = new PluginInstaller(
+      const installer = new PluginInstaller({
         ctx,
-        config(root),
+        config: config(root),
         store,
-        {
+        launcher: {
           profileTargetAbsent: async () => true,
           install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
           profileSourceMatches: async () => true,
           readInstalledVerificationFixtures: async () => jsonFixtures(),
           verifyHost: async () => options.verification,
         } as unknown as DshLauncher,
-        async () => true,
-        undefined,
-        async () => ({
+        hotLoader: async () => ({
           evidence: { attempted: true, loaded: true, method: 'loader', reason: 'hot-loaded' },
         }),
-        undefined,
-        'autoevo-verify',
-      )
+      })
       const result = await installer.install({
         reviewId: local.id,
         targetProfile: 'web',

@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile 
 import path from 'node:path'
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError } from '../errors.js'
+import { isAlreadyExists, isNotFound, isProcessAlive } from '../internal-utils.js'
 import { commandResultFailure, type CommandRunner } from '../process/runner.js'
 import { ensureAutoEvoGitignore, WORKSPACE_GIT_CACHE_DIR } from '../workspace-layout.js'
 import { validateGithubRepository } from './discovery.js'
@@ -36,16 +37,6 @@ function cacheKey(repository: string): string {
 
 export function gitTransportArgs(platform: NodeJS.Platform = process.platform): string[] {
   return platform === 'win32' ? ['-c', 'http.sslBackend=openssl'] : []
-}
-
-function processAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EPERM')
-  }
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -102,7 +93,7 @@ function retryableBusy(): EvolutionError {
 
 async function readText(target: string): Promise<string | undefined> {
   return await readFile(target, 'utf8').catch((error: unknown) => {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined
+    if (isNotFound(error)) return undefined
     throw error
   })
 }
@@ -199,18 +190,12 @@ async function recoverStaleLock(lockPath: string, observed: { owner: string | nu
   try {
     await writeFile(recoveryPath, `${JSON.stringify(recovery)}\n`, { encoding: 'utf8', flag: 'wx' })
   } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw new LockBusyError()
+    if (isAlreadyExists(error)) throw new LockBusyError()
     throw error
   }
   let quarantined = false
   const quarantine = lockQuarantinePath(lockPath, (testing.token ?? randomUUID)())
   try {
-    if (await lstat(quarantine).then(() => true).catch((error: unknown) => {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false
-      throw error
-    })) {
-      throw new EvolutionError('command_failed', 'Workspace Git cache stale-lock quarantine collision; refusing takeover', { retryable: true })
-    }
     const latest = await observeLock(lockPath)
     if (latest.owner !== observed.owner || latest.publisher !== observed.publisher) {
       throw new EvolutionError('command_failed', 'Workspace Git cache lock changed during stale recovery', { retryable: true })
@@ -244,7 +229,7 @@ async function acquireLock(lockPath: string, timeoutMs: number, signal?: AbortSi
     } catch (error) {
       if (error instanceof LockBusyError) {
         // A recovery owner is publishing or quarantining the stale lock.
-      } else if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') throw error
+      } else if (!isAlreadyExists(error)) throw error
     }
     const observed = await observeLock(lockPath)
     const holderBody = observed.owner ?? observed.publisher
@@ -252,7 +237,7 @@ async function acquireLock(lockPath: string, timeoutMs: number, signal?: AbortSi
       try { return JSON.parse(holderBody) as LockOwner } catch { return undefined }
     })()
     const age = await stat(lockPath).then((item) => Date.now() - item.mtimeMs).catch(() => 0)
-    if ((!owner?.pid || !(testing.processAlive ?? processAlive)(owner.pid)) && age > Math.max(5_000, timeoutMs)) {
+    if ((!owner?.pid || !(testing.processAlive ?? isProcessAlive)(owner.pid)) && age > Math.max(5_000, timeoutMs)) {
       try {
         return await recoverStaleLock(lockPath, observed, testing, signal)
       } catch (error) {
@@ -305,7 +290,7 @@ async function gitCacheDirectoryExists(
     return true
   } catch (error) {
     if (signal?.aborted) throw signal.reason
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return false
+    if (isNotFound(error)) return false
     throw error
   }
 }
@@ -386,7 +371,7 @@ export async function withCachedGithubRepository<T>(
     for (const segment of WORKSPACE_GIT_CACHE_DIR.split(path.sep)) {
       component = path.join(component, segment)
       const info = await lstat(component).catch((error: unknown) => {
-        if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined
+        if (isNotFound(error)) return undefined
         throw error
       })
       if (!info) await mkdir(component)

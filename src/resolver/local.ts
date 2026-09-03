@@ -221,7 +221,7 @@ export async function resolveLocalCapabilities(
       requirement,
       match: matchConfidence,
       ...(options.activeProfile ? { activeProfile: options.activeProfile } : {}),
-    }).catch(() => [])
+    })
     const knownNames = new Set(candidates.map((candidate) => candidate.name))
     for (const bundled of bundledCandidates) {
       if (!knownNames.has(bundled.name)) candidates.push(bundled)

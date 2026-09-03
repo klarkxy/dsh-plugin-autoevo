@@ -7,6 +7,7 @@ import {
   EVOLUTION_PRESET_KNOWN_MANIFESTS,
   EVOLUTION_PRESET_MANIFEST_FILENAME,
   EVOLUTION_PRESET_TEMPLATE_VERSION,
+  isEvolutionPresetManifest,
 } from '../../src/evolution-contracts.js'
 import {
   buildManifest,
@@ -58,6 +59,13 @@ describe('evolution preset Search-first V18', () => {
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[2]?.templateVersion).toBe('15')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[3]?.templateVersion).toBe('16')
     expect(EVOLUTION_PRESET_KNOWN_MANIFESTS[4]?.templateVersion).toBe('17')
+  })
+
+  it('ships only well-formed prior manifests so materialize never re-validates compile-time constants', () => {
+    // preset-manager trusts EVOLUTION_PRESET_KNOWN_MANIFESTS as-is; a malformed
+    // constant must fail here rather than silently downgrade an upgrade to "preserved".
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS.length).toBeGreaterThan(0)
+    expect(EVOLUTION_PRESET_KNOWN_MANIFESTS.every((manifest) => isEvolutionPresetManifest(manifest))).toBe(true)
   })
 
   it('upgrades a pristine V13 install to the current Creator-superset template', async () => {

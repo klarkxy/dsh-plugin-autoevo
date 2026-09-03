@@ -2,7 +2,7 @@ import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type Workflow
 import { prefersChinese, rememberRequirementLanguage } from '../i18n.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { hostDirectUseBoundary, isDirectlyUsableReview } from '../review/direct-use.js'
-import { needsSemanticReviewer } from '../review/review.js'
+import { requiresSemanticContext } from '../review/review.js'
 import { creatorAgentFacts } from '../creator-foundation.js'
 import { activeDiscoveryQueriesUsed, discoveryQueriesPerTurn } from './candidates.js'
 import {
@@ -265,9 +265,7 @@ function reviewEvidence(view: WorkflowView): Record<string, unknown>[] {
         not_established: finding.notEstablished.map((item) => boundedText(item, 160)).slice(0, 12),
       })),
     },
-    semantic_assessment: needsSemanticReviewer(review)
-      ? review.reviewerVerdict?.decision ?? 'missing'
-      : 'not_required',
+    semantic_context_required: requiresSemanticContext(review),
     can_install: isDirectlyUsableReview(review, view.workflow),
     blocking_issues: reviewBlockingIssues(review),
     warnings: securityFindingFacts(review.findings)

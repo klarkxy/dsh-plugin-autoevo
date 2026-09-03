@@ -41,6 +41,18 @@ export interface CapabilityVersionList {
   versions: CapabilityVersionEntry[]
 }
 
+/** Await `work`; if the signal aborted meanwhile, surface the exact abort reason instead of the read's own error. */
+async function awaitOrAbort<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  try {
+    const value = await work()
+    signal?.throwIfAborted()
+    return value
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason
+    throw error
+  }
+}
+
 async function artifactAvailable(record: InstallationRecord, signal?: AbortSignal): Promise<boolean> {
   signal?.throwIfAborted()
   if (!record.installSpec.startsWith('file:')) return true
@@ -67,28 +79,13 @@ export async function listCapabilityVersions(
   signal?: AbortSignal,
 ): Promise<CapabilityVersionList> {
   signal?.throwIfAborted()
-  let anchor: InstallationRecord | undefined
-  if (input.installationId) {
-    try {
-      anchor = await deps.store.getInstallation(input.installationId)
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason
-      throw error
-    }
-    signal?.throwIfAborted()
-  }
+  const anchorId = input.installationId
+  const anchor = anchorId ? await awaitOrAbort(() => deps.store.getInstallation(anchorId), signal) : undefined
   const packageName = input.packageName ?? anchor?.packageName ?? undefined
   if (!packageName) {
     throw new EvolutionError('invalid_input', 'capability_versions requires a package_name or an installation_id with a package identity')
   }
-  let listed: InstallationRecord[]
-  try {
-    listed = await deps.store.listInstallationsStrict()
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason
-    throw error
-  }
-  signal?.throwIfAborted()
+  const listed = await awaitOrAbort(() => deps.store.listInstallationsStrict(), signal)
   const records = listed.filter((record) => record.packageName === packageName)
   const lineage = deriveInstallationLineage(records)
   const liveInstallationByIdentity = new Map<string, string | undefined>()
@@ -98,15 +95,13 @@ export async function listCapabilityVersions(
     if (!liveInstallationByIdentity.has(identity)) {
       signal?.throwIfAborted()
       let spec: string | undefined
-      if (deps.launcher.profileDependencySpec) {
-        try {
-          spec = await deps.launcher.profileDependencySpec(record.dshHome, record.targetProfile, packageName)
-        } catch (error) {
-          if (signal?.aborted) throw signal.reason
-          throw new EvolutionError('command_failed', 'Could not read the live profile dependency state while listing capability versions')
-        }
-        signal?.throwIfAborted()
+      try {
+        spec = await deps.launcher.profileDependencySpec(record.dshHome, record.targetProfile, packageName)
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason
+        throw new EvolutionError('command_failed', 'Could not read the live profile dependency state while listing capability versions')
       }
+      signal?.throwIfAborted()
       const live = lineage.uniqueLiveLeaf(record, spec)
       if (live.status === 'ambiguous') {
         throw new EvolutionError('command_failed', 'Capability version lineage is ambiguous for the live profile; refusing to report multiple active receipts', {
@@ -151,14 +146,7 @@ export async function rollbackInstallation(
   exec: ToolRunContext,
 ): Promise<InstallationRecord> {
   exec.signal?.throwIfAborted()
-  let current: InstallationRecord
-  try {
-    current = await deps.store.getInstallation(input.installationId)
-    exec.signal?.throwIfAborted()
-  } catch (error) {
-    if (exec.signal?.aborted) throw exec.signal.reason
-    throw error
-  }
+  const current = await awaitOrAbort(() => deps.store.getInstallation(input.installationId), exec.signal)
   if (current.removed) {
     throw new EvolutionError('invalid_input', 'The current installation receipt is already removed; nothing rolls back from it')
   }
@@ -169,14 +157,7 @@ export async function rollbackInstallation(
   if (normalizedInstallationHome(current.dshHome) !== normalizedInstallationHome(deps.config.dshHome)) {
     throw new EvolutionError('review_expired', 'The current installation receipt targets a different DSH home; refusing rollback')
   }
-  let listed: InstallationRecord[]
-  try {
-    listed = await deps.store.listInstallationsStrict()
-    exec.signal?.throwIfAborted()
-  } catch (error) {
-    if (exec.signal?.aborted) throw exec.signal.reason
-    throw error
-  }
+  const listed = await awaitOrAbort(() => deps.store.listInstallationsStrict(), exec.signal)
   const records = listed.filter((record) => record.packageName === packageName)
   const lineage = deriveInstallationLineage(records)
   const listedCurrent = records.find((record) => record.id === current.id)
@@ -225,15 +206,13 @@ export async function rollbackInstallation(
     throw new EvolutionError('command_failed', 'The rollback target artifact is no longer available on disk')
   }
   let liveSpec: string | undefined
-  if (deps.launcher.profileDependencySpec) {
-    try {
-      liveSpec = await deps.launcher.profileDependencySpec(deps.config.dshHome, current.targetProfile, packageName)
-      exec.signal?.throwIfAborted()
-    } catch (error) {
-      if (exec.signal?.aborted) throw exec.signal.reason
-      liveSpec = undefined
-    }
+  try {
+    liveSpec = await deps.launcher.profileDependencySpec(deps.config.dshHome, current.targetProfile, packageName)
+  } catch (error) {
+    if (exec.signal?.aborted) throw exec.signal.reason
+    throw new EvolutionError('command_failed', 'Could not read the live profile dependency state before rollback')
   }
+  exec.signal?.throwIfAborted()
   if (!liveSpec || liveSpec !== current.installSpec) {
     throw new EvolutionError('invalid_input', 'The live profile dependency spec does not match the given current installation; pass the active installation_id', {
       expected: current.installSpec,

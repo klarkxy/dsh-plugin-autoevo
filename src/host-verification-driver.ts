@@ -135,15 +135,6 @@ export function extractFixtureArguments(value: unknown): Record<string, unknown>
   return args
 }
 
-/** Candidate risk/approval/safe flags are never Host attestation. Kept as an explicit untrusted probe. */
-export function inspectLoadedToolSafety(tool: object): { safe: boolean; reason: string } {
-  void tool
-  return {
-    safe: false,
-    reason: 'loaded tool self-declared risk, approval, or package safe flags are not Host attestation',
-  }
-}
-
 export function argumentsMatchToolSchema(parameters: unknown, args: Record<string, unknown>): boolean {
   try {
     assertSupportedJsonSchema(parameters)
@@ -393,9 +384,8 @@ export function hostVerificationOverlay(input: {
   const fixtures: Record<string, Record<string, unknown>> = {}
   for (const item of input.fixtures) fixtures[item.tool] = item.arguments
   return [
-    // Isolated preflight boots a non-template profile (`autoevo-verify`) so
-    // `dsh plugin` initializes only `@deepseek-ai/dsh-base`. No headless
-    // one-shot runner is present; the observer exits after Loader/tool probe.
+    // No headless one-shot runner is present; the observer exits after the
+    // Loader/tool probe without starting an Agent turn.
     {
       insert: [{
       id: `${HOST_OVERLAY_ID_PREFIX}${randomUUID()}`,
@@ -751,7 +741,6 @@ export function applyHostVerification(ctx: Context, config: HostDriverConfig): v
 
 export const _testing = {
   extractFixtureArguments,
-  inspectLoadedToolSafety,
   argumentsMatchToolSchema,
   decideHostFixtures,
   parseFixturesJson,

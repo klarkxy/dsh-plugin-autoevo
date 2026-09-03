@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import type { ResolutionRecord, ReviewRecord } from '../../src/contracts.js'
-import { needsSemanticReviewer } from '../../src/review/review.js'
 import { confirmationFacts, securityFindingFacts } from '../../src/workflow/contracts.js'
 
 describe('security finding presentation', () => {

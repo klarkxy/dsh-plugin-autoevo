@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord } from '../../src/contracts.js'
+import { EvolutionError } from '../../src/errors.js'
 import { StateStore } from '../../src/state/store.js'
 import { sha256 } from '../../src/state/hashes.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
@@ -310,6 +311,20 @@ describe('StateStore lightweight validation', () => {
       code: 'invalid_input',
       details: { id: badId, diagnosticHash: expect.stringMatching(/^[a-f0-9]{64}$/u) },
     })
+  })
+
+  it('propagates a record read failure instead of reporting it as a corrupt record', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-state-read-failure-'))
+    temporary.push(root)
+    const store = new StateStore(root)
+    const id = `installation_${'e'.repeat(24)}`
+    // A directory at the record path is unreadable (EISDIR), not absent and not corrupt JSON.
+    await mkdir(path.join(root, 'installations', `${id}.json`), { recursive: true })
+
+    const failure = await store.getInstallation(id).then(() => undefined, (error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'EISDIR' })
+    expect(failure).not.toBeInstanceOf(EvolutionError)
+    await expect(store.getInstallation(`installation_${'f'.repeat(24)}`)).rejects.toMatchObject({ code: 'not_found' })
   })
 
   it('collects invalid installation diagnostics locally for a strict pass without exposing record contents', async () => {

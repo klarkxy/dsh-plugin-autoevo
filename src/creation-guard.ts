@@ -50,8 +50,6 @@ interface AgentGateState {
 const FIND_PLUGIN_TOOL = 'find_dsh_plugin'
 const WEB_SEARCH_TOOL = 'web_search'
 const ASK_USER_TOOLS = new Set(['ask_user', 'ask_user_question'])
-const SHELL_TOOLS = new Set(['pwsh', 'bash'])
-const DSH_PLUGIN_ADD = /(?:^|[\s;&|])dsh(?:\.cmd)?\s+plugin\b[\s\S]*\badd\b/iu
 const SKIP_USER_TEXT = /^(?:Current runtime context\.|<system-reminder>)/u
 
 export interface UserFacingMessage {
@@ -97,19 +95,6 @@ export function extractUserFacingText(message: UserFacingMessage): string {
   return parts.join('\n')
 }
 
-export function isDshPluginAddCommand(value: string): boolean {
-  return DSH_PLUGIN_ADD.test(value)
-}
-
-function shellCommandText(args: unknown): string {
-  if (!isRecord(args)) return ''
-  for (const key of ['command', 'cmd', 'script']) {
-    const value = args[key]
-    if (typeof value === 'string') return value
-  }
-  return ''
-}
-
 function clearHostGrant(state: AgentGateState): void {
   delete state.selectionReceipt
   delete state.actionCommitment
@@ -127,26 +112,6 @@ export function isNewCordisDefinition(exec: Pick<ToolExecution, 'name' | 'argume
   if (exec.name !== 'cordis_define' || !isRecord(exec.arguments)) return false
   const plugin = exec.arguments.plugin
   return isRecord(plugin) && plugin.kind === 'new'
-}
-
-function denialReason(authorization?: ResolutionAuthorization): string {
-  if (!authorization) {
-    return 'AutoEvo denied new Cordis plugin creation: call capability_workflow for the current capability requirement first.'
-  }
-  const prefix = `AutoEvo denied new Cordis plugin creation for ${authorization.resolutionId}`
-  if (authorization.state === 'reuse_local') return `${prefix}: reuse the existing local capability the user chose. ${authorization.reason}`
-  if (authorization.state === 'modify_review') return `${prefix}: improve the reviewed plugin in the Host-managed source from this session instead of cordis_define. ${authorization.reason}`
-  if (authorization.state === 'use_review') return `${prefix}: the user chose to use a reviewed plugin, not create a new one. ${authorization.reason}`
-  if (authorization.state === 'selection_required') return `${prefix}: present the shortlist in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
-  if (authorization.state === 'confirmation_required') return `${prefix}: explain the review in chat, wait for the user, then call capability_workflow_resume. ${authorization.reason}`
-  if (authorization.state === 'stopped') return `${prefix}: the user stopped. ${authorization.reason}`
-  if (authorization.state === 'market_required') {
-    return `${prefix}: this older receipt is still parked on marketplace setup. Call capability_workflow again so Host-owned GitHub topic search can run. Do not create a plugin. ${authorization.reason}`
-  }
-  if (authorization.state === 'create_authorized') {
-    return `${prefix}: create-new continues in a Host-owned managed child on a managed git source; use repository files instead of cordis_define(kind:new).`
-  }
-  return `${prefix}: Host-managed construction is using the managed git source; live cordis_define(kind:new) is not the construction path.`
 }
 
 function outsideEvolutionModeReason(): string {
@@ -573,41 +538,26 @@ export class CreationGuard {
       }
       return 'Discovery is finished. If the user has not replied since the shortlist, present it and stop. After they reply, map their words to candidate IDs and call capability_workflow_resume with read-only navigation.'
     }
-    if (SHELL_TOOLS.has(exec.name) && state?.authorization && isDshPluginAddCommand(shellCommandText(exec.arguments))) {
-      return 'Install only via the capability workflow after review.'
-    }
     return undefined
   }
 
+  /**
+   * Protocol-state denials only. Live Cordis definition and `dsh plugin add`
+   * are denied by the outer ExecutionGuard, which runs first in evolution mode.
+   */
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     const protocol = this.protocolDenial(exec)
     if (protocol) return Promise.resolve({ kind: 'deny', reason: protocol })
-    if (!exec.agent || !isNewCordisDefinition(exec)) return next()
-    const managed = this.managedConstructionDenial(exec.agent)
-    if (managed) return Promise.resolve({ kind: 'deny', reason: managed })
     return next()
   }
 
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined {
-    const protocol = this.protocolDenial(exec)
-    if (protocol) return protocol
-    if (!exec.agent || !isNewCordisDefinition(exec)) return undefined
-    return this.managedConstructionDenial(exec.agent)
+    return this.protocolDenial(exec)
   }
 
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
-    // The outer current-policy execution guard denies every parent live definition.
-    // This inner guard remains responsible for managed-construction protocol state.
-  }
-
-  private managedConstructionDenial(agent: Agent): string | undefined {
-    if (!this.inEvolutionMode(agent)) return undefined
-    const state = this.states.get(agent)
-    if (state?.constructionRoot) return denialReason(state.authorization)
-    const auth = state?.authorization?.state
-    if (auth === 'create_authorized' || auth === 'modify_review') return denialReason(state?.authorization)
-    return undefined
+    // No per-result bookkeeping remains; kept because index.ts wires tools/result here.
   }
 
   authorization(agent: Agent): ResolutionAuthorization | undefined {
@@ -616,9 +566,7 @@ export class CreationGuard {
 }
 
 export const _testing = {
-  denialReason,
   extractUserFacingText,
-  isDshPluginAddCommand,
   outsideEvolutionModeReason,
   preservesHostGrant,
 }

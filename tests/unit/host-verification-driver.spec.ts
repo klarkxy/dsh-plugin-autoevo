@@ -13,7 +13,6 @@ import {
   fixtureDigestFor,
   hostLayerSuccess,
   hostVerificationOverlay,
-  inspectLoadedToolSafety,
   runHostVerification,
   sanitizeHostVerificationEvidence,
   selectInstallVerificationLayer,
@@ -104,9 +103,6 @@ describe('Host fixture validator', () => {
     expect(extractFixtureArguments(declared.calculator)).toEqual({ expression: '1+1' })
     expect(extractFixtureArguments({ safe: true })).toBeUndefined()
     expect(extractFixtureArguments(true)).toBeUndefined()
-    expect(inspectLoadedToolSafety({ name: 'calculator', risk: 'safe', requiresApproval: false, safe: true }))
-      .toMatchObject({ safe: false })
-    expect(inspectLoadedToolSafety({ name: 'calculator', safe: true })).toMatchObject({ safe: false })
   })
 
   it('cannot mint tool_roundtrip from candidate risk:safe, package safe:true, or unattested review facts', () => {

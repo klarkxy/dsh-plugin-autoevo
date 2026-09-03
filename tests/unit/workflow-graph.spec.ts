@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { POLICY_VERSION, type InstallationRecord, type MechanicalFacts, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import { EvolutionError } from '../../src/errors.js'
-import { reviewCandidateDigest, reviewSnapshotDigest } from '../../src/review/direct-use.js'
-import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import { executeNode, interruptPayload, type NodeExecutionResult, transition } from '../../src/workflow/graph.js'
 import { candidateSnapshotFor } from '../../src/workflow/candidates.js'
 import { retryableInstallContext, retryablePreVerificationReviewId, type WorkflowExec, type WorkflowHost, type WorkflowNodeId, type WorkflowRecord } from '../../src/workflow/contracts.js'
@@ -78,38 +76,6 @@ function review(): ReviewRecord {
       evidenceHashes: [],
       semanticContextRequired: false,
     } satisfies MechanicalFacts,
-  }
-}
-
-function withApprovedVerdict(record: ReviewRecord, workflow: WorkflowRecord): ReviewRecord {
-  const snapshotDigest = reviewSnapshotDigest(record)
-  const candidateDigest = reviewCandidateDigest(record, workflow)
-  const request = mintReviewerRequest({
-    workflowId: workflow.id,
-    review: record,
-    snapshotDigest,
-    candidateDigest,
-    createdAt: '2026-08-17T00:00:02.000Z',
-  })
-  const completed = { ...request, status: 'completed' as const, completedAt: '2026-08-17T00:00:03.000Z' }
-  return {
-    ...record,
-    reviewerRequestId: completed.id,
-    reviewerRequest: completed,
-    reviewerVerdict: {
-      requestId: completed.id,
-      reviewId: record.id,
-      requirementHash: requirementHashFor(record.requirement),
-      snapshotDigest,
-      candidateDigest,
-      reviewerSessionId: 'reviewer-session',
-      reviewerVersion: REVIEWER_VERSION,
-      decision: 'approved',
-      evidence: [],
-      conditions: [],
-      semanticCoverage: record.fit,
-      createdAt: '2026-08-17T00:00:03.000Z',
-    },
   }
 }
 
@@ -212,20 +178,6 @@ function prepareModifyHost(options: {
 }
 
 describe('workflow graph transitions', () => {
-  it('keeps create-new blocked when marketplace setup fails before discovery', async () => {
-    const current = resolution()
-    const host = {
-      async ensureMarket() {
-        return {
-          resolution: current,
-          market: { status: 'blocked', reason: 'approval denied or install failed' },
-        }
-      },
-    } as unknown as WorkflowHost
-    const result = await runNode('ensure_market', { host, resolution: current })
-    expect(result).toMatchObject({ kind: 'done', node: 'market_setup_required' })
-  })
-
   it('routes selection and confirmation options onto the declared nodes', () => {
     expect(transition('await_confirmation', 'use_this')).toBe('install_verify')
     expect(transition('await_confirmation', 'modify_this')).toBe('prepare_modify')
@@ -248,7 +200,7 @@ describe('workflow graph transitions', () => {
     confirmationWorkflow.reviewIdsByCandidate = {
       [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
     }
-    const confirmationReview = withApprovedVerdict(review(), confirmationWorkflow)
+    const confirmationReview = review()
     const confirmation = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
       workflow: confirmationWorkflow,
       installProfiles: ['web'],
@@ -277,7 +229,7 @@ describe('workflow graph transitions', () => {
     confirmationWorkflow.reviewIdsByCandidate = {
       [confirmationWorkflow.candidateSnapshot![0]!.id]: review().id,
     }
-    const confirmationReview = withApprovedVerdict(review(), confirmationWorkflow)
+    const confirmationReview = review()
     const confirmation = interruptPayload('await_confirmation', resolution(), [confirmationReview], {
       workflow: confirmationWorkflow,
       installProfiles: ['web'],
@@ -448,11 +400,9 @@ describe('workflow graph nodes', () => {
     const current = resolution()
     const legacy = workflow('review_github')
     delete legacy.candidateSnapshot![0]!.commit
-    let reviewed = false
-    const host = { async reviewGithub() { reviewed = true; throw new Error('must not review') } } as unknown as WorkflowHost
+    const host = {} as unknown as WorkflowHost
     const result = await runNode('review_github', { host, resolution: current, workflow: legacy })
     expect(result).toMatchObject({ kind: 'next', node: 'await_discovery' })
-    expect(reviewed).toBe(false)
     expect(legacy.candidateSnapshot).toBeUndefined()
     expect(legacy.lastFailure).toMatchObject({ code: 'review_target_upgrade_required', retryable: true })
   })
@@ -717,6 +667,7 @@ describe('workflow graph nodes', () => {
     const current = resolution()
     const record = workflow('prepare_modify')
     const host = prepareModifyHost({
+      async getResolution() { return current },
       async prepareModify() {
         throw new EvolutionError('command_failed', 'explicit source recovery is required', { recoveryRequired: true })
       },
@@ -742,7 +693,7 @@ describe('workflow graph nodes', () => {
       message: 'pnpm failed before verification',
       retryable: true,
     }
-    const approved = withApprovedVerdict(review(), confirmationWorkflow)
+    const approved = review()
 
     const confirmation = interruptPayload('await_confirmation', resolution(), [approved], {
       workflow: confirmationWorkflow,
@@ -758,7 +709,7 @@ describe('workflow graph nodes', () => {
   it('offers only the receipt-bound exact release-age exception for the failed candidate', () => {
     const record = workflow('await_confirmation')
     record.status = 'interrupted'
-    const approved = withApprovedVerdict(review(), record)
+    const approved = review()
     const candidateId = record.candidateSnapshot![0]!.id
     record.reviewedCandidateIds = [candidateId]
     record.reviewIdsByCandidate = { [candidateId]: approved.id }
@@ -827,7 +778,7 @@ describe('workflow graph nodes', () => {
   it('offers a sealed pause-and-fix retry for a confirmed-absent profile store mismatch', () => {
     const record = workflow('await_confirmation')
     record.status = 'interrupted'
-    const approved = withApprovedVerdict(review(), record)
+    const approved = review()
     const candidateId = record.candidateSnapshot![0]!.id
     record.reviewedCandidateIds = [candidateId]
     record.reviewIdsByCandidate = { [candidateId]: approved.id }

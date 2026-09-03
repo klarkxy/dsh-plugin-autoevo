@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { POLICY_VERSION, type ActionCommitment, type ReviewRecord, type ReviewerVerdict, type SelectionReceipt } from '../contracts.js'
+import { POLICY_VERSION, type ActionCommitment, type ReviewRecord, type SelectionReceipt } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
 import { isSafePackageName } from '../package-name.js'
 import { hashObject } from '../state/hashes.js'
@@ -155,19 +155,6 @@ export function isManagedModificationEligibleReview(review: ReviewRecord): boole
   if (review.policyVersion !== POLICY_VERSION || review.fit === 'none' || review.license === null) return false
   if (review.mechanicalFacts?.truncated) return false
   return !review.findings.some((finding) => finding.code === 'review_truncated')
-}
-
-export function reviewerBindingDigest(verdict: ReviewerVerdict): string {
-  return hashObject({
-    requestId: verdict.requestId,
-    reviewId: verdict.reviewId,
-    requirementHash: verdict.requirementHash,
-    snapshotDigest: verdict.snapshotDigest,
-    candidateDigest: verdict.candidateDigest,
-    reviewerSessionId: verdict.reviewerSessionId,
-    reviewerVersion: verdict.reviewerVersion,
-    decision: verdict.decision,
-  })
 }
 
 export function frozenManifestDigest(review: ReviewRecord): string {

@@ -183,8 +183,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const flow = workflow()
@@ -207,8 +205,6 @@ describe('managed create vertical flow', () => {
       status: 'verified',
       receipt: expect.objectContaining({ presetId: 'evolution', childSessionId: 'child-1' }),
     }))
-    const revalidate = service as unknown as { revalidate(review: NonNullable<typeof result.review>): Promise<boolean> }
-    await expect(revalidate.revalidate(result.review!)).resolves.toBe(true)
   }, 60_000)
 
   it.each([
@@ -255,8 +251,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const flow = workflow()
@@ -292,8 +286,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const flow = workflow()
@@ -344,8 +336,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const flow = workflow()
@@ -375,8 +365,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(testingCreatorPreflight()),
     )
     const flow = workflow()
@@ -413,8 +401,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       {
         async preflight() {
           throw new Error('Official Creator cordis preset is missing')
@@ -459,8 +445,6 @@ describe('managed create vertical flow', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(testingCreatorPreflight()),
     )
     const firstFlow = workflow()

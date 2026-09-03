@@ -1,5 +1,6 @@
 import type { RuntimeConfig } from '../config.js'
 import { EvolutionError } from '../errors.js'
+import { isRecord } from '../internal-utils.js'
 import { commandResultFailure, type CommandResult, type CommandRunner } from '../process/runner.js'
 import { validateGithubRepository } from './discovery.js'
 
@@ -10,12 +11,21 @@ export interface UpstreamState {
   latestRelease: { tag: string; publishedAt: string | null } | null
 }
 
-function asObject(stdout: string): Record<string, unknown> {
-  const value: unknown = JSON.parse(stdout.trim())
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new EvolutionError('github_unavailable', 'GitHub returned malformed repository data')
+/** Every gh payload parse failure is one boundary failure: `github_unavailable`. */
+function githubJson(stdout: string, description: string): unknown {
+  const body = stdout.trim()
+  if (!body) throw new EvolutionError('github_unavailable', `GitHub returned empty ${description}`)
+  try {
+    return JSON.parse(body)
+  } catch {
+    throw new EvolutionError('github_unavailable', `GitHub returned malformed ${description}`)
   }
-  return value as Record<string, unknown>
+}
+
+function githubObject(stdout: string, description: string): Record<string, unknown> {
+  const value = githubJson(stdout, description)
+  if (!isRecord(value)) throw new EvolutionError('github_unavailable', `GitHub returned malformed ${description}`)
+  return value
 }
 
 function isExplicitHttp404(result: CommandResult): boolean {
@@ -23,25 +33,13 @@ function isExplicitHttp404(result: CommandResult): boolean {
   for (const body of [result.stdout, result.stderr]) {
     try {
       const payload: unknown = JSON.parse(body.trim())
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue
-      const status = (payload as Record<string, unknown>).status
-      if (status === 404 || status === '404') return true
+      if (!isRecord(payload)) continue
+      if (payload.status === 404 || payload.status === '404') return true
     } catch {
       // Only an explicit structured status or HTTP status line is accepted.
     }
   }
   return false
-}
-
-function latestReleaseObject(stdout: string): Record<string, unknown> {
-  if (!stdout.trim()) {
-    throw new EvolutionError('github_unavailable', 'GitHub returned empty latest release data')
-  }
-  try {
-    return asObject(stdout)
-  } catch {
-    throw new EvolutionError('github_unavailable', 'GitHub returned malformed latest release data')
-  }
 }
 
 /**
@@ -69,31 +67,27 @@ export async function fetchUpstreamState(options: {
     allowFailure,
     ...(options.signal ? { signal: options.signal } : {}),
   })
-  const repoPayload = asObject((await run(`/repos/${repository}`)).stdout)
+  const repoPayload = githubObject((await run(`/repos/${repository}`)).stdout, 'repository data')
   const defaultBranch = typeof repoPayload.default_branch === 'string' && repoPayload.default_branch
     ? repoPayload.default_branch
     : 'HEAD'
-  const commitsPayload: unknown = JSON.parse((await run(`/repos/${repository}/commits`, {
+  const commitsPayload = githubJson((await run(`/repos/${repository}/commits`, {
     sha: defaultBranch,
     per_page: '1',
-  })).stdout.trim())
-  const latest = Array.isArray(commitsPayload) ? commitsPayload[0] as Record<string, unknown> | undefined : undefined
+  })).stdout, 'commit data')
+  const latest = Array.isArray(commitsPayload) && isRecord(commitsPayload[0]) ? commitsPayload[0] : undefined
   const sha = typeof latest?.sha === 'string' ? latest.sha : undefined
-  if (!sha) {
+  if (!latest || !sha) {
     throw new EvolutionError('github_unavailable', 'GitHub returned no head commit for the default branch', { repository })
   }
-  const committer = latest?.commit && typeof latest.commit === 'object'
-    ? (latest.commit as Record<string, unknown>).committer
-    : undefined
-  const date = committer && typeof committer === 'object'
-    ? (committer as Record<string, unknown>).date
-    : undefined
+  const committer = isRecord(latest.commit) ? latest.commit.committer : undefined
+  const date = isRecord(committer) ? committer.date : undefined
   const releaseResult = await run(`/repos/${repository}/releases/latest`, {}, true)
   let latestRelease: UpstreamState['latestRelease'] = null
   if (releaseResult.exitCode !== 0) {
     if (!isExplicitHttp404(releaseResult)) throw commandResultFailure(options.config.ghCommand, releaseResult)
   } else {
-    const releasePayload = latestReleaseObject(releaseResult.stdout)
+    const releasePayload = githubObject(releaseResult.stdout, 'latest release data')
     if (typeof releasePayload.tag_name !== 'string' || !releasePayload.tag_name.trim()) {
       throw new EvolutionError('github_unavailable', 'GitHub latest release data is missing a valid tag_name')
     }

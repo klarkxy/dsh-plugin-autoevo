@@ -9,6 +9,7 @@ import {
   type DerivedInstallationLineage,
   type UniqueLiveLeaf,
 } from './installation-lineage.js'
+import { isRecord } from './internal-utils.js'
 import { assertSafePackageName } from './package-name.js'
 import { parseExactGithubDependency } from './resolver/installed-origin.js'
 import { resolveProfilePluginCapabilities } from './resolver/profile.js'
@@ -89,6 +90,19 @@ function within(root: string, candidate: string): boolean {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
+/** Await `work`; if the signal aborted meanwhile, surface the exact abort reason instead of the read's own error. */
+async function awaitOrAbort<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  try {
+    const value = await work()
+    signal?.throwIfAborted()
+    return value
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason
+    throw error
+  }
+}
+
+/** Only ever rejects with the abort reason; every read failure is reported as `unreadable`. */
 async function exactProfileEvidence(
   deps: AdoptDeps,
   profile: string,
@@ -126,9 +140,9 @@ async function exactProfileEvidence(
     if (!within(profileRoot, manifestPath)) return { status: 'unreadable' }
     const manifest: unknown = JSON.parse(await readFile(manifestPath, { encoding: 'utf8', signal }))
     signal?.throwIfAborted()
-    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return { status: 'unreadable' }
-    const dependencies = (manifest as { dependencies?: unknown }).dependencies
-    if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) return { status: 'unreadable' }
+    if (!isRecord(manifest)) return { status: 'unreadable' }
+    const dependencies = manifest.dependencies
+    if (!isRecord(dependencies)) return { status: 'unreadable' }
     return Object.prototype.hasOwnProperty.call(dependencies, packageName)
       ? { status: 'unreadable' }
       : { status: 'absent' }
@@ -161,35 +175,14 @@ export async function scanOrphanedInstallations(
   options: { signal?: AbortSignal } = {},
 ): Promise<OrphanScan> {
   options.signal?.throwIfAborted()
-  let profile: string
-  try {
-    profile = await deps.currentProfile()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
-  let candidates
-  try {
-    candidates = await resolveProfilePluginCapabilities({
-      dshHome: deps.config.dshHome,
-      profile,
-      requirement: '',
-      match: () => 1,
-    })
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
-  let installations: InstallationRecord[]
-  try {
-    installations = await deps.store.listInstallationsStrict()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
+  const profile = await awaitOrAbort(() => deps.currentProfile(), options.signal)
+  const candidates = await awaitOrAbort(() => resolveProfilePluginCapabilities({
+    dshHome: deps.config.dshHome,
+    profile,
+    requirement: '',
+    match: () => 1,
+  }), options.signal)
+  const installations = await awaitOrAbort(() => deps.store.listInstallationsStrict(), options.signal)
   const lineage = deriveInstallationLineage(installations)
   const orphans: OrphanedInstallation[] = []
   for (const candidate of candidates) {
@@ -225,17 +218,10 @@ export async function adoptInstallation(
     throw new EvolutionError('invalid_input', 'capability_adopt requires a package_name from the orphan scan')
   }
   assertSafePackageName(packageName)
-  let initialProfile: string
-  try {
-    initialProfile = await deps.currentProfile()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
+  const initialProfile = await awaitOrAbort(() => deps.currentProfile(), options.signal)
   if (options.expectedProfile !== undefined && initialProfile !== options.expectedProfile) {
     throw new EvolutionError('review_expired', 'The live profile owner changed before adoption; scan again')
   }
-  options.signal?.throwIfAborted()
   const initialEvidence = await exactProfileEvidence(deps, initialProfile, packageName, options.signal)
   options.signal?.throwIfAborted()
   if (initialEvidence.status === 'unsupported') {
@@ -256,14 +242,7 @@ export async function adoptInstallation(
     targetProfile: initialProfile,
     packageName,
   })
-  let installations: InstallationRecord[]
-  try {
-    installations = await deps.store.listInstallationsStrict()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
+  const installations = await awaitOrAbort(() => deps.store.listInstallationsStrict(), options.signal)
   const lineage = deriveInstallationLineage(installations)
   const tracked = trackedInstallation(
     installations,
@@ -309,24 +288,9 @@ export async function adoptInstallation(
     return existingFinal
   }
 
-  let currentProfile: string
-  try {
-    currentProfile = await deps.currentProfile()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
-  const currentEvidence = currentProfile === initialProfile
-    ? await exactProfileEvidence(deps, currentProfile, packageName, options.signal)
-    : { status: 'unreadable' as const }
-  options.signal?.throwIfAborted()
-  if (currentEvidence.status !== 'found'
-    || currentEvidence.evidence.dependencySpec !== initialEvidence.evidence.dependencySpec
-    || currentEvidence.evidence.configuredBundle !== initialEvidence.evidence.configuredBundle) {
-    throw new EvolutionError('review_expired', 'The exact profile evidence changed before the adoption claim; scan again')
-  }
-
+  // Only Host store reads happened since the entry evidence read; the claim
+  // below is the commit point and the post-claim re-read is the authoritative
+  // drift check against it.
   let claim
   try {
     claim = await deps.store.claimAdoption({
@@ -334,8 +298,8 @@ export async function adoptInstallation(
       dshHome: normalizedDshHome(deps.config.dshHome),
       profile: initialProfile,
       packageName,
-      observedSpec: currentEvidence.evidence.dependencySpec,
-      configuredBundle: currentEvidence.evidence.configuredBundle,
+      observedSpec: initialEvidence.evidence.dependencySpec,
+      configuredBundle: initialEvidence.evidence.configuredBundle,
     })
   } catch (error) {
     if (options.signal?.aborted && !(error instanceof EvolutionError && error.code === 'invalid_input')) {
@@ -358,15 +322,9 @@ export async function adoptInstallation(
     })
   }
   options.signal?.throwIfAborted()
-  let evidenceAfterClaim: ExactProfileEvidence
-  try {
-    evidenceAfterClaim = ownerAfterClaim === initialProfile
-      ? await exactProfileEvidence(deps, initialProfile, packageName, options.signal)
-      : { status: 'unreadable' }
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
+  const evidenceAfterClaim: ExactProfileEvidence = ownerAfterClaim === initialProfile
+    ? await exactProfileEvidence(deps, initialProfile, packageName, options.signal)
+    : { status: 'unreadable' }
   options.signal?.throwIfAborted()
   if (evidenceAfterClaim.status === 'absent') {
     throw new EvolutionError('not_found', 'The package disappeared after the adoption claim; no installation receipt was created', {
@@ -385,14 +343,7 @@ export async function adoptInstallation(
   // The profile claim is append-only, but another writer may have committed a
   // canonical installation while this helper was revalidating live evidence.
   // Re-read strict history immediately before the append-only final receipt.
-  let installationsAfterClaim: InstallationRecord[]
-  try {
-    installationsAfterClaim = await deps.store.listInstallationsStrict()
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
-  options.signal?.throwIfAborted()
+  const installationsAfterClaim = await awaitOrAbort(() => deps.store.listInstallationsStrict(), options.signal)
   const trackedAfterClaim = trackedInstallation(
     installationsAfterClaim,
     deriveInstallationLineage(installationsAfterClaim),
@@ -478,15 +429,9 @@ export async function adoptInstallation(
     })
   }
   options.signal?.throwIfAborted()
-  let evidenceAfterFinal: ExactProfileEvidence
-  try {
-    evidenceAfterFinal = ownerAfterFinal === initialProfile
-      ? await exactProfileEvidence(deps, initialProfile, packageName, options.signal)
-      : { status: 'unreadable' }
-  } catch (error) {
-    if (options.signal?.aborted) throw options.signal.reason
-    throw error
-  }
+  const evidenceAfterFinal: ExactProfileEvidence = ownerAfterFinal === initialProfile
+    ? await exactProfileEvidence(deps, initialProfile, packageName, options.signal)
+    : { status: 'unreadable' }
   options.signal?.throwIfAborted()
   if (evidenceAfterFinal.status !== 'found'
     || evidenceAfterFinal.evidence.dependencySpec !== persisted.installSpec

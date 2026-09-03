@@ -6,7 +6,7 @@ import {
   type RequestIntent,
   type ResolutionRecord,
 } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
+import { EvolutionError, errorMessage } from '../errors.js'
 import { validateGithubRepository } from '../github/index.js'
 import { isConciseDiscoveryQuery, normalizeDiscoveryQueries } from '../resolver/keywords.js'
 import { hashObject } from '../state/hashes.js'
@@ -119,8 +119,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           this.creationGuard.invalidateHostGrant(exec.agent)
           await this.reissueInterrupt(latest, exec)
         }
-        let resolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
-        exec.signal?.throwIfAborted()
+        const resolution = latest.resolutionId ? await this.host.getResolution(latest.resolutionId) : undefined
         return await this.view(latest, resolution, {}, exec.signal)
       })
     }
@@ -603,11 +602,8 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           usedCalls: priorCalls + 1,
           maxProbes: 8,
           usedProbes: priorProbeUses + probes.length,
-          maxRecordReads: 4,
-          usedRecordReads: 1 + (reviews.length > 0 ? 1 : 0) + (installation ? 1 : 0),
         },
       }
-      exec.signal?.throwIfAborted()
       workflow.lastDiagnosis = diagnosis
       await this.awaitPreEffect(() => this.checkpoint(workflow), exec.signal)
       return await this.awaitPreEffect(
@@ -651,10 +647,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             await this.checkpoint(workflow)
             this.syncGuard(workflow, exec, guardGeneration, resolution)
             durableOutcomeCommitted = true
-            exec.signal?.throwIfAborted()
-            const committed = await this.view(workflow, resolution, {}, exec.signal)
-            exec.signal?.throwIfAborted()
-            return committed
+            return await this.view(workflow, resolution, {}, exec.signal)
           }
           workflow.discoveryPool = candidateSnapshotFor(
             resolution,
@@ -672,10 +665,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           durableOutcomeCommitted = true
-          exec.signal?.throwIfAborted()
-          const committed = await this.view(workflow, resolution, {}, exec.signal)
-          exec.signal?.throwIfAborted()
-          return committed
+          return await this.view(workflow, resolution, {}, exec.signal)
         }
 
         if (INTERRUPT_NODES.has(workflow.cursor)) {
@@ -685,10 +675,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             await this.issueClarificationInterrupt(workflow, exec)
             this.syncGuard(workflow, exec, guardGeneration, undefined)
             durableOutcomeCommitted = true
-            exec.signal?.throwIfAborted()
-            const committed = await this.view(workflow, undefined, {}, exec.signal)
-            exec.signal?.throwIfAborted()
-            return committed
+            return await this.view(workflow, undefined, {}, exec.signal)
           }
           if (!resolution && workflow.resolutionId) {
             resolution = await this.awaitPreEffect(
@@ -766,10 +753,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           durableOutcomeCommitted = true
-          exec.signal?.throwIfAborted()
-          const committed = await this.view(workflow, resolution, {}, exec.signal)
-          exec.signal?.throwIfAborted()
-          return committed
+          return await this.view(workflow, resolution, {}, exec.signal)
         }
 
         if (TERMINAL_NODES.has(workflow.cursor)) {
@@ -780,10 +764,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
             await this.issueRecoveryInterrupt(workflow, exec)
             this.syncGuard(workflow, exec, guardGeneration, resolution)
             durableOutcomeCommitted = true
-            exec.signal?.throwIfAborted()
-            const committed = await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
-            exec.signal?.throwIfAborted()
-            return committed
+            return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
           }
           this.markInstallCompletion(workflow, exec)
           workflow.status = 'completed'
@@ -791,10 +772,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           await this.checkpoint(workflow)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           durableOutcomeCommitted = true
-          exec.signal?.throwIfAborted()
-          const committed = await this.view(workflow, resolution, {}, exec.signal)
-          exec.signal?.throwIfAborted()
-          return committed
+          return await this.view(workflow, resolution, {}, exec.signal)
         }
 
         workflow.status = 'running'
@@ -869,10 +847,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
           await this.issueRecoveryInterrupt(workflow, exec)
           this.syncGuard(workflow, exec, guardGeneration, resolution)
           durableOutcomeCommitted = true
-          exec.signal?.throwIfAborted()
-          const committed = await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
-          exec.signal?.throwIfAborted()
-          return committed
+          return await this.view(workflow, resolution, { status: 'parked', alreadyWaiting: true }, exec.signal)
         }
         this.markInstallCompletion(workflow, exec)
         workflow.status = 'completed'
@@ -880,10 +855,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
         await this.checkpoint(workflow)
         this.syncGuard(workflow, exec, guardGeneration, resolution)
         durableOutcomeCommitted = true
-        exec.signal?.throwIfAborted()
-        const committed = await this.view(workflow, resolution, {}, exec.signal)
-        exec.signal?.throwIfAborted()
-        return committed
+        return await this.view(workflow, resolution, {}, exec.signal)
       }
     } catch (error) {
       if (durableOutcomeCommitted && exec.signal?.aborted) throw exec.signal.reason
@@ -893,7 +865,7 @@ export abstract class WorkflowEngineDriver extends WorkflowEngineCore {
       workflow.status = 'failed'
       workflow.error = {
         code: error instanceof EvolutionError ? error.code : 'command_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       }
       await this.checkpoint(workflow)
       throw error

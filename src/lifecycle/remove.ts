@@ -288,14 +288,6 @@ export class PluginRemover {
     const { record, builtin, packageName, cwd } = input
     if (record.retention === 'persistent' && builtin) {
       try {
-        if (builtin.wrote) {
-          await builtinMountPresent({
-            dshHome: record.dshHome,
-            targetProfile: record.targetProfile,
-            mountId: builtin.mountId,
-            packageName: packageName!,
-          })
-        }
         await disableBuiltinMount({
           launcher: this.launcher,
           dshHome: record.dshHome,
@@ -315,7 +307,7 @@ export class PluginRemover {
     } else if (record.retention === 'persistent') {
       let liveSpec: string | undefined
       try {
-        liveSpec = await this.launcher.profileDependencySpec!(
+        liveSpec = await this.launcher.profileDependencySpec(
           record.dshHome,
           record.targetProfile,
           packageName!,
@@ -435,7 +427,7 @@ export class PluginRemover {
         } else {
           const result = await this.launcher.remove(record.dshHome, record.targetProfile, packageName!, cwd, exec.signal)
           exec.signal?.throwIfAborted()
-          const remainingSpec = await this.launcher.profileDependencySpec!(
+          const remainingSpec = await this.launcher.profileDependencySpec(
             record.dshHome,
             record.targetProfile,
             packageName!,

@@ -93,12 +93,6 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     async discoverRemote(current) {
       return current
     },
-    async ensureMarket(current) {
-      return { resolution: current, market: { status: 'empty', reason: 'none' } }
-    },
-    async reviewGithub() {
-      throw new Error('not used')
-    },
     async reviewLocal() {
       throw new Error('not used')
     },
@@ -1724,9 +1718,10 @@ describe('workflow engine autonomous discovery', () => {
     } = await prepareBuiltinConfirmation('claim-advanced-checkpoint')
     const abortController = new AbortController()
     const resumeTurn = { ...turn, signal: abortController.signal } as ToolRunContext
+    const reason = new Error('injected post-checkpoint abort')
     const effect = vi.fn(async () => {
-      abortController.abort()
-      throw new Error('injected post-checkpoint abort')
+      abortController.abort(reason)
+      throw new Error('effect failure that must not mask the abort reason')
     })
     workflowHost.enableBuiltin = effect
     const interruptId = confirmation.workflow.interrupt!.interruptId
@@ -1736,7 +1731,7 @@ describe('workflow engine autonomous discovery', () => {
       workflowId: confirmation.workflow.id,
       interruptId,
       decision: { action: 'enable_builtin', candidateId },
-    }, resumeTurn)).rejects.toThrow(/injected post-checkpoint abort/u)
+    }, resumeTurn)).rejects.toBe(reason)
 
     const advanced = await store.getWorkflow(confirmation.workflow.id)
     expect(advanced).toMatchObject({

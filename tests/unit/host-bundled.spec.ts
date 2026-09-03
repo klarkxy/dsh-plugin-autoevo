@@ -314,6 +314,28 @@ describe('host-bundled opt-in capabilities', () => {
     expect(result.shouldDiscoverRemote).toBe(false)
   })
 
+  it('propagates non-ENOENT bundled-root read failures instead of reporting no bundled candidates', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-bundled-unreadable-'))
+    temporary.push(root)
+    const bundledRoot = path.join(root, 'cli')
+    const dshHome = path.join(root, 'dsh-home')
+    // A regular file where the scope directory must be makes readdir fail with
+    // a non-ENOENT code on every platform.
+    await mkdir(path.join(bundledRoot, 'node_modules'), { recursive: true })
+    await writeFile(path.join(bundledRoot, 'node_modules', '@deepseek-ai'), 'not a directory')
+    await mkdir(path.join(dshHome, 'profiles', 'web'), { recursive: true })
+
+    const failure = await resolveLocalCapabilities(emptyContext(), BUNDLED_REQUIREMENT, exec, {
+      dshHome,
+      activeProfile: 'web',
+      dshPackageRoot: bundledRoot,
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as NodeJS.ErrnoException).code).not.toBe('ENOENT')
+    expect((failure as NodeJS.ErrnoException).code).toMatch(/^E[A-Z]+$/u)
+  })
+
   it('presents enable_builtin at the selection gate for host-bundled snapshot candidates', async () => {
     const id = `resolution_${'c'.repeat(24)}`
     const resolution: ResolutionRecord = {

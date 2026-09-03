@@ -28,15 +28,15 @@ GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 一律按
 
 1. 候选来自同一当前 Policy resolution 的持久 review receipt；任何 Policy 不匹配的 review 都不得授权；
 2. Host 只阻断无法正确安装目标的机械问题：来源或包身份不明确、snapshot 不完整或不可物化、installSpec 与审查来源不一致、bundle manifest 无效或明显路径越界；
-3. `needsSemanticReviewer` 只表示值得请求第二意见。reviewer 缺失、超时、`rejected` 或 `uncertain` 会作为警告展示，不会自行取消安装入口，也不能授予执行权。生命周期脚本、进程/网络/文件访问、兼容性未知、fit 与 recommendation 同样是给人类和 LLM 的事实与建议；
-4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment；reviewer/verifier 不能铸造授权，也不能把安装完成态升级为 `verified`；
+3. `requiresSemanticContext` 只表示这些事实需要 Agent 结合语义理解，Host 不为此启动子 Agent，也不据此取消安装入口。生命周期脚本、进程/网络/文件访问、兼容性未知、fit 与 recommendation 同样是给人类和 LLM 的事实与建议；
+4. 新鲜认证用户 `use_this` 决定后，Host 铸造并保留 ActionCommitment；模型判断不能铸造授权，也不能把安装完成态升级为 `verified`；
 5. GitHub 安装 spec 钉在 exact commit；本地来源绑定 lineage root commit、status 与除 `.git`/`node_modules` 外的完整文件集合；HEAD 必须是该 root 或其后代；
-6. 安装前重新审查，材料一致；live Host `selectionReceipt` 与 `actionCommitment` 必须存在且结构哈希匹配；
+6. 安装只接受审查时冻结并哈希绑定的材料（exact commit 或 Host-owned tgz）；live Host `selectionReceipt` 与 `actionCommitment` 必须存在且结构哈希匹配；
 7. live DSH approval 返回一次性的 `allowed-once`，只批准副作用，不代替用户决定。
 
-symlink、特殊文件或截断的本地快照停在审查阶段；材料变化记为 `review_expired`；非 bundle 或 Host 判定不可物化仍不可直接安装。风险高、脚本存在、兼容性未知或明确不兼容、reviewer 无法判断时，用户仍可在看到摘要后选择使用、修改或跳过。
+symlink、特殊文件或截断的本地快照停在审查阶段；材料变化记为 `review_expired`；非 bundle 或 Host 判定不可物化仍不可直接安装。风险高、脚本存在、兼容性未知或明确不兼容时，用户仍可在看到摘要后选择使用、修改或跳过。
 
-本地改进在审查时冻结 Host-owned tgz；安装只接受该 file: 产物，批准前与隔离预检后再复算 SHA-256。生命周期与构建脚本按 DSH 和包管理器的正常规则执行，AutoEvo 只在事前展示并在失败时返回结构化阶段、摘要、可重试性与修复建议，不静默修改 profile 的构建白名单。
+本地改进在审查时冻结 Host-owned tgz；安装只接受该 file: 产物，批准前与实际安装前再复算 SHA-256。生命周期与构建脚本按 DSH 和包管理器的正常规则执行，AutoEvo 只在事前展示并在失败时返回结构化阶段、摘要、可重试性与修复建议，不静默修改 profile 的构建白名单。
 
 批准理由包含 fit、风险、兼容性、生命周期脚本名称和最多八项派生 finding。
 
@@ -73,7 +73,7 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 { "kind": "task/result", "resultSha256": "...", "matchedExpectation": true }
 ```
 
-不变量：机械验证完全由 Host 驱动；独立 semantic verifier 不能覆盖 Host 失败，也不能把 `activated` 或 `awaiting_user_test` 升级为 `verified`；`matchedExpectation` / `taskResultMatchedExpectation` 只保存为诊断布尔值，不得作为最终 `verified` 门槛。三层的执行条件与状态语义见[架构说明 §4](architecture.md#4-数据与状态) 与 [§5](architecture.md#5-状态语义)。
+不变量：机械验证完全由 Host 驱动；模型判断不能覆盖 Host 失败，也不能把 `activated` 或 `awaiting_user_test` 升级为 `verified`；`matchedExpectation` / `taskResultMatchedExpectation` 只保存为诊断布尔值，不得作为最终 `verified` 门槛。三层的执行条件与状态语义见[架构说明 §4](architecture.md#4-数据与状态) 与 [§5](architecture.md#5-状态语义)。
 
 ## 5. 删除
 
@@ -87,7 +87,7 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 
 文本类规则（`hidden_instructions`、`prompt_injection`、`data_exfiltration`）覆盖全部 UTF-8 文件，包括 README、SKILL.md 与其它 markdown——文本文件是隐藏指令的经典载体；代码类规则只扫可执行源。finding detail 保持短语级，review receipt 不含源码文本。
 
-检测项包括 `child_process`、`process_execution`、`dynamic_evaluation`、`environment_access`、`filesystem_access`、`network_access`、`prompt_injection`、`lifecycle_script`、`non_registry_dependency`、隐藏指令、数据外发、凭据访问、混淆代码、下载执行、关闭 TLS 校验、破坏性操作、持久化机制与云元数据访问。部分高歧义信号会请求 semantic reviewer 给出第二意见；它们不会把 reviewer 变成门禁。新增检测的思路部分受 NVIDIA SkillSpector（Apache 2.0）启发；规则与正则均为 AutoEvo 独立重实现。
+检测项包括 `child_process`、`process_execution`、`dynamic_evaluation`、`environment_access`、`filesystem_access`、`network_access`、`prompt_injection`、`lifecycle_script`、`non_registry_dependency`、隐藏指令、数据外发、凭据访问、混淆代码、下载执行、关闭 TLS 校验、破坏性操作、持久化机制与云元数据访问。高歧义信号以 `requiresSemanticContext` 提示 Agent 需结合语义理解；它们不是门禁。新增检测的思路部分受 NVIDIA SkillSpector（Apache 2.0）启发；规则与正则均为 AutoEvo 独立重实现。
 
 ## 7. 运行假设
 
@@ -96,6 +96,6 @@ symlink、特殊文件或截断的本地快照停在审查阶段；材料变化�
 - 状态列表的容错读取只用于诊断或可选历史展示。任何会授权、恢复或推导当前 workflow / installation 拓扑的路径都使用严格扫描；损坏或不可读 receipt 会让操作失败关闭，诊断只公开计数与 hash，不公开路径、spec 或原始内容。
 - 隔离的 DSH home/profile 只隔离配置与依赖；获准安装的包仍以当前用户权限运行。
 - 启发式扫描的检测项见 §6；结果供安装决策使用，不构成权限结论。
-- MechanicalFacts 的 static high risk / keyword 命中只作展示与是否启动 semantic reviewer 的路由；它们是警告和决策证据，不会自行控制 DSH Core 权限。可修 high 仍可走 `modify_this`，且 DSH Core 允许时用户可明确接受警告。安装完成后的功能是否已验证只看 Host 三层结果，不看 reviewer/verifier。
+- MechanicalFacts 的 static high risk / keyword 命中只作展示；它们是警告和决策证据，不会自行控制 DSH Core 权限。可修 high 仍可走 `modify_this`，且 DSH Core 允许时用户可明确接受警告。安装完成后的功能是否已验证只看 Host 三层结果。
 - `contributionAdvice.eligible` 表示可以建议贡献。提交前由人工或 Agent 检查实际 diff，清理用户路径、账号、私有地址、密钥和专有逻辑，并再次取得用户明确批准。
 - 内部托管源 commit 由 Host 在禁用 hooks/签名后本地完成；任何 fork、push、tag、release 或上游 PR 都属于后续发布动作，仍需另行明确批准。

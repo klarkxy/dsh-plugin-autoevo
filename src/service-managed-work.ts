@@ -11,7 +11,7 @@ import {
   type CreatorOperation,
   type CreatorWorkOrder,
 } from './creator-foundation.js'
-import { EvolutionError } from './errors.js'
+import { EvolutionError, errorMessage } from './errors.js'
 import type { ManagedChildHost, ManagedChildResult } from './managed-child.js'
 import { reviewLocalPlugin } from './review/index.js'
 import {
@@ -19,7 +19,6 @@ import {
   childCheckEvidence,
   hasMeaningfulModificationInstruction,
   modificationAcceptance,
-  modificationBlockers,
   modificationWorkOrder,
 } from './service-modification.js'
 import {
@@ -126,8 +125,8 @@ export async function preserveFailedManagedWork(
         recoveryRequired: true,
         cancelled: input.cancelled,
         sourceId: input.sourceId,
-        childDiagnostic: hashObject({ cause: input.cause instanceof Error ? input.cause.message : String(input.cause) }),
-        preserveDiagnostic: hashObject({ cause: preserveError instanceof Error ? preserveError.message : String(preserveError) }),
+        childDiagnostic: hashObject({ cause: errorMessage(input.cause) }),
+        preserveDiagnostic: hashObject({ cause: errorMessage(preserveError) }),
       },
     )
   }
@@ -334,7 +333,7 @@ export async function prepareManagedCreation(
 function completedManagedReviewError(error: unknown): EvolutionError {
   return error instanceof EvolutionError
     ? new EvolutionError(error.code, error.message, { ...error.details, managedChildCompleted: true })
-    : new EvolutionError('command_failed', error instanceof Error ? error.message : String(error), {
+    : new EvolutionError('command_failed', errorMessage(error), {
         managedChildCompleted: true,
       })
 }
@@ -497,7 +496,7 @@ export async function finishManagedWork(
   const preflight = completedChild?.preflight ?? await preflightCreator(deps, workflow, workOrder.operation, exec)
   const childResult = completedChild?.result
     ?? (await runManagedChild(deps, workflow, parent, cwd, workOrder, preflight, exec)).result
-  assertCreatorReceipt(childResult.creator, preflight)
+  assertCreatorReceipt(childResult.creator)
   if (childResult.creator.childSessionId !== childResult.sessionId) {
     throw new EvolutionError('invalid_input', 'Managed child Creator receipt is not bound to the completed child session')
   }

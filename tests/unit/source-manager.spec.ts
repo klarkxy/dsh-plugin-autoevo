@@ -105,6 +105,18 @@ type CompletionOwnerAcquire = (
   lockToken: string,
 ) => Promise<unknown>
 
+type LockAcquire = (
+  sourceId: string,
+  workflowId: string,
+  signal?: AbortSignal,
+  workspaceCwd?: string,
+) => Promise<{ lockToken: string; acquiredHere: boolean }>
+
+/** Production only acquires through materialize/initialize/resume; tests reach the shared internal path directly. */
+async function acquireLock(manager: SourceManager, sourceId: string, workflowId: string): Promise<void> {
+  await (manager as unknown as { acquireLockInternal: LockAcquire }).acquireLockInternal(sourceId, workflowId)
+}
+
 async function leaveCompletionProof(
   manager: SourceManager,
   sourceId: string,
@@ -354,7 +366,7 @@ describe('SourceManager defaults and provenance', () => {
     const manager = new SourceManager(config(root), scriptedGit({ head: 'c'.repeat(40), branch: 'main' }))
     const sourceId = sourceIdForRepository('acme/calculator')
     const workflowId = `workflow_${'9'.repeat(24)}`
-    await manager.acquireLock(sourceId, workflowId)
+    await acquireLock(manager, sourceId, workflowId)
     const original = JSON.parse(await readFile(manager.lockPath(sourceId), 'utf8')) as { lockToken: string }
     await writeFile(manager.lockPath(sourceId), `${JSON.stringify({
       workflowId,
@@ -374,7 +386,7 @@ describe('SourceManager defaults and provenance', () => {
     const initial = await manager.materializeReviewedGithub({ review: review(), workflowId })
     await leaveCompletionProof(manager, initial.sourceId, workflowId)
 
-    await expect(manager.acquireLock(initial.sourceId, workflowId)).rejects.toThrow(/must be claimed/i)
+    await expect(acquireLock(manager, initial.sourceId, workflowId)).rejects.toThrow(/must be claimed/i)
     await expect(readFile(manager.lockPath(initial.sourceId), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await manager.readReceipt(initial.sourceId)).toMatchObject({ activeWorkflowId: null, completionProof: { workflowId } })
   })

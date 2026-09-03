@@ -34,7 +34,6 @@ import {
   reviewIdentity,
 } from './lifecycle/decide.js'
 import { sessionCwd } from './host-identity.js'
-import { prefersChinese } from './i18n.js'
 import { PluginInstaller } from './lifecycle/install.js'
 import { DshLauncher } from './lifecycle/launcher.js'
 import { PluginRemover, type RemovalResult } from './lifecycle/remove.js'
@@ -97,17 +96,9 @@ import {
 import {
   dshRuntimeVersion,
   materialReviewFacts,
-  revalidateReview,
   reviewAndFreezeManagedSource,
   shouldReviewAdaptiveThird,
 } from './service-review.js'
-import {
-  assertSemanticReviewerBinding,
-  attachSemanticReview,
-  boundedReviewerFiles,
-} from './service-semantic-review.js'
-import type { SemanticReviewerHost } from './semantic-reviewer.js'
-import type { SemanticVerifierHost } from './semantic-verifier.js'
 import { SourceManager } from './source-manager.js'
 import { hashObject } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
@@ -134,7 +125,6 @@ import { WorkflowEngine } from './workflow/engine.js'
 import { DISCOVERY_REMOTE_POOL_MAX, remotePackageSnapshotItem } from './workflow/candidates.js'
 import { assertBuiltinEnablementBinding } from './workflow/grants.js'
 import type {
-  MarketplaceStepResult,
   CandidatePreview,
   CandidatePreviewFailure,
   CandidateSnapshotItem,
@@ -153,11 +143,6 @@ import type {
 export { addExplicitCandidate } from './service-resolution.js'
 export { lineageRootReview } from './resolver/lineage.js'
 export { reviewCandidateDigest, reviewSnapshotDigest } from './review/direct-use.js'
-export {
-  assertSemanticReviewerBinding,
-  attachSemanticReview,
-  boundedReviewerFiles,
-} from './service-semantic-review.js'
 
 function asToolExec(exec: WorkflowExec): ToolRunContext {
   return exec as ToolRunContext
@@ -311,8 +296,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     private readonly store: StateStore,
     private readonly creationGuard: CreationGuard,
     managedChild?: ManagedChildHost,
-    _semanticReviewer?: SemanticReviewerHost,
-    _semanticVerifier?: SemanticVerifierHost,
     creatorFoundation?: CreatorFoundation,
     repairChild?: RepairChildHost,
   ) {
@@ -321,21 +304,17 @@ export class CapabilityEvolutionService implements WorkflowHost {
     this.creatorFoundation = creatorFoundation ?? createCreatorFoundation(ctx)
     this.managedChild = managedChild ?? new DshManagedChildHost(ctx, runner)
     this.faultRepair = new FaultRepairMode(creationGuard, repairChild ?? new DshRepairChildHost(ctx))
-    this.installer = new PluginInstaller(
+    this.installer = new PluginInstaller({
       ctx,
       config,
       store,
-      this.launcher,
-      (review, signal) => this.revalidate(review, signal),
-      async (review, exec, binding) => {
+      launcher: this.launcher,
+      authorizeInstall: async (review, exec, binding) => {
         const resolution = await this.store.getResolution(review.resolutionId)
         this.creationGuard.assertInstallAuthorized(exec.agent, review, resolution, binding)
       },
-      undefined,
-      undefined,
-      undefined,
-      () => this.currentProfileOwner(),
-    )
+      resolveDestinationProfile: () => this.currentProfileOwner(),
+    })
     this.remover = new PluginRemover(ctx, config, store, this.launcher, () => this.currentProfileOwner())
     this.engine = new WorkflowEngine(store, creationGuard, this, true)
   }
@@ -352,8 +331,8 @@ export class CapabilityEvolutionService implements WorkflowHost {
     }
   }
 
-  private reviewArtifactRoot(cwd: string): string {
-    return path.join(resolveStateRoot(this.config, cwd), 'review-artifacts', `review-${randomUUID()}`)
+  private reviewArtifactRoot(): string {
+    return path.join(resolveStateRoot(this.config), 'review-artifacts', `review-${randomUUID()}`)
   }
 
   private withWorkspace<T>(exec: { agent?: ToolRunContext['agent'] }, fn: () => T): T {
@@ -464,18 +443,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
       launcher: this.launcher,
       // No workflow-commitment authorizer: rollback is not bound to a capability
       // workflow, but the installer still requests one-time user approval.
-      createRollbackInstaller: () => new PluginInstaller(
-        this.ctx,
-        this.config,
-        this.store,
-        this.launcher,
-        (review, signal) => this.revalidate(review, signal),
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        () => this.currentProfileOwner(),
-      ),
+      createRollbackInstaller: () => new PluginInstaller({
+        ctx: this.ctx,
+        config: this.config,
+        store: this.store,
+        launcher: this.launcher,
+        resolveDestinationProfile: () => this.currentProfileOwner(),
+      }),
     }
   }
 
@@ -751,66 +725,6 @@ export class CapabilityEvolutionService implements WorkflowHost {
     return { candidates: expandedCandidates.map((item, index) => ({ ...item, index: index + 1 })), previews, failures }
   }
 
-  async ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
-    resolution: ResolutionRecord
-    market: MarketplaceStepResult
-  }> {
-    const rediscovered = await this.discoverRemote(resolution, exec)
-    return {
-      resolution: rediscovered,
-      market: {
-        status: 'empty',
-        reason: prefersChinese(resolution.requirement)
-          ? '远端发现改走 Host 侧 GitHub topic 搜索，不再安装市场插件。'
-          : 'Remote discovery now uses Host-owned GitHub topic search and no longer installs a marketplace plugin.',
-      },
-    }
-  }
-
-  async reviewGithub(
-    resolution: ResolutionRecord,
-    repository: string,
-    ref: string | undefined,
-    exec: WorkflowExec,
-    workflow?: WorkflowRecord,
-  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
-    const selected = (resolution.selectedRepositories ?? []).map((item) => item.toLowerCase())
-    if (!selected.includes(repository.toLowerCase())) {
-      throw new EvolutionError(
-        'invalid_input',
-        'This repository was not selected by the user for this resolution',
-        { repository },
-      )
-    }
-    const candidate = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === repository.toLowerCase())
-    if (!candidate) {
-      throw new EvolutionError('invalid_input', 'The repository is not a candidate from this resolution', {
-        repository,
-      })
-    }
-    const runtimeVersion = await dshRuntimeVersion(this.managedWorkDeps(), resolution.cwd, exec.signal)
-    const sealedCandidate = workflow?.candidateSnapshot?.find((item) => item.id === workflow.pendingReviewedCandidateId)
-      ?? workflow?.candidateSnapshot?.find((item) => item.repository?.toLowerCase() === candidate.repository.toLowerCase()
-        && (!ref || item.commit?.toLowerCase() === ref.toLowerCase()))
-    const evidence = await reviewGithubPluginWithFiles({
-      runner: this.runner,
-      config: this.config,
-      cwd: resolution.cwd,
-      repository: candidate.repository,
-      ref: sealedCandidate?.commit ?? ref ?? candidate.defaultBranch ?? 'HEAD',
-      ...(sealedCandidate?.packagePath ? { packagePath: sealedCandidate.packagePath } : {}),
-      resolutionId: resolution.id,
-      requirement: resolution.requirement,
-      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
-      ...(runtimeVersion ? { runtimeVersion } : {}),
-      ...(exec.signal ? { signal: exec.signal } : {}),
-    })
-    const review = await this.persistReviewed(evidence.record)
-    const waiting = withNextStep(waitingConfirmation(resolution, review, workflow))
-    await this.store.put('resolutions', waiting)
-    return { resolution: waiting, review }
-  }
-
   async reviewExisting(
     resolution: ResolutionRecord,
     target: EvolutionTarget,
@@ -973,7 +887,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       ref: target.commit,
       resolutionId: resolution.id,
       requirement: resolution.requirement,
-      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
+      artifactRoot: this.reviewArtifactRoot(),
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
     })
@@ -1025,7 +939,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ...(candidate.packagePath ? { packagePath: candidate.packagePath } : {}),
         resolutionId: resolution.id,
         requirement: resolution.requirement,
-        artifactRoot: this.reviewArtifactRoot(resolution.cwd),
+        artifactRoot: this.reviewArtifactRoot(),
         ...(runtimeVersion ? { runtimeVersion } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
@@ -1119,7 +1033,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       lineageRootCommit: root.sourceSnapshot.commit,
       resolutionId: resolution.id,
       requirement: resolution.requirement,
-      artifactRoot: this.reviewArtifactRoot(resolution.cwd),
+      artifactRoot: this.reviewArtifactRoot(),
       ...(root.sourceSnapshot.packagePath ? { packagePath: root.sourceSnapshot.packagePath } : {}),
       ...(runtimeVersion ? { runtimeVersion } : {}),
       ...(exec.signal ? { signal: exec.signal } : {}),
@@ -1150,15 +1064,13 @@ export class CapabilityEvolutionService implements WorkflowHost {
       throw new EvolutionError('review_rejected', 'Managed local review is missing matching frozen artifact provenance')
     }
     const record = await serializeProfileMutation(
-      input.retention === 'persistent' ? this.config.dshHome : this.store.root,
+      this.config.dshHome,
       input.targetProfile,
       () => this.installer.install({
         ...(workflow?.pendingInstallationId ? { installationId: workflow.pendingInstallationId } : {}),
         reviewId: review.id,
         targetProfile: input.targetProfile,
         retention: input.retention,
-        ...(input.verificationTask !== undefined ? { verificationTask: input.verificationTask } : {}),
-        ...(input.verificationExpectedText !== undefined ? { verificationExpectedText: input.verificationExpectedText } : {}),
         ...(provenance?.artifactHash ? { expectedArtifactSha256: provenance.artifactHash } : {}),
         ...(input.replacement ? { replacement: input.replacement } : {}),
         ...(input.recoveryPlan ? { recoveryPlan: input.recoveryPlan } : {}),
@@ -1166,15 +1078,11 @@ export class CapabilityEvolutionService implements WorkflowHost {
         ...(workflow ? { workflow } : {}),
         ...(workflow?.actionCommitment ? { commitment: workflow.actionCommitment } : {}),
         ...(workflow?.selectionReceipt ? { receipt: workflow.selectionReceipt } : {}),
-        ...(input.retention ? { retention: input.retention } : {}),
+        retention: input.retention,
         ...(input.recoveryPlan ? { recoveryPlan: input.recoveryPlan } : {}),
       }),
     )
     return record
-  }
-
-  private revalidate(review: ReviewRecord, signal?: AbortSignal): Promise<boolean> {
-    return revalidateReview(this.managedWorkDeps(), review, signal)
   }
 
   async prepareModify(
@@ -1577,9 +1485,6 @@ export const _testing = {
   isDirectlyUsableReview,
   shouldReviewAdaptiveThird,
   waitingAuthorization,
-  attachSemanticReview,
-  assertSemanticReviewerBinding,
-  boundedReviewerFiles,
   reviewCandidateDigest,
   reviewSnapshotDigest,
   serializeProfileMutation,

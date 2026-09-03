@@ -226,18 +226,18 @@ describe('real Host-managed child lifecycle', () => {
     const budget = new managedChildTesting.ChildTurnBudget()
     const next = vi.fn(async () => ({ kind: 'enter' as const, messages: [] }))
 
-    await expect(budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT - 1, [], next))
+    await expect(budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT - 1, next))
       .resolves.toEqual({ kind: 'enter', messages: [] })
     expect(budget.denialReason()).toBeUndefined()
 
-    const forced = await budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT, [], next)
+    const forced = await budget.preStep(managedChildTesting.CHILD_SOFT_STEP_LIMIT, next)
     expect(forced.kind).toBe('enter')
     expect(forced.kind === 'enter' && forced.messages.at(-1)?.content[0]).toMatchObject({
       type: 'text',
       text: expect.stringContaining(managedChildTesting.CHILD_RESULT_MARKER),
     })
     expect(budget.denialReason()).toBe(managedChildTesting.CHILD_BUDGET_DENIAL)
-    await expect(budget.preStep(managedChildTesting.CHILD_HARD_STEP_LIMIT, [], next))
+    await expect(budget.preStep(managedChildTesting.CHILD_HARD_STEP_LIMIT, next))
       .resolves.toEqual({ kind: 'reject' })
   })
 

@@ -268,8 +268,7 @@ describe('official DSH workspace-write sandbox probe', () => {
   beforeAll(async () => { cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-managed-source-')) })
   afterAll(async () => rm(cwd, { recursive: true, force: true }))
 
-  it('fails closed on missing services, wrong mode, and wrong root', async () => {
-    await expect(probeWorkspaceWriteSandbox(undefined, session, cwd)).rejects.toThrow(/official DSH sandbox/i)
+  it('fails closed on wrong mode and wrong root', async () => {
     await expect(probeWorkspaceWriteSandbox(officialStack(cwd, { mode: 'read-only' }), session, cwd)).rejects.toThrow(/workspace-write/i)
     await expect(probeWorkspaceWriteSandbox(officialStack(cwd, { root: path.resolve('C:/tmp/other') }), session, cwd)).rejects.toThrow(/workspaceRoot/i)
   })

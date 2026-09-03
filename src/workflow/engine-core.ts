@@ -556,10 +556,7 @@ export abstract class WorkflowEngineCore {
     const installation = installationId
       ? await this.readOptionalBeforeEffect(() => this.host.getInstallation(installationId), signal)
       : undefined
-    const lifecycleState = lifecycleStateFor(workflow, {
-      ...(reviews.length > 0 ? { reviews } : {}),
-      ...(installation ? { installation } : {}),
-    })
+    const lifecycleState = lifecycleStateFor(workflow, installation ? { installation } : {})
     const result = JSON.parse(JSON.stringify({
       workflow,
       lifecycleState,

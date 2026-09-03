@@ -14,8 +14,9 @@ export interface Config {
   expectedProvider?: string
   expectedModel?: string
   layer?: string
-  packageName?: string
-  fixtureDigest?: string
+  /** Schema-defaulted to '' when absent. */
+  packageName: string
+  fixtureDigest: string
   fixturesJson?: string
   activatedFibersJson?: string
 }
@@ -74,8 +75,8 @@ export function apply(ctx: Context, config: Config): void {
       receiptPath: config.receiptPath,
       expectedTools: config.expectedTools,
       layer,
-      packageName: config.packageName ?? '',
-      fixtureDigest: config.fixtureDigest ?? '',
+      packageName: config.packageName,
+      fixtureDigest: config.fixtureDigest,
       ...(config.fixturesJson ? { fixturesJson: config.fixturesJson } : {}),
       ...(config.activatedFibersJson ? { activatedFibersJson: config.activatedFibersJson } : {}),
     }

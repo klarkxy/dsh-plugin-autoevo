@@ -18,12 +18,12 @@
 | `create_authorized` | The user explicitly allowed one new plugin. | The Host runs the structured WorkOrder in a cwd-bound construction child, then commits and re-reviews the result. The parent does not write, call `cordis_define(kind:new)`, or install directly. |
 | completed `verified` | Host `tool_roundtrip` passed. | This is the only functionally verified install. Ordinary chat may continue. Do not re-verify the same review, source, layer, and fixture. |
 | completed `activated` | Host `bundle_activation` passed. | The bundle loaded; do not claim the capability was tested. Ordinary chat may continue. |
-| completed `awaiting_user_test` | Host `manual_runtime` persistent. | Invite a real-client or profile test once in natural language, then continue ordinary chat. Do not nag later. Temporary `manual_runtime` is rejected before install. |
+| completed `awaiting_user_test` | Host `manual_runtime` completed. | Invite a real-client or profile test once in natural language, then continue ordinary chat. Do not nag later. |
 | `recovery_required` | Sealed failure interrupt. | After a fresh user confirmation, call `capability_workflow_recover` with the current `interrupt_id`. This is not completed-install cleanup. |
 
 The grant belongs to the current Agent and current resolution. Starting another workflow revokes it. Managed construction remains bound to the current work order and source receipt. Do not retry after an approval rejection without a new user decision.
 
-Policy-mismatched unfinished state is not executable; start a fresh Policy V14 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself or treat a semantic reviewer as an authorization gate.
+Policy-mismatched unfinished state is not executable; start a fresh Policy V14 workflow from the current top-level user wording. Completed installations and historical temporary receipts remain readable and explicitly removable. Mechanical verification is Host-driven: do not judge success yourself.
 
 `capability_workflow_diagnose` is read-only and available only after an incomplete or failed stage. It returns redacted facts under a per-failure budget; it never retries, installs, edits, or cleans up. Repeated identical invalid resumes are blocked for the remainder of the current user turn without consuming authorization. After repeated verification or modify failure, present a human decision or diagnosis exit instead of looping.
 

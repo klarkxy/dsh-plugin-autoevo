@@ -280,17 +280,9 @@ describe('workspace Git cache containment', () => {
     await release()
   })
 
-  it('fails closed on stale quarantine collision and mismatch', async () => {
+  it('fails closed on stale quarantine mismatch', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-cache-quarantine-'))
     temporary.push(root)
-    const collision = await staleLock(root, 'collision.lock', { pid: 123_456, lockToken: 'stale' })
-    await mkdir(`${collision}.quarantine.stale`)
-    await expect(_testing.acquireLock(collision, 5, undefined, {
-      token: () => 'quarantine',
-      processAlive: () => false,
-    })).rejects.toThrow('quarantine collision')
-    expect(await lstat(collision)).toBeDefined()
-
     const mismatch = await staleLock(root, 'mismatch.lock', { pid: 123_456, lockToken: 'stale' })
     let calls = 0
     await expect(_testing.acquireLock(mismatch, 5, undefined, {

@@ -234,6 +234,18 @@ describe('materializeEvolutionPreset', () => {
     expect(await readFile(path.join(target, 'notes.txt'), 'utf8')).toBe('mine\n')
   })
 
+  it('propagates a manifest read failure instead of preserving as user-owned content', async () => {
+    const root = await tempDir('autoevo-preset-manifest-unreadable')
+    const dshHome = path.join(root, 'dsh')
+    const target = resolveEvolutionPresetPaths(dshHome).targetDir
+    // A directory at the manifest path is unreadable (EISDIR), not absent.
+    await mkdir(path.join(target, EVOLUTION_PRESET_MANIFEST_FILENAME), { recursive: true })
+    const templateDir = await writeTemplate(root, baseTemplate)
+
+    await expect(materializeEvolutionPreset({ dshHome, enabled: true, templateDir }))
+      .rejects.toMatchObject({ code: 'EISDIR' })
+  })
+
   it('preserves a same-name directory with a plausible but incomplete manifest', async () => {
     const root = await tempDir('autoevo-preset-incomplete-manifest')
     const dshHome = path.join(root, 'dsh')

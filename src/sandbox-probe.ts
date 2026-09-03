@@ -5,14 +5,15 @@ import type { SandboxExecutionPolicy, SandboxProvider } from '@deepseek-ai/dsh-s
 import type { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { EvolutionError } from './errors.js'
-import { isPathInside } from './internal-utils.js'
+import { isNotFound, isPathInside } from './internal-utils.js'
 import type { CommandRunner } from './process/runner.js'
 
+/** Live services the caller has already resolved; the probe does not re-validate their presence. */
 export interface LiveSandboxStack {
-  sandbox?: SandboxProvider
-  sandboxPolicy?: SandboxPolicyService
-  fs?: FileSystem
-  runner?: CommandRunner
+  sandbox: SandboxProvider
+  sandboxPolicy: SandboxPolicyService
+  fs: FileSystem
+  runner: CommandRunner
 }
 
 export interface SandboxProbeResult {
@@ -45,7 +46,7 @@ async function exists(
     return true
   } catch (error) {
     throwIfAborted(signal)
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    if (isNotFound(error)) return false
     throw error
   }
 }
@@ -166,17 +167,12 @@ async function probeShell(
  * `workspace-write` override. It owns and removes every probe path.
  */
 export async function probeWorkspaceWriteSandbox(
-  stack: LiveSandboxStack | undefined,
+  stack: LiveSandboxStack,
   session: Session,
   expectedCwd: string,
   signal?: AbortSignal,
 ): Promise<SandboxProbeResult> {
   throwIfAborted(signal)
-  if (!stack?.sandbox || !stack.sandboxPolicy || !stack.fs || !stack.runner) {
-    throw new EvolutionError('invalid_input', 'The official DSH sandbox, policy, filesystem, and subprocess services are required for modify/create', {
-      reason: 'missing_sandbox_service',
-    })
-  }
   const cwd = normalizePath(expectedCwd)
   const policy = stack.sandboxPolicy.resolve({ session })
   throwIfAborted(signal)

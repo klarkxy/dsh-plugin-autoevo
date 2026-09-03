@@ -13,6 +13,10 @@ export function isNotFound(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code: string }).code === 'ENOENT')
 }
 
+export function isAlreadyExists(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code: string }).code === 'EEXIST')
+}
+
 export function isPathInside(parent: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate))
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))

@@ -1,5 +1,4 @@
-import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../contracts.js'
-import { needsSemanticReviewer } from '../review/review.js'
+import { POLICY_VERSION, type InstallationRecord } from '../contracts.js'
 import { COMPLETED_CLEANUP_NODES, type WorkflowNodeId, type WorkflowRecord } from './contracts.js'
 
 /**
@@ -10,10 +9,6 @@ export type WorkflowLifecycleState =
   | 'searched'
   | 'selected'
   | 'reviewing'
-  | 'approved'
-  | 'rejected'
-  | 'uncertain'
-  | 'skipped'
   | 'awaiting_confirmation'
   | 'committed'
   | 'executing'
@@ -31,18 +26,7 @@ export type WorkflowLifecycleState =
   | 'reuse_local'
 
 export interface LifecycleMappingInput {
-  reviews?: readonly ReviewRecord[]
   installation?: InstallationRecord
-}
-
-function reviewDecisionState(review: ReviewRecord | undefined): WorkflowLifecycleState | undefined {
-  if (!review) return undefined
-  const decision = review.reviewerVerdict?.decision
-  if (decision === 'approved') return 'approved'
-  if (decision === 'rejected') return 'rejected'
-  if (decision === 'uncertain') return 'uncertain'
-  if (!needsSemanticReviewer(review)) return 'skipped'
-  return undefined
 }
 
 function installedLifecycle(installation: InstallationRecord | undefined): WorkflowLifecycleState {
@@ -91,9 +75,7 @@ export function lifecycleStateFor(
   if (cursor === 'resolve_local' || cursor === 'discover_remote' || cursor === 'ensure_market' || cursor === 'await_discovery') return 'searched'
   if (cursor === 'await_selection') return 'selected'
   if (cursor === 'await_modify_work') return 'interrupted'
-  if (cursor === 'await_confirmation') {
-    return reviewDecisionState(extras.reviews?.[0]) ?? 'awaiting_confirmation'
-  }
+  if (cursor === 'await_confirmation') return 'awaiting_confirmation'
   if (workflow.status === 'interrupted') return 'interrupted'
   if (workflow.status === 'failed') return 'recovery_required'
   return 'searched'

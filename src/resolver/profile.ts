@@ -191,12 +191,12 @@ export async function resolveProfilePluginCapabilities(input: {
   requirement: string
   match: CapabilityMatcher
 }): Promise<LocalCapabilityCandidate[]> {
+  // PROFILE_NAME excludes separators and dot segments, so the lexical join
+  // cannot escape; the realpath check below is the containment boundary.
   if (!PROFILE_NAME.test(input.profile)) return []
   const home = path.resolve(input.dshHome)
   const profileRoot = path.resolve(home, 'profiles', input.profile)
-  if (!within(home, profileRoot)) return []
   const profileManifestPath = path.resolve(profileRoot, 'package.json')
-  if (!within(profileRoot, profileManifestPath)) return []
   const physicalProfileRoot = await physicalPathWithin(home, profileRoot)
   if (!physicalProfileRoot) return []
   const physicalProfileManifest = await physicalPathWithin(physicalProfileRoot, profileManifestPath)

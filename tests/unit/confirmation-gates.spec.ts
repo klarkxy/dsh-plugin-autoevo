@@ -10,12 +10,12 @@ import { describe, expect, it } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
-import type { AuthorizationDecisionInput, ReviewerVerdictDecision } from '../../src/contracts.js'
+import type { AuthorizationDecisionInput } from '../../src/contracts.js'
 import { CreationGuard } from '../../src/creation-guard.js'
+import { ExecutionGuard } from '../../src/execution-guard.js'
 import { EvolutionError } from '../../src/errors.js'
 import { assertUseThisReceipt } from '../../src/lifecycle/decide.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
-import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION, type SemanticReviewerHost } from '../../src/semantic-reviewer.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { StateStore } from '../../src/state/store.js'
 
@@ -340,43 +340,11 @@ const nebulaHighRisk = {
   'lib/index.js': "export function apply() { eval('1') }\n",
 }
 
-function reviewerHost(decision: ReviewerVerdictDecision): SemanticReviewerHost {
-  return {
-    async run(input) {
-      const request = mintReviewerRequest({
-        workflowId: input.workflowId,
-        review: input.review,
-        snapshotDigest: input.snapshotDigest,
-        candidateDigest: input.candidateDigest,
-      })
-      const completedAt = '2026-08-19T00:00:03.000Z'
-      return {
-        request: { ...request, status: 'completed', startedAt: request.createdAt, completedAt },
-        verdict: {
-          requestId: request.id,
-          reviewId: input.review.id,
-          requirementHash: requirementHashFor(input.review.requirement),
-          snapshotDigest: input.snapshotDigest,
-          candidateDigest: input.candidateDigest,
-          reviewerSessionId: 'reviewer-session',
-          reviewerVersion: REVIEWER_VERSION,
-          decision,
-          evidence: [],
-          conditions: [],
-          semanticCoverage: 'partial',
-          createdAt: completedAt,
-        },
-      }
-    },
-  }
-}
-
 type RunnerResults = Parameters<typeof discoveryRunner>[0]
 
 function makeService(
   root: string,
   runnerResults: RunnerResults | { results: RunnerResults, files: Record<string, string> },
-  reviewer?: SemanticReviewerHost,
 ) {
   const guard = new CreationGuard({ isEvolutionMode: () => true })
   const store = new StateStore(root)
@@ -387,8 +355,6 @@ function makeService(
     discoveryRunner(spec.results, spec.files),
     store,
     guard,
-    undefined,
-    reviewer,
   )
   return { service, guard, store }
 }
@@ -553,11 +519,8 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
       .toBe(thirdCandidate.repository)
   }, 20_000)
 
-  it.each([
-    { verdict: 'uncertain' as ReviewerVerdictDecision },
-    { verdict: 'approved' as ReviewerVerdictDecision },
-  ])('keeps a high-risk review visible for an explicit user decision ($verdict verdict)', async ({ verdict }) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), `autoevo-gate-high-${verdict}-`))
+  it('keeps a high-risk review visible for an explicit user decision', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-high-'))
     temporary.push(root)
     const { service, guard } = makeService(root, {
       results: [{
@@ -567,7 +530,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
         stars: 2,
       }],
       files: nebulaHighRisk,
-    }, reviewerHost(verdict))
+    })
     service.listInstallProfiles = async () => ['web']
     const turn = exec()
     const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
@@ -577,39 +540,32 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     const candidateId = presented.workflow.candidateSnapshot![0]!.id
     const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [candidateId])
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
+    expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
     expect(reviewed.review?.securityRisk).toBe('high')
-    expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('use_this')
-
-    if (verdict === 'uncertain') {
-      expect(reviewed.review?.fit).toBe('full')
-      expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          code: 'dynamic_evaluation',
-          severity: expect.any(String),
-          evidenceKind: 'static_review',
-          observed: true,
-        }),
-      ]))
-      expect(reviewed.workflow.interrupt?.facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
-      expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
-      expect(reviewed.workflow.interrupt?.options.map((item) => item.id)).toContain('modify_this')
-      const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
-      expect(stopped.resolution?.authorization?.state).toBe('stopped')
-      await expect(guard.preExecute({
-        callId: 'define-high',
-        name: 'cordis_define',
-        arguments: { plugin: { kind: 'new' } },
-        agent: turn.agent,
-      } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
-      return
-    }
-
+    expect(reviewed.review?.fit).toBe('full')
     const optionIds = reviewed.workflow.interrupt?.options.map((item) => item.id) ?? []
     expect(optionIds).toContain('use_this')
+    expect(optionIds).toContain('modify_this')
     expect(optionIds).toContain('stop')
-    expect(reviewed.workflow.interrupt?.kind).toBe('await_confirmation')
-
     expect(reviewed.workflow.interrupt?.facts.canInstall).toBe(true)
+    expect(reviewed.workflow.interrupt?.facts.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'dynamic_evaluation',
+        severity: expect.any(String),
+        evidenceKind: 'static_review',
+        observed: true,
+      }),
+    ]))
+    expect(reviewed.workflow.interrupt?.facts.securityInterpretationRule).toMatch(/Never invent a justification/i)
+    expect(reviewed.resolution?.authorization?.state).toBe('confirmation_required')
+    const stopped = await resumeWith(service, guard, turn, reviewed.workflow.id, reviewed.workflow.interrupt!.interruptId, '先停', { action: 'stop' })
+    expect(stopped.resolution?.authorization?.state).toBe('stopped')
+    await expect(guard.preExecute({
+      callId: 'define-high',
+      name: 'cordis_define',
+      arguments: { plugin: { kind: 'new' } },
+      agent: turn.agent,
+    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'allow' })
   }, 20_000)
 
   it('records create-authorized only after an explicit create-new chat reply and still denies cordis_define', async () => {
@@ -636,12 +592,16 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     await expect(resumeWith(service, guard, turn, started.workflow.id, started.workflow.interrupt!.interruptId, '没有合适的，新建一个', { action: 'create_new' }))
       .rejects.toThrow(/Agent|managed modify\/create|without changing|construction tools|construction runtime/i)
     expect((await store.getResolution(started.resolution!.id)).authorization?.state).toBe('create_authorized')
-    await expect(guard.preExecute({
+    // Live Cordis mutation is denied by the outer ExecutionGuard that index.ts
+    // runs ahead of CreationGuard in evolution mode, not by the grant itself.
+    const define = {
       callId: 'define-ok',
       name: 'cordis_define',
       arguments: { plugin: { kind: 'new' } },
       agent: turn.agent,
-    } as never, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    } as never
+    await expect(new ExecutionGuard({ role: 'parent' }).preExecute(define, async () => guard.preExecute(define, async () => ({ kind: 'allow' }))))
+      .resolves.toMatchObject({ kind: 'deny' })
   })
 
   it('reuses a strict local hit without an authorization receipt, and binds use-this to the reviewed identity', async () => {
@@ -821,7 +781,7 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
         { name: 'dsh-nebula-third', url: 'https://github.com/example-org/dsh-nebula-third', description: 'Third nebula relay integration', stars: 1 },
       ],
       files: nebulaHighRisk,
-    }, reviewerHost('uncertain'))
+    })
     const turn = exec('session-adaptive')
     const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
     expect(started.workflow.cursor).toBe('await_discovery')

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { valid } from 'semver'
 import type { RuntimeConfig } from './config.js'
@@ -12,7 +11,6 @@ import {
   reviewLocalPlugin,
 } from './review/index.js'
 import type { SourceManager } from './source-manager.js'
-import { sha256 } from './state/hashes.js'
 import type { StateStore } from './state/store.js'
 import type { WorkflowExec, WorkflowRecord } from './workflow/contracts.js'
 import { resolveStateRoot } from './workspace-layout.js'
@@ -88,7 +86,7 @@ export async function reviewAndFreezeManagedSource(
   },
 ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
   const runtimeVersion = await dshRuntimeVersion(deps, input.resolution.cwd, input.exec.signal)
-  const artifactRoot = path.join(resolveStateRoot(deps.config, input.resolution.cwd), 'review-artifacts', `review-${randomUUID()}`)
+  const artifactRoot = path.join(resolveStateRoot(deps.config), 'review-artifacts', `review-${randomUUID()}`)
   const receipt = await deps.sources.readReceipt(input.sourceId)
   if (!receipt || path.resolve(receipt.path) !== path.resolve(input.path)) {
     throw new EvolutionError('review_rejected', 'Managed package review is missing its source receipt')
@@ -125,31 +123,4 @@ export async function reviewAndFreezeManagedSource(
   await deps.store.put('resolutions', waiting)
   input.exec.signal?.throwIfAborted()
   return { resolution: waiting, review }
-}
-
-export async function revalidateReview(
-  _deps: Pick<ReviewOrchestrationDeps, 'runner' | 'config' | 'store' | 'sources'>,
-  review: ReviewRecord,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  signal?.throwIfAborted()
-  if (review.artifact && review.installSpec?.startsWith('file:')) {
-    const artifactPath = path.resolve(review.installSpec.slice('file:'.length))
-    const ownedRoot = path.resolve(review.artifact.ownedRoot)
-    const relative = path.relative(ownedRoot, artifactPath)
-    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false
-    try {
-      const current = await readFile(artifactPath, { signal })
-      signal?.throwIfAborted()
-      const currentSha256 = sha256(current)
-      signal?.throwIfAborted()
-      return currentSha256 === review.artifact.sha256
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason
-      return false
-    }
-  }
-  // Historical source-only reviews remain readable, but are not current
-  // installation authority. A fresh formal review creates a frozen artifact.
-  return false
 }

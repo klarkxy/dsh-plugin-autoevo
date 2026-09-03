@@ -13,7 +13,6 @@ import {
   assertChildCreatorCatalog,
   assertWorkOrderScope,
   commandMatchesAcceptanceTarget,
-  compositionSha256,
   formatCreatorWorkOrder,
   isCreatorShellTool,
   mintCreatorReceipt,
@@ -70,11 +69,7 @@ class ChildTurnBudget {
     hard: CHILD_HARD_STEP_LIMIT,
   }) {}
 
-  async preStep(
-    step: number,
-    messages: UserMessage[],
-    next: () => Promise<PreStepDecision>,
-  ): Promise<PreStepDecision> {
+  async preStep(step: number, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> {
     if (step >= this.limits.hard) {
       this.forcingFinal = true
       return { kind: 'reject' }
@@ -118,7 +113,6 @@ interface LiveServices {
   agentPresets: {
     mount(agentCtx: Context, id?: string): Promise<{ id: string; trust?: string }>
     composedPreset(agentCtx: Context): string | undefined
-    read(id: string): Promise<string>
   }
 }
 
@@ -334,7 +328,6 @@ export class DshManagedChildHost implements ManagedChildHost {
       ...(request.signal ? { signal: request.signal } : {}),
       parentCtx: request.parent.ctx,
     })
-    const expectedChildCompositionSha256 = compositionSha256(await services.agentPresets.read(CREATOR_PRESET_ID))
     const childGuard = new ExecutionGuard({ role: 'child' })
     const budgetLimits = childStepBudgetFor(request.workOrder)
     const childBudget = new ChildTurnBudget(budgetLimits)
@@ -359,17 +352,8 @@ export class DshManagedChildHost implements ManagedChildHost {
         setSandboxMode(child.session, 'workspace-write')
         const mounted = await services.agentPresets.mount(agentCtx, CREATOR_PRESET_ID)
         const composed = services.agentPresets.composedPreset(agentCtx)
-        const mountedComposition = await services.agentPresets.read(CREATOR_PRESET_ID)
-        await assertChildCreatorCatalog(
-          agentCtx,
-          child,
-          preflight,
-          mounted,
-          composed,
-          mountedComposition,
-          expectedChildCompositionSha256,
-        )
-        agentCtx.on('agent/pre-step', ({ messages, step }, next) => childBudget.preStep(step, messages, next))
+        await assertChildCreatorCatalog(agentCtx, child, preflight, mounted, composed)
+        agentCtx.on('agent/pre-step', ({ step }, next) => childBudget.preStep(step, next))
         agentCtx.on('tools/pre-execute', (exec, next) => {
           const budgetDenial = childBudget.denialReason()
           return budgetDenial ? Promise.resolve({ kind: 'deny', reason: budgetDenial }) : childGuard.preExecute(exec, next)
@@ -397,9 +381,7 @@ export class DshManagedChildHost implements ManagedChildHost {
       if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
         throw new EvolutionError('invalid_input', 'Created child is not owned by the initiating parent Agent')
       }
-      if (path.resolve(handle.agent.session.header.cwd ?? '') !== cwd) {
-        throw new EvolutionError('invalid_input', 'Created child cwd does not match the managed source repository')
-      }
+      // Session identity and cwd were bound inside `setup` on this same registry.create call.
       const sandbox = await this.probeSandbox({
         sandbox: services.sandbox,
         sandboxPolicy: services.sandboxPolicy,

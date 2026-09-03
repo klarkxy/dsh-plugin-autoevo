@@ -402,23 +402,6 @@ describe('capability adopt', () => {
     await expect(readdir(path.join(store.root, 'adoption-claims'))).resolves.toHaveLength(2)
   })
 
-  it('writes no claim when the exact source drifts during the pre-claim owner recheck', async () => {
-    const { store, deps } = await setup({ 'dsh-tool-orphan': ORPHAN_SPEC })
-    const replacementSpec = `github:acme/orphan#${'f'.repeat(40)}`
-    let ownerReads = 0
-    const currentProfile = async () => {
-      ownerReads += 1
-      if (ownerReads === 2) await writeDependencies(deps, { 'dsh-tool-orphan': replacementSpec })
-      return 'web'
-    }
-
-    await expect(adoptInstallation(
-      { ...deps, currentProfile },
-      { packageName: 'dsh-tool-orphan' },
-    )).rejects.toMatchObject({ code: 'review_expired' })
-    await expect(store.listInstallations()).resolves.toEqual([])
-  })
-
   it.each([
     ['changed', { 'dsh-tool-orphan': `github:acme/orphan#${'1'.repeat(40)}` }, 'command_failed'],
     ['absent', {}, 'not_found'],
@@ -486,7 +469,8 @@ describe('capability adopt', () => {
     let ownerReads = 0
     const currentProfile = async () => {
       ownerReads += 1
-      if (ownerReads === 3) {
+      // Read 1 is the entry owner read; read 2 is the post-claim owner read.
+      if (ownerReads === 2) {
         controller.abort(reason)
         throw new Error('owner read interrupted')
       }

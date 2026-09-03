@@ -316,26 +316,6 @@ describe('enableBuiltinMount', () => {
     await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
   })
 
-  it('rejects conflicting exec and explicit cancellation signals before any profile effect', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-signal-conflict-'))
-    temporary.push(root)
-    const { bundledRoot, dshHome, patchPath } = await seed(root)
-    const exec = { ...EXEC, signal: new AbortController().signal } as ToolRunContext
-    const signal = new AbortController().signal
-
-    await expect(enableBuiltinMount({
-      ...approvedMutation(),
-      exec,
-      launcher: { dumpConfig: vi.fn() } as unknown as DshLauncher,
-      dshHome,
-      bundledRoot,
-      endpoint: ENDPOINT,
-      cwd: root,
-      signal,
-    })).rejects.toMatchObject({ code: 'invalid_input' })
-    await expect(readFile(patchPath, 'utf8')).resolves.toBe(TEMPLATE_PATCH)
-  })
-
   it('leaves the postimage for recovery when cancellation starts after the atomic rename', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-enable-postwrite-abort-'))
     temporary.push(root)

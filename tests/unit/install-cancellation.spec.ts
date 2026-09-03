@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -117,7 +117,6 @@ function input(review: ReviewRecord, installationId: string) {
     installationId,
     targetProfile: 'web',
     retention: 'persistent' as const,
-    verificationTask: 'verify calculator',
   }
 }
 
@@ -139,21 +138,16 @@ function installer(options: {
   store: StateStore
   launcher: DshLauncher
   hotLoader?: ProfileHotLoader
-  preflightProfile?: string
 }): PluginInstaller {
-  return new PluginInstaller(
-    options.ctx,
-    testRuntimeConfig(options.root, { dshHome: path.join(options.root, 'dsh-home') }),
-    options.store,
-    options.launcher,
-    async () => true,
-    undefined,
-    options.hotLoader ?? (async () => ({
+  return new PluginInstaller({
+    ctx: options.ctx,
+    config: testRuntimeConfig(options.root, { dshHome: path.join(options.root, 'dsh-home') }),
+    store: options.store,
+    launcher: options.launcher,
+    hotLoader: options.hotLoader ?? (async () => ({
       evidence: { attempted: false, loaded: false, method: 'unsupported', reason: 'restart' },
     })),
-    undefined,
-    options.preflightProfile,
-  )
+  })
 }
 
 describe('effect-aware install cancellation', () => {
@@ -208,71 +202,6 @@ describe('effect-aware install cancellation', () => {
       installOutcome: 'failed_absent',
       removed: false,
       installFailure: { code: 'operation_cancelled' },
-    })
-  })
-
-  it('cleans and seals an aborted isolated preflight without touching the destination', async () => {
-    const current = await fixture()
-    const controller = new AbortController()
-    const reason = new Error('cancel after preflight verification')
-    const installProfiles: string[] = []
-    const installationId = `installation_${'4'.repeat(24)}`
-    const trialRoot = current.store.trialRoot(installationId)
-    const verifyHost = vi.fn(async () => {
-      controller.abort(reason)
-      return passedEvidence
-    })
-    await expect(installer({
-      ...current,
-      preflightProfile: 'autoevo-verify',
-      launcher: launcher({
-        install: async (_home, profile) => {
-          installProfiles.push(profile)
-          return { exitCode: 0, signal: null, stdout: '', stderr: '' }
-        },
-        profileTargetAbsent: async () => true,
-        verifyHost,
-      }),
-    }).install(input(current.review, installationId), exec(controller.signal))).rejects.toBe(reason)
-    expect(installProfiles).toEqual(['autoevo-verify'])
-    expect(verifyHost).toHaveBeenCalledTimes(1)
-    await expect(access(trialRoot)).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(current.store.getInstallation(installationId)).resolves.toMatchObject({
-      installPhase: 'completed',
-      installState: 'not_installed',
-      installOutcome: 'failed_absent',
-      removed: true,
-      installFailure: { code: 'operation_cancelled', stage: 'preflight' },
-    })
-  })
-
-  it('does not claim an aborted preflight was removed when owned cleanup fails', async () => {
-    const current = await fixture()
-    const controller = new AbortController()
-    const reason = new Error('cancel preflight with cleanup failure')
-    const installationId = `installation_${'a'.repeat(24)}`
-    const subject = installer({
-      ...current,
-      preflightProfile: 'autoevo-verify',
-      launcher: launcher({
-        profileTargetAbsent: async () => true,
-        verifyHost: async () => {
-          controller.abort(reason)
-          return passedEvidence
-        },
-      }),
-    })
-    const internal = subject as unknown as { removeOwnedDirectory: () => Promise<void> }
-    internal.removeOwnedDirectory = async () => { throw new Error('owned cleanup failed') }
-
-    await expect(subject.install(input(current.review, installationId), exec(controller.signal))).rejects.toBe(reason)
-    await expect(access(current.store.trialRoot(installationId))).resolves.toBeUndefined()
-    await expect(current.store.getInstallation(installationId)).resolves.toMatchObject({
-      installPhase: 'completed',
-      installState: 'unknown',
-      installOutcome: 'recovery_required',
-      removed: false,
-      installFailure: { code: 'operation_cancelled', stage: 'preflight' },
     })
   })
 

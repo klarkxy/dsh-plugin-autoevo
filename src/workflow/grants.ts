@@ -7,11 +7,9 @@ import {
   type SelectionReceipt,
 } from '../contracts.js'
 import { EvolutionError } from '../errors.js'
-import { needsSemanticReviewer } from '../review/review.js'
 import {
   frozenManifestDigest,
   reviewCandidateDigest,
-  reviewerBindingDigest,
   reviewSnapshotDigest,
 } from '../review/direct-use.js'
 import { hashObject } from '../state/hashes.js'
@@ -129,10 +127,6 @@ export function mintActionCommitment(input: {
   const manifestDigest = review ? frozenManifestDigest(review) : undefined
   const candidateDigest = input.candidate?.digest
     ?? (review ? reviewCandidateDigest(review, input.workflow) : undefined)
-  const reviewerRequestId = review && needsSemanticReviewer(review) ? review.reviewerRequestId : undefined
-  const reviewerVerdictDigest = review && needsSemanticReviewer(review) && review.reviewerVerdict
-    ? reviewerBindingDigest(review.reviewerVerdict)
-    : undefined
   return {
     id: `commitment_${hashObject({
       selectionReceiptId: input.receipt.id,
@@ -144,8 +138,6 @@ export function mintActionCommitment(input: {
       retention: input.retention,
       reviewId: review?.id,
       reviewSnapshot,
-      reviewerRequestId,
-      reviewerVerdictDigest,
       recoveryPlan: input.recoveryPlan,
       createdAt,
     }).slice(0, 24)}`,
@@ -166,8 +158,6 @@ export function mintActionCommitment(input: {
     createdAt,
     ...(review ? { reviewId: review.id } : {}),
     ...(reviewSnapshot ? { reviewSnapshotDigest: reviewSnapshot } : {}),
-    ...(reviewerRequestId ? { reviewerRequestId } : {}),
-    ...(reviewerVerdictDigest ? { reviewerVerdictDigest } : {}),
     ...(manifestDigest ? { frozenManifestDigest: manifestDigest } : {}),
     ...(review ? { frozenInstallSpec: review.installSpec } : {}),
   }

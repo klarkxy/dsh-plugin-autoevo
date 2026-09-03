@@ -1,7 +1,6 @@
 import { access, mkdtemp, readFile, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
@@ -9,7 +8,6 @@ import {
   appendCreatorRecord,
   assertChildCreatorCatalog,
   assertCreatorReceipt,
-  compositionSha256,
   creatorAgentFacts,
   mintCreatorReceipt,
   preflightCreatorFoundation,
@@ -40,6 +38,7 @@ function foundationCtx(options: {
   toolsScope?: unknown
   skills?: string[]
   readError?: Error
+  schemasError?: Error
   missingRuntime?: string
   resolvedTrust?: string
 } = {}): Context {
@@ -79,7 +78,10 @@ function foundationCtx(options: {
       }
       if (name === 'tools') {
         return {
-          schemas: (scope?: unknown) => [...scopedNames(scope)].map((item) => ({ name: item })),
+          schemas: (scope?: unknown) => {
+            if (options.schemasError) throw options.schemasError
+            return [...scopedNames(scope)].map((item) => ({ name: item }))
+          },
           get: (item: string, scope?: unknown) => scopedNames(scope).has(item) ? { name: item } : undefined,
         }
       }
@@ -155,27 +157,30 @@ describe('Creator foundation preflight', () => {
     await expect(preflightCreatorFoundation(foundationCtx({ missingRuntime: 'tools' })))
       .rejects.toThrow(/runtime prerequisites are unavailable/i)
   })
+
+  it('propagates a failing tool catalog read instead of reporting the catalog as missing tools', async () => {
+    const failure = new Error('tool registry unavailable')
+    await expect(preflightCreatorFoundation(foundationCtx({ schemasError: failure })))
+      .rejects.toBe(failure)
+  })
 })
 
 describe('Creator child catalog and receipt', () => {
   it('accepts a system-trust cordis child catalog that matches parent preflight', async () => {
     const preflight = testingCreatorPreflight()
-    const composition = creatorTesting.TESTING_CORDIS_COMPOSITION
     const catalog = await assertChildCreatorCatalog(
       foundationCtx(),
       { child: true },
       preflight,
       { id: 'cordis', trust: 'system' },
       'cordis',
-      composition,
-      compositionSha256(composition),
     )
     expect(catalog.tools).toEqual(expect.arrayContaining(requiredTools()))
     const receipt = mintCreatorReceipt(preflight, 'parent-session-1')
-    expect(assertCreatorReceipt(receipt, preflight)).toEqual(receipt)
+    expect(assertCreatorReceipt(receipt)).toEqual(receipt)
   })
 
-  it('rejects code composition and catalog digest mismatch', async () => {
+  it('rejects a code child composition and a receipt without a session identity', async () => {
     const preflight = testingCreatorPreflight()
     await expect(assertChildCreatorCatalog(
       foundationCtx(),
@@ -183,17 +188,16 @@ describe('Creator child catalog and receipt', () => {
       preflight,
       { id: 'code', trust: 'system' },
       'code',
-      creatorTesting.TESTING_CORDIS_COMPOSITION,
-      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
     ))
       .rejects.toThrow(/code preset is not permitted/i)
     expect(() => assertCreatorReceipt({
       ...mintCreatorReceipt(preflight, 'child-session-1'),
-      compositionSha256: '0'.repeat(64),
-    }, preflight)).toThrow(/does not match Creator preflight/i)
+      childSessionId: '  ',
+    })).toThrow(/missing the parent session identity/i)
+    expect(() => assertCreatorReceipt(undefined)).toThrow(/did not return a verified Creator foundation receipt/i)
   })
 
-  it('rejects child preset, trust, and composition drift independently of the evolution parent', async () => {
+  it('rejects child preset trust drift independently of the evolution parent', async () => {
     const preflight = testingCreatorPreflight()
     await expect(assertChildCreatorCatalog(
       foundationCtx(),
@@ -201,18 +205,14 @@ describe('Creator child catalog and receipt', () => {
       preflight,
       { id: 'cordis', trust: 'user' },
       'cordis',
-      creatorTesting.TESTING_CORDIS_COMPOSITION,
-      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
     )).rejects.toThrow(/official system Creator cordis preset/i)
     await expect(assertChildCreatorCatalog(
-      foundationCtx(),
+      foundationCtx({ tools: requiredTools().filter((name) => name !== 'cordis_inspect_self') }),
       { child: true },
       preflight,
       { id: 'cordis', trust: 'system' },
       'cordis',
-      `${creatorTesting.TESTING_CORDIS_COMPOSITION}# changed after preflight\n`,
-      compositionSha256(creatorTesting.TESTING_CORDIS_COMPOSITION),
-    )).rejects.toThrow(/changed after Host preflight/i)
+    )).rejects.toThrow(/missing required construction tools/i)
   })
 })
 
@@ -275,44 +275,3 @@ describe('Creator records and legacy workflow JSON', () => {
     expect(creatorTesting.commandMatchesAcceptanceTarget('git status', ['Add focused tests'])).toBe(false)
   })
 })
-
-describe('installed DSH Creator compositions', () => {
-  it('smokes an installed DSH 0.1.1 cordis composition when present, without touching Web', async () => {
-    const version = await dshVersionIfPresent()
-    if (!version) return
-    if (!/^0\.1\.1(?:-|$)/u.test(version)) return
-    const composition = await installedCordisComposition()
-    if (!composition) return
-    expect(composition).toMatch(/@deepseek-ai\/dsh-tool-cordis/u)
-    expect(compositionSha256(composition)).toMatch(/^[a-f0-9]{64}$/u)
-  })
-})
-
-async function dshVersionIfPresent(): Promise<string | undefined> {
-  return await new Promise((resolve) => {
-    const child = spawn('dsh', ['--version'], {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    child.stdout?.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
-    child.once('error', () => resolve(undefined))
-    child.once('close', (code) => resolve(code === 0 ? stdout.trim() : undefined))
-  })
-}
-
-async function installedCordisComposition(): Promise<string | undefined> {
-  const candidates = [
-    process.env.DSH_HOME,
-    path.join(os.homedir(), '.dsh'),
-  ].filter((item): item is string => Boolean(item))
-  for (const home of candidates) {
-    const file = path.join(home, 'node_modules', '@deepseek-ai', 'dsh', 'config', 'agent-presets', 'cordis', 'agent.cordis.yml')
-    try {
-      return await readFile(file, 'utf8')
-    } catch {
-      // Continue searching other install roots; absence is not a failure.
-    }
-  }
-  return undefined
-}

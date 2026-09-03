@@ -54,6 +54,7 @@ function ghRunner(options: {
   release?: string | null
   releasePayload?: string
   releaseFailure?: { exitCode: number; stdout: string; stderr: string }
+  repoPayload?: string
 }): CommandRunner {
   return {
     async run(request) {
@@ -68,7 +69,7 @@ function ghRunner(options: {
       if (joined.includes('/commits')) {
         return ok(JSON.stringify([{ sha: options.headSha, commit: { committer: { date: '2026-08-10T00:00:00Z' } } }]))
       }
-      if (/repos\/[^/]+\/[^/]+$/u.test(joined)) return ok(JSON.stringify({ default_branch: 'main' }))
+      if (/repos\/[^/]+\/[^/]+$/u.test(joined)) return ok(options.repoPayload ?? JSON.stringify({ default_branch: 'main' }))
       return ok('')
     },
   }
@@ -229,6 +230,18 @@ describe('capability upstream updates', () => {
 
     expect(report.updates[0]?.latestRelease).toBeUndefined()
     expect(report.updates[0]?.error).toMatch(/latest release data/u)
+  })
+
+  it.each([
+    ['truncated JSON', '{'],
+    ['array', '[]'],
+  ])('reports malformed repository payload %s as github_unavailable like the release boundary', async (_label, repoPayload) => {
+    const { store, deps: d } = await deps(ghRunner({ headSha: UPSTREAM_SHA, release: null, repoPayload }))
+    await store.put('installations', installation())
+
+    const report = await checkCapabilityUpdates(d)
+
+    expect(report.updates[0]?.error).toMatch(/GitHub returned malformed repository data/u)
   })
 
   it('skips installations without an exact GitHub pin and removed receipts', async () => {

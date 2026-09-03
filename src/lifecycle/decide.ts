@@ -2,13 +2,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
   AuthorizationDecisionInput,
   AuthorizationAction,
-  DecisionPhase,
   DecisionReceipt,
   EvolutionTarget,
   ResolutionAuthorization,
   InstallRecoveryPlan,
   ReviewRecord,
-  VerificationLayerKind,
   WorkflowOptionId,
 } from '../contracts.js'
 import type { CreationGuard } from '../creation-guard.js'
@@ -264,8 +262,6 @@ function evolutionTargetFromInterrupt(
 function resolveInstallFromDecision(
   interrupt: InterruptPayload,
   decision: AuthorizationDecisionInput,
-  requirement: string,
-  _verificationLayer?: VerificationLayerKind,
 ): WorkflowPendingInstall {
   const profiles = Array.isArray(interrupt.facts.installProfiles)
     ? interrupt.facts.installProfiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -351,7 +347,6 @@ function resolveInstallFromDecision(
   return {
     targetProfile,
     retention,
-    verificationTask: requirement,
     ...(recoveryPlan ? { recoveryPlan } : {}),
     ...(liveReplacement && evolutionTarget ? {
       replacement: {
@@ -365,22 +360,18 @@ function resolveInstallFromDecision(
   }
 }
 
-export function phaseForOption(_optionId: AuthorizationAction): DecisionPhase {
-  return 'gate2'
-}
-
 export function resolveDecisionFromModel(input: {
   guard: CreationGuard
   agent: Agent | undefined
   interrupt: InterruptPayload
   decision: AuthorizationDecisionInput
-  requirement: string
+  /** Result of `resolveDecisionTarget` when the caller already ran it. */
+  target?: ReturnType<typeof resolveDecisionTarget>
   reviewId?: string
-  verificationLayer?: VerificationLayerKind
 }): ValidatedResume {
-  const target = resolveDecisionTarget(input.decision, input.interrupt)
+  const target = input.target ?? resolveDecisionTarget(input.decision, input.interrupt)
   const install = input.decision.action === 'use_this' || input.decision.action === 'apply_recovery'
-    ? resolveInstallFromDecision(input.interrupt, input.decision, input.requirement, input.verificationLayer)
+    ? resolveInstallFromDecision(input.interrupt, input.decision)
     : undefined
   const preview = input.guard.previewDecisionTurn(input.agent, input.interrupt)
   const userMessage = preview.message.normalize('NFKC').trim()

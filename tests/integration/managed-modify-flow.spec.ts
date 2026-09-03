@@ -98,8 +98,6 @@ describe('managed modify closure', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const resolutionId = `resolution_${'a'.repeat(24)}`
@@ -215,8 +213,6 @@ describe('managed modify closure', () => {
       store,
       new CreationGuard({ isEvolutionMode: () => true }),
       child,
-      undefined,
-      undefined,
       testingCreatorFoundation(preflight),
     )
     const resolutionId = `resolution_${'f'.repeat(24)}`

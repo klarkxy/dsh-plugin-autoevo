@@ -15,7 +15,7 @@ import {
   type RuntimeSurface,
   type ToolFixtureAvailability,
 } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
+import { EvolutionError, errorMessage } from '../errors.js'
 import { normalizePackagePath, withCachedGithubRepository } from '../github/git-cache.js'
 import { validateGithubRepository } from '../github/discovery.js'
 import { isSafePackageName } from '../package-name.js'
@@ -61,11 +61,6 @@ interface GithubCommit {
 
 interface GithubRepository {
   default_branch?: unknown
-}
-
-interface GithubTree {
-  tree?: unknown
-  truncated?: unknown
 }
 
 export interface ContentFile {
@@ -668,13 +663,14 @@ function isMechanicalFacts(value: object): value is MechanicalFacts {
   return 'staticRisk' in value && 'semanticContextRequired' in value && 'truncated' in value
 }
 
-export function needsSemanticReviewer(
+/** Static findings whose meaning (purpose, necessity, target) cannot be established mechanically. */
+export function requiresSemanticContext(
   review: MechanicalFacts | Pick<ReviewRecord, 'fit' | 'securityRisk' | 'compatibility' | 'findings' | 'mechanicalFacts'>,
 ): boolean {
   if (isMechanicalFacts(review)) {
     return review.semanticContextRequired
   }
-  if (review.mechanicalFacts) return needsSemanticReviewer(review.mechanicalFacts)
+  if (review.mechanicalFacts) return requiresSemanticContext(review.mechanicalFacts)
   return review.findings.some((item) => SEMANTIC_CONTEXT_FINDING_CODES.has(item.code))
 }
 
@@ -854,7 +850,7 @@ function parseGithub<T>(stdout: string, description: string): T {
     return JSON.parse(stdout) as T
   } catch (cause) {
     throw new EvolutionError('github_unavailable', `GitHub returned malformed ${description}`, {
-      cause: cause instanceof Error ? cause.message : String(cause),
+      cause: errorMessage(cause),
     })
   }
 }
@@ -1090,15 +1086,6 @@ export async function previewGithubPlugins(options: {
     }
     return previews.sort((left, right) => left.packagePath.localeCompare(right.packagePath))
   })
-}
-
-/** Backward-compatible single-package preview API. */
-export async function previewGithubPlugin(options: Parameters<typeof previewGithubPlugins>[0] & { packagePath?: string }): Promise<GithubPluginPreview> {
-  const previews = await previewGithubPlugins(options)
-  const requested = normalizePackagePath(options.packagePath)
-  const preview = previews.find((item) => item.packagePath === requested) ?? (!options.packagePath && previews.length === 1 ? previews[0] : undefined)
-  if (!preview) throw new EvolutionError('review_rejected', 'Repository preview resolved to multiple packages; select an exact package path')
-  return preview
 }
 
 export async function reviewGithubPluginWithFiles(options: {

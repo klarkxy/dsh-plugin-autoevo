@@ -81,12 +81,6 @@ function host(store: StateStore, record: ResolutionRecord): WorkflowHost {
     async discoverRemote(current) {
       return current
     },
-    async ensureMarket(current) {
-      return { resolution: current, market: { status: 'empty', reason: 'none' } }
-    },
-    async reviewGithub() {
-      throw new Error('not used')
-    },
     async reviewLocal() {
       throw new Error('not used')
     },

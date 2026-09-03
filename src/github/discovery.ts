@@ -1,7 +1,7 @@
 import type { RuntimeConfig } from '../config.js'
 import type { RemotePluginCandidate } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
-import { commandResultFailure, type CommandRunner } from '../process/runner.js'
+import { EvolutionError, errorMessage } from '../errors.js'
+import type { CommandRunner } from '../process/runner.js'
 import { sha256 } from '../state/hashes.js'
 
 export const DSH_PLUGIN_TOPIC = 'dsh-plugin'
@@ -55,7 +55,7 @@ function asSearchResponse(stdout: string): GithubSearchResponse {
       'github_unavailable',
       `GitHub returned malformed repository search data (${stdoutBytes} bytes, sha256 ${stdoutSha256})`,
       {
-        cause: cause instanceof Error ? cause.message : String(cause),
+        cause: errorMessage(cause),
         parseCategory,
         stdoutBytes,
         stdoutSha256,
@@ -142,7 +142,6 @@ export async function searchGithubRepositories(options: {
     ...(options.signal ? { signal: options.signal } : {}),
   })
   options.signal?.throwIfAborted()
-  if (result.exitCode !== 0) throw commandResultFailure(options.config.ghCommand, result)
   const payload = asSearchResponse(result.stdout)
   const merged = new Map<string, RemotePluginCandidate>()
   for (const raw of payload.items) {

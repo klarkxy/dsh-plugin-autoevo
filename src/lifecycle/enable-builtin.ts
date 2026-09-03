@@ -30,8 +30,13 @@ function patchRows(body: string): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) {
     throw new EvolutionError('invalid_input', 'The profile patch layer is not a top-level array; Host will not rewrite it')
   }
-  return value.filter((entry): entry is Record<string, unknown> =>
-    Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
+  // Every row is rewritten back verbatim; a row this Host cannot represent
+  // must stop the mutation instead of being dropped from the profile.
+  if (!value.every((entry): entry is Record<string, unknown> =>
+    Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))) {
+    throw new EvolutionError('invalid_input', 'The profile patch layer contains non-object rows; Host will not rewrite it')
+  }
+  return value
 }
 
 function alreadyMounted(rows: readonly Record<string, unknown>[], mountId: string, packageName: string): boolean {
@@ -87,13 +92,6 @@ function exactBuiltinRow(entry: Record<string, unknown>, mountId: string, packag
     && Object.keys(row).length === 2
     && (row as { id?: unknown }).id === mountId
     && (row as { name?: unknown }).name === packageName
-}
-
-function canonicalSignal(exec: ToolRunContext | undefined, signal: AbortSignal | undefined): AbortSignal | undefined {
-  if (exec?.signal && signal && exec.signal !== signal) {
-    throw new EvolutionError('invalid_input', 'Built-in mutation received conflicting cancellation signals')
-  }
-  return signal ?? exec?.signal
 }
 
 function dumpCompositionMatches(
@@ -209,7 +207,7 @@ export async function disableBuiltinMount(input: {
   /** Recovery journals may precede the write; absence is then a proven no-op. */
   allowAbsent?: boolean
 }): Promise<{ wrote: boolean }> {
-  const signal = canonicalSignal(undefined, input.signal)
+  const signal = input.signal
   signal?.throwIfAborted()
   if (!input.spec.wrote) return { wrote: false }
   const patchPath = path.join(input.dshHome, 'profiles', input.targetProfile, 'cordis.patch.yml')
@@ -268,7 +266,7 @@ export async function enableBuiltinMount(input: {
   /** Host crash journal persisted after approval and immediately before the profile write. */
   beforeProfileWrite?: () => Promise<void>
 }): Promise<BuiltinEnableResult> {
-  const signal = canonicalSignal(input.exec, input.signal)
+  const signal = input.signal ?? input.exec.signal
   signal?.throwIfAborted()
   const { packageName, version, mountId, targetProfile } = input.endpoint
   if (!MOUNT_ID_PATTERN.test(mountId)) {
@@ -322,13 +320,10 @@ export async function enableBuiltinMount(input: {
     signal?.throwIfAborted()
     await input.beforeProfileWrite?.()
     signal?.throwIfAborted()
-    const journaledPreimage = await patchFileOps.readFile(patchPath, 'utf8')
-    signal?.throwIfAborted()
-    if (journaledPreimage !== original) {
-      throw new EvolutionError('review_expired', 'The target profile patch changed before the approved write; refusing a stale overwrite')
-    }
     rows.push({ insert: [{ id: mountId, name: packageName }] })
     postimage = stringify(rows)
+    // writePatchAtomically re-reads and compares the preimage immediately
+    // before rename, which covers the journal window above.
     await writePatchAtomically(patchPath, original, postimage, signal)
     signal?.throwIfAborted()
   }
@@ -347,9 +342,6 @@ export async function enableBuiltinMount(input: {
       exitCode: dump.exitCode,
       diagnosticHash: sha256(dump.stderr),
     })
-  }
-  if (!alreadyMounted(patchRows(live), mountId, packageName)) {
-    throw new EvolutionError('review_expired', 'The exact built-in mount row changed during the composition check; recovery is required')
   }
   return { packageName, version, mountId, targetProfile, wrote }
 }

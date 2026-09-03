@@ -274,9 +274,7 @@ export class DshRepairChildHost implements RepairChildHost {
       if (!services.agents.isOwnedBy(handle.agent.id, request.parent)) {
         throw new EvolutionError('invalid_input', 'Created repair Agent is not owned by the initiating parent Agent')
       }
-      if (path.resolve(handle.agent.session.header.cwd ?? '') !== cwd) {
-        throw new EvolutionError('invalid_input', 'Created repair Agent working directory changed after setup')
-      }
+      // Session identity and cwd were bound inside `setup` on this same registry.create call.
       handle.agent.followup(createUserMessage({
         source: { kind: 'plugin', plugin: 'autoevo', form: 'relay' },
         content: [{ type: 'text', text: repairInstruction(request) }],

@@ -58,11 +58,9 @@ src/
 ├─ contracts.ts                # Policy V14 公共合同、review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService 装配；实现拆分为下列 service-*.ts
 ├─ service-resolution.ts       # 解析、候选池进出与授权流转
-├─ service-review.ts           # 审查编排与重验证
+├─ service-review.ts           # 审查编排与冻结规格
 ├─ service-modification.ts     # 修改 blocker 与 WorkOrder 派生
-├─ service-semantic-review.ts  # 独立 semantic reviewer 编排
 ├─ service-managed-work.ts     # 托管 create/modify 执行与 receipt
-├─ semantic-host.ts            # semantic 会话 Host 装配与输入校验
 ├─ internal-utils.ts           # 共享小工具（类型守卫、路径 containment 等）
 ├─ workflow/                   # 图引擎、生命周期映射、Agent 展示协议
 ├─ resolver/                   # 本地/已装来源、intent、lineage 与 profile ownership
@@ -189,7 +187,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 | `bundle_activation` | `activated` | 审查 bundle 的 Loader/Fiber 已收口 |
 | persistent `manual_runtime` | `awaiting_user_test` | 已安装，等待真实客户端测试 |
 
-`loaded` 只表示目标进程 bundle 已加载。AutoEvo 不用私有预检代替 live profile 证据；semantic verifier 与 `taskResultMatchedExpectation` 都不能把结果升级为 `verified`。
+`loaded` 只表示目标进程 bundle 已加载。AutoEvo 只看 live profile 证据，没有私有预检；`taskResultMatchedExpectation` 不能把结果升级为 `verified`。
 
 ## 10. 测试矩阵
 

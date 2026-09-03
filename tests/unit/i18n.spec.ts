@@ -44,8 +44,6 @@ describe('approval prompts', () => {
       requirement: 'scientific calculator',
       packageName: 'dsh-tool-calculator',
       targetProfile: 'web',
-      retention: 'temporary',
-      preflight: false,
       riskPrefix: '',
       fit: 'full',
       securityRisk: 'medium',
@@ -53,7 +51,7 @@ describe('approval prompts', () => {
       scripts: 'prepare',
       findings: 'lifecycle_script:info',
     })
-    expect(english).toContain('Install the exact reviewed dsh-tool-calculator')
+    expect(english).toContain('Install the exact reviewed dsh-tool-calculator into profile web (persistent)')
     expect(english).toContain('risk=medium')
     expect(english).not.toMatch(/[\u4e00-\u9fff]/u)
 
@@ -61,8 +59,6 @@ describe('approval prompts', () => {
       requirement: '科学计算器',
       packageName: 'dsh-tool-calculator',
       targetProfile: 'web',
-      retention: 'temporary',
-      preflight: false,
       riskPrefix: '',
       fit: 'full',
       securityRisk: 'medium',
@@ -70,7 +66,7 @@ describe('approval prompts', () => {
       scripts: 'prepare',
       findings: 'lifecycle_script:info',
     })
-    expect(chinese).toContain('将已审查的 dsh-tool-calculator 安装到隔离的临时 profile web')
+    expect(chinese).toContain('将已审查的 dsh-tool-calculator 安装到 profile web')
     expect(chinese).toContain('风险=medium')
     expect(chinese).not.toMatch(/Install the exact reviewed/u)
   })

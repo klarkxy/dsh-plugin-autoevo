@@ -70,7 +70,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId },
-      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'modify_this',
       candidateId,
@@ -82,7 +81,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId },
-      requirement: 'synthetic-model',
     })).toThrow(/already consumed|replay/i)
   })
 
@@ -91,27 +89,25 @@ describe('resume validation', () => {
     const current = interrupt(['modify_this', 'stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '你来理解这个决定' }] })
     expect(() => resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'create_new' }, requirement: 'synthetic-model',
+      guard, agent, interrupt: current, decision: { action: 'create_new' },
     })).toThrow(/not available/i)
     expect(() => resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'modify_this' }, requirement: 'synthetic-model',
+      guard, agent, interrupt: current, decision: { action: 'modify_this' },
     })).toThrow(/requires candidate_id/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId: `candidate_${'f'.repeat(24)}` },
-      requirement: 'synthetic-model',
     })).toThrow(/not allowed/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'modify_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
-      requirement: 'synthetic-model',
     })).toThrow(/do not accept retention/i)
     expect(resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'synthetic-model',
+      guard, agent, interrupt: current, decision: { action: 'stop' },
     })).toMatchObject({ optionId: 'stop', userMessage: '你来理解这个决定' })
   })
 
@@ -120,7 +116,7 @@ describe('resume validation', () => {
     const current = interrupt(['stop'])
     guard.rememberUserMessage(agent, { content: [{ type: 'text', text: 'x'.repeat(2_001) }] })
     expect(resolveDecisionFromModel({
-      guard, agent, interrupt: current, decision: { action: 'stop' }, requirement: 'synthetic-model',
+      guard, agent, interrupt: current, decision: { action: 'stop' },
     }).userMessage).toHaveLength(2_001)
   })
 
@@ -133,10 +129,9 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'synthetic-model' },
+      install: { targetProfile: 'web', retention: 'persistent' },
     })
   })
 
@@ -149,28 +144,24 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'apply_recovery', candidateId },
-      requirement: 'synthetic-model',
     })).toThrow(/requires recovery_id/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'apply_recovery', candidateId, recoveryId: `recovery_${'a'.repeat(24)}` },
-      requirement: 'synthetic-model',
     })).toThrow(/not allowed/i)
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'stop', recoveryId },
-      requirement: 'synthetic-model',
     })).toThrow(/does not accept recovery_id/i)
     expect(resolveDecisionFromModel({
       guard,
       agent,
       interrupt: current,
       decision: { action: 'apply_recovery', candidateId, recoveryId },
-      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'apply_recovery',
       candidateId,
@@ -206,7 +197,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'apply_recovery', candidateId, recoveryId },
-      requirement: 'synthetic-model',
     })).toMatchObject({
       optionId: 'apply_recovery',
       candidateId,
@@ -230,7 +220,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId, retention: 'persistent' } as unknown as AuthorizationDecisionInput,
-      requirement: 'synthetic-model',
     })).toThrow(/do not accept retention/i)
   })
 
@@ -243,8 +232,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'synthetic-model',
-      verificationLayer: 'manual_runtime',
     })).toMatchObject({ install: { retention: 'persistent' } })
     const nextGuard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     nextGuard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
@@ -253,8 +240,6 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
-      requirement: 'synthetic-model',
-      verificationLayer: 'manual_runtime',
     })).toThrow(/do not accept retention/i)
   })
 
@@ -267,11 +252,9 @@ describe('resume validation', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'synthetic-model',
-      verificationLayer: 'tool_roundtrip',
     })).toMatchObject({
       optionId: 'use_this',
-      install: { targetProfile: 'web', retention: 'persistent', verificationTask: 'synthetic-model' },
+      install: { targetProfile: 'web', retention: 'persistent' },
     })
   })
 })
@@ -380,7 +363,6 @@ describe('install authorization receipts', () => {
       agent,
       interrupt: current,
       decision: { action: 'use_this', candidateId },
-      requirement: 'dsh-plugin-alpha',
     })
     expect(resume.install).toMatchObject({
       targetProfile: 'web',
@@ -401,7 +383,6 @@ describe('install authorization receipts', () => {
       agent,
       interrupt: again,
       decision: { action: 'use_this', candidateId, retention: 'temporary' } as unknown as AuthorizationDecisionInput,
-      requirement: 'dsh-plugin-alpha',
     })).toThrow(/do not accept retention/i)
   })
 
@@ -445,7 +426,6 @@ describe('install authorization receipts', () => {
         agent,
         interrupt: current,
         decision: { action: 'use_this', candidateId },
-        requirement: 'record-sync',
       })
       expect(resume.install).toMatchObject({
         targetProfile: 'web',

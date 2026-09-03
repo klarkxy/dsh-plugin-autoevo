@@ -28,7 +28,7 @@ Each topic has one canonical home. Interactive flow diagrams (standalone HTML wi
 ## Install
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.2.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.0
 ```
 
 - Replace `--profile web` with the profile you actually use; keep the `@deepseek-ai/` prefix (the unscoped `dsh` package on npm is an unrelated project).

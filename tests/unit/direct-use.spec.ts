@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { testResolution } from '../helpers/records.js'
-import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord, type ReviewerVerdictDecision } from '../../src/contracts.js'
+import { POLICY_VERSION, type ResolutionRecord, type ReviewRecord } from '../../src/contracts.js'
 import {
   assertDirectUseAllowed,
   hostDirectUseBoundary,
   isDirectlyUsableReview,
   isManagedModificationEligibleReview,
   reviewCandidateDigest,
-  reviewSnapshotDigest,
 } from '../../src/review/direct-use.js'
-import { evaluatePluginContent, needsSemanticReviewer } from '../../src/review/review.js'
+import { evaluatePluginContent, requiresSemanticContext } from '../../src/review/review.js'
 import { reviewIdentity } from '../../src/lifecycle/decide.js'
-import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
-import { _testing as serviceTesting } from '../../src/service.js'
 import { optionsFor, type WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const COMMIT = 'c'.repeat(40)
@@ -95,44 +92,6 @@ function githubReview(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
   }
 }
 
-function bindVerdict(
-  review: ReviewRecord,
-  decision: ReviewerVerdictDecision,
-  workflow?: WorkflowRecord,
-  overrides: Partial<ReviewRecord['reviewerVerdict']> = {},
-): ReviewRecord {
-  const snapshotDigest = reviewSnapshotDigest(review)
-  const candidateDigest = reviewCandidateDigest(review, workflow)
-  const request = mintReviewerRequest({
-    workflowId: workflow?.id ?? `workflow_${'d'.repeat(24)}`,
-    review,
-    snapshotDigest,
-    candidateDigest,
-    createdAt: '2026-08-19T00:00:02.000Z',
-  })
-  const completed = { ...request, status: 'completed' as const, completedAt: '2026-08-19T00:00:03.000Z' }
-  return {
-    ...review,
-    reviewerRequestId: completed.id,
-    reviewerRequest: completed,
-    reviewerVerdict: {
-      requestId: completed.id,
-      reviewId: review.id,
-      requirementHash: requirementHashFor(review.requirement),
-      snapshotDigest,
-      candidateDigest,
-      reviewerSessionId: 'reviewer-session',
-      reviewerVersion: REVIEWER_VERSION,
-      decision,
-      evidence: [],
-      conditions: [],
-      semanticCoverage: 'partial',
-      createdAt: '2026-08-19T00:00:03.000Z',
-      ...overrides,
-    },
-  }
-}
-
 function confirmationIds(review: ReviewRecord, workflow: WorkflowRecord): string[] {
   return optionsFor('await_confirmation', resolution(), [review], workflow, ['web']).map((item) => item.id)
 }
@@ -151,7 +110,7 @@ describe('direct use eligibility', () => {
     expect(reviewCandidateDigest(review, workflow)).toBe('1'.repeat(64))
   })
 
-  it('lets a low-risk full compatible review expose use_this without a reviewer verdict', () => {
+  it('lets a low-risk full compatible review expose use_this', () => {
     const review = githubReview()
     const workflow = workflowFor(review)
     expect(isDirectlyUsableReview(review, workflow)).toBe(true)
@@ -187,42 +146,16 @@ describe('direct use eligibility', () => {
     }
   })
 
-  it('preserves missing, rejected, uncertain, stale, and wrong-bound semantic verdicts without turning them into Host blocks', () => {
-    const base = githubReview({
-      securityRisk: 'high',
-      recommendation: 'modify',
-      findings: [{ code: 'dynamic_evaluation', severity: 'block', source: 'src/run.ts', detail: 'eval' }],
-    })
-    const workflow = workflowFor(base)
-    const missing = base
-    const rejected = bindVerdict(base, 'rejected', workflow)
-    const uncertain = bindVerdict(base, 'uncertain', workflow)
-    const stale = bindVerdict(base, 'approved', workflow, { snapshotDigest: '9'.repeat(64) })
-    const wrongBound = bindVerdict(base, 'approved', workflow, { reviewId: `review_${'f'.repeat(64)}` })
-    const wrongRequest = bindVerdict(base, 'approved', workflow, { requestId: `reviewer_${'0'.repeat(24)}` })
-    const wrongRequirement = bindVerdict(base, 'approved', workflow, { requirementHash: '8'.repeat(64) })
-    const wrongCandidate = bindVerdict(base, 'approved', workflow, { candidateDigest: '7'.repeat(64) })
-    const wrongVersion = bindVerdict(base, 'approved', workflow, { reviewerVersion: '0' })
-    const wrongSession = bindVerdict(base, 'approved', workflow, { reviewerSessionId: '' })
-
-    for (const review of [missing, rejected, uncertain, stale, wrongBound, wrongRequest, wrongRequirement, wrongCandidate, wrongVersion, wrongSession]) {
-      expect(isDirectlyUsableReview(review, workflow)).toBe(true)
-      expect(confirmationIds(review, workflow)).toContain('use_this')
-      expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
-    }
-  })
-
   it('keeps explicit incompatibility advisory and offers both use and modify', () => {
-    const review = bindVerdict(githubReview({
+    const review = githubReview({
       compatibility: { status: 'incompatible', reason: 'peer excludes runtime', runtimeVersion: '0.1.0-rc.7' },
       recommendation: 'modify',
-    }), 'approved', workflowFor(githubReview()))
+    })
     const workflow = workflowFor(review)
-    const bound = bindVerdict(review, 'approved', workflow)
-    expect(hostDirectUseBoundary(bound)).toBeUndefined()
-    expect(isDirectlyUsableReview(bound, workflow)).toBe(true)
-    expect(confirmationIds(bound, workflow)).toEqual(expect.arrayContaining(['use_this', 'modify_this', 'stop']))
-    expect(() => assertDirectUseAllowed(bound, workflow)).not.toThrow()
+    expect(hostDirectUseBoundary(review)).toBeUndefined()
+    expect(isDirectlyUsableReview(review, workflow)).toBe(true)
+    expect(confirmationIds(review, workflow)).toEqual(expect.arrayContaining(['use_this', 'modify_this', 'stop']))
+    expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
   })
 
   it('continues to reject mechanical policy, install-spec, and materialization failures', () => {
@@ -340,7 +273,7 @@ describe('direct use eligibility', () => {
     expect(confirmationIds(record, workflow)).toContain('use_this')
   })
 
-  it('gates credential-access findings behind the semantic reviewer', () => {
+  it('marks credential-access findings as requiring semantic context', () => {
     const record = evaluatePluginContent({
       resolutionId: resolution().id,
       runtimeVersion: '0.1.0-rc.6',
@@ -367,21 +300,6 @@ describe('direct use eligibility', () => {
       expect.objectContaining({ code: 'credential_access', severity: 'block' }),
     ]))
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
-    expect(needsSemanticReviewer(record)).toBe(true)
-  })
-
-  it('does not let a reviewer verdict mint authorization, commitment, or a user decision', () => {
-    const review = bindVerdict(githubReview({
-      securityRisk: 'high',
-      recommendation: 'modify',
-    }), 'approved', workflowFor(githubReview()))
-    const record = resolution()
-    expect(serviceTesting.authorizationForResolution(record, [review]).state).toBe('confirmation_required')
-    expect(review.reviewerVerdict).not.toHaveProperty('authorization')
-    expect(review.reviewerVerdict).not.toHaveProperty('actionCommitment')
-    expect(review.reviewerVerdict).not.toHaveProperty('executionLease')
-    expect(review.reviewerVerdict).not.toHaveProperty('selectionReceipt')
-    expect(review.reviewerVerdict).not.toHaveProperty('installSpec')
-    expect(record.decisions ?? []).toEqual([])
+    expect(requiresSemanticContext(record)).toBe(true)
   })
 })

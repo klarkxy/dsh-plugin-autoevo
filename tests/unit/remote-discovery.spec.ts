@@ -111,23 +111,6 @@ describe('scoped GitHub discovery', () => {
     expect(runner.run).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects nonzero search results even when stdout is valid JSON', async () => {
-    await expect(searchGithubRepositories({
-      runner: {
-        run: async () => ({
-          exitCode: 1,
-          signal: null,
-          stdout: JSON.stringify({ items: [searchItem({ full_name: 'acme/should-not-appear' })] }),
-          stderr: 'github failed',
-        }),
-      },
-      config,
-      cwd: 'C:/workspace',
-      query: 'calculator',
-      limit: 20,
-    })).rejects.toMatchObject({ code: 'command_failed' })
-  })
-
   it('rejects invalid GitHub search response schemas but accepts an empty items array', async () => {
     for (const invalid of [{}, { items: null }, { items: 'nope' }, { items: {} }, []]) {
       await expect(searchGithubRepositories({

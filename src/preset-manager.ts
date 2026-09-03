@@ -13,7 +13,8 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
-import { isNotFound, isPathInside, isProcessAlive, normalizeLf } from './internal-utils.js'
+import { errorMessage } from './errors.js'
+import { isAlreadyExists, isNotFound, isPathInside, isProcessAlive, normalizeLf } from './internal-utils.js'
 import {
   EVOLUTION_PRESET_ID,
   EVOLUTION_PRESET_KNOWN_MANIFESTS,
@@ -53,10 +54,6 @@ export interface EvolutionPresetPaths {
 interface PhysicalEvolutionPresetPaths {
   presetsRoot: string
   targetDir: string
-}
-
-function posixJoin(...parts: string[]): string {
-  return parts.join('/')
 }
 
 function assertContained(root: string, candidate: string, label: string): string {
@@ -114,8 +111,9 @@ async function pathExists(target: string): Promise<boolean> {
   try {
     await access(target, constants.F_OK)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    if (isNotFound(error)) return false
+    throw error
   }
 }
 
@@ -145,9 +143,7 @@ async function resolvePhysicalPresetPaths(
     try {
       await mkdir(physicalPresetsRoot)
     } catch (error) {
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
-        throw error
-      }
+      if (!isAlreadyExists(error)) throw error
     }
     rootInfo = await lstat(physicalPresetsRoot)
   }
@@ -232,14 +228,14 @@ async function listTreeFilesNoFollow(root: string): Promise<string[]> {
   return files.sort((a, b) => a.localeCompare(b))
 }
 
-/** Verify target is pristine against the installed manifest (content + no extras). */
+/**
+ * Verify target is pristine against the installed manifest (content + no extras).
+ * `manifest` is trusted: on-disk manifests are validated once in `readInstalledManifest`.
+ */
 export async function verifyPristine(
   targetDir: string,
   manifest: EvolutionPresetManifest,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (!isEvolutionPresetManifest(manifest)) {
-    return { ok: false, reason: 'manifest schema or managed file set is invalid' }
-  }
   const resolvedTarget = path.resolve(targetDir)
   const expectedNames = new Set<string>([
     ...Object.keys(manifest.files),
@@ -249,7 +245,7 @@ export async function verifyPristine(
   try {
     children = await listTreeFilesNoFollow(resolvedTarget)
   } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    return { ok: false, reason: errorMessage(error) }
   }
 
   for (const name of children) {
@@ -299,9 +295,13 @@ async function writeStagedPreset(
 /** Bounded cleanup for the exact managed preset tree; never follows links. */
 async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Promise<void> {
   const resolvedTree = assertContained(containmentRoot, treeRoot, 'cleanup tree')
-  if (!(await pathExists(resolvedTree))) return
-
-  const rootInfo = await lstat(resolvedTree)
+  let rootInfo: Awaited<ReturnType<typeof lstat>>
+  try {
+    rootInfo = await lstat(resolvedTree)
+  } catch (error) {
+    if (isNotFound(error)) return
+    throw error
+  }
   if (rootInfo.isSymbolicLink()) {
     throw new Error(`AutoEvo refused cleanup of linked preset tree: ${resolvedTree}`)
   }
@@ -347,19 +347,26 @@ async function cleanupOwnedTree(treeRoot: string, containmentRoot: string): Prom
   await rmdir(resolvedTree)
 }
 
+/** Missing or unparseable manifest means user-owned content; read errors propagate. */
 async function readInstalledManifest(targetDir: string): Promise<EvolutionPresetManifest | undefined> {
   const manifestPath = path.join(targetDir, EVOLUTION_PRESET_MANIFEST_FILENAME)
-  if (!(await pathExists(manifestPath))) return undefined
+  let text: string
   try {
-    const text = await readFile(manifestPath, 'utf8')
-    const raw = JSON.parse(text) as unknown
-    if (!isEvolutionPresetManifest(raw)) return undefined
-    // The manifest itself is managed content. Any byte-level edit, including
-    // formatting-only changes, makes the directory user-owned and fail-closed.
-    return text === serializeManifest(raw) ? raw : undefined
+    text = await readFile(manifestPath, 'utf8')
+  } catch (error) {
+    if (isNotFound(error)) return undefined
+    throw error
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
   } catch {
     return undefined
   }
+  if (!isEvolutionPresetManifest(raw)) return undefined
+  // The manifest itself is managed content. Any byte-level edit, including
+  // formatting-only changes, makes the directory user-owned and fail-closed.
+  return text === serializeManifest(raw) ? raw : undefined
 }
 
 function randomSuffix(): string {
@@ -372,10 +379,6 @@ function migrationLockPath(presetsRoot: string): string {
     path.join(presetsRoot, `.${EVOLUTION_PRESET_ID}.migrate.lock`),
     'migration lock',
   )
-}
-
-async function isPidAlive(pid: number): Promise<boolean> {
-  return isProcessAlive(pid)
 }
 
 interface MigrationLockBody {
@@ -444,7 +447,7 @@ async function readRecoveryMarker(markerFile: string): Promise<string | undefine
     return await readFile(markerFile, 'utf8')
   } catch (error) {
     if (isNotFound(error)) return undefined
-    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`AutoEvo refused migration lock recovery: ${errorMessage(error)}`)
   }
 }
 
@@ -512,23 +515,21 @@ async function acquireMigrationLock(
     return await publishMigrationLock(lockFile, markerFile, nextToken(), testing)
   } catch (error) {
     if (error instanceof Error && /already running/u.test(error.message)) throw error
-    if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
-      throw error
-    }
+    if (!isAlreadyExists(error)) throw error
   }
 
   let observed: { raw: string; body: MigrationLockBody }
   try {
     observed = await readMigrationLock(lockFile)
   } catch (error) {
-    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`AutoEvo refused migration lock recovery: ${errorMessage(error)}`)
   }
 
   let alive: boolean
   try {
-    alive = await (testing.isProcessAlive ?? isPidAlive)(observed.body.pid)
+    alive = await (testing.isProcessAlive ?? isProcessAlive)(observed.body.pid)
   } catch (error) {
-    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`AutoEvo refused migration lock recovery: ${errorMessage(error)}`)
   }
   if (alive) throw migrationBusy()
 
@@ -538,8 +539,8 @@ async function acquireMigrationLock(
   try {
     await writeFile(markerFile, marker, { encoding: 'utf8', flag: 'wx' })
   } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') throw migrationBusy()
-    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+    if (isAlreadyExists(error)) throw migrationBusy()
+    throw new Error(`AutoEvo refused migration lock recovery: ${errorMessage(error)}`)
   }
 
   let unlinked = false
@@ -570,7 +571,7 @@ async function acquireMigrationLock(
       if (currentMarker === marker) await unlink(markerFile).catch(() => undefined)
     }
     if (error instanceof Error && /already running/u.test(error.message)) throw error
-    throw new Error(`AutoEvo refused migration lock recovery: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`AutoEvo refused migration lock recovery: ${errorMessage(error)}`)
   }
 }
 
@@ -612,8 +613,8 @@ async function recoverInterruptedMigration(
   const backups = children.filter((name) => name.startsWith(`.${EVOLUTION_PRESET_ID}.backup-`))
   for (const name of staging) {
     const stagingDir = assertContained(presetsRoot, path.join(presetsRoot, name), 'orphan staging')
-    await cleanupOwnedTree(stagingDir, presetsRoot).catch((error) => {
-      throw new Error(`AutoEvo failed to clean interrupted staging: ${error instanceof Error ? error.message : String(error)}`)
+    await cleanupOwnedTree(stagingDir, presetsRoot).catch((error: unknown) => {
+      throw new Error(`AutoEvo failed to clean interrupted staging: ${errorMessage(error)}`)
     })
     logger?.warn?.(`AutoEvo removed interrupted preset staging ${name}`)
   }
@@ -713,9 +714,7 @@ async function materializeEvolutionPresetLocked(
 
   const isCurrentDesiredManifest = manifestsMatch(installedManifest, desiredManifest)
   const trustedPriorManifests = options.trustedPriorManifests ?? EVOLUTION_PRESET_KNOWN_MANIFESTS
-  const isKnownPriorManifest = trustedPriorManifests.some((known) => {
-    return isEvolutionPresetManifest(known) && manifestsMatch(installedManifest, known)
-  })
+  const isKnownPriorManifest = trustedPriorManifests.some((known) => manifestsMatch(installedManifest, known))
   if (!isCurrentDesiredManifest && !isKnownPriorManifest) {
     const reason = 'existing evolution directory manifest is not a known AutoEvo release; preserved without changes'
     options.logger?.warn?.(reason)
@@ -759,7 +758,7 @@ async function materializeEvolutionPresetLocked(
         await renamePath(backupDir, targetDir)
       } catch (restoreError) {
         throw new Error(
-          `AutoEvo preset upgrade failed and restore also failed: ${error instanceof Error ? error.message : String(error)}; restore: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+          `AutoEvo preset upgrade failed and restore also failed: ${errorMessage(error)}; restore: ${errorMessage(restoreError)}`,
         )
       }
       await cleanupOwnedTree(stagingDir, presetsRoot).catch(() => undefined)
@@ -774,12 +773,9 @@ async function materializeEvolutionPresetLocked(
       templateVersion,
     }
   } catch (error) {
+    // Backup restore lives in the inner swap handler; a lone orphan backup is
+    // restored by recoverInterruptedMigration on the next locked run.
     await cleanupOwnedTree(stagingDir, presetsRoot).catch(() => undefined)
-    if (await pathExists(backupDir) && !(await pathExists(targetDir))) {
-      await renamePath(backupDir, targetDir).catch(() => undefined)
-    } else if (await pathExists(backupDir) && await pathExists(targetDir)) {
-      await cleanupOwnedTree(backupDir, presetsRoot).catch(() => undefined)
-    }
     throw error
   }
 }
@@ -790,12 +786,10 @@ export const _testing = {
   serializeManifest,
   manifestsMatch,
   cleanupOwnedTree,
-  posixJoin,
   listExactChildren,
   acquireMigrationLock,
   releaseMigrationLock,
   runWithMigrationLockRelease,
   recoverInterruptedMigration,
   migrationLockPath,
-  isPidAlive,
 }

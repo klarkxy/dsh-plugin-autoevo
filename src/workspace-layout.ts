@@ -18,7 +18,7 @@ export function currentWorkspaceCwd(): string | undefined {
   return currentWorkspace.getStore()
 }
 
-export function resolveStateRoot(config: Pick<RuntimeConfig, 'dshHome' | 'stateDir'>, _cwd?: string): string {
+export function resolveStateRoot(config: Pick<RuntimeConfig, 'dshHome' | 'stateDir'>): string {
   if (config.stateDir) return path.resolve(config.stateDir)
   return path.resolve(config.dshHome, 'autoevo')
 }

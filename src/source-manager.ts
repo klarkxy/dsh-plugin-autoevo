@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises'
 import path from 'node:path'
 import type { RuntimeConfig } from './config.js'
-import { isNotFound, isPathInside, isProcessAlive } from './internal-utils.js'
+import { isAlreadyExists, isNotFound, isPathInside, isProcessAlive } from './internal-utils.js'
 import type { ReviewRecord } from './contracts.js'
 import { EvolutionError } from './errors.js'
 import { normalizePackagePath } from './github/git-cache.js'
@@ -131,22 +131,7 @@ async function canonicalPath(candidate: string): Promise<string> {
   }
 }
 
-/**
- * Cross-platform lock-holder liveness probe.
- * - non-positive PID => dead/invalid (eligible for stale recovery)
- * - kill(pid, 0) success => live
- * - ESRCH => dead
- * - EPERM / unknown errors => treat as live (fail closed)
- */
-export function isLockHolderAlive(pid: number): boolean {
-  return isProcessAlive(pid)
-}
-
 type SourceCompletionProof = NonNullable<SourceReceipt['completionProof']>
-
-function isAlreadyExists(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')
-}
 
 function validatedCompletionProof(receipt: SourceReceipt): {
   proof: SourceCompletionProof
@@ -293,17 +278,6 @@ export class SourceManager {
     return `${this.lockRecoveryPath(sourceId)}.workflow-completion-takeover`
   }
 
-  private isManagedSourceDir(resolved: string, sourceId: string): boolean {
-    const parent = path.dirname(resolved)
-    if (path.basename(resolved) !== sourceId) return false
-    if (this.config.sourceDir) return path.resolve(parent) === path.resolve(this.config.sourceDir)
-    if (path.basename(parent) === 'sources' && path.basename(path.dirname(parent)) === '.autoevo') return true
-    if (this.config.stateDir) {
-      return path.resolve(parent) === path.resolve(this.config.stateDir, 'sources')
-    }
-    return false
-  }
-
   /** Containment of a realpath'd managed source against canonicalized base roots. */
   private async isCanonicalManagedSourceDir(resolved: string, sourceId: string): Promise<boolean> {
     const parent = path.dirname(resolved)
@@ -335,11 +309,10 @@ export class SourceManager {
       const receipt = JSON.parse(await readFile(this.legacyReceiptPath(sourceId), 'utf8')) as SourceReceipt
       if (receipt.sourceId !== sourceId
         || receipt.activeWorkflowId !== null
-        || path.resolve(receipt.path) !== path.resolve(this.legacySourceRoot, sourceId)
-        || !this.isManagedSourceDir(path.resolve(receipt.path), sourceId)) return undefined
+        || path.resolve(receipt.path) !== path.resolve(this.legacySourceRoot, sourceId)) return undefined
       try {
         const lock = JSON.parse(await readFile(this.legacyLockPath(sourceId), 'utf8')) as SourceLock
-        if (isLockHolderAlive(lock.pid)) return undefined
+        if (isProcessAlive(lock.pid)) return undefined
       } catch (error) {
         if (!isNotFound(error)) return undefined
       }
@@ -494,27 +467,6 @@ export class SourceManager {
     return resolved
   }
 
-  async acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void> {
-    await this.acquireLockInternal(sourceId, workflowId, signal, workspaceCwd)
-  }
-
-  private async writeInitialLock(lockFile: string, body: string): Promise<void> {
-    await writeFile(lockFile, body, { encoding: 'utf8', flag: 'wx' })
-  }
-
-  private async releaseInitialLockIfExact(sourceId: string, lockToken: string, expectedBody: string): Promise<void> {
-    const target = this.lockPath(sourceId)
-    let current: string
-    try {
-      current = await readFile(target, 'utf8')
-    } catch (error) {
-      if (isNotFound(error)) return
-      throw error
-    }
-    if (current !== expectedBody) return
-    await this.releaseLockToken(sourceId, lockToken)
-  }
-
   private async acquireLockInternal(
     sourceId: string,
     workflowId: string,
@@ -591,7 +543,7 @@ export class SourceManager {
     const initialBody = `${JSON.stringify(initialLock, null, 2)}\n`
     let initialPublished = false
     try {
-      await this.writeInitialLock(lockFile, initialBody)
+      await writeFile(lockFile, initialBody, { encoding: 'utf8', flag: 'wx' })
       initialPublished = true
       signal?.throwIfAborted()
       if (await this.lockPublicationBarrierExists(sourceId)) {
@@ -607,10 +559,7 @@ export class SourceManager {
         await this.releaseLockToken(sourceId, initialLock.lockToken!).catch(() => undefined)
         throw error
       }
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'EEXIST') {
-        await this.releaseInitialLockIfExact(sourceId, initialLock.lockToken!, initialBody).catch(() => undefined)
-        throw error
-      }
+      if (!isAlreadyExists(error)) throw error
     }
 
     const observedLock = await readFile(lockFile, 'utf8')
@@ -622,7 +571,7 @@ export class SourceManager {
       })
     }
 
-    if (isLockHolderAlive(existing.pid)) {
+    if (isProcessAlive(existing.pid)) {
       throw new EvolutionError('invalid_input', 'Managed source is locked by another active workflow', {
         sourceId,
         activeWorkflowId: existing.workflowId,
@@ -676,7 +625,7 @@ export class SourceManager {
         flag: 'wx',
       })
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+      if (isAlreadyExists(error)) {
         throw new EvolutionError('invalid_input', 'Managed source lock recovery is already owned; refusing concurrent takeover', {
           sourceId,
         })
@@ -860,7 +809,7 @@ export class SourceManager {
     if (orphanedTakeover !== undefined) {
       const stale = JSON.parse(orphanedTakeover) as SourceLockRecoveryOwner
       if (!this.completionOwnerMatches(stale, proofHash, lockRaw, lockToken)
-        || isLockHolderAlive(stale.pid)) return undefined
+        || isProcessAlive(stale.pid)) return undefined
       const owner = nextOwner()
       try {
         await writeFile(target, `${JSON.stringify(owner, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
@@ -888,7 +837,7 @@ export class SourceManager {
     const observedOwnerRaw = await readFile(target, 'utf8')
     const observedOwner = JSON.parse(observedOwnerRaw) as SourceLockRecoveryOwner
     if (!this.completionOwnerMatches(observedOwner, proofHash, lockRaw, lockToken)
-      || isLockHolderAlive(observedOwner.pid)) return undefined
+      || isProcessAlive(observedOwner.pid)) return undefined
 
     try {
       await rename(target, takeover)
@@ -1097,17 +1046,6 @@ export class SourceManager {
     }
   }
 
-  async releaseLock(sourceId: string, workflowId: string): Promise<void> {
-    const lockFile = this.lockPath(sourceId)
-    try {
-      const existing = JSON.parse(await readFile(lockFile, 'utf8')) as SourceLock
-      if (existing.workflowId !== workflowId) return
-      await rm(lockFile, { force: true })
-    } catch (error) {
-      if (!isNotFound(error)) throw error
-    }
-  }
-
   async completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted()
     const receipt = await this.readReceipt(sourceId)
@@ -1156,12 +1094,7 @@ export class SourceManager {
       activeWorkflowId: null,
       completionProof,
     }
-    try {
-      await this.writeReceipt(completedReceipt)
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason
-      throw error
-    }
+    await this.writeReceipt(completedReceipt)
     const completed = await this.convergeWorkflowCompletion(completedReceipt)
     if (!completed) {
       throw new EvolutionError('invalid_input', 'Managed source workflow completion did not converge')
@@ -1241,15 +1174,7 @@ export class SourceManager {
     let receiptActivated = false
     try {
       const root = this.sourcePath(sourceId, input.workspaceCwd)
-      let gitDirectoryExists: boolean
-      try {
-        gitDirectoryExists = await this.hasGitDirectory(path.join(root, '.git'), input.signal)
-        input.signal?.throwIfAborted()
-      } catch (error) {
-        if (input.signal?.aborted) throw input.signal.reason
-        throw error
-      }
-      if (gitDirectoryExists) {
+      if (await this.hasGitDirectory(path.join(root, '.git'), input.signal)) {
         throw new EvolutionError('invalid_input', 'Managed create source already exists; refusing to overwrite', {
           sourceId,
         })
@@ -1334,15 +1259,7 @@ export class SourceManager {
     let receiptActivated = false
     try {
       const root = this.sourcePath(sourceId, input.workspaceCwd)
-      let exists: boolean
-      try {
-        exists = await this.hasGitDirectory(path.join(root, '.git'), input.signal)
-        input.signal?.throwIfAborted()
-      } catch (error) {
-        if (input.signal?.aborted) throw input.signal.reason
-        throw error
-      }
-      if (!exists) {
+      if (!(await this.hasGitDirectory(path.join(root, '.git'), input.signal))) {
         input.signal?.throwIfAborted()
         await mkdir(root, { recursive: true })
         input.signal?.throwIfAborted()
@@ -1606,7 +1523,7 @@ export class SourceManager {
     try {
       await writeFile(lockFile, `${JSON.stringify(lock, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+      if (isAlreadyExists(error)) {
         throw new EvolutionError('invalid_input', 'Completed managed source was claimed concurrently')
       }
       throw error

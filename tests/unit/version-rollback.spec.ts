@@ -469,13 +469,15 @@ describe('capability rollback', () => {
       verifyHost: async () => hostPassedEvidence,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      ctx, config(root), store, launcher, async () => true, undefined, async () => ({
+    const installer = new PluginInstaller({
+      ctx,
+      config: config(root),
+      store,
+      launcher,
+      hotLoader: async () => ({
         evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'rollback requires restart' },
       }),
-      undefined,
-      'autoevo-verify',
-    )
+    })
     return {
       store,
       currentId,
@@ -640,6 +642,27 @@ describe('capability rollback', () => {
     const { deps, currentId } = await rollbackDeps({ liveSpec: OLD_SPEC })
     await expect(rollbackInstallation(deps, { installationId: currentId }, execution()))
       .rejects.toThrow(/does not match the given current installation/i)
+  })
+
+  it('reports a live profile read failure as command_failed instead of a spec mismatch', async () => {
+    const { deps, currentId } = await rollbackDeps()
+    const raw = 'C:\\Users\\secret\\profile package spec'
+    const createRollbackInstaller = vi.fn(deps.createRollbackInstaller)
+    const launcher = {
+      ...deps.launcher,
+      profileDependencySpec: async () => { throw new Error(raw) },
+    } as unknown as DshLauncher
+
+    const failure = await rollbackInstallation(
+      { ...deps, launcher, createRollbackInstaller },
+      { installationId: currentId },
+      execution(),
+    ).then(() => undefined, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(EvolutionError)
+    expect(failure).toMatchObject({ code: 'command_failed' })
+    expect((failure as Error).message).not.toMatch(/does not match/i)
+    expect((failure as Error).message).not.toContain(raw)
+    expect(createRollbackInstaller).not.toHaveBeenCalled()
   })
 
   it('refuses rollback before creating an installer when the target receipt drifted from its linked frozen review', async () => {

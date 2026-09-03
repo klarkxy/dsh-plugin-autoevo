@@ -5,13 +5,11 @@ export {
   isDirectlyUsableReview,
   isManagedModificationEligibleReview,
   reviewCandidateDigest,
-  reviewerBindingDigest,
   reviewSnapshotDigest,
   type InstallCommitmentBinding,
 } from './direct-use.js'
 export {
-  needsSemanticReviewer,
-  previewGithubPlugin,
+  requiresSemanticContext,
   previewGithubPlugins,
   reviewGithubPluginWithFiles,
   reviewLocalPlugin,

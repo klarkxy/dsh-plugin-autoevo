@@ -173,19 +173,15 @@ describe('installed evolve replacement on an isolated profile', () => {
         reason: 'Host loaded the reviewed bundle.',
       }),
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(
-      { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context,
-      config(root),
+    const installer = new PluginInstaller({
+      ctx: { get: () => ({ request: async () => 'allowed-once' }) } as unknown as Context,
+      config: config(root),
       store,
       launcher,
-      async () => true,
-      undefined,
-      async () => ({
+      hotLoader: async () => ({
         evidence: { attempted: true, loaded: false, method: 'unsupported', reason: 'replacement requires restart' },
       }),
-      undefined,
-      'autoevo-verify',
-    )
+    })
     const exec = {
       callId: 'call-1',
       agent: { session: { header: { cwd: root } } },

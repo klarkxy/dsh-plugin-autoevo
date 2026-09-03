@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { link, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { POLICY_VERSION, type InstallationRecord, type ResolutionRecord, type ReviewRecord } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
+import { errorMessage, EvolutionError } from '../errors.js'
 import { projectInstallation } from '../installation-lifecycle.js'
+import { isAlreadyExists, isNotFound, isRecord } from '../internal-utils.js'
 import type { WorkflowRecord } from '../workflow/contracts.js'
 import { ensureAutoEvoGitignore } from '../workspace-layout.js'
 import { sha256 } from './hashes.js'
@@ -101,10 +102,6 @@ function nonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-function plainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
 function assertPrefixedId(value: unknown, prefix: string, field: string): void {
   if (typeof value !== 'string'
     || !value.startsWith(`${prefix}_`)
@@ -139,7 +136,7 @@ function validateStrictInstallationRecord(stored: StoredRecord): void {
   for (const field of ['installed', 'loaded', 'verified', 'restartRequired', 'removed']) {
     if (typeof record[field] !== 'boolean') throw new Error(`installation ${field} is missing`)
   }
-  if (!plainObject(record.verification)) throw new Error('installation verification is invalid')
+  if (!isRecord(record.verification)) throw new Error('installation verification is invalid')
   if (record.installPhase !== undefined && !INSTALL_PHASES.has(record.installPhase as string)) {
     throw new Error('installation phase is invalid')
   }
@@ -160,7 +157,7 @@ function validateStrictInstallationRecord(stored: StoredRecord): void {
 
   let validReplacement = false
   if (record.replacement !== undefined) {
-    if (!plainObject(record.replacement)) throw new Error('installation replacement is invalid')
+    if (!isRecord(record.replacement)) throw new Error('installation replacement is invalid')
     const replacement = record.replacement
     if (!REPLACEMENT_STATES.has(replacement.state as string)
       || typeof replacement.oldSpecDigest !== 'string'
@@ -216,7 +213,7 @@ function validateStrictWorkflowRecord(stored: StoredRecord): void {
     }
   }
   if (record.interrupt !== undefined) {
-    if (!plainObject(record.interrupt)) throw new Error('workflow interrupt is invalid')
+    if (!isRecord(record.interrupt)) throw new Error('workflow interrupt is invalid')
     const interrupt = record.interrupt
     if (!INTERRUPT_KINDS.has(interrupt.kind as string)
       || !nonemptyString(interrupt.ownerSessionId)
@@ -224,7 +221,7 @@ function validateStrictWorkflowRecord(stored: StoredRecord): void {
       || typeof interrupt.snapshotDigest !== 'string'
       || !/^[a-f0-9]{64}$/u.test(interrupt.snapshotDigest)
       || !Array.isArray(interrupt.options)
-      || !plainObject(interrupt.facts)) {
+      || !isRecord(interrupt.facts)) {
       throw new Error('workflow interrupt is invalid')
     }
     assertPrefixedId(interrupt.interruptId, 'interrupt', 'interruptId')
@@ -242,10 +239,8 @@ function validateStrictWorkflowRecord(stored: StoredRecord): void {
 }
 
 function validateRecord(kind: RecordKind, value: unknown, expectedId?: string): StoredRecord {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('record must be a JSON object')
-  }
-  const record = value as Record<string, unknown>
+  if (!isRecord(value)) throw new Error('record must be a JSON object')
+  const record = value
   if (typeof record.id !== 'string') throw new Error('record id is missing')
   assertRecordId(record.id)
   if (!record.id.startsWith(KIND_PREFIX[kind])) throw new Error('record id has the wrong kind prefix')
@@ -272,7 +267,7 @@ function validateRecord(kind: RecordKind, value: unknown, expectedId?: string): 
       delete record.executionLease
       break
   }
-  return value as StoredRecord
+  return record as unknown as StoredRecord
 }
 
 function projectStoredRecord(kind: RecordKind, record: StoredRecord): StoredRecord {
@@ -303,8 +298,8 @@ function validateAdoptionClaim(
   value: unknown,
   expected: Omit<AdoptionClaim, 'observedSpecDigest' | 'claimToken' | 'createdAt'>,
 ): AdoptionClaim {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('adoption claim must be a JSON object')
-  const claim = value as Record<string, unknown>
+  if (!isRecord(value)) throw new Error('adoption claim must be a JSON object')
+  const claim = value
   const digest = sha256(expected.observedSpec)
   if (claim.installationId !== expected.installationId
     || claim.observedSpecDigest !== digest
@@ -369,7 +364,7 @@ export class StateStore {
       await this.writeAppendOnly(target, body)
       return { status: 'created', installation: record }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      if (!isAlreadyExists(error)) {
         if (await this.wasWrittenExactly(target, body)) {
           return { status: 'created', installation: record }
         }
@@ -401,7 +396,7 @@ export class StateStore {
       await this.writeAppendOnly(target, body)
       return { status: 'claimed', claim }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      if (!isAlreadyExists(error)) {
         if (await this.wasWrittenExactly(target, body)) return { status: 'claimed', claim }
         throw error
       }
@@ -413,7 +408,7 @@ export class StateStore {
       throw new EvolutionError('invalid_input', 'Corrupt or conflicting adoption claim already owns this source generation', {
         installationId: input.installationId,
         observedSpecDigest,
-        diagnosticHash: sha256(cause instanceof Error ? cause.message : String(cause)),
+        diagnosticHash: sha256(errorMessage(cause)),
       })
     }
   }
@@ -552,7 +547,7 @@ export class StateStore {
       fileName,
       code: error instanceof SyntaxError ? 'invalid_json' : 'invalid_record',
       summary,
-      diagnosticHash: sha256(error instanceof Error ? error.message : String(error)),
+      diagnosticHash: sha256(errorMessage(error)),
     }
     return diagnostic
   }
@@ -570,7 +565,7 @@ export class StateStore {
     try {
       entries = await readdir(directory)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { records: [], diagnostics: [] }
+      if (isNotFound(error)) return { records: [], diagnostics: [] }
       throw error
     }
     const records: StoredRecord[] = []
@@ -592,14 +587,18 @@ export class StateStore {
 
   private async get(kind: RecordKind, id: string): Promise<StoredRecord> {
     assertRecordId(id)
+    let body: string
     try {
-      const body = await readFile(path.join(this.root, kind, `${id}.json`), 'utf8')
-      const record = projectStoredRecord(kind, validateRecord(kind, JSON.parse(body), id))
-      return record
+      body = await readFile(path.join(this.root, kind, `${id}.json`), 'utf8')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new EvolutionError('not_found', `Unknown ${kind.slice(0, -1)} id`, { id })
-      }
+      if (isNotFound(error)) throw new EvolutionError('not_found', `Unknown ${kind.slice(0, -1)} id`, { id })
+      // EACCES/EISDIR/EMFILE... are read failures, not corrupt records.
+      throw error
+    }
+    // Only the record body can be corrupt: JSON.parse SyntaxError or validation Error.
+    try {
+      return projectStoredRecord(kind, validateRecord(kind, JSON.parse(body), id))
+    } catch (error) {
       const diagnostic = this.recordDiagnostic(kind, `${id}.json`, error)
       throw new EvolutionError('invalid_input', `Corrupt ${kind.slice(0, -1)} state record`, {
         id,

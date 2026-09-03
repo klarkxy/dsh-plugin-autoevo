@@ -1,5 +1,5 @@
-import type { InstallationRecord, ResolutionRecord, ReviewMode, ReviewRecord, WorkflowOptionId } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
+import type { InstallationRecord, ResolutionRecord, ReviewRecord, WorkflowOptionId } from '../contracts.js'
+import { EvolutionError, errorMessage } from '../errors.js'
 import { assertInstallationLifecycleTuple } from '../installation-lifecycle.js'
 import {
   confirmationFacts,
@@ -193,7 +193,7 @@ async function executeCompleteManagedWork(ctx: GraphContext): Promise<NodeExecut
     ctx.workflow.lastFailure = {
       stage: managedWorkFailureStage(error),
       code: error instanceof EvolutionError ? error.code : 'command_failed',
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
       retryable: true,
     }
     // A failed seal/re-review is still managed construction work. Keep the
@@ -248,7 +248,7 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
     ctx.workflow.lastFailure = {
       stage: 'discovery',
       code: error instanceof EvolutionError ? error.code : 'command_failed',
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
       retryable: true,
     }
     resolution = { ...current, remoteDiscoveryComplete: false }
@@ -257,15 +257,14 @@ async function executeDiscoverRemote(ctx: GraphContext): Promise<NodeExecutionRe
   return { kind: 'next', node: discoveryCheckpoint(resolution, ctx.workflow), resolution }
 }
 
+/**
+ * Legacy cursor: no live transition targets it and remote discovery no longer
+ * installs a marketplace plugin. A persisted workflow parked here continues
+ * straight to the discovery checkpoint.
+ */
 async function executeEnsureMarket(ctx: GraphContext): Promise<NodeExecutionResult> {
-  const current = await requireResolution(ctx)
-  const { resolution, market } = await ctx.host.ensureMarket(current, ctx.exec)
-  if (market.status === 'loaded') return { kind: 'next', node: 'discover_remote', resolution }
-  if (market.status === 'empty') {
-    return { kind: 'next', node: discoveryCheckpoint(resolution, ctx.workflow), resolution }
-  }
-  if (market.status === 'blocked') return { kind: 'done', node: 'market_setup_required', resolution }
-  return { kind: 'done', node: 'market_restart_required', resolution }
+  const resolution = await requireResolution(ctx)
+  return { kind: 'next', node: discoveryCheckpoint(resolution, ctx.workflow), resolution }
 }
 
 async function executeReviewGithub(ctx: GraphContext): Promise<NodeExecutionResult> {
@@ -587,7 +586,7 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
     ctx.workflow.lastFailure = {
       stage: 'install',
       code: error instanceof EvolutionError ? error.code : 'command_failed',
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
       retryable,
       ...(error instanceof EvolutionError
         && typeof error.details.diagnosticHash === 'string'
@@ -610,54 +609,43 @@ async function executeInstallVerify(ctx: GraphContext): Promise<NodeExecutionRes
   }
 }
 
+function assertOwnedBuiltinReceipt(ctx: GraphContext, linked: InstallationRecord): void {
+  if (linked.workflowId !== ctx.workflow.id) {
+    throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
+  }
+  assertInstallationLifecycleRecord(linked)
+}
+
 async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionResult> {
   const current = await requireResolution(ctx)
   if (!ctx.host.enableBuiltin) {
     throw new EvolutionError('invalid_input', 'This workflow host does not support built-in capability enablement')
   }
-  try {
-    if (ctx.workflow.pendingInstallationId) {
-      const linked = await readOptionalInstallation(ctx, ctx.workflow.pendingInstallationId)
-      if (linked) {
-        if (linked.workflowId !== ctx.workflow.id) {
-          throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
-        }
-        assertInstallationLifecycleRecord(linked)
-        const terminal = builtinTerminalNode(linked)
-        if (terminal) {
-          return { kind: 'done', node: terminal, resolution: current, installation: linked }
-        }
-        if (linked.installPhase === 'completed' && linked.installOutcome !== 'failed_absent') {
-          return { kind: 'done', node: 'recovery_required', resolution: current, installation: linked }
-        }
+  if (ctx.workflow.pendingInstallationId) {
+    const linked = await readOptionalInstallation(ctx, ctx.workflow.pendingInstallationId)
+    if (linked) {
+      assertOwnedBuiltinReceipt(ctx, linked)
+      const terminal = builtinTerminalNode(linked)
+      if (terminal) {
+        return { kind: 'done', node: terminal, resolution: current, installation: linked }
+      }
+      if (linked.installPhase === 'completed' && linked.installOutcome !== 'failed_absent') {
+        return { kind: 'done', node: 'recovery_required', resolution: current, installation: linked }
       }
     }
-    const result = await ctx.host.enableBuiltin(ctx.workflow, ctx.exec)
-    const installation = result
+  }
+  // Only the Host effect is mapped into a workflow failure. Engine invariants
+  // before and after it are contract violations and propagate as invalid_input.
+  let installation: InstallationRecord | undefined
+  try {
+    installation = await ctx.host.enableBuiltin(ctx.workflow, ctx.exec)
       ?? await ctx.host.findInstallationForWorkflow?.(ctx.workflow.id)
-    if (installation) assertInstallationLifecycleRecord(installation)
-    const terminal = builtinTerminalNode(installation)
-    if (installation && !terminal) {
-      throw new EvolutionError('invalid_input', 'Built-in enablement returned a non-terminal installation receipt')
-    }
-    return {
-      kind: 'done',
-      node: terminal ?? 'recovery_required',
-      resolution: current,
-      ...(installation ? { installation } : {}),
-    }
   } catch (error) {
-    if (ctx.exec.signal?.aborted) throw error
+    if (ctx.exec.signal?.aborted) throw ctx.exec.signal.reason
     const linked = ctx.workflow.pendingInstallationId
-      ? await ctx.host.getInstallation(ctx.workflow.pendingInstallationId).catch((readError: unknown) => {
-          if (readError instanceof EvolutionError && readError.code === 'not_found') return undefined
-          throw readError
-        })
+      ? await readOptionalInstallation(ctx, ctx.workflow.pendingInstallationId)
       : undefined
-    if (linked) assertInstallationLifecycleRecord(linked)
-    if (linked && linked.workflowId !== ctx.workflow.id) {
-      throw new EvolutionError('invalid_input', 'Built-in receipt is not owned by the current workflow')
-    }
+    if (linked) assertOwnedBuiltinReceipt(ctx, linked)
     ctx.workflow.lastFailure = linked?.installFailure ? {
       stage: 'install',
       code: linked.installFailure.code,
@@ -667,7 +655,7 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
     } : {
       stage: 'install',
       code: error instanceof EvolutionError ? error.code : 'command_failed',
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
       retryable: error instanceof EvolutionError && error.code === 'command_failed',
       ...(error instanceof EvolutionError
         && typeof error.details.diagnosticHash === 'string'
@@ -685,6 +673,44 @@ async function executeEnableBuiltin(ctx: GraphContext): Promise<NodeExecutionRes
       ...(linked ? { installation: linked } : {}),
     }
   }
+  if (installation) assertInstallationLifecycleRecord(installation)
+  const terminal = builtinTerminalNode(installation)
+  if (installation && !terminal) {
+    throw new EvolutionError('invalid_input', 'Built-in enablement returned a non-terminal installation receipt')
+  }
+  return {
+    kind: 'done',
+    node: terminal ?? 'recovery_required',
+    resolution: current,
+    ...(installation ? { installation } : {}),
+  }
+}
+
+async function readOptionalRecord<T>(operation: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (error instanceof EvolutionError && error.code === 'not_found') return undefined
+    throw error
+  }
+}
+
+/**
+ * After a failed managed modification, re-read the Host-checkpointed review
+ * and resolution. Only a missing record falls back to the pre-attempt state;
+ * read failures propagate instead of masquerading as "nothing was persisted".
+ */
+async function preservedModifyState(
+  ctx: GraphContext,
+  current: ResolutionRecord,
+  review: ReviewRecord,
+): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }> {
+  const preservedReview = await readOptionalRecord(() => ctx.host.latestReview(
+    current.id,
+    ctx.workflow.lineageTipReviewId ?? ctx.workflow.lastReviewId,
+  ))
+  const preservedResolution = await readOptionalRecord(() => ctx.host.getResolution(current.id))
+  return { resolution: preservedResolution ?? current, review: preservedReview ?? review }
 }
 
 async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionResult> {
@@ -721,14 +747,8 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
           message: error.message,
           retryable: false,
         }
-        const preservedReview = await ctx.host.latestReview(
-          current.id,
-          ctx.workflow.lineageTipReviewId ?? ctx.workflow.lastReviewId,
-        ).catch(() => review) ?? review
-        const preservedResolution = await Promise.resolve()
-          .then(() => ctx.host.getResolution(current.id))
-          .catch(() => current)
-        return { kind: 'done', node: 'recovery_required', resolution: preservedResolution, review: preservedReview }
+        const preserved = await preservedModifyState(ctx, current, review)
+        return { kind: 'done', node: 'recovery_required', ...preserved }
       }
       if (ctx.exec.signal?.aborted
         || (error instanceof EvolutionError
@@ -737,20 +757,14 @@ async function executePrepareModify(ctx: GraphContext): Promise<NodeExecutionRes
       ctx.workflow.lastFailure = {
         stage: managedWorkFailureStage(error),
         code: error instanceof EvolutionError ? error.code : 'command_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         retryable: error instanceof EvolutionError
           && (error.code === 'command_failed' || error.details.managedChildCompleted === true),
       }
-      const preservedReview = await ctx.host.latestReview(
-        current.id,
-        ctx.workflow.lineageTipReviewId ?? ctx.workflow.lastReviewId,
-      ).catch(() => review) ?? review
-      const preservedResolution = await Promise.resolve()
-        .then(() => ctx.host.getResolution(current.id))
-        .catch(() => current)
+      const preserved = await preservedModifyState(ctx, current, review)
       return error instanceof EvolutionError && error.details.managedChildCompleted === true
-        ? { kind: 'next', node: 'await_modify_work', resolution: preservedResolution, review: preservedReview }
-        : { kind: 'next', node: 'await_confirmation', resolution: preservedResolution, review: preservedReview }
+        ? { kind: 'next', node: 'await_modify_work', ...preserved }
+        : { kind: 'next', node: 'await_confirmation', ...preserved }
     }
     if (prepared.path) {
       ctx.workflow.pendingPath = prepared.path
@@ -795,7 +809,7 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
         ctx.workflow.lastFailure = {
           stage: 'managed_child',
           code: error instanceof EvolutionError ? error.code : 'command_failed',
-          message: error instanceof Error ? error.message : String(error),
+          message: errorMessage(error),
           retryable: error instanceof EvolutionError && error.code === 'command_failed',
         }
         throw error
@@ -803,7 +817,7 @@ async function executePrepareCreate(ctx: GraphContext): Promise<NodeExecutionRes
       ctx.workflow.lastFailure = {
         stage: managedWorkFailureStage(error),
         code: error instanceof EvolutionError ? error.code : 'command_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         retryable: error instanceof EvolutionError
           && (error.code === 'command_failed' || error.details.managedChildCompleted === true),
       }

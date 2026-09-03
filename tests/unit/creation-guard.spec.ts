@@ -6,14 +6,19 @@ import type {
   ResolutionAuthorization,
 } from '../../src/contracts.js'
 import { OUTSIDE_EVOLUTION_MODE_DENIAL } from '../../src/evolution-contracts.js'
+import { ExecutionGuard } from '../../src/execution-guard.js'
 
 const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
 const CREATOR_SKILL_PROVIDER = 'dsh-plugin-autoevo'
 const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v2'
 const OFFICIAL_CREATOR_SKILL_NAME = 'cordis-plugin-development'
 
-const agent = {} as Agent
-const otherAgent = {} as Agent
+function fakeAgent(id: string): Agent {
+  return { id, session: { header: { id, cwd: 'C:/workspace', version: 0, createdAt: 0 } } } as unknown as Agent
+}
+
+const agent = fakeAgent('session-guard')
+const otherAgent = fakeAgent('session-other')
 
 function execution(callId: string, kind: 'new' | 'existing' = 'new', name = 'cordis_define'): ToolExecution {
   return {
@@ -53,8 +58,6 @@ function outsideModeGuard(): CreationGuard {
   return new CreationGuard({ isEvolutionMode: () => false })
 }
 
-const success = { isError: false, value: {}, content: [] } as unknown as ToolExecutionResult
-const failure = { isError: true, error: { message: 'failed' }, content: [] } as unknown as ToolExecutionResult
 const creatorSkillSuccess: ToolExecutionResult = {
   isError: false,
   value: {
@@ -77,58 +80,33 @@ describe('new Cordis Plugin creation guard', () => {
     expect(_testing.outsideEvolutionModeReason()).toBe(OUTSIDE_EVOLUTION_MODE_DENIAL)
   })
 
-  it('allows an unresolved live definition in evolution mode', async () => {
-    const guard = inModeGuard()
-    const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    await expect(guard.preExecute(execution('call-1'), next)).resolves.toEqual({ kind: 'allow' })
-    expect(next).toHaveBeenCalledTimes(1)
-    expect(guard.guard(execution('call-final'))).toBeUndefined()
-  })
-
-  it.each(['reuse_local', 'selection_required', 'confirmation_required', 'use_review', 'market_required', 'stopped'] as const)(
-    'keeps live Creator definitions available in evolution mode for %s',
+  it.each([
+    undefined,
+    'reuse_local',
+    'selection_required',
+    'confirmation_required',
+    'use_review',
+    'market_required',
+    'stopped',
+    'modify_review',
+    'create_authorized',
+  ] as const)(
+    'leaves live Cordis definitions to the outer ExecutionGuard in evolution mode (%s)',
     async (state) => {
       const guard = inModeGuard()
-      resolveAs(guard, authorization(state))
-      const decision = await guard.preExecute(execution(`call-${state}`), async () => ({ kind: 'allow' }))
-      expect(decision).toEqual({ kind: 'allow' })
-      expect(guard.guard(execution(`call-${state}-guard`))).toBeUndefined()
+      if (state) resolveAs(guard, authorization(state))
+      guard.setConstructionRoot(agent, state === 'create_authorized' ? 'C:/workspace/.autoevo/sources/new' : undefined)
+      const next = vi.fn(async () => ({ kind: 'allow' as const }))
+      const exec = execution(`call-${state ?? 'unresolved'}`)
+      await expect(guard.preExecute(exec, next)).resolves.toEqual({ kind: 'allow' })
+      expect(next).toHaveBeenCalledTimes(1)
+      expect(guard.guard(exec)).toBeUndefined()
+      // In evolution mode index.ts runs ExecutionGuard first; both parent and constructor roles deny.
+      expect(new ExecutionGuard({ role: 'parent' }).guard(exec)).toMatch(/Cordis live mutation/i)
+      expect(new ExecutionGuard({ role: 'constructor', allowedRoot: 'C:/managed', cwd: 'C:/managed' }).guard(exec))
+        .toMatch(/Cordis mutation/i)
     },
   )
-
-  it.each(['modify_review', 'create_authorized'] as const)(
-    'blocks live definitions during Host-managed construction for %s',
-    async (state) => {
-      const guard = inModeGuard()
-      resolveAs(guard, authorization(state))
-      const decision = await guard.preExecute(execution(`call-${state}`), async () => ({ kind: 'allow' }))
-      expect(decision.kind).toBe('deny')
-      if (decision.kind === 'deny') expect(decision.reason).toContain(authorization(state).resolutionId)
-      expect(guard.guard(execution(`call-${state}-guard`))).toContain(authorization(state).resolutionId)
-    },
-  )
-
-  it('never grants parent-session cordis_define after create_authorized', async () => {
-    const guard = inModeGuard()
-    resolveAs(guard, authorization('create_authorized'))
-    const first = execution('call-first')
-    await expect(guard.preExecute(first, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
-    expect(guard.guard(first)).toMatch(/managed git source|workspace-write|not permitted/i)
-    guard.result(first, failure)
-    const retry = execution('call-retry')
-    await expect(guard.preExecute(retry, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
-  })
-
-  it('keeps create_authorized denied even after loading the creator skill', async () => {
-    const guard = inModeGuard()
-    resolveAs(guard, authorization('create_authorized'))
-    const skill = skillExecution('call-skill')
-    await expect(guard.preExecute(skill, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
-    guard.result(skill, creatorSkillSuccess)
-    const exec = execution('call-after-skill')
-    await expect(guard.preExecute(exec, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
-    expect(guard.guard(exec)).toMatch(/managed git source|not permitted/i)
-  })
 
   it('does not block official creator skill loads', async () => {
     const guard = inModeGuard()
@@ -145,23 +123,21 @@ describe('new Cordis Plugin creation guard', () => {
     expect(next).toHaveBeenCalledTimes(2)
   })
 
-  it('denies same-id foreign preset agents when isEvolutionMode returns false', async () => {
+  it('applies protocol denials per Agent according to isEvolutionMode', async () => {
     const guard = new CreationGuard({
       isEvolutionMode: (target) => target === agent,
     })
-    resolveAs(guard, authorization('create_authorized'), agent)
-    resolveAs(guard, authorization('create_authorized'), otherAgent)
+    resolveAs(guard, authorization('selection_required'), agent)
+    resolveAs(guard, authorization('selection_required'), otherAgent)
 
-    const inMode = execution('call-real-mode')
+    const inMode = execution('call-real-mode', 'new', 'find_dsh_plugin')
     await expect(guard.preExecute(inMode, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
-    expect(guard.guard(inMode)).toMatch(/managed git source|not permitted/i)
 
     const foreign = {
-      ...execution('call-foreign'),
+      ...execution('call-foreign', 'new', 'find_dsh_plugin'),
       agent: otherAgent,
     } as unknown as ToolExecution
-    const decision = await guard.preExecute(foreign, async () => ({ kind: 'allow' }))
-    expect(decision).toEqual({ kind: 'allow' })
+    await expect(guard.preExecute(foreign, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
     expect(guard.guard(foreign)).toBeUndefined()
   })
 
@@ -175,15 +151,15 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.guard(execution('call-pwsh', 'new', 'pwsh'))).toBeUndefined()
   })
 
-  it('clears prior authorization bookkeeping when a new resolution starts', async () => {
+  it('clears prior authorization bookkeeping when a new resolution starts', () => {
     const guard = inModeGuard()
     resolveAs(guard, authorization('create_authorized'))
+    expect(guard.authorization(agent)).toEqual(authorization('create_authorized'))
     guard.beginResolution(agent)
-    const decision = await guard.preExecute(execution('call-revoked'), async () => ({ kind: 'allow' }))
-    expect(decision).toEqual({ kind: 'allow' })
+    expect(guard.authorization(agent)).toBeUndefined()
   })
 
-  it('ignores a stale resolution completion after a newer resolution starts', async () => {
+  it('ignores a stale resolution completion after a newer resolution starts', () => {
     const guard = inModeGuard()
     const staleGeneration = guard.beginResolution(agent)!
     const currentGeneration = guard.beginResolution(agent)!
@@ -191,7 +167,6 @@ describe('new Cordis Plugin creation guard', () => {
     expect(guard.applyResolutionAuthorization(agent, current, currentGeneration)).toBe(true)
     expect(guard.applyResolutionAuthorization(agent, authorization('create_authorized'), staleGeneration)).toBe(false)
     expect(guard.authorization(agent)).toEqual(current)
-    expect(await guard.preExecute(execution('call-stale'), async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
   })
 
   it('only lets reviews update the active in-memory resolution for the same Agent', () => {
@@ -333,19 +308,14 @@ describe('evolution protocol automaton', () => {
     await expect(guard.preExecute(tool('web_search'), next)).resolves.toEqual({ kind: 'allow' })
   })
 
-  it('denies dsh plugin add in the shell and leaves ordinary commands alone', async () => {
+  it('leaves shell dsh plugin add to the outer ExecutionGuard', async () => {
     const guard = inModeGuard()
     resolveAs(guard, authorization('selection_required'))
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
-    await expect(guard.preExecute(tool('pwsh', {
-      command: 'dsh plugin --profile web add github:Yts1919/dsh-vision-complete',
-    }), next)).resolves.toEqual({
-      kind: 'deny',
-      reason: 'Install only via the capability workflow after review.',
-    })
+    const install = tool('pwsh', { command: 'dsh plugin --profile web add github:Yts1919/dsh-vision-complete' })
+    await expect(guard.preExecute(install, next)).resolves.toEqual({ kind: 'allow' })
     await expect(guard.preExecute(tool('pwsh', { command: 'Get-ChildItem' }), next)).resolves.toEqual({ kind: 'allow' })
-    expect(_testing.isDshPluginAddCommand('dsh plugin add foo')).toBe(true)
-    expect(_testing.isDshPluginAddCommand('Get-ChildItem')).toBe(false)
+    expect(new ExecutionGuard({ role: 'parent' }).guard(install)).toMatch(/plugin install\/remove/i)
   })
 
   it('remembers the user-facing turn text and ignores runtime-context injections', () => {

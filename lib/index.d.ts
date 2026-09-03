@@ -2,9 +2,9 @@ import { t as EVOLUTION_PRESET_ID } from "./evolution-contracts.js";
 import { LoadHookContext } from "node:module";
 import Schema from "@deepseek-ai/schemastery";
 import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
+import "@deepseek-ai/cordis-plugin-include";
 import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
 import { Session } from "@deepseek-ai/dsh-session";
-import "@deepseek-ai/cordis-plugin-include";
 import { Context, Fiber, Inject, Service } from "@deepseek-ai/cordis";
 import { Agent } from "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-subprocess";
@@ -352,37 +352,6 @@ interface MechanicalFacts {
   /** Host still hard-rejects direct use_this when set; not a reviewer authorization. */
   directUseHostBoundary?: 'incompatible' | 'not_materializable';
 }
-type ReviewerRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out';
-/** Host-owned reviewer job. Must not carry authorization or an install spec. */
-interface ReviewerRequest {
-  id: string;
-  workflowId: string;
-  resolutionId: string;
-  reviewId: string;
-  requirement: string;
-  snapshotDigest: string;
-  candidateDigest: string;
-  status: ReviewerRequestStatus;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-}
-type ReviewerVerdictDecision = 'approved' | 'rejected' | 'uncertain';
-/** Reviewer semantic verdict. Must not carry authorization, lease, endpoint, or install spec. */
-interface ReviewerVerdict {
-  requestId: string;
-  reviewId: string;
-  requirementHash: string;
-  snapshotDigest: string;
-  candidateDigest: string;
-  reviewerSessionId: string;
-  reviewerVersion: string;
-  decision: ReviewerVerdictDecision;
-  evidence: string[];
-  conditions: string[];
-  semanticCoverage: ReviewFit;
-  createdAt: string;
-}
 interface ReviewRecord {
   schemaVersion: 1;
   id: string;
@@ -413,9 +382,6 @@ interface ReviewRecord {
   mechanicalFacts?: MechanicalFacts;
   /** Frozen static runtime surface. Absent on old readable records. */
   runtimeSurface?: RuntimeSurface;
-  reviewerRequestId?: string;
-  reviewerRequest?: ReviewerRequest;
-  reviewerVerdict?: ReviewerVerdict;
 }
 type InstallationRetention = 'temporary' | 'persistent';
 type InstallationState = 'installed' | 'not_installed' | 'unknown';
@@ -465,34 +431,6 @@ interface VerificationEvidence {
   fixtureDigest?: string;
   reason: string;
 }
-type VerifierRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out';
-type VerificationVerdictDecision = 'verified' | 'rejected' | 'uncertain';
-/** Host-owned semantic verification job. Must not carry authorization or an install spec. */
-interface VerifierRequest {
-  id: string;
-  installationId: string;
-  reviewId: string;
-  requirement: string;
-  evidenceDigest: string;
-  status: VerifierRequestStatus;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-}
-/** Independent semantic completion verdict. Must not carry authorization, lease, endpoint, or install spec. */
-interface VerificationVerdict {
-  requestId: string;
-  installationId: string;
-  reviewId: string;
-  requirementHash: string;
-  evidenceDigest: string;
-  verifierSessionId: string;
-  verifierVersion: string;
-  decision: VerificationVerdictDecision;
-  evidence: string[];
-  conditions: string[];
-  createdAt: string;
-}
 interface InstallationRecord {
   schemaVersion: 1 | 2;
   id: string;
@@ -510,9 +448,9 @@ interface InstallationRecord {
   installSpec: string;
   ownedArtifactRoot?: string;
   artifactSha256?: string;
-  /** Crash-recovery journal for the two-phase isolated-preflight/install flow. */
+  /** Crash-recovery journal. `preflight_*` phases appear only on legacy receipts. */
   installPhase?: 'prepared' | 'preflight_running' | 'preflight_passed' | 'destination_installing' | 'completed';
-  /** Isolated Host evidence. This never means the live destination process loaded the bundle. */
+  /** Legacy isolated-preflight evidence; current installs never write it. */
   preflight?: {
     profile: string;
     passed: boolean;
@@ -530,9 +468,6 @@ interface InstallationRecord {
   hotReload?: HotReloadEvidence;
   removed: boolean;
   verification: VerificationEvidence;
-  verifierRequestId?: string;
-  verifierRequest?: VerifierRequest;
-  verificationVerdict?: VerificationVerdict;
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
     /** User/LLM-facing lifecycle stage. Never contains a command line or path. */
@@ -619,10 +554,8 @@ interface InstallInput {
   installationId?: string;
   reviewId: string;
   targetProfile: string;
+  /** Every adopted capability is persisted; the installer rejects anything else. */
   retention: InstallationRetention;
-  /** Optional human test prompt. Never forwarded into automatic Host verification. */
-  verificationTask?: string;
-  verificationExpectedText?: string;
   /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
   expectedArtifactSha256?: string;
   /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
@@ -732,8 +665,6 @@ interface ActionCommitment {
   /** Host-frozen review identity. Reviewer output cannot mint these fields. */
   reviewId?: string;
   reviewSnapshotDigest?: string;
-  reviewerRequestId?: string;
-  reviewerVerdictDigest?: string;
   frozenManifestDigest?: string;
   frozenInstallSpec?: string | null;
   targetProfile?: string;
@@ -854,7 +785,7 @@ interface CreatorFoundation {
    */
   preflight(input?: {
     signal?: AbortSignal;
-    parentCtx?: unknown;
+    parentCtx?: Context;
     parentScope?: unknown;
   }): Promise<CreatorFoundationPreflight>;
 }
@@ -864,9 +795,8 @@ interface CreatorFoundation {
  * Public workflow lifecycle presentation. Internal `cursor` names stay on the
  * record for graph safety; this field is a deterministic mapping only.
  */
-type WorkflowLifecycleState = 'searched' | 'selected' | 'reviewing' | 'approved' | 'rejected' | 'uncertain' | 'skipped' | 'awaiting_confirmation' | 'committed' | 'executing' | 'verified' | 'activated' | 'awaiting_user_test' | 'recovery_required' | 'restart_required' | 'market_restart_required' | 'market_setup_required' | 'modify_authorized' | 'create_authorized' | 'stopped' | 'interrupted' | 'reuse_local';
+type WorkflowLifecycleState = 'searched' | 'selected' | 'reviewing' | 'awaiting_confirmation' | 'committed' | 'executing' | 'verified' | 'activated' | 'awaiting_user_test' | 'recovery_required' | 'restart_required' | 'market_restart_required' | 'market_setup_required' | 'modify_authorized' | 'create_authorized' | 'stopped' | 'interrupted' | 'reuse_local';
 interface LifecycleMappingInput {
-  reviews?: readonly ReviewRecord[];
   installation?: InstallationRecord;
 }
 /** Map internal cursor/status/grants to the public lifecycle state. Never claims verified early. */
@@ -901,8 +831,6 @@ interface InterruptPayload {
 interface WorkflowPendingInstall {
   targetProfile: string;
   retention: InstallationRetention;
-  verificationTask?: string;
-  verificationExpectedText?: string;
   replacement?: ReplacementTarget;
   /** Host-derived from the sealed interrupt after the Agent selects its id. */
   recoveryPlan?: InstallRecoveryPlan;
@@ -956,8 +884,7 @@ interface DiscoveryBudget {
   activeTurnId?: string;
   activeTurnQueriesUsed: string[];
   maxQueriesPerTurn: 5;
-  /** Legacy persisted fields from schemaVersion 3; no longer global caps. */
-  maxRefinementRounds?: 2;
+  /** Legacy persisted per-turn cap from schemaVersion 3 records that predate maxQueriesPerTurn. */
   maxRefinementQueries?: 5;
   /** Bounded rolling window; semantic relevance never removes an eligible result. */
   maxCandidates: 113;
@@ -1032,8 +959,6 @@ interface WorkflowDiagnosis {
     usedCalls: number;
     maxProbes: 8;
     usedProbes: number;
-    maxRecordReads: 4;
-    usedRecordReads: number;
   };
 }
 interface InvalidResumeAttempt {
@@ -1235,10 +1160,6 @@ interface ValidatedResume {
   reviewId?: string;
   install?: WorkflowPendingInstall;
 }
-interface MarketplaceStepResult {
-  status: 'loaded' | 'restart' | 'blocked' | 'empty';
-  reason: string;
-}
 interface WorkflowHost {
   bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>;
   discoverRemote(resolution: ResolutionRecord, exec: WorkflowExec, input?: {
@@ -1257,14 +1178,6 @@ interface WorkflowHost {
     candidates?: CandidateSnapshotItem[];
     previews: CandidatePreview[];
     failures: CandidatePreviewFailure[];
-  }>;
-  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
-    resolution: ResolutionRecord;
-    market: MarketplaceStepResult;
-  }>;
-  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
-    resolution: ResolutionRecord;
-    review: ReviewRecord;
   }>;
   reviewExisting(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
@@ -1409,11 +1322,14 @@ declare class CreationGuard {
   isManagedWorkAvailable(agent: Agent | undefined): boolean;
   private inEvolutionMode;
   protocolDenial(exec: Readonly<ToolExecution>): string | undefined;
+  /**
+   * Protocol-state denials only. Live Cordis definition and `dsh plugin add`
+   * are denied by the outer ExecutionGuard, which runs first in evolution mode.
+   */
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined;
   result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
-  private managedConstructionDenial;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
 }
 //#endregion
@@ -1459,11 +1375,6 @@ interface HostLayerSelection {
   fixtureDigest: string;
   expectedTools: string[];
 }
-/** Candidate risk/approval/safe flags are never Host attestation. Kept as an explicit untrusted probe. */
-declare function inspectLoadedToolSafety(tool: object): {
-  safe: boolean;
-  reason: string;
-};
 /**
  * Install-time layer selection. Risk signals only downgrade. Plugin-declared
  * `safe:true` / `risk:'safe'` cannot mint tool_roundtrip. Authorization comes
@@ -1494,64 +1405,6 @@ declare function hostLayerSuccess(input: {
   verification: Pick<VerificationEvidence, 'attempted' | 'exitCode' | 'expectedTools' | 'calledTools' | 'resultTools' | 'failedTools' | 'layer' | 'status'>;
 }): boolean;
 declare function verificationChildEnv(dshHome: string, parent?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-//#endregion
-//#region src/semantic-host.d.ts
-declare function requirementHashFor(requirement: string): string;
-//#endregion
-//#region src/semantic-verifier.d.ts
-declare const VERIFIER_SUBMIT_TOOL = "autoevo_submit_verification";
-declare const VERIFIER_VERSION = "1";
-/** Bounded Host receipt for the verifier. Never includes secrets or source paths. */
-interface RedactedVerificationReceipt {
-  expectedTools: string[];
-  calledTools: string[];
-  resultTools: string[];
-  failedTools: string[];
-  taskResultObserved: boolean;
-  taskResultSha256?: string;
-  observedProvider?: string;
-  observedModel?: string;
-  routeMatchedExpectation?: boolean;
-  exitCode?: number | null;
-  launchEvidence?: VerificationEvidence['launchEvidence'];
-}
-interface VerifierRunInput {
-  parent: Agent;
-  installationId: string;
-  reviewId: string;
-  requirement: string;
-  evidenceDigest: string;
-  receipt: RedactedVerificationReceipt;
-  signal?: AbortSignal;
-  timeoutMs: number;
-}
-interface SemanticVerifierResult {
-  request: VerifierRequest;
-  verdict: VerificationVerdict;
-}
-interface SemanticVerifierHost {
-  run(input: VerifierRunInput): Promise<SemanticVerifierResult>;
-}
-declare function verificationEvidenceDigest(evidence: Pick<VerificationEvidence, 'expectedTools' | 'calledTools' | 'resultTools' | 'failedTools' | 'taskResultObserved' | 'taskResultSha256' | 'observedProvider' | 'observedModel' | 'routeMatchedExpectation' | 'exitCode' | 'launchEvidence'>): string;
-declare function mintVerifierRequest(input: {
-  installationId: string;
-  reviewId: string;
-  requirement: string;
-  evidenceDigest: string;
-  createdAt?: string;
-}): VerifierRequest;
-declare function verificationVerdictAllowsCompletion(verdict: VerificationVerdict | undefined, expected: {
-  installationId: string;
-  reviewId: string;
-  requirement: string;
-  evidenceDigest: string;
-}): boolean;
-/** Real Host-owned DSH semantic verifier lifecycle. */
-declare class DshSemanticVerifierHost implements SemanticVerifierHost {
-  private readonly ctx;
-  constructor(ctx: Context);
-  run(input: VerifierRunInput): Promise<SemanticVerifierResult>;
-}
 //#endregion
 //#region src/state/store.d.ts
 type RecordKind = 'resolutions' | 'reviews' | 'installations' | 'workflows';
@@ -1638,10 +1491,6 @@ declare class DshLauncher {
   profileSourceMatches(dshHome: string, profile: string, packageName: string, expectedSpec: string): Promise<boolean>;
   /** Confirm absence in both the profile manifest and its visible node_modules target. */
   profileTargetAbsent(dshHome: string, profile: string, packageName: string): Promise<boolean>;
-  verify(dshHome: string, profile: string, cwd: string, task: string, expectedTools: readonly string[], expectedText?: string, expectedRoute?: {
-    provider: string;
-    model?: string;
-  }, signal?: AbortSignal): Promise<VerificationEvidence>;
   readInstalledVerificationFixtures(dshHome: string, profile: string, packageName: string): Promise<Record<string, unknown>>;
   /**
    * Host-owned mechanical verification. Never forwards credentials, never
@@ -1953,7 +1802,6 @@ interface HotReloadAttempt {
 }
 //#endregion
 //#region src/lifecycle/install.d.ts
-type ReviewRevalidator = (review: ReviewRecord, signal?: AbortSignal) => Promise<boolean>;
 type InstallAuthorizer = (review: ReviewRecord, exec: ToolRunContext, binding?: InstallCommitmentBinding) => void | Promise<void>;
 type ProfileHotLoader = (input: {
   ctx: Context;
@@ -1964,20 +1812,27 @@ type ProfileHotLoader = (input: {
   agent?: ToolRunContext['agent'];
   signal?: AbortSignal;
 }) => Promise<HotReloadAttempt>;
+interface PluginInstallerOptions {
+  ctx: Context;
+  config: RuntimeConfig;
+  store: StateStore;
+  launcher: DshLauncher;
+  /** Workflow-bound authorization. Absent means the review's own direct-use gate decides. */
+  authorizeInstall?: InstallAuthorizer;
+  hotLoader?: ProfileHotLoader;
+  /** Live DSH profile owner; install refuses to mutate a profile the Host does not own. */
+  resolveDestinationProfile?: () => Promise<string>;
+}
 declare class PluginInstaller {
   private readonly ctx;
   private readonly config;
   private readonly store;
   private readonly launcher;
-  private readonly _revalidate;
-  private readonly authorizeInstall?;
-  private readonly semanticVerifier?;
-  private readonly preflightProfile?;
-  private readonly resolveDestinationProfile?;
+  private readonly authorizeInstall;
   private readonly hotLoader;
-  constructor(ctx: Context, config: RuntimeConfig, store: StateStore, launcher: DshLauncher, _revalidate: ReviewRevalidator, authorizeInstall?: InstallAuthorizer | undefined, hotLoader?: ProfileHotLoader, semanticVerifier?: SemanticVerifierHost | undefined, preflightProfile?: string | undefined, resolveDestinationProfile?: (() => Promise<string>) | undefined);
-  private removeOwnedDirectory;
-  private assertPersistentDestination;
+  private readonly resolveDestinationProfile;
+  constructor(options: PluginInstallerOptions);
+  private assertDestination;
   private assertReplacementBinding;
   private upstreamRepository;
   private assertRecoveryPlanBinding;
@@ -1990,13 +1845,13 @@ declare class PluginInstaller {
   private assertArtifactUnchangedAfterApproval;
   private writeProvisionalReceipt;
   private settleInterruptedAttempt;
-  private runIsolatedPreflight;
+  /** Post-effect reconciliation of the live profile. Unreadable profile state is `unknown`, never a claim. */
+  private reconcileDestinationState;
   private prepareDestinationMutation;
   private runDestinationInstall;
   private verifyInstalledSource;
   private activateInstalledBundle;
   private persistInstallOutcome;
-  private attachSemanticVerification;
 }
 //#endregion
 //#region src/lifecycle/remove.d.ts
@@ -2031,11 +1886,12 @@ declare class PluginRemover {
 }
 //#endregion
 //#region src/sandbox-probe.d.ts
+/** Live services the caller has already resolved; the probe does not re-validate their presence. */
 interface LiveSandboxStack {
-  sandbox?: SandboxProvider;
-  sandboxPolicy?: SandboxPolicyService;
-  fs?: FileSystem;
-  runner?: CommandRunner;
+  sandbox: SandboxProvider;
+  sandboxPolicy: SandboxPolicyService;
+  fs: FileSystem;
+  runner: CommandRunner;
 }
 interface SandboxProbeResult {
   ok: true;
@@ -2051,7 +1907,7 @@ interface SandboxProbeResult {
  * The probe runs only after a child session exists and has a durable
  * `workspace-write` override. It owns and removes every probe path.
  */
-declare function probeWorkspaceWriteSandbox(stack: LiveSandboxStack | undefined, session: Session, expectedCwd: string, signal?: AbortSignal): Promise<SandboxProbeResult>;
+declare function probeWorkspaceWriteSandbox(stack: LiveSandboxStack, session: Session, expectedCwd: string, signal?: AbortSignal): Promise<SandboxProbeResult>;
 //#endregion
 //#region src/managed-child.d.ts
 interface ManagedChildRequest {
@@ -2179,7 +2035,6 @@ declare class SourceManager {
   lockPath(sourceId: string): string;
   private lockRecoveryPath;
   private completionRecoveryTakeoverPath;
-  private isManagedSourceDir;
   /** Containment of a realpath'd managed source against canonicalized base roots. */
   private isCanonicalManagedSourceDir;
   private ensureWorkspaceLayout;
@@ -2203,9 +2058,6 @@ declare class SourceManager {
   private git;
   private gitConfigHash;
   private disabledHooksPath;
-  acquireLock(sourceId: string, workflowId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
-  private writeInitialLock;
-  private releaseInitialLockIfExact;
   private acquireLockInternal;
   private releaseRecoveryOwner;
   private completionOwnerMatches;
@@ -2218,7 +2070,6 @@ declare class SourceManager {
   private releaseLockToken;
   private removeOwnedLockPath;
   private bindOwnedLockLineage;
-  releaseLock(sourceId: string, workflowId: string): Promise<void>;
   completeWorkflow(sourceId: string, workflowId: string, signal?: AbortSignal): Promise<void>;
   assertCleanTree(sourceId: string, signal?: AbortSignal, workspaceCwd?: string): Promise<void>;
   assertPathContainment(sourceId: string, workspaceCwd?: string): Promise<string>;
@@ -2275,47 +2126,6 @@ declare class SourceManager {
     reviewId: string;
     signal?: AbortSignal;
   }): Promise<SourceReceipt>;
-}
-//#endregion
-//#region src/semantic-reviewer.d.ts
-declare const REVIEWER_SUBMIT_TOOL = "autoevo_submit_review";
-declare const REVIEWER_VERSION = "1";
-interface BoundedReviewFile {
-  path: string;
-  sha256: string;
-  bytes: number;
-  text: string;
-}
-/** Internal Host input. Never accepted on ResumeInput. */
-interface ReviewerRunInput {
-  parent: Agent;
-  workflowId: string;
-  review: ReviewRecord;
-  candidateDigest: string;
-  snapshotDigest: string;
-  files: readonly BoundedReviewFile[];
-  signal?: AbortSignal;
-  timeoutMs: number;
-}
-interface SemanticReviewerResult {
-  request: ReviewerRequest;
-  verdict: ReviewerVerdict;
-}
-interface SemanticReviewerHost {
-  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
-}
-declare function mintReviewerRequest(input: {
-  workflowId: string;
-  review: ReviewRecord;
-  snapshotDigest: string;
-  candidateDigest: string;
-  createdAt?: string;
-}): ReviewerRequest;
-/** Real Host-owned DSH semantic reviewer lifecycle. */
-declare class DshSemanticReviewerHost implements SemanticReviewerHost {
-  private readonly ctx;
-  constructor(ctx: Context);
-  run(input: ReviewerRunInput): Promise<SemanticReviewerResult>;
 }
 //#endregion
 //#region src/service-adopt.d.ts
@@ -2394,7 +2204,7 @@ declare class CapabilityEvolutionService implements WorkflowHost {
   private readonly creatorFoundation;
   private readonly managedChild;
   private readonly faultRepair;
-  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, _semanticReviewer?: SemanticReviewerHost, _semanticVerifier?: SemanticVerifierHost, creatorFoundation?: CreatorFoundation, repairChild?: RepairChildHost);
+  constructor(ctx: Context, config: RuntimeConfig, runner: CommandRunner, store: StateStore, creationGuard: CreationGuard, managedChild?: ManagedChildHost, creatorFoundation?: CreatorFoundation, repairChild?: RepairChildHost);
   private managedWorkDeps;
   private reviewArtifactRoot;
   private withWorkspace;
@@ -2435,14 +2245,6 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     previews: CandidatePreview[];
     failures: CandidatePreviewFailure[];
   }>;
-  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
-    resolution: ResolutionRecord;
-    market: MarketplaceStepResult;
-  }>;
-  reviewGithub(resolution: ResolutionRecord, repository: string, ref: string | undefined, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
-    resolution: ResolutionRecord;
-    review: ReviewRecord;
-  }>;
   reviewExisting(resolution: ResolutionRecord, target: EvolutionTarget, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     review: ReviewRecord;
@@ -2462,7 +2264,6 @@ declare class CapabilityEvolutionService implements WorkflowHost {
     review: ReviewRecord;
   }>;
   installReviewed(review: ReviewRecord, input: WorkflowPendingInstall, exec: WorkflowExec, workflow?: WorkflowRecord): Promise<InstallationRecord>;
-  private revalidate;
   prepareModify(resolution: ResolutionRecord, review: ReviewRecord, exec: WorkflowExec, workflow: WorkflowRecord): Promise<{
     resolution: ResolutionRecord;
     path?: string;
@@ -2502,5 +2303,5 @@ type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, type BoundedReviewFile, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, DshSemanticReviewerHost, DshSemanticVerifierHost, type ExecutionEndpoint, ExecutionGuard, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, REVIEWER_SUBMIT_TOOL, REVIEWER_VERSION, type RedactedVerificationReceipt, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type ReviewerRequest, type ReviewerRequestStatus, type ReviewerRunInput, type ReviewerVerdict, type ReviewerVerdictDecision, type SelectionReceipt, type SemanticReviewerHost, type SemanticReviewerResult, type SemanticVerifierHost, type SemanticVerifierResult, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, VERIFIER_SUBMIT_TOOL, VERIFIER_VERSION, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type VerificationVerdict, type VerificationVerdictDecision, type VerifierRequest, type VerifierRequestStatus, type VerifierRunInput, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, apply, classifyRuntimeSurface, hostLayerSuccess, inject, inspectLoadedToolSafety, lifecycleStateFor, mintReviewerRequest, mintVerifierRequest, name, probeWorkspaceWriteSandbox, requirementHashFor, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv, verificationEvidenceDigest, verificationVerdictAllowsCompletion };
+export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, type ExecutionEndpoint, ExecutionGuard, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type SelectionReceipt, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, apply, classifyRuntimeSurface, hostLayerSuccess, inject, lifecycleStateFor, name, probeWorkspaceWriteSandbox, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv };
 //# sourceMappingURL=index.d.ts.map

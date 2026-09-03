@@ -1,13 +1,12 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
-  FORGED_RESUME_HOST_KEYS,
   POLICY_VERSION,
   type NavigationInput,
   type ResolutionRecord,
   type ResumeInput,
   type ReviewRecord,
 } from '../contracts.js'
-import { EvolutionError } from '../errors.js'
+import { EvolutionError, errorMessage } from '../errors.js'
 import { normalizeRequirement, ownerSessionId } from '../host-identity.js'
 import { composeDiscoveryRequirement } from '../resolver/keywords.js'
 import { assertOptionAllowed, resolveDecisionFromModel, resolveDecisionTarget } from '../lifecycle/decide.js'
@@ -23,6 +22,7 @@ import {
 import { retryableResumeHint } from './agent-view.js'
 import { transition } from './graph.js'
 import { snapshotDigestFor } from './candidates.js'
+import { boundedAgentText } from './sanitize.js'
 import {
   assertBuiltinEnablementBinding,
   endpointForLocalReuse,
@@ -39,21 +39,9 @@ function exactGithubRepositoryUrl(message: string): string | undefined {
   return EXACT_GITHUB_REPOSITORY_URL.test(value) ? value : undefined
 }
 
-function assertResumeDoesNotForgeHostFacts(input: ResumeInput): void {
-  const record = input as unknown as Record<string, unknown>
-  for (const key of FORGED_RESUME_HOST_KEYS) {
-    if (record[key] !== undefined) {
-      throw new EvolutionError('invalid_input', 'ResumeInput does not accept Host-owned selection, commitment, or lease fields', {
-        key,
-      })
-    }
-  }
-}
-
 export class WorkflowEngine extends WorkflowEngineRecovery {
   async resume(input: ResumeInput, exec: ToolRunContext): Promise<WorkflowView> {
     return await this.withLock(input.workflowId, async () => {
-      assertResumeDoesNotForgeHostFacts(input)
       const workflow = await this.awaitPreEffect(
         () => this.store.getWorkflow(input.workflowId),
         exec.signal,
@@ -93,14 +81,6 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
         throw new EvolutionError('invalid_input', 'interrupt_id does not match the current workflow interrupt', {
           expected: workflow.interrupt.interruptId,
           actual: input.interruptId,
-        })
-      }
-
-      const sessionId = callerSessionId
-      if (!sessionId || sessionId !== workflow.ownerSessionId || sessionId !== workflow.interrupt.ownerSessionId) {
-        throw new EvolutionError('invalid_input', 'Workflow interrupt belongs to a different owner session', {
-          expected: workflow.ownerSessionId,
-          actual: sessionId,
         })
       }
       if (workflow.interrupt.bootId !== this.creationGuard.bootId || workflow.bootId !== this.creationGuard.bootId) {
@@ -235,22 +215,22 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
       let decisionReview
       let resume
       try {
-        resolveDecisionTarget(input.decision, workflow.interrupt)
+        // Validate the option/candidate binding before the review lookup so an
+        // illegal candidate_id surfaces as a retryable hint rather than a
+        // missing-review failure.
+        const target = resolveDecisionTarget(input.decision, workflow.interrupt)
         decisionReview = input.decision.action === 'use_this'
           || input.decision.action === 'apply_recovery'
           || input.decision.action === 'modify_this'
-          ? await this.reviewForAuthorization(workflow, reviews, input.decision.candidateId)
+          ? await this.reviewForAuthorization(workflow, reviews, target.candidateId)
           : undefined
         resume = resolveDecisionFromModel({
           guard: this.creationGuard,
           agent: exec.agent,
           interrupt: workflow.interrupt,
           decision: input.decision,
-          requirement: workflow.requirement,
+          target,
           ...(decisionReview ? { reviewId: decisionReview.id } : {}),
-          ...(decisionReview?.runtimeSurface?.verificationLayer
-            ? { verificationLayer: decisionReview.runtimeSurface.verificationLayer }
-            : {}),
         })
       } catch (error) {
         const hint = retryableResumeHint(error)
@@ -312,8 +292,8 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
       let nextResolution: ResolutionRecord
       try {
         nextResolution = await this.host.applyDecision(resolution, resume, decisionReview, latest)
-      } catch {
-        return await this.settleCommittedFinalDecisionFailure(latest, resolution, exec)
+      } catch (error) {
+        return await this.settleCommittedFinalDecisionFailure(latest, resolution, error, exec)
       }
       return await this.runUntilPark(latest, exec, undefined, nextResolution)
     })
@@ -322,14 +302,16 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
   private async settleCommittedFinalDecisionFailure(
     workflow: WorkflowRecord,
     resolution: ResolutionRecord,
+    error: unknown,
     exec: ToolRunContext,
   ): Promise<WorkflowView> {
+    const causeCode = error instanceof EvolutionError ? error.code : 'command_failed'
     workflow.cursor = 'recovery_required'
     workflow.status = 'interrupted'
     workflow.lastFailure = {
       stage: 'workflow',
       code: 'final_decision_application_failed',
-      message: 'The final decision was checkpointed but Host application did not complete; recovery is required.',
+      message: `The final decision was checkpointed but Host application did not complete (${causeCode}: ${boundedAgentText(errorMessage(error))}); recovery is required.`,
       retryable: false,
     }
     delete workflow.interrupt
@@ -632,7 +614,7 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
       latest.lastFailure = {
         stage: 'discovery',
         code: error instanceof EvolutionError ? error.code : 'command_failed',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         retryable: true,
       }
       latest.forceRemoteDiscovery = false
@@ -662,21 +644,12 @@ export class WorkflowEngine extends WorkflowEngineRecovery {
       || input.resume.optionId === 'apply_recovery'
       || input.resume.optionId === 'modify_this'
       || input.resume.optionId === 'enable_builtin'
+    // resolveDecisionTarget already bound candidateId to the canonical interrupt
+    // snapshot, and reviewForAuthorization already produced the review for
+    // use/modify actions; neither can be absent here.
     const candidate = input.resume.candidateId
       ? snapshot.find((item) => item.id === input.resume.candidateId)
       : undefined
-    if (needsCandidate && !candidate) {
-      throw new EvolutionError('invalid_input', 'Final use/modify/enable commitment requires the interrupt-bound candidate', {
-        candidateId: input.resume.candidateId,
-      })
-    }
-    if ((input.resume.optionId === 'use_this'
-      || input.resume.optionId === 'apply_recovery'
-      || input.resume.optionId === 'modify_this') && !input.review) {
-      throw new EvolutionError('invalid_input', 'Final use/modify commitment requires the selected review', {
-        candidateId: input.resume.candidateId,
-      })
-    }
     const builtinBinding = input.resume.optionId === 'enable_builtin'
       ? assertBuiltinEnablementBinding(input.workflow, 'gate1')
       : undefined

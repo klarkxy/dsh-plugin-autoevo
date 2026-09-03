@@ -2,6 +2,17 @@
 
 All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Versioning for its public API and persisted Policy contract.
 
+## Unreleased
+
+## 1.3.0
+
+- Remove the never-wired independent semantic reviewer/verifier stack (`DshSemanticReviewerHost`, `DshSemanticVerifierHost`, `ReviewerRequest`/`ReviewerVerdict`, `VerifierRequest`/`VerificationVerdict`, the `reviewerRequestId`/`reviewerVerdictDigest` commitment fields). Mechanical verification was already Host-only; the Agent view now exposes `semantic_context_required` as a hint instead of a reviewer decision. Historical review receipts that still carry reviewer fields remain readable.
+- Remove the isolated minimal-DSH preflight profile, temporary (`trial`) installation retention, `verificationTask` / `verificationExpectedText`, and `DshLauncher.verify()`. Public decisions already forced persistent installs; historical temporary receipts remain readable and removable through `plugin_remove`.
+- Drop dead pre-install revalidation and duplicated guards that re-checked facts already enforced by the frozen artifact hash, the atomic profile-patch write, or an outer cancellation handler. Errors that were previously swallowed into same-shaped defaults (predecessor lookup, malformed profile-patch rows) now fail closed.
+- Collapse duplicated guard layers: `CreationGuard` no longer re-denies Cordis live mutation or shell `dsh plugin add` (the outer `ExecutionGuard` already does in evolution mode); the unreachable `ensure_market` workflow node, `WorkflowHost.ensureMarket` / `reviewGithub`, and the unused refinement/diagnosis budget fields are removed. Persisted legacy `ensure_market` cursors continue to the discovery checkpoint.
+- Fail closed instead of shrinking: `receiptOwnedRoots`, `StateStore.get`, preset `pathExists`, bundled-capability `readdir`, and GitHub payload parsing now surface non-ENOENT read or parse failures rather than returning an empty or default result. Three separate PID-liveness helpers are unified into `isProcessAlive`.
+- `PluginInstaller` takes an options object instead of positional constructor arguments.
+
 ## 1.2.1
 
 - Move the public Policy contract to V14. Unfinished V13 workflows and their grants cannot resume; start again from the current top-level requirement. Completed installations and historical receipts remain readable.

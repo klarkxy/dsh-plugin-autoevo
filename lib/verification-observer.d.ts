@@ -8,8 +8,9 @@ interface Config {
   expectedProvider?: string;
   expectedModel?: string;
   layer?: string;
-  packageName?: string;
-  fixtureDigest?: string;
+  /** Schema-defaulted to '' when absent. */
+  packageName: string;
+  fixtureDigest: string;
   fixturesJson?: string;
   activatedFibersJson?: string;
 }

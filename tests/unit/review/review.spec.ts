@@ -9,7 +9,7 @@ import {
   VERIFICATION_STATUSES,
   type RuntimeSurfaceFacts,
 } from '../../../src/contracts.js'
-import { evaluatePluginContent, freezeRuntimeSurface, needsSemanticReviewer, previewGithubPlugin, previewGithubPlugins, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
+import { evaluatePluginContent, freezeRuntimeSurface, requiresSemanticContext, previewGithubPlugins, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
 import type { CommandRequest, CommandRunner } from '../../../src/process/runner.js'
 
 const config: RuntimeConfig = {
@@ -136,7 +136,7 @@ describe('third-party review', () => {
     expect(record.recommendation).toBe('modify')
     expect(record.installSpec).toBe(`github:synthetic-org/quasar-archive#${'a'.repeat(40)}`)
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
-    expect(needsSemanticReviewer(record)).toBe(true)
+    expect(requiresSemanticContext(record)).toBe(true)
     expect(record.findings.map((finding) => finding.code)).toEqual(expect.arrayContaining(['lifecycle_script', 'non_registry_dependency', 'environment_access', 'dynamic_evaluation']))
     expect(record.findings.some((finding) => finding.code === 'prompt_injection' && finding.source === 'README.md')).toBe(true)
     expect(JSON.stringify(record)).not.toContain('Ignore previous instructions')
@@ -225,8 +225,10 @@ describe('third-party review', () => {
       },
     }
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'autoevo-preview-cache-'))
-    const preview = await previewGithubPlugin({ runner, config, cwd, repository: 'acme/safe-tool', ref: 'main' })
+    const previews = await previewGithubPlugins({ runner, config, cwd, repository: 'acme/safe-tool', ref: 'main' })
 
+    expect(previews).toHaveLength(1)
+    const preview = previews[0]!
     expect(preview).toMatchObject({
       repository: 'acme/safe-tool', commit: 'a'.repeat(40), defaultBranch: 'main', truncated: false,
       manifest: { kind: 'bundle', packageName: 'safe-tool', packageVersion: '1.2.3', bundlePatch: 'cordis.patch.yml', license: 'MIT' },
@@ -324,7 +326,7 @@ describe('third-party review', () => {
     expect(record.securityRisk).toBe('low')
     expect(record.recommendation).toBe('use')
     expect(record.findings).toEqual([])
-    expect(needsSemanticReviewer(record)).toBe(false)
+    expect(requiresSemanticContext(record)).toBe(false)
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(false)
   })
 
@@ -418,11 +420,11 @@ describe('third-party review', () => {
     expect(incompatible.recommendation).toBe('modify')
     expect(incompatible.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
     expect(incompatible.mechanicalFacts?.directUseHostBoundary).toBeUndefined()
-    expect(needsSemanticReviewer(incompatible)).toBe(false)
+    expect(requiresSemanticContext(incompatible)).toBe(false)
     expect(unknown.compatibility).toMatchObject({ status: 'unknown', runtimeVersion: null })
     expect(unknown.recommendation).toBe('use')
     expect(unknown.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
-    expect(needsSemanticReviewer(unknown)).toBe(false)
+    expect(requiresSemanticContext(unknown)).toBe(false)
   })
 
   it('treats process execution as a warning that still allows direct use', () => {
@@ -448,7 +450,7 @@ describe('third-party review', () => {
     expect(record.securityRisk).toBe('medium')
     expect(record.recommendation).toBe('use')
     expect(record.installSpec).toBe(`github:example-org/dsh-nebula-auth#${'a'.repeat(40)}`)
-    expect(needsSemanticReviewer(record)).toBe(false)
+    expect(requiresSemanticContext(record)).toBe(false)
     expect(record.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'process_execution', severity: 'warning' }),
     ]))
@@ -477,7 +479,7 @@ describe('third-party review', () => {
     expect(record.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'lifecycle_script' }),
     ]))
-    expect(needsSemanticReviewer(record)).toBe(false)
+    expect(requiresSemanticContext(record)).toBe(false)
   })
 
   it('surfaces every package lifecycle hook as at least medium install risk', () => {
@@ -554,7 +556,7 @@ describe('third-party review', () => {
     expect(record.mechanicalFacts?.semanticContextRequired).toBe(true)
     expect(record.recommendation).toBe('modify')
     expect(record.installSpec).toBe(`github:acme/calculator#${'a'.repeat(40)}`)
-    expect(needsSemanticReviewer(record)).toBe(true)
+    expect(requiresSemanticContext(record)).toBe(true)
     expect(record.mechanicalFacts).toMatchObject({
       fit: record.fit,
       staticRisk: record.securityRisk,
@@ -563,7 +565,7 @@ describe('third-party review', () => {
     })
   })
 
-  it('does not require a semantic reviewer for spawn, partial fit, or unknown compatibility', () => {
+  it('does not require semantic context for spawn, partial fit, or unknown compatibility', () => {
     const baseFiles = [
       { path: 'package.json', content: Buffer.from(JSON.stringify({
         name: '@acme/calculator',
@@ -600,13 +602,13 @@ describe('third-party review', () => {
       files: baseFiles,
     })
     expect(high.securityRisk).toBe('medium')
-    expect(needsSemanticReviewer(high)).toBe(false)
+    expect(requiresSemanticContext(high)).toBe(false)
     expect(partial.fit).toBe('partial')
     expect(partial.recommendation).toBe('use')
-    expect(needsSemanticReviewer(partial)).toBe(false)
+    expect(requiresSemanticContext(partial)).toBe(false)
     expect(unknown.compatibility.status).toBe('unknown')
     expect(unknown.recommendation).toBe('use')
-    expect(needsSemanticReviewer(unknown)).toBe(false)
+    expect(requiresSemanticContext(unknown)).toBe(false)
   })
 
   it('keeps a truncated exact GitHub bundle installable with an explicit warning', () => {
@@ -733,7 +735,7 @@ describe('security content scanning', () => {
       expect.objectContaining({ code: 'credential_access', severity: 'block', source: 'src/keys.ts' }),
     ]))
     expect(record.findings.filter((item) => item.code === 'credential_access')).toHaveLength(1)
-    expect(needsSemanticReviewer(record)).toBe(true)
+    expect(requiresSemanticContext(record)).toBe(true)
   })
 
   it('flags long encoded blobs only when the same file also evaluates code', () => {

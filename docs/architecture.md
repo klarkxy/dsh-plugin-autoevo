@@ -50,8 +50,7 @@ capability_workflow
          tool_roundtrip: Host-attested fixture execute → verified
          bundle_activation: load reviewed bundle, no Agent turn → activated
            (carrier patches count the insert id+name Fiber, not the npm package name)
-         manual_runtime persistent: no Host spawn → awaiting_user_test
-         (temporary manual_runtime is rejected before approval)
+         manual_runtime: no Host spawn → awaiting_user_test
                                   │
                                   ▼
                            plugin_remove
@@ -65,7 +64,7 @@ capability_workflow
 
 ## 3. DSH 接缝
 
-入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`MechanicalFacts`、`ReviewerRequest`/`ReviewerVerdict`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`、`DshSemanticReviewerHost`/`DshSemanticVerifierHost`。独立 semantic verifier 不是安装完成的可信门槛。
+入口 `src/index.ts` 以 named exports 暴露 `name`、`inject`、`Config`、`apply`，以及 Policy 合同与 Host：`POLICY_VERSION`、`SelectionReceipt`、`ActionCommitment`、`MechanicalFacts`、`VERIFICATION_LAYER_KINDS`、`classifyRuntimeSurface`、`lifecycleStateFor`。安装完成的可信门槛只有 Host 机械验证，没有独立的模型 reviewer/verifier。
 
 Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它包（例如 `@deepseek-ai/dsh-mcp-client`）；`bundle_activation` 以审查冻结的 insert `id`+`name` 认 Fiber，而不是要求存在名为 npm 包名的 Fiber。
 
@@ -146,7 +145,7 @@ Git cache、preset 与托管源锁等特定文件资源拥有各自的跨进程�
 
 ### 验证与安装语义
 
-MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的 Host-owned semantic reviewer；reviewer 不能铸造 commitment、endpoint 或用户决定。机械验证完全由 Host 驱动，不把验证任务交给普通模型。
+MechanicalFacts 只用于展示与路由。`requiresSemanticContext` 只是给 Agent 的提示：这些事实需要结合语义理解，Host 不为此启动任何子 Agent。机械验证完全由 Host 驱动，不把验证任务交给普通模型。
 
 三层结果严格区分，三者都是非失败完成态，但后二者不得冒充功能已验证：
 
@@ -154,10 +153,9 @@ MechanicalFacts 只用于展示与路由。显式 OR 条件才会启动独立的
 | --- | --- | --- |
 | `tool_roundtrip` passed | `verified` | Host-attested fixture 经 `ToolRuntime.execute`，预期工具全部覆盖且成功 |
 | `bundle_activation` passed | `activated` | 审查 bundle 已加载，无工具往返 |
-| `manual_runtime` persistent | `awaiting_user_test` | 无 Host spawn，等待用户人工测试 |
+| `manual_runtime` | `awaiting_user_test` | 无 Host spawn，等待用户人工测试 |
 
-- 第三方默认没有 Host attestation，通常进入 `manual_runtime` / persistent；包清单 safe/risk 或候选自报不得升级为 `tool_roundtrip`。
-- `manual_runtime` 的 temporary 必须在安装与批准副作用前拒绝。
+- 第三方默认没有 Host attestation，通常进入 `manual_runtime`；包清单 safe/risk 或候选自报不得升级为 `tool_roundtrip`。
 - `taskResultMatchedExpectation` 只是诊断字段，不是 verified 真值。
 
 同一 review / source / layer / fixture 不能重复安装或验证；modify 最多两次，重复失败后给出人类决策或诊断出口，不得原样循环。用户在新的顶层消息明确要求清理并重来时，completed 的 `installed` / `restart_required` / `activated` / `awaiting_user_test` 可通过精确工作流归属和一次性批准清理后生成全新 workflow；故障 `recovery_required` 仍使用 sealed interrupt 协议，两条路径不得混同。
@@ -172,11 +170,11 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 - `loaded`：Host 证明 bundle 已加载；`tool_roundtrip` 还要求 Host 执行了预期工具。
 - `verified`：仅当 Host `tool_roundtrip` passed。模型不得自行判断 success；`taskResultMatchedExpectation` 只作诊断。
 - `activated`：Host `bundle_activation` passed，bundle 已加载但没有工具往返，不得称为功能已验证。
-- `awaiting_user_test`：Host `manual_runtime` persistent，`pending_user_test`。自然提示用户到目标客户端/profile 手动测试；不要固定话术，也不要在闲聊中反复追问。
+- `awaiting_user_test`：Host `manual_runtime`，`pending_user_test`。自然提示用户到目标客户端/profile 手动测试；不要固定话术，也不要在闲聊中反复追问。
 - `restartRequired`：非失败完成态已成立，但当前进程的 Loader 热加载无法完整完成；仅此时要求新进程加载 bundle。
-- `removed`：临时 owned trial 已删除，或持久安装 receipt 已完成 remove。
+- `removed`：持久安装 receipt 已完成 remove（历史 temporary trial receipt 仍可读取并删除其 owned 目录）。
 
-用户可见安装一律持久化，公开决策不接受 `retention`。标准流程不创建私有预检 profile；安装、脚本与包管理器行为交给 DSH 的正常权限、sandbox 和 approval 规则。
+安装一律持久化，公开决策不接受 `retention`。Host 不创建私有预检 profile，也不做隔离预检；安装、脚本与包管理器行为交给 DSH 的正常权限、sandbox 和 approval 规则。
 
 交互版（点击查看 HTML 原图）：
 
@@ -202,14 +200,13 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 
 **Service 装配与 Host 接缝：**
 
-- `src/service.ts`：`CapabilityEvolutionService` 装配，组合下列 resolution / review / modification / semantic-review / managed-work 子模块。
+- `src/service.ts`：`CapabilityEvolutionService` 装配，组合下列 resolution / review / modification / managed-work 子模块。
 - `src/service-resolution.ts`：resolution 决策回执、显式候选与 next-step 指引。
 - `src/service-review.ts`：GitHub / 本地审查编排、冻结规格与改后重审。
 - `src/service-modification.ts`：修改阻塞项、验收标准与 WorkOrder 输入。
-- `src/service-semantic-review.ts`：ReviewerRequest 铸造、有界审查文件与裁决绑定。
 - `src/service-managed-work.ts`：托管施工全周期：Creator 预检、取消保留、modify/create 准备与 finish 收口。
-- `src/semantic-host.ts`：semantic 子 Agent 的共享提交门禁与运行器；`DshSemanticReviewerHost` / `DshSemanticVerifierHost` 分别在 `src/semantic-reviewer.ts` / `src/semantic-verifier.ts`。它们不是安装完成的可信门槛。
-- `src/creation-guard.ts`：Host 用户回合、session/boot/interrupt 绑定与新建拒绝。
+- `src/creation-guard.ts`：Host 用户回合、session/boot/interrupt 绑定与 creator skill 协议拒绝。
+- `src/execution-guard.ts`：进化模式下先于 CreationGuard 运行的工具执行边界：拒绝 Cordis live mutation、`dsh plugin add/remove` 与写入受保护/receipt-owned 根目录；受保护根目录读取失败时直接抛错而不是缩小保护范围。
 - `src/runtime-observations.ts`：按 Agent 在内存中保留有界的近期失败、重复调用和 request-error 计数，只向能力进化会话生成被动提示。
 - `src/creator-foundation.ts`：Creator 预检、结构化 WorkOrder、运行期 composition/catalog 验证与有界 receipt。
 - `src/internal-utils.ts`：`isRecord`、路径包含判断与 PID 存活探测等共享内部工具。
@@ -227,9 +224,9 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 **生命周期：**
 
 - `src/source-manager.ts`：普通 Git 源、排他锁、hookless commit 与来源回执。
-- `src/lifecycle/install.ts`：批准、重验证、状态机和失败清理。
+- `src/lifecycle/install.ts`：批准、状态机和失败清理。
 - `src/lifecycle/package-artifact.ts`：审查期 `npm pack --ignore-scripts` 冻结 Host-owned tgz。
-- `src/lifecycle/launcher.ts`：DSH CLI、隔离安装进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
+- `src/lifecycle/launcher.ts`：DSH CLI 安装/移除进程，以及 Host `bundle_activation` / `tool_roundtrip` 执行。
 - `src/host-verification-driver.ts`：按 frozen runtime-surface 选择验证层；plugin 自报不得铸造 `tool_roundtrip`；`manual_runtime` 不拉起验证子进程。
 - `src/verification-observer.ts`：记录 Host 工具名/callId 往返与完成轮 hash；不记录模型正文，也不作为语义成功门槛。
 - `src/lifecycle/remove.ts`：receipt 驱动的精确移除。

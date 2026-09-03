@@ -4,11 +4,7 @@ import { hashObject } from './state/hashes.js'
 
 /** Stable owner session identity used to bind workflow interrupts. */
 export function ownerSessionId(agent: Agent | undefined): string | undefined {
-  if (!agent) return undefined
-  const headerId = agent.session?.header?.id
-  if (typeof headerId === 'string' && headerId.length > 0) return headerId
-  if (typeof agent.id === 'string' && agent.id.length > 0) return agent.id
-  return undefined
+  return agent?.session.header.id
 }
 
 export function sessionCwd(agent: Agent | undefined, fallback = process.cwd()): string {

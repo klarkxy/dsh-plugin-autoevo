@@ -58,11 +58,9 @@ src/
 ├─ contracts.ts                # Policy V14 public contracts, review/install receipts
 ├─ service.ts                  # CapabilityEvolutionService composition; split into the service-*.ts below
 ├─ service-resolution.ts       # Resolution, candidate pool entry/exit, authorization flow
-├─ service-review.ts           # Review orchestration and revalidation
+├─ service-review.ts           # Review orchestration and frozen specs
 ├─ service-modification.ts     # Modification blockers and WorkOrder derivation
-├─ service-semantic-review.ts  # Independent semantic reviewer orchestration
 ├─ service-managed-work.ts     # Managed create/modify execution and receipt
-├─ semantic-host.ts            # Semantic session Host wiring and input validation
 ├─ internal-utils.ts           # Shared helpers (type guards, path containment)
 ├─ workflow/                   # Graph engine, lifecycle mapping, Agent view protocol
 ├─ resolver/                   # Local/installed sources, intent, lineage, profile ownership
@@ -189,7 +187,7 @@ The three verification layers are not interchangeable:
 | `bundle_activation` | `activated` | The reviewed bundle's Loader/Fiber has settled |
 | persistent `manual_runtime` | `awaiting_user_test` | Installed; a real client/profile test is pending |
 
-`loaded` only means the destination-process bundle has been loaded. AutoEvo does not substitute a private preflight for live-profile evidence; the semantic verifier and `taskResultMatchedExpectation` cannot mint `verified`.
+`loaded` only means the destination-process bundle has been loaded. AutoEvo only trusts live-profile evidence and has no private preflight; `taskResultMatchedExpectation` cannot mint `verified`.
 
 ## 10. Test matrix
 

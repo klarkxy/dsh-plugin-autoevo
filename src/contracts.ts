@@ -404,41 +404,6 @@ export interface MechanicalFacts {
   directUseHostBoundary?: 'incompatible' | 'not_materializable'
 }
 
-export type ReviewerRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out'
-
-/** Host-owned reviewer job. Must not carry authorization or an install spec. */
-export interface ReviewerRequest {
-  id: string
-  workflowId: string
-  resolutionId: string
-  reviewId: string
-  requirement: string
-  snapshotDigest: string
-  candidateDigest: string
-  status: ReviewerRequestStatus
-  createdAt: string
-  startedAt?: string
-  completedAt?: string
-}
-
-export type ReviewerVerdictDecision = 'approved' | 'rejected' | 'uncertain'
-
-/** Reviewer semantic verdict. Must not carry authorization, lease, endpoint, or install spec. */
-export interface ReviewerVerdict {
-  requestId: string
-  reviewId: string
-  requirementHash: string
-  snapshotDigest: string
-  candidateDigest: string
-  reviewerSessionId: string
-  reviewerVersion: string
-  decision: ReviewerVerdictDecision
-  evidence: string[]
-  conditions: string[]
-  semanticCoverage: ReviewFit
-  createdAt: string
-}
-
 export interface ReviewRecord {
   schemaVersion: 1
   id: string
@@ -469,9 +434,6 @@ export interface ReviewRecord {
   mechanicalFacts?: MechanicalFacts
   /** Frozen static runtime surface. Absent on old readable records. */
   runtimeSurface?: RuntimeSurface
-  reviewerRequestId?: string
-  reviewerRequest?: ReviewerRequest
-  reviewerVerdict?: ReviewerVerdict
 }
 
 export type InstallationRetention = 'temporary' | 'persistent'
@@ -531,37 +493,6 @@ export interface VerificationEvidence {
   reason: string
 }
 
-export type VerifierRequestStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'timed_out'
-export type VerificationVerdictDecision = 'verified' | 'rejected' | 'uncertain'
-
-/** Host-owned semantic verification job. Must not carry authorization or an install spec. */
-export interface VerifierRequest {
-  id: string
-  installationId: string
-  reviewId: string
-  requirement: string
-  evidenceDigest: string
-  status: VerifierRequestStatus
-  createdAt: string
-  startedAt?: string
-  completedAt?: string
-}
-
-/** Independent semantic completion verdict. Must not carry authorization, lease, endpoint, or install spec. */
-export interface VerificationVerdict {
-  requestId: string
-  installationId: string
-  reviewId: string
-  requirementHash: string
-  evidenceDigest: string
-  verifierSessionId: string
-  verifierVersion: string
-  decision: VerificationVerdictDecision
-  evidence: string[]
-  conditions: string[]
-  createdAt: string
-}
-
 export interface InstallationRecord {
   schemaVersion: 1 | 2
   id: string
@@ -579,9 +510,9 @@ export interface InstallationRecord {
   installSpec: string
   ownedArtifactRoot?: string
   artifactSha256?: string
-  /** Crash-recovery journal for the two-phase isolated-preflight/install flow. */
+  /** Crash-recovery journal. `preflight_*` phases appear only on legacy receipts. */
   installPhase?: 'prepared' | 'preflight_running' | 'preflight_passed' | 'destination_installing' | 'completed'
-  /** Isolated Host evidence. This never means the live destination process loaded the bundle. */
+  /** Legacy isolated-preflight evidence; current installs never write it. */
   preflight?: {
     profile: string
     passed: boolean
@@ -599,9 +530,6 @@ export interface InstallationRecord {
   hotReload?: HotReloadEvidence
   removed: boolean
   verification: VerificationEvidence
-  verifierRequestId?: string
-  verifierRequest?: VerifierRequest
-  verificationVerdict?: VerificationVerdict
   /** Redacted structured facts for a failed install command. Raw stderr is never persisted. */
   installFailure?: {
     /** User/LLM-facing lifecycle stage. Never contains a command line or path. */
@@ -703,10 +631,8 @@ export interface InstallInput {
   installationId?: string
   reviewId: string
   targetProfile: string
+  /** Every adopted capability is persisted; the installer rejects anything else. */
   retention: InstallationRetention
-  /** Optional human test prompt. Never forwarded into automatic Host verification. */
-  verificationTask?: string
-  verificationExpectedText?: string
   /** Host-derived managed-source artifact hash; never accepted from model tool arguments. */
   expectedArtifactSha256?: string
   /** Host-owned same-package replacement binding. Never accepted from model tool arguments. */
@@ -813,8 +739,6 @@ export interface ActionCommitment {
   /** Host-frozen review identity. Reviewer output cannot mint these fields. */
   reviewId?: string
   reviewSnapshotDigest?: string
-  reviewerRequestId?: string
-  reviewerVerdictDigest?: string
   frozenManifestDigest?: string
   frozenInstallSpec?: string | null
   targetProfile?: string

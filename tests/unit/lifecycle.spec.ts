@@ -157,32 +157,6 @@ describe('lifecycle validation', () => {
     expect(() => installTesting.validateProfile('a/b')).toThrow(/profile name/u)
   })
 
-  it('keeps verificationTask optional and never requires it for mechanical verification', () => {
-    expect(installTesting.verificationTask({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-    })).toBeUndefined()
-    expect(installTesting.verificationTask({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'persistent',
-      retention: 'persistent',
-    })).toBeUndefined()
-    expect(installTesting.verificationTask({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      verificationTask: 'test calculator',
-    })).toBe('test calculator')
-    expect(() => installTesting.verificationExpectation({
-      reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'persistent',
-      retention: 'persistent',
-      verificationTask: 'test calculator',
-      verificationExpectedText: '42',
-    }, undefined)).toThrow(/requires a verificationTask/u)
-  })
-
   it('rejects shell metacharacters in local artifact paths forwarded by DSH on Windows', () => {
     expect(() => packageArtifactTesting.shellForwardedFileSpec('C:\\safe&unsafe\\plugin.tgz')).toThrow(/unsafe/u)
     expect(packageArtifactTesting.shellForwardedFileSpec('C:\\safe path\\plugin.tgz')).toMatch(/^file:/u)
@@ -206,16 +180,18 @@ describe('lifecycle validation', () => {
   it('makes no installation change when one-time approval is denied', async () => {
     const { root, store } = await installHarness(attestedReview())
     const ctx = { get: () => ({ request: async () => 'denied' }) } as unknown as Context
-    const launcher = { install: async () => { throw new Error('must not install') } } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const launcher = {
+      install: async () => { throw new Error('must not install') },
+      profileTargetAbsent: async () => true,
+    } as unknown as DshLauncher
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     await expect(installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
-      verificationTask: 'test calculator',
+      targetProfile: 'web',
+      retention: 'persistent',
     }, execution())).rejects.toMatchObject({ code: 'approval_required' })
-    await expect(stat(path.join(root, 'trials'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(store.listInstallationsStrict()).resolves.toEqual([])
   })
 
   it('persists the host-prelinked receipt before the external install command starts', async () => {
@@ -230,18 +206,19 @@ describe('lifecycle validation', () => {
           diagnosticHash: '8'.repeat(64),
         })
       },
+      profileTargetAbsent: async () => true,
+      profileSourceMatches: async () => false,
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     const result = await installer.install({
       installationId,
       reviewId: `review_${'a'.repeat(64)}`,
-      targetProfile: 'trial',
-      retention: 'temporary',
+      targetProfile: 'web',
+      retention: 'persistent',
     }, execution())
 
-    // Every destination effect, including a temporary trial without preflight,
-    // is now preceded by the durable destination_installing journal.
+    // Every destination effect is preceded by the durable destination_installing journal.
     expect(observedPhase).toBe('destination_installing')
     expect(result).toMatchObject({
       id: installationId,
@@ -292,17 +269,15 @@ describe('lifecycle validation', () => {
         sourceMatched: true,
         reason: 'Host executed 1 expected tool(s) once through ToolRuntime.execute.',
       }),
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     let installationId = ''
     try {
       await installer.install({
         reviewId: `review_${'a'.repeat(64)}`,
-        targetProfile: 'trial',
-        retention: 'temporary',
-        verificationTask: 'test calculator',
+        targetProfile: 'web',
+        retention: 'persistent',
       }, execution())
       throw new Error('expected receipt persistence failure')
     } catch (error) {
@@ -310,11 +285,15 @@ describe('lifecycle validation', () => {
       expect(error).toMatchObject({ code: 'command_failed', details: { recoveryRequired: true } })
     }
     expect(installationId).toMatch(/^installation_[a-f0-9]{24}$/u)
-    await expect(store.getInstallation(installationId)).resolves.toMatchObject({ removed: true })
-    await expect(stat(store.trialRoot(installationId))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(store.getInstallation(installationId)).resolves.toMatchObject({
+      installOutcome: 'recovery_required',
+      installed: false,
+      removed: false,
+      installFailure: { stage: 'persist' },
+    })
   })
 
-  it('returns a removable receipt when persistent verification is interrupted', async () => {
+  it('returns a recovery receipt when persistent verification is interrupted', async () => {
     const { root, store, ctx } = await installHarness(attestedReview())
     const launcher = {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
@@ -322,15 +301,13 @@ describe('lifecycle validation', () => {
       profileSourceMatches: async () => true,
       readInstalledVerificationFixtures: async () => ({ calculator: { arguments: { expression: '1+1' } } }),
       verifyHost: async () => { throw new Error('simulated verification interruption') },
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
 
     const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'persistent-profile',
       retention: 'persistent',
-      verificationTask: 'test calculator',
     }, execution())
 
     expect(result).toMatchObject({
@@ -913,19 +890,15 @@ describe('lifecycle validation', () => {
           reason: 'Host executed 1 expected tool(s) once through ToolRuntime.execute.',
         }
       },
-      verify: async () => { throw new Error('LLM verify must not drive mechanical verification') },
     } as unknown as DshLauncher
-    const installer = new PluginInstaller(ctx, config(root), store, launcher, async () => true)
+    const installer = new PluginInstaller({ ctx, config: config(root), store, launcher })
     const result = await installer.install({
       reviewId: `review_${'a'.repeat(64)}`,
       targetProfile: 'web',
       retention: 'persistent',
-      verificationTask: 'calculate 6 * 7 with /Users/secret/path',
     }, execution())
     expect(verifyHostCalls).toBe(1)
-    expect(JSON.stringify(verifyHostArgs)).not.toContain('calculate 6 * 7')
-    expect(JSON.stringify(verifyHostArgs)).not.toContain('verificationTask')
-    expect(JSON.stringify(verifyHostArgs)).not.toContain('verificationExpectedText')
+    expect(verifyHostArgs).toEqual([expect.objectContaining({ layer: 'tool_roundtrip', packageName: 'dsh-tool-calculator' })])
     expect(result).toMatchObject({
       installOutcome: 'verified',
       verified: true,
@@ -934,8 +907,6 @@ describe('lifecycle validation', () => {
     const serialized = JSON.stringify(result.verification)
     expect(serialized).not.toContain('1+1')
     expect(serialized).not.toContain('expression')
-    expect(serialized).not.toContain('/Users/secret/path')
-    expect(serialized).not.toContain('calculate 6 * 7')
     expect(result.verification.sessionFiles).toEqual([])
     expect(result.verification.receiptPath).toBeUndefined()
     expect(result.verification.task).toBeUndefined()

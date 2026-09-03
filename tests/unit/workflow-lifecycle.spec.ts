@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { testReview } from '../helpers/records.js'
-import { POLICY_VERSION, type InstallationRecord, type ReviewRecord } from '../../src/contracts.js'
+import { POLICY_VERSION, type InstallationRecord } from '../../src/contracts.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 import { lifecycleStateFor, type WorkflowLifecycleState } from '../../src/workflow/lifecycle.js'
 
@@ -11,27 +10,6 @@ function workflow(overrides: Partial<WorkflowRecord> = {}): WorkflowRecord {
     cursor: 'resolve_local',
     ...overrides,
   } as WorkflowRecord
-}
-
-function review(decision?: 'approved' | 'rejected' | 'uncertain'): ReviewRecord {
-  return testReview(decision
-    ? {
-        reviewerVerdict: {
-          requestId: `reviewer_${'1'.repeat(24)}`,
-          reviewId: `review_${'a'.repeat(64)}`,
-          requirementHash: '2'.repeat(64),
-          snapshotDigest: '3'.repeat(64),
-          candidateDigest: '4'.repeat(64),
-          reviewerSessionId: 'reviewer-session',
-          reviewerVersion: '1',
-          decision,
-          evidence: [],
-          conditions: [],
-          semanticCoverage: 'full',
-          createdAt: '2026-08-19T00:00:03.000Z',
-        },
-      }
-    : {})
 }
 
 function installation(
@@ -69,17 +47,9 @@ describe('public workflow lifecycle mapping', () => {
     }
   })
 
-  it('projects review decisions only at the confirmation boundary', () => {
-    for (const decision of ['approved', 'rejected', 'uncertain'] as const) {
-      expect(lifecycleStateFor(
-        workflow({ cursor: 'await_confirmation', status: 'interrupted' }),
-        { reviews: [review(decision)] },
-      )).toBe(decision)
-    }
-    expect(lifecycleStateFor(
-      workflow({ cursor: 'await_confirmation', status: 'interrupted' }),
-      { reviews: [review()] },
-    )).toBe('skipped')
+  it('maps the confirmation boundary to awaiting_confirmation', () => {
+    expect(lifecycleStateFor(workflow({ cursor: 'await_confirmation', status: 'interrupted' })))
+      .toBe('awaiting_confirmation')
     expect(lifecycleStateFor(workflow({ cursor: 'await_confirmation' })))
       .toBe('awaiting_confirmation')
   })

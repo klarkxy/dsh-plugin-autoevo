@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
 import { Config as ConfigSchema, normalizeConfig, type Config as ConfigShape } from './config.js'
 import { CreationGuard, isTrustedTopLevelUserMessage } from './creation-guard.js'
+import { errorMessage } from './errors.js'
 import { ExecutionGuard } from './execution-guard.js'
 import { AUTOEVO_AUTONOMY_CONTRACT } from './evolution-mode.js'
 import { newBootId } from './host-identity.js'
@@ -50,53 +51,17 @@ export type {
   ExecutionEndpoint,
   FrozenCandidateIdentity,
   MechanicalFacts,
-  ReviewerRequest,
-  ReviewerRequestStatus,
-  ReviewerVerdict,
-  ReviewerVerdictDecision,
   SelectionReceipt,
   VerificationEvidence,
   VerificationLayerKind,
   VerificationStatus,
-  VerificationVerdict,
-  VerificationVerdictDecision,
-  VerifierRequest,
-  VerifierRequestStatus,
 } from './contracts.js'
 export {
   hostLayerSuccess,
-  inspectLoadedToolSafety,
   sanitizeHostVerificationEvidence,
   selectInstallVerificationLayer,
   verificationChildEnv,
 } from './host-verification-driver.js'
-export {
-  DshSemanticReviewerHost,
-  REVIEWER_SUBMIT_TOOL,
-  REVIEWER_VERSION,
-  mintReviewerRequest,
-  requirementHashFor,
-} from './semantic-reviewer.js'
-export type {
-  BoundedReviewFile,
-  ReviewerRunInput,
-  SemanticReviewerHost,
-  SemanticReviewerResult,
-} from './semantic-reviewer.js'
-export {
-  DshSemanticVerifierHost,
-  VERIFIER_SUBMIT_TOOL,
-  VERIFIER_VERSION,
-  mintVerifierRequest,
-  verificationEvidenceDigest,
-  verificationVerdictAllowsCompletion,
-} from './semantic-verifier.js'
-export type {
-  RedactedVerificationReceipt,
-  SemanticVerifierHost,
-  SemanticVerifierResult,
-  VerifierRunInput,
-} from './semantic-verifier.js'
 export { lifecycleStateFor } from './workflow/lifecycle.js'
 export type { WorkflowLifecycleState } from './workflow/lifecycle.js'
 export type { WorkflowRecord, WorkflowView } from './workflow/contracts.js'
@@ -132,8 +97,7 @@ export function apply(ctx: Context, input: Config): void {
       warn: (message) => log.warn(message),
     },
   }).catch((error: unknown) => {
-    const detail = error instanceof Error ? error.message : String(error)
-    log.warn(`AutoEvo evolution preset materialization failed: ${detail}`)
+    log.warn(`AutoEvo evolution preset materialization failed: ${errorMessage(error)}`)
   })
 
   ctx.systemPrompt.section({

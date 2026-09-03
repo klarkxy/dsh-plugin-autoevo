@@ -1,6 +1,6 @@
 import os from 'node:os'
 import path from 'node:path'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
@@ -13,10 +13,8 @@ import { reviewGithubPluginWithFiles, reviewLocalPlugin } from '../../src/review
 import { evaluatePluginContent } from '../../src/review/review.js'
 import { dependencySpecDigest } from '../../src/resolver/installed-origin.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
-import { dshRuntimeVersion, revalidateReview, reviewAndFreezeManagedSource, type ReviewOrchestrationDeps } from '../../src/service-review.js'
+import { dshRuntimeVersion, reviewAndFreezeManagedSource, type ReviewOrchestrationDeps } from '../../src/service-review.js'
 import type { SourceReceipt } from '../../src/source-manager.js'
-import { hashObject } from '../../src/state/hashes.js'
-import { sha256 } from '../../src/state/hashes.js'
 import { StateStore } from '../../src/state/store.js'
 import type { WorkflowExec, WorkflowRecord } from '../../src/workflow/contracts.js'
 
@@ -158,29 +156,6 @@ describe('formal review cancellation', () => {
     const runnerRun = vi.spyOn(internals.runner, 'run')
     return { ...fixture, target, owner, profileSpec, runnerRun }
   }
-
-  it('rethrows the exact reason when frozen-artifact revalidation is already cancelled', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-revalidate-cancel-'))
-    temporary.push(root)
-    const artifactRoot = path.join(root, 'artifact')
-    const artifactPath = path.join(artifactRoot, 'package', 'reviewed.tgz')
-    const artifact = Buffer.from('frozen review')
-    await mkdir(path.dirname(artifactPath), { recursive: true })
-    await writeFile(artifactPath, artifact)
-    const current = testReview({
-      installSpec: `file:${artifactPath.replaceAll('\\', '/')}`,
-      artifact: {
-        sha256: sha256(artifact),
-        bytes: artifact.byteLength,
-        entryCount: 1,
-        ownedRoot: artifactRoot,
-      },
-    })
-    const controller = new AbortController()
-    const reason = new Error('cancel review revalidation')
-    controller.abort(reason)
-    await expect(revalidateReview({} as ReviewOrchestrationDeps, current, controller.signal)).rejects.toBe(reason)
-  })
 
   it('rethrows the exact abort reason when runtime-version probing fails during cancellation', async () => {
     const controller = new AbortController()

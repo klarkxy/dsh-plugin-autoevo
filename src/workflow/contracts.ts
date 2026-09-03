@@ -19,7 +19,7 @@ import type {
 import { creatorAgentFacts, type CreatorRecord, type HostObservedCheck } from '../creator-foundation.js'
 import { EvolutionError } from '../errors.js'
 import { isDirectlyUsableReview, isManagedModificationEligibleReview } from '../review/direct-use.js'
-import { needsSemanticReviewer } from '../review/review.js'
+import { requiresSemanticContext } from '../review/review.js'
 import { hashObject } from '../state/hashes.js'
 import { boundedAgentText } from './sanitize.js'
 import type { WorkflowLifecycleState } from './lifecycle.js'
@@ -134,8 +134,6 @@ export interface InterruptPayload {
 export interface WorkflowPendingInstall {
   targetProfile: string
   retention: InstallationRetention
-  verificationTask?: string
-  verificationExpectedText?: string
   replacement?: import('../contracts.js').ReplacementTarget
   /** Host-derived from the sealed interrupt after the Agent selects its id. */
   recoveryPlan?: InstallRecoveryPlan
@@ -201,8 +199,7 @@ export interface DiscoveryBudget {
   activeTurnId?: string
   activeTurnQueriesUsed: string[]
   maxQueriesPerTurn: 5
-  /** Legacy persisted fields from schemaVersion 3; no longer global caps. */
-  maxRefinementRounds?: 2
+  /** Legacy persisted per-turn cap from schemaVersion 3 records that predate maxQueriesPerTurn. */
   maxRefinementQueries?: 5
   /** Bounded rolling window; semantic relevance never removes an eligible result. */
   maxCandidates: 113
@@ -284,8 +281,6 @@ export interface WorkflowDiagnosis {
     usedCalls: number
     maxProbes: 8
     usedProbes: number
-    maxRecordReads: 4
-    usedRecordReads: number
   }
 }
 
@@ -426,18 +421,6 @@ export function reviewSourceIdentity(review: Pick<ReviewRecord, 'sourceSnapshot'
   return source.kind === 'github'
     ? `github:${source.repository.toLowerCase()}#${source.commit}${source.packagePath ? `:path/${source.packagePath}` : ''}`
     : `local:${source.statusHash}`
-}
-
-export function verificationAttemptKey(
-  review: Pick<ReviewRecord, 'id' | 'sourceSnapshot' | 'runtimeSurface'>,
-  extras: { layer?: string; fixtureDigest?: string } = {},
-): string {
-  return hashObject({
-    reviewId: review.id,
-    sourceIdentity: reviewSourceIdentity(review),
-    layer: extras.layer ?? review.runtimeSurface?.verificationLayer ?? 'unspecified',
-    ...(extras.fixtureDigest ? { fixtureDigest: extras.fixtureDigest } : {}),
-  })
 }
 
 export function sameVerificationAttempt(
@@ -678,11 +661,6 @@ export interface ValidatedResume {
   install?: WorkflowPendingInstall
 }
 
-export interface MarketplaceStepResult {
-  status: 'loaded' | 'restart' | 'blocked' | 'empty'
-  reason: string
-}
-
 export interface WorkflowHost {
   bootstrapResolution(requirement: string, exec: WorkflowExec, intent?: RequestIntent): Promise<ResolutionRecord>
   discoverRemote(
@@ -700,17 +678,6 @@ export interface WorkflowHost {
     candidates: Array<{ candidateId: string; repository: string; ref?: string; packagePath?: string }>,
     exec: WorkflowExec,
   ): Promise<{ candidates?: CandidateSnapshotItem[]; previews: CandidatePreview[]; failures: CandidatePreviewFailure[] }>
-  ensureMarket(resolution: ResolutionRecord, exec: WorkflowExec): Promise<{
-    resolution: ResolutionRecord
-    market: MarketplaceStepResult
-  }>
-  reviewGithub(
-    resolution: ResolutionRecord,
-    repository: string,
-    ref: string | undefined,
-    exec: WorkflowExec,
-    workflow?: WorkflowRecord,
-  ): Promise<{ resolution: ResolutionRecord; review: ReviewRecord }>
   reviewExisting(
     resolution: ResolutionRecord,
     target: EvolutionTarget,
@@ -842,10 +809,6 @@ export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
   finish_managed_work: { id: 'finish_managed_work', labelEn: 'Continue managed construction', labelZh: '继续托管施工', placement: 'primary' },
 }
 
-export function isWorkflowOptionId(value: string): value is WorkflowOptionId {
-  return Object.hasOwn(WORKFLOW_OPTIONS, value)
-}
-
 export function isInterruptKind(value: string | undefined): value is InterruptKind {
   return value === 'await_clarification'
     || value === 'await_selection'
@@ -950,7 +913,7 @@ export function confirmationFacts(
       missingCapabilities: review.missingCapabilities,
       verificationLayer: reviewLayer ?? 'manual_runtime',
       ...(reviewLayer === 'manual_runtime' ? {
-        installRetentionRule: 'This candidate verifies only at manual_runtime: adoption is persistent, Host still performs its isolated preflight and bundle-activation checks, and completion awaits a manual user test in the target client or profile.',
+        installRetentionRule: 'This candidate verifies only at manual_runtime: adoption is persistent, Host still checks that the exact reviewed source is active in the profile, and completion awaits a manual user test in the target client or profile.',
       } : {}),
       findings: compact?.findings ?? [],
       findingDetails: compact?.findingDetails ?? [],
@@ -967,9 +930,8 @@ export function confirmationFacts(
       installable: Boolean(item.installSpec),
       missingCapabilities: item.missingCapabilities,
       verificationLayer: item.runtimeSurface?.verificationLayer ?? 'manual_runtime',
-      semanticReviewRequired: needsSemanticReviewer(item),
+      semanticContextRequired: requiresSemanticContext(item),
       directUseEligible: isDirectlyUsableReview(item, workflow),
-      ...(item.reviewerVerdict ? { reviewerDecision: item.reviewerVerdict.decision } : {}),
     })),
     ...(builtinEnablement ? {
       builtinEnablement: {

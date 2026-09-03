@@ -21,10 +21,8 @@ import {
   frozenManifestDigest,
   isDirectlyUsableReview,
   reviewCandidateDigest,
-  reviewerBindingDigest,
   reviewSnapshotDigest,
 } from '../../src/review/direct-use.js'
-import { mintReviewerRequest, requirementHashFor, REVIEWER_VERSION } from '../../src/semantic-reviewer.js'
 import type { WorkflowRecord } from '../../src/workflow/contracts.js'
 
 const COMMIT = 'c'.repeat(40)
@@ -107,39 +105,6 @@ function workflowFor(review: ReviewRecord): WorkflowRecord {
   }
 }
 
-function bindApproved(review: ReviewRecord, workflow: WorkflowRecord): ReviewRecord {
-  const snapshotDigest = reviewSnapshotDigest(review)
-  const candidateDigest = reviewCandidateDigest(review, workflow)
-  const request = mintReviewerRequest({
-    workflowId: workflow.id,
-    review,
-    snapshotDigest,
-    candidateDigest,
-    createdAt: '2026-08-19T00:00:02.000Z',
-  })
-  const completed = { ...request, status: 'completed' as const, completedAt: '2026-08-19T00:00:03.000Z' }
-  const verdict = {
-    requestId: completed.id,
-    reviewId: review.id,
-    requirementHash: requirementHashFor(review.requirement),
-    snapshotDigest,
-    candidateDigest,
-    reviewerSessionId: 'reviewer-session',
-    reviewerVersion: REVIEWER_VERSION,
-    decision: 'approved' as const,
-    evidence: ['static high risk is a presentation fact'],
-    conditions: [],
-    semanticCoverage: review.fit,
-    createdAt: '2026-08-19T00:00:03.000Z',
-  }
-  return {
-    ...review,
-    reviewerRequestId: completed.id,
-    reviewerRequest: completed,
-    reviewerVerdict: verdict,
-  }
-}
-
 function receiptFor(
   guard: CreationGuard,
   session: Agent,
@@ -185,8 +150,6 @@ function commitmentFor(
     frozenManifestDigest: frozenManifestDigest(review),
     targetProfile: 'web',
     ...(review.installSpec !== undefined ? { frozenInstallSpec: review.installSpec } : {}),
-    ...(review.reviewerRequestId !== undefined ? { reviewerRequestId: review.reviewerRequestId } : {}),
-    ...(review.reviewerVerdict ? { reviewerVerdictDigest: reviewerBindingDigest(review.reviewerVerdict) } : {}),
   }
 }
 
@@ -204,13 +167,12 @@ function decisionReceipt(review: ReviewRecord): DecisionReceipt {
 }
 
 describe('final use_this Host commitment', () => {
-  it('authorizes install for a partial/unknown/high-risk/prompt-regex review with exact approved verdict and current commitment', () => {
+  it('authorizes install for a partial/unknown/high-risk/prompt-regex review with a current commitment', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
     guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
-    const review = bindApproved(githubReview(), workflowFor(githubReview()))
-    const workflow = workflowFor(review)
-    const bound = bindApproved(review, workflow)
+    const bound = githubReview()
+    const workflow = workflowFor(bound)
     expect(isDirectlyUsableReview(bound, workflow)).toBe(true)
     const receipt = receiptFor(guard, session, workflow)
     const commitment = commitmentFor(receipt, bound, workflow)
@@ -225,9 +187,8 @@ describe('final use_this Host commitment', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
     guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
-    const review = bindApproved(githubReview(), workflowFor(githubReview()))
-    const workflow = workflowFor(review)
-    const bound = bindApproved(review, workflow)
+    const bound = githubReview()
+    const workflow = workflowFor(bound)
     const receipt = receiptFor(guard, session, workflow)
     const commitment = commitmentFor(receipt, bound, workflow)
     guard.grantHostSelection(session, receipt, commitment)
@@ -276,9 +237,8 @@ describe('final use_this Host commitment', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
     guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
-    const review = bindApproved(githubReview(), workflowFor(githubReview()))
-    const workflow = workflowFor(review)
-    const bound = bindApproved(review, workflow)
+    const bound = githubReview()
+    const workflow = workflowFor(bound)
     const receipt = receiptFor(guard, session, workflow)
     const commitment = commitmentFor(receipt, bound, workflow)
     expect(commitment.endpoint).toEqual({ kind: 'none' })
@@ -329,21 +289,20 @@ describe('install grant owns usability', () => {
       install: async () => ({ exitCode: 0, signal: null, stdout: '', stderr: '' }),
       profileTargetAbsent: async () => true,
     } as unknown as DshLauncher
-    const withoutGrant = new PluginInstaller(ctx, testRuntimeConfig(root), store, launcher, async () => true)
+    const withoutGrant = new PluginInstaller({ ctx, config: testRuntimeConfig(root), store, launcher })
     await expect(withoutGrant.install({
       reviewId: stale.id,
       targetProfile: 'web',
       retention: 'persistent',
     }, exec())).rejects.toThrow(/predates the current policy/i)
 
-    const withGrant = new PluginInstaller(
+    const withGrant = new PluginInstaller({
       ctx,
-      testRuntimeConfig(root),
+      config: testRuntimeConfig(root),
       store,
       launcher,
-      async () => true,
-      async () => undefined,
-    )
+      authorizeInstall: async () => undefined,
+    })
     await expect(withGrant.install({
       reviewId: stale.id,
       targetProfile: 'web',

@@ -57,11 +57,11 @@ Never call Cordis live mutation, add/update/remove packages with `pnpm add/updat
 
 - `verified`: Host `tool_roundtrip` passed; functional verification is supported.
 - `activated`: Loader/Fiber activation passed; the capability was not functionally tested.
-- `awaiting_user_test`: persistent `manual_runtime` completed; invite one real client/profile test.
+- `awaiting_user_test`: `manual_runtime` completed; invite one real client/profile test.
 - `restartRequired: true`: a non-failure install exists, but the target process needs a restart to load it fully.
 - `recovery_required`: state cannot be reconciled safely; do not reinstall or clean up blindly.
 
-An isolated minimal-DSH preflight, model judgment, semantic verifier, `installed`, or `loaded` alone cannot mint `verified`.
+Model judgment, `installed`, or `loaded` alone cannot mint `verified`; only a Host-attested `tool_roundtrip` does.
 
 ## 5. Diagnose, recover, and clean up
 
