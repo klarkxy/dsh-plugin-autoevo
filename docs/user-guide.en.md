@@ -14,7 +14,7 @@ This guide is for users who discover, install, improve, or create capabilities i
 ## 2. Install, upgrade, and first load
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.0
+npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.1
 ```
 
 Run DSH through npx; no global install needed. Keep the `@deepseek-ai/` prefix — the unscoped `dsh` package on npm is an unrelated project. Restart the profile after installing or upgrading so the new bundle takes effect.

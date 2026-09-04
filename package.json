@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-autoevo",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "description": "Lightweight capability discovery, review, and installation workflow for DSH.",
   "license": "SEE LICENSE IN LICENSE",
