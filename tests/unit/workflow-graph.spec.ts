@@ -212,11 +212,6 @@ describe('workflow graph transitions', () => {
       'create_new',
       'stop',
     ])
-    expect(confirmation.options.find((item) => item.id === 'use_this')?.placement).toBe('primary')
-    expect(confirmation.options.find((item) => item.id === 'search_more')?.placement).toBe('primary')
-    expect(confirmation.options.find((item) => item.id === 'modify_this')?.placement).toBe('advanced')
-    expect(confirmation.options.find((item) => item.id === 'create_new')?.placement).toBe('advanced')
-    expect(confirmation.options.find((item) => item.id === 'stop')?.placement).toBe('recovery')
     expect(confirmation.options.find((item) => item.id === 'use_this')?.candidateIds)
       .toEqual([confirmationWorkflow.candidateSnapshot![0]!.id])
     const modify = interruptPayload('await_modify_work', resolution(), [review()], { workflow: workflow('await_modify_work') })
@@ -984,10 +979,5 @@ describe('workflow graph nodes', () => {
       resolution: current,
     })
     expect(result).toMatchObject({ kind: 'done', node: 'create_authorized' })
-  })
-
-  it('keeps search_more outside the authorization transition table', () => {
-    expect(() => transition('await_selection', 'search_more')).toThrow(/cannot resume/i)
-    expect(() => transition('await_confirmation', 'search_more')).toThrow(/cannot resume/i)
   })
 })

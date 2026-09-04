@@ -1,16 +1,14 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { CreationGuard, _testing } from '../../src/creation-guard.js'
 import type {
   ResolutionAuthorization,
 } from '../../src/contracts.js'
-import { OUTSIDE_EVOLUTION_MODE_DENIAL } from '../../src/evolution-contracts.js'
 import { ExecutionGuard } from '../../src/execution-guard.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const CREATOR_SKILL_NAME = 'autoevo-plugin-creator'
-const CREATOR_SKILL_PROVIDER = 'dsh-plugin-autoevo'
-const CREATOR_SKILL_MARKER = 'autoevo-plugin-creator:v2'
 const OFFICIAL_CREATOR_SKILL_NAME = 'cordis-plugin-development'
 
 function fakeAgent(id: string): Agent {
@@ -58,16 +56,6 @@ function outsideModeGuard(): CreationGuard {
   return new CreationGuard({ isEvolutionMode: () => false })
 }
 
-const creatorSkillSuccess: ToolExecutionResult = {
-  isError: false,
-  value: {
-    name: CREATOR_SKILL_NAME,
-    provider: CREATOR_SKILL_PROVIDER,
-    content: `# Creator\n${CREATOR_SKILL_MARKER}`,
-  },
-  content: [],
-} as unknown as ToolExecutionResult
-
 describe('new Cordis Plugin creation guard', () => {
   it('allows official Creator live definitions outside evolution mode', async () => {
     const guard = outsideModeGuard()
@@ -77,7 +65,6 @@ describe('new Cordis Plugin creation guard', () => {
     await expect(guard.preExecute(exec, next)).resolves.toEqual({ kind: 'allow' })
     expect(next).toHaveBeenCalledTimes(1)
     expect(guard.guard(exec)).toBeUndefined()
-    expect(_testing.outsideEvolutionModeReason()).toBe(OUTSIDE_EVOLUTION_MODE_DENIAL)
   })
 
   it.each([
@@ -118,8 +105,6 @@ describe('new Cordis Plugin creation guard', () => {
     const replacement = skillExecution('call-replacement-skill', CREATOR_SKILL_NAME)
     await expect(guard.preExecute(replacement, next)).resolves.toEqual({ kind: 'allow' })
     expect(guard.guard(replacement)).toBeUndefined()
-    // Skill results are ignored for authorization; no creator-skill bookkeeping remains.
-    guard.result(replacement, creatorSkillSuccess)
     expect(next).toHaveBeenCalledTimes(2)
   })
 
@@ -221,7 +206,7 @@ describe('evolution protocol automaton', () => {
     const guard = inModeGuard()
     resolveAs(guard, authorization('selection_required'))
     guard.setWaiting(agent, 'await_selection', 'turn_issue')
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '看看3' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('看看3'))
     const next = vi.fn(async () => ({ kind: 'allow' as const }))
     const direct = tool('find_dsh_plugin', { query: 'dsh-plugin-alpha' })
     const denied = await guard.preExecute(direct, next)
@@ -257,7 +242,7 @@ describe('evolution protocol automaton', () => {
       expect(beforeReply).not.toMatch(/review_candidates|capability_workflow_resume/i)
     }
 
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '清理并重新开始' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('清理并重新开始'))
     for (const name of ['find_dsh_plugin', 'web_search']) {
       const afterReply = guard.guard(tool(name))
       expect(afterReply).toMatch(/capability_workflow_recover/i)
@@ -320,16 +305,17 @@ describe('evolution protocol automaton', () => {
 
   it('remembers the user-facing turn text and ignores runtime-context injections', () => {
     const guard = inModeGuard()
-    guard.rememberUserMessage(agent, {
-      content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.' }],
-    })
+    expect(guard.rememberUserMessage(agent, trustedUserMessage(
+      'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
+    ))).toBe(false)
     expect(guard.lastUserMessage(agent)).toBeUndefined()
-    guard.rememberUserMessage(agent, {
+    expect(guard.rememberUserMessage(agent, {
+      ...trustedUserMessage('具体看看3，我希望右键生成长图。'),
       content: [
         { type: 'text', text: '<system-reminder>\nA skill is available\n' },
         { type: 'text', text: '具体看看3，我希望右键生成长图。' },
       ],
-    })
+    })).toBe(true)
     expect(guard.lastUserMessage(agent)).toBe('具体看看3，我希望右键生成长图。')
     resolveAs(guard, authorization('selection_required'))
     expect(guard.lastUserMessage(agent)).toBe('具体看看3，我希望右键生成长图。')
@@ -340,6 +326,7 @@ describe('evolution protocol automaton', () => {
 
   it('accepts only stable top-level user messages as explicit decision authority', () => {
     const guard = inModeGuard()
+    expect(guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })).toBe(false)
     const user = {
       id: 'message-user-1',
       role: 'user',

@@ -142,7 +142,7 @@ describe('direct use eligibility', () => {
       expect(hostDirectUseBoundary(review)).toBeUndefined()
       expect(isDirectlyUsableReview(review, workflow)).toBe(true)
       expect(confirmationIds(review, workflow)).toContain('use_this')
-      expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
+      expect(() => assertDirectUseAllowed(review)).not.toThrow()
     }
   })
 
@@ -155,7 +155,7 @@ describe('direct use eligibility', () => {
     expect(hostDirectUseBoundary(review)).toBeUndefined()
     expect(isDirectlyUsableReview(review, workflow)).toBe(true)
     expect(confirmationIds(review, workflow)).toEqual(expect.arrayContaining(['use_this', 'modify_this', 'stop']))
-    expect(() => assertDirectUseAllowed(review, workflow)).not.toThrow()
+    expect(() => assertDirectUseAllowed(review)).not.toThrow()
   })
 
   it('continues to reject mechanical policy, install-spec, and materialization failures', () => {
@@ -177,7 +177,7 @@ describe('direct use eligibility', () => {
 
     for (const review of [wrongPolicy, wrongInstallSpec, notMaterializable]) {
       expect(isDirectlyUsableReview(review, workflowFor(review))).toBe(false)
-      expect(() => assertDirectUseAllowed(review, workflowFor(review))).toThrow(/cannot authorize installation|does not authorize installation/i)
+      expect(() => assertDirectUseAllowed(review)).toThrow(/cannot authorize installation|does not authorize installation/i)
     }
   })
 
@@ -219,7 +219,7 @@ describe('direct use eligibility', () => {
       expect(isDirectlyUsableReview(corrupt, workflow)).toBe(false)
       expect(isManagedModificationEligibleReview(corrupt)).toBe(false)
       expect(confirmationIds(corrupt, workflow)).not.toEqual(expect.arrayContaining(['use_this', 'modify_this']))
-      expect(() => assertDirectUseAllowed(corrupt, workflow)).toThrow(/does not authorize installation/i)
+      expect(() => assertDirectUseAllowed(corrupt)).toThrow(/does not authorize installation/i)
     }
     expect(() => reviewIdentity(opaque as unknown as ReviewRecord)).toThrow(/source identity is malformed/i)
   })

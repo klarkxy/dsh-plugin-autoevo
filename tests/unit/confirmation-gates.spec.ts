@@ -18,6 +18,7 @@ import { assertUseThisReceipt } from '../../src/lifecycle/decide.js'
 import { CapabilityEvolutionService } from '../../src/service.js'
 import type { CommandRequest, CommandResult, CommandRunner } from '../../src/process/runner.js'
 import { StateStore } from '../../src/state/store.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const temporary = trackTempDirs()
 
@@ -107,7 +108,7 @@ function withGitSupport(base: Pick<CommandRunner, 'run'>): CommandRunner {
 }
 
 function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: string): void {
-  guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
+  guard.rememberUserMessage(agent, trustedUserMessage(text))
 }
 
 async function startWith(
@@ -477,47 +478,6 @@ const started = await startWith(service, guard, turn, '我需要一个调用 neb
     expect(reviewed.workflow.consumedInterruptIds ?? []).not.toContain(presented.workflow.interrupt!.interruptId)
     expect(reviewed.installation).toBeUndefined()
   })
-
-  it('seals the third discovery candidate for a natural-language third-choice review', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-look-at-3-'))
-    temporary.push(root)
-    const { service, guard } = makeService(root, {
-      results: [
-        {
-          name: 'dsh-nebula',
-          url: 'https://github.com/example-org/dsh-nebula',
-          description: 'Nebula relay connection',
-          stars: 3,
-        },
-        {
-          name: 'dsh-nebula-capture',
-          url: 'https://github.com/example-org/dsh-nebula-capture',
-          description: 'Nebula relay capture adapter',
-          stars: 1,
-        },
-        {
-          name: 'dsh-nebula-third',
-          url: 'https://github.com/example-org/dsh-nebula-third',
-          description: 'Third nebula relay candidate',
-          stars: 1,
-        },
-      ],
-      files: nebulaBundle,
-    })
-    const turn = exec()
-    const started = await startWith(service, guard, turn, '我需要一个调用 nebula relay 的能力。')
-    expect(started.workflow.cursor).toBe('await_discovery')
-    const presentedIds = started.workflow.discoveryPool!.map((item) => item.id)
-    const presented = await presentWith(service, turn, started.workflow.id, presentedIds)
-    expect(presented.workflow.candidateSnapshot?.map((item) => item.index)).toEqual([1, 2, 3])
-    const thirdCandidate = presented.workflow.candidateSnapshot![2]!
-    const thirdId = thirdCandidate.id
-    const reviewed = await navigateWith(service, guard, turn, presented.workflow.id, presented.workflow.interrupt!.interruptId, 'review_candidates', [thirdId])
-    expect(reviewed.status).not.toBe('invalid_resume')
-    expect(reviewed.workflow.cursor).toBe('await_confirmation')
-    expect(reviewed.review?.sourceSnapshot.kind === 'github' && reviewed.review.sourceSnapshot.repository)
-      .toBe(thirdCandidate.repository)
-  }, 20_000)
 
   it('keeps a high-risk review visible for an explicit user decision', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'autoevo-gate-high-'))

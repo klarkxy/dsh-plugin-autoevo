@@ -13,6 +13,7 @@ import { StateStore } from '../../src/state/store.js'
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 import type { WorkflowHost } from '../../src/workflow/contracts.js'
 import { POLICY_VERSION, type ResolutionRecord } from '../../src/contracts.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const temporary = trackTempDirs()
 
@@ -34,7 +35,7 @@ function exec(sessionId = 'session-alpha', cwd = process.cwd()): ToolRunContext 
 }
 
 function remember(guard: CreationGuard, agent: ToolRunContext['agent'], text: string): void {
-  guard.rememberUserMessage(agent, { content: [{ type: 'text', text }] })
+  guard.rememberUserMessage(agent, trustedUserMessage(text))
 }
 
 function hostCtx(baseUrl: string): Context {

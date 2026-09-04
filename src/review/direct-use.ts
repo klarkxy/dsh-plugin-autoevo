@@ -169,7 +169,7 @@ export interface InstallCommitmentBinding {
   recoveryPlan?: ActionCommitment['allowedParameterConstraints']['recoveryPlan']
 }
 
-export function assertDirectUseAllowed(review: ReviewRecord, _workflow?: ReviewCandidateContext): void {
+export function assertDirectUseAllowed(review: ReviewRecord): void {
   if (review.policyVersion !== POLICY_VERSION) {
     throw new EvolutionError('review_rejected', 'This review predates the current policy and cannot authorize installation', {
       reviewId: review.id,

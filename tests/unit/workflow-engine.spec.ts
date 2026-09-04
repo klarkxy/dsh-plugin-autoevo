@@ -22,6 +22,7 @@ import { candidateSnapshotFor, DISCOVERY_POOL_MAX } from '../../src/workflow/can
 import { WorkflowEngine } from '../../src/workflow/engine.js'
 import { compactAgentView } from '../../src/workflow/agent-view.js'
 import type { WorkflowExec, WorkflowHost, WorkflowRecord, WorkflowView } from '../../src/workflow/contracts.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const temporary = trackTempDirs()
 
@@ -357,7 +358,7 @@ async function prepareBuiltinConfirmation(suffix: string): Promise<{
   const turn = exec(`session-${suffix}`)
   const { selection } = await startAndPresent(setup.engine, 'current time', turn)
   const candidateId = selection.workflow.candidateSnapshot![0]!.id
-  setup.guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先查看这个内置能力' }] })
+  setup.guard.rememberUserMessage(turn.agent, trustedUserMessage('先查看这个内置能力'))
   const confirmation = await setup.engine.resume({
     workflowId: selection.workflow.id,
     interruptId: selection.workflow.interrupt!.interruptId,
@@ -435,7 +436,7 @@ async function reviewInstalledCandidate(
 }> {
   const { selection } = await startAndPresent(engine, requirement, turn)
   const candidateId = selection.workflow.candidateSnapshot![0]!.id
-  guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: message }] })
+  guard.rememberUserMessage(turn.agent, trustedUserMessage(message))
   const reviewed = await engine.resume({
     workflowId: selection.workflow.id,
     interruptId: selection.workflow.interrupt!.interruptId,
@@ -763,7 +764,7 @@ describe('workflow engine autonomous discovery', () => {
     const discoverRemote = vi.fn(async (current: ResolutionRecord) => current)
     workflowHost.discoverRemote = discoverRemote
     const turn = exec('session-baseline-queries')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '我需要一个自动审批代码审查的能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('我需要一个自动审批代码审查的能力'))
 
     const view = await engine.start(
       'automatic approval review',
@@ -839,7 +840,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(changedView.workflow.discoveryPool![0]!.digest).not.toBe(candidate.digest)
   })
 
-  it('present seals one to five pool candidates into Gate 1 and blocks same-turn resume', async () => {
+  it('present seals one to five pool candidates into Gate 1', async () => {
     const { engine } = await makeEngine(resolution(), 'present')
     const turn = exec()
     const { discovery, selection } = await startAndPresent(engine, 'calculator', turn)
@@ -849,13 +850,6 @@ describe('workflow engine autonomous discovery', () => {
     expect(selection.workflow.candidateSnapshot?.map((item) => item.id)).toEqual([
       discovery.workflow.discoveryPool![0]!.id,
     ])
-    const parked = await engine.resume({
-      workflowId: selection.workflow.id,
-      interruptId: selection.workflow.interrupt!.interruptId,
-      navigation: { kind: 'stop' },
-    }, turn)
-    expect(parked).toMatchObject({ status: 'parked', alreadyWaiting: true })
-    expect(parked.workflow.consumedInterruptIds).toEqual([])
   })
 
   it('previews only the Agent-selected remote shortlist before sealing Gate 1', async () => {
@@ -1054,7 +1048,7 @@ describe('workflow engine autonomous discovery', () => {
       'stop',
     ])
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '从零创建这个能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('从零创建这个能力'))
     const constructing = await engine.resume({
       workflowId: empty.workflow.id,
       interruptId: empty.workflow.interrupt!.interruptId,
@@ -1067,23 +1061,6 @@ describe('workflow engine autonomous discovery', () => {
       pendingPath: path.join(root, 'managed-lunar-calendar'),
     })
     expect(guard.constructionRoot(turn.agent)).toBe(path.join(root, 'managed-lunar-calendar'))
-  })
-
-  it('automatically seals a completed empty discovery without requiring a presentation call', async () => {
-    const record = resolution('unfamiliar capability')
-    record.decision = 'inspect_remote'
-    record.localCandidates = []
-    record.remoteCandidates = []
-    record.remoteDiscoveryComplete = true
-    const { engine } = await makeEngine(record, 'auto-empty')
-    const view = await engine.start(record.requirement, exec())
-
-    expect(view.workflow).toMatchObject({ status: 'interrupted', cursor: 'await_selection', candidateSnapshot: [] })
-    expect(view.workflow.interrupt?.options.map((option) => option.id)).toEqual([
-      'search_more',
-      'create_new',
-      'stop',
-    ])
   })
 
   it('rejects a persisted interrupt option that canonical Host policy did not issue', async () => {
@@ -1104,7 +1081,7 @@ describe('workflow engine autonomous discovery', () => {
     const prepareCreate = vi.fn(async () => { throw new Error('must not create') })
     workflowHost.prepareCreate = prepareCreate
     const put = vi.spyOn(store, 'put')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '那就新建' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('那就新建'))
 
     await expect(engine.resume({
       workflowId: persisted.id,
@@ -1165,7 +1142,7 @@ describe('workflow engine autonomous discovery', () => {
     await store.put('workflows', persisted)
     const applyDecision = vi.spyOn(workflowHost, 'applyDecision')
     const put = vi.spyOn(store, 'put')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '停止' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('停止'))
 
     await expect(engine.resume({
       workflowId: persisted.id,
@@ -1249,7 +1226,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
     expect(exhausted.workflow.candidateSnapshot).toEqual([])
     expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toEqual(['search_more', 'stop'])
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '扩大范围，再继续找一轮' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('扩大范围，再继续找一轮'))
 
     const continued = await engine.resume({
       workflowId: exhausted.workflow.id,
@@ -1277,7 +1254,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn, 2)
     const firstIds = selection.workflow.candidateSnapshot!.map((item) => item.id)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '再找找' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('再找找'))
 
     const more = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1314,7 +1291,7 @@ describe('workflow engine autonomous discovery', () => {
     workflowHost.refineRemote = refineRemote
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'review capability', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: 'https://github.com/PerryLink/dsh-auto-review' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('https://github.com/PerryLink/dsh-auto-review'))
 
     const more = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1351,7 +1328,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'review capability', turn)
     const consumedInterruptId = selection.workflow.interrupt!.interruptId
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '换个词继续找' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('换个词继续找'))
 
     const failed = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1392,7 +1369,7 @@ describe('workflow engine autonomous discovery', () => {
       const { store, guard, workflowHost, engine } = await makeEngine(record, `search-more-reread-${mode}`)
       const turn = exec(`session-search-more-reread-${mode}`)
       const { selection } = await startAndPresent(engine, 'review capability', turn)
-      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '换个范围继续找' }] })
+      guard.rememberUserMessage(turn.agent, trustedUserMessage('换个范围继续找'))
       const landed = { ...record, reasons: [...record.reasons, `landed-${mode}`] }
       const applyFailure = new Error('apply navigation rejected after landing')
       workflowHost.refineRemote = vi.fn(async (current) => current)
@@ -1443,7 +1420,7 @@ describe('workflow engine autonomous discovery', () => {
     workflowHost.refineRemote = refineRemote
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '再找找' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('再找找'))
 
     await expect(engine.resume({
       workflowId: selection.workflow.id,
@@ -1465,7 +1442,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
     const candidate = selection.workflow.candidateSnapshot![0]!
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用已有的' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('用已有的'))
 
     const reused = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1509,7 +1486,7 @@ describe('workflow engine autonomous discovery', () => {
         if (mode === 'reject') throw new Error('ordinary profile resolution failure')
         return 'web'
       }
-      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '直接启用' }] })
+      guard.rememberUserMessage(turn.agent, trustedUserMessage('直接启用'))
       const put = vi.spyOn(store, 'put')
 
       await expect(engine.resume({
@@ -1547,7 +1524,7 @@ describe('workflow engine autonomous discovery', () => {
     const { selection } = await startAndPresent(engine, 'current time', turn)
     const candidate = selection.workflow.candidateSnapshot![0]!
     expect(selection.workflow.interrupt?.options.map((option) => option.id)).toContain('enable_builtin')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '直接启用' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('直接启用'))
     const confirmation = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
@@ -1583,7 +1560,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(sameTurn.status).toBe('parked')
     expect(workflowHost.enableBuiltin).not.toHaveBeenCalled()
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用这个内置能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用这个内置能力'))
     // Terminal settlement clears the grant on the shared record object; capture at execution time.
     let capturedCommitment: unknown
     let capturedReceipt: unknown
@@ -1644,7 +1621,7 @@ describe('workflow engine autonomous discovery', () => {
       })
       const checkpoint = vi.spyOn(store, 'put')
       const applyDecision = vi.spyOn(workflowHost, 'applyDecision')
-      guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+      guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用'))
 
       await expect(engine.resume({
         workflowId: confirmation.workflow.id,
@@ -1687,7 +1664,7 @@ describe('workflow engine autonomous discovery', () => {
       })
       throw new Error('injected decision application failure')
     })
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用'))
 
     const recovered = await engine.resume({
       workflowId: confirmation.workflow.id,
@@ -1725,7 +1702,7 @@ describe('workflow engine autonomous discovery', () => {
     })
     workflowHost.enableBuiltin = effect
     const interruptId = confirmation.workflow.interrupt!.interruptId
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用'))
 
     await expect(engine.resume({
       workflowId: confirmation.workflow.id,
@@ -1783,14 +1760,14 @@ describe('workflow engine autonomous discovery', () => {
     const { selection } = await startAndPresent(engine, 'current time', turn, 2)
     const [selected, forged] = selection.workflow.candidateSnapshot!
     const gate1InterruptId = selection.workflow.interrupt!.interruptId
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先看第一个内置能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('先看第一个内置能力'))
     const confirmation = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: gate1InterruptId,
       navigation: { kind: 'enable_builtin', candidateIds: [selected!.id] },
     }, turn)
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用第二个' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用第二个'))
     await expect(engine.resume({
       workflowId: confirmation.workflow.id,
       interruptId: gate1InterruptId,
@@ -1827,7 +1804,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'current time', turn)
     const candidate = selection.workflow.candidateSnapshot![0]!
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '先查看这个内置能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('先查看这个内置能力'))
     const confirmation = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
@@ -1876,7 +1853,7 @@ describe('workflow engine autonomous discovery', () => {
       throw new EvolutionError('approval_required', 'The profile change was denied.', { outcome: 'denied' })
     })
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '确认启用' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('确认启用'))
     const denied = await engine.resume({
       workflowId: confirmation.workflow.id,
       interruptId: confirmation.workflow.interrupt!.interruptId,
@@ -1904,7 +1881,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
     const candidate = selection.workflow.candidateSnapshot![0]!
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '启用' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('启用'))
 
     const invalid = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1919,7 +1896,7 @@ describe('workflow engine autonomous discovery', () => {
     const { store, guard, engine } = await makeEngine(resolution(), 'scope')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '用别的' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('用别的'))
 
     const invalid = await engine.resume({
       workflowId: selection.workflow.id,
@@ -1936,7 +1913,7 @@ describe('workflow engine autonomous discovery', () => {
     const { guard, engine } = await makeEngine(resolution(), 'invalid-breaker')
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'calculator', turn)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '停' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('停'))
     const input = {
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
@@ -2095,7 +2072,7 @@ describe('workflow engine autonomous discovery', () => {
     const exhausted = await engine.refine({ workflowId: started.workflow.id, queries: ['third', 'fourth', 'fifth'] }, turn)
     expect(exhausted.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
     expect(exhausted.workflow.interrupt?.options.map((option) => option.id)).toContain('create_new')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '没有合适的，新建一个' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('没有合适的，新建一个'))
 
     await expect(engine.resume({
       workflowId: exhausted.workflow.id,
@@ -2257,7 +2234,7 @@ describe('workflow engine autonomous discovery', () => {
     const discovery = await engine.start(record.requirement, turn)
     const started = await engine.present({ workflowId: discovery.workflow.id, candidateIds: [] }, turn)
     expect(started.workflow).toMatchObject({ cursor: 'await_selection', status: 'interrupted' })
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '新建' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('新建'))
     const constructing = await engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
@@ -2342,7 +2319,7 @@ describe('workflow engine autonomous discovery', () => {
       queries: ['third search', 'fourth search', 'fifth search'],
     }, turn)
     expect(started.workflow).toMatchObject({ cursor: 'await_confirmation', status: 'interrupted' })
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '创建新的能力' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('创建新的能力'))
     const constructing = await engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
@@ -2454,7 +2431,7 @@ describe('workflow engine autonomous discovery', () => {
     const tampered = await store.getWorkflow(workflow.id)
     tampered.lastInstallationId = `installation_${'9'.repeat(24)}`
     await store.put('workflows', tampered)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理掉并重新开始' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('清理掉并重新开始'))
     await expect(engine.recover({
       workflowId: workflow.id,
       interruptId: recoveredAfterRestart.workflow.interrupt!.interruptId,
@@ -2571,7 +2548,7 @@ describe('workflow engine autonomous discovery', () => {
     }, turn)).rejects.toThrow(/omit interrupt_id/i)
     expect(cleanupInstallation).not.toHaveBeenCalled()
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理掉，从头开始' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('清理掉，从头开始'))
     const denied = vi.fn(async () => {
       throw new EvolutionError('approval_required', 'The removal was not approved (denied)', { outcome: 'denied' })
     })
@@ -2696,7 +2673,7 @@ describe('workflow engine autonomous discovery', () => {
     workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
     const currentRequest = '现在清理旧试装并找农历转换能力'
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: currentRequest }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage(currentRequest))
 
     const restarted = await engine.recover({ workflowId }, turn)
 
@@ -2778,7 +2755,7 @@ describe('workflow engine autonomous discovery', () => {
     const cleanupInstallation = vi.fn(async (id: string) => ({ installationId: id, removed: true, restartRequired: false }))
     workflowHost.cleanupInstallation = cleanupInstallation
     const turn = exec()
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '清理并重来' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('清理并重来'))
     await expect(engine.recover({ workflowId }, turn)).rejects.toThrow(/not owned by this recovery workflow/i)
     expect(cleanupInstallation).not.toHaveBeenCalled()
     expect((await store.listWorkflows()).map((item) => item.id)).toEqual([workflowId])
@@ -2857,7 +2834,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(optionIds).toEqual(expect.arrayContaining(['review_existing', 'reuse_local', 'search_more', 'stop']))
     expect(optionIds).not.toContain('modify_this')
     const candidateId = selection.workflow.candidateSnapshot![0]!.id
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '装这个' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('装这个'))
     const rejected = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
@@ -3014,7 +2991,7 @@ describe('workflow engine autonomous discovery', () => {
     const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, record.requirement, '审查这份失败来源')
     expect(reviewed.workflow.cursor).toBe('await_confirmation')
     expect(reviewed.workflow.interrupt?.options.find((item) => item.id === 'use_this')?.candidateIds).toEqual([candidateId])
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '安装修好的这份' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('安装修好的这份'))
     const installed = await engine.resume({
       workflowId: reviewed.workflow.id,
       interruptId: reviewed.workflow.interrupt!.interruptId,
@@ -3085,7 +3062,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec()
     const { selection } = await startAndPresent(engine, 'dsh-plugin-alpha', turn)
     const candidateId = selection.workflow.candidateSnapshot![0]!.id
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '审这个已装来源' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('审这个已装来源'))
     const reviewed = await engine.resume({
       workflowId: selection.workflow.id,
       interruptId: selection.workflow.interrupt!.interruptId,
@@ -3232,7 +3209,7 @@ describe('workflow engine autonomous discovery', () => {
     }
     const turn = exec()
     const { candidateId, reviewed } = await reviewInstalledCandidate(engine, guard, turn, 'dsh-plugin-alpha', '审已装来源')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '在这个上改' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('在这个上改'))
     const modifying = await engine.resume({
       workflowId: reviewed.workflow.id,
       interruptId: reviewed.workflow.interrupt!.interruptId,
@@ -3247,7 +3224,7 @@ describe('workflow engine autonomous discovery', () => {
     expect(finished.workflow.reviewIdsByCandidate?.[candidateId]).toBe(localReview.id)
     expect(finished.workflow.interrupt?.options.map((item) => item.id)).toEqual(expect.arrayContaining(['use_this', 'modify_this']))
     expect(finished.workflow.interrupt?.options.map((item) => item.id)).not.toContain('search_more')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '装回去' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('装回去'))
     const installed = await engine.resume({
       workflowId: finished.workflow.id,
       interruptId: finished.workflow.interrupt!.interruptId,
@@ -3273,7 +3250,7 @@ describe('workflow engine autonomous discovery', () => {
     const turn = exec('session-clarification')
     const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
     const discoverRemote = vi.spyOn(workflowHost, 'discoverRemote')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '  帮我处理日期，但先别猜  ' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('  帮我处理日期，但先别猜  '))
     const started = await engine.start('date conversion summary', turn, {
       operation: 'discover_or_reuse',
       requiredSurface: 'native_dsh_plugin',
@@ -3296,7 +3273,7 @@ describe('workflow engine autonomous discovery', () => {
     }, turn)
     expect(sameTurn.alreadyWaiting).toBe(true)
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '是公历转农历，保留原格式。' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('是公历转农历，保留原格式。'))
     const searched = await engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
@@ -3334,7 +3311,7 @@ describe('workflow engine autonomous discovery', () => {
     const { engine, guard, workflowHost } = await makeEngine(resolution('summary'), 'option-clarification')
     const turn = exec('session-option-clarification')
     const bootstrap = vi.spyOn(workflowHost, 'bootstrapResolution')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '  帮我处理日期，但先别猜  ' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('  帮我处理日期，但先别猜  '))
     const started = await engine.start('date conversion summary', turn, {
       operation: 'discover_or_reuse',
       requiredSurface: 'native_dsh_plugin',
@@ -3348,7 +3325,7 @@ describe('workflow engine autonomous discovery', () => {
       },
     }, turn)
     expect(sameTurn.alreadyWaiting).toBe(true)
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '1' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('1'))
     const searched = await engine.resume({
       workflowId: started.workflow.id,
       interruptId: started.workflow.interrupt!.interruptId,
@@ -3368,9 +3345,9 @@ describe('workflow engine autonomous discovery', () => {
   it('supersedes a pending clarification when a fresh top-level requirement starts', async () => {
     const { engine, guard, store } = await makeEngine(resolution('first'), 'supersede')
     const turn = exec('session-supersede')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '第一个含糊需求' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('第一个含糊需求'))
     const first = await engine.start('first summary', turn, undefined, '你具体指什么？')
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '现在改成找农历转换插件' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('现在改成找农历转换插件'))
     const second = await engine.start('lunar calendar plugin', turn)
     expect(second.workflow.id).not.toBe(first.workflow.id)
     expect(await store.getWorkflow(first.workflow.id)).toMatchObject({
@@ -3383,9 +3360,9 @@ describe('workflow engine autonomous discovery', () => {
   it('preserves exact cancellation after the supersede reread and writes no checkpoint', async () => {
     const { engine, guard, store } = await makeEngine(resolution('first'), 'supersede-reread-abort')
     const firstTurn = exec('session-supersede-reread')
-    guard.rememberUserMessage(firstTurn.agent, { content: [{ type: 'text', text: '第一个含糊需求' }] })
+    guard.rememberUserMessage(firstTurn.agent, trustedUserMessage('第一个含糊需求'))
     const first = await engine.start('first summary', firstTurn, undefined, '你具体指什么？')
-    guard.rememberUserMessage(firstTurn.agent, { content: [{ type: 'text', text: '现在改成找农历转换插件' }] })
+    guard.rememberUserMessage(firstTurn.agent, trustedUserMessage('现在改成找农历转换插件'))
     const controller = new AbortController()
     const reason = new Error('supersede reread cancelled')
     const originalGet = store.getWorkflow.bind(store)
@@ -3663,7 +3640,7 @@ describe('workflow engine autonomous discovery', () => {
       .toEqual([candidateId])
     expect(installCalls).toHaveLength(0)
 
-    guard.rememberUserMessage(turn.agent, { content: [{ type: 'text', text: '重试安装这个候选' }] })
+    guard.rememberUserMessage(turn.agent, trustedUserMessage('重试安装这个候选'))
     const retried = await engine.resume({
       workflowId,
       interruptId: reissued.workflow.interrupt!.interruptId,

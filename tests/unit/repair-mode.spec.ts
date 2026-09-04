@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { CreationGuard } from '../../src/creation-guard.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 import {
   DshRepairChildHost,
   FaultRepairMode,
@@ -94,7 +95,7 @@ describe('full-access fault repair gate', () => {
   it('requires a fresh user turn, consumes the ticket once, and relays the sealed objective', async () => {
     const guard = new CreationGuard({ bootId: 'boot-repair' })
     const parent = parentAgent()
-    guard.rememberUserMessage(parent, { content: [{ type: 'text', text: 'prepare a repair' }] })
+    guard.rememberUserMessage(parent, trustedUserMessage('prepare a repair'))
     const result: RepairChildResult = {
       sessionId: 'autoevo-repair-result',
       taskResult: `repaired and verified\n${_testing.REPAIR_RESULT_MARKER}`,
@@ -120,7 +121,7 @@ describe('full-access fault repair gate', () => {
     await expect(mode.resume({ repairId: prepared.repairId }, execution(parent)))
       .rejects.toThrow(/fresh user turn/i)
 
-    guard.rememberUserMessage(parent, { content: [{ type: 'text', text: '同意，开始完整权限修理' }] })
+    guard.rememberUserMessage(parent, trustedUserMessage('同意，开始完整权限修理'))
     await expect(mode.resume({ repairId: prepared.repairId }, execution(parent))).resolves.toEqual({
       status: 'completed',
       ...result,
@@ -139,11 +140,11 @@ describe('full-access fault repair gate', () => {
     const guard = new CreationGuard({ bootId: 'boot-repair' })
     const parent = parentAgent('session-one')
     const other = parentAgent('session-two')
-    guard.rememberUserMessage(parent, { content: [{ type: 'text', text: 'prepare' }] })
-    guard.rememberUserMessage(other, { content: [{ type: 'text', text: 'confirm' }] })
+    guard.rememberUserMessage(parent, trustedUserMessage('prepare'))
+    guard.rememberUserMessage(other, trustedUserMessage('confirm'))
     const mode = new FaultRepairMode(guard, { run: vi.fn() })
     const prepared = mode.prepare({ objective: 'repair the Host' }, execution(parent))
-    guard.rememberUserMessage(other, { content: [{ type: 'text', text: 'yes' }] })
+    guard.rememberUserMessage(other, trustedUserMessage('yes'))
     await expect(mode.resume({ repairId: prepared.repairId }, execution(other)))
       .rejects.toThrow(/different Agent session/i)
   })

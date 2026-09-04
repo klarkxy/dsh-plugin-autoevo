@@ -17,6 +17,7 @@ import { PluginInstaller } from '../../src/lifecycle/install.js'
 import type { DshLauncher } from '../../src/lifecycle/launcher.js'
 import { StateStore } from '../../src/state/store.js'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 import {
   frozenManifestDigest,
   isDirectlyUsableReview,
@@ -139,7 +140,6 @@ function commitmentFor(
     snapshotDigest: receipt.snapshotDigest,
     candidateId,
     candidateDigest: reviewCandidateDigest(review, workflow),
-    frozenIdentity: { kind: 'remote', name: 'one', identity: 'acme/one', repository: 'acme/one' },
     requestedAction: 'use_this',
     retention: 'temporary',
     endpoint: { kind: 'none' },
@@ -170,7 +170,7 @@ describe('final use_this Host commitment', () => {
   it('authorizes install for a partial/unknown/high-risk/prompt-regex review with a current commitment', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
-    guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(session, trustedUserMessage('用这个'))
     const bound = githubReview()
     const workflow = workflowFor(bound)
     expect(isDirectlyUsableReview(bound, workflow)).toBe(true)
@@ -186,7 +186,7 @@ describe('final use_this Host commitment', () => {
   it('rejects candidate, review, manifest, installSpec, retention, session, boot, and turn swaps', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
-    guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(session, trustedUserMessage('用这个'))
     const bound = githubReview()
     const workflow = workflowFor(bound)
     const receipt = receiptFor(guard, session, workflow)
@@ -215,12 +215,12 @@ describe('final use_this Host commitment', () => {
     })).toThrow(/does not match the current Host grant|candidate digest is stale/i)
 
     const other = agent('session-other')
-    guard.rememberUserMessage(other, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(other, trustedUserMessage('用这个'))
     expect(() => guard.assertInstallAuthorized(other, bound, resolution, binding))
       .toThrow(/different owner session|current Host action commitment/i)
 
     const restarted = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_other' })
-    restarted.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
+    restarted.rememberUserMessage(session, trustedUserMessage('用这个'))
     expect(() => restarted.assertInstallAuthorized(session, bound, resolution, {
       workflow,
       commitment,
@@ -228,7 +228,7 @@ describe('final use_this Host commitment', () => {
       retention: 'temporary',
     })).toThrow(/service restart|current Host action commitment/i)
 
-    guard.rememberUserMessage(session, { content: [{ type: 'text', text: '还是用这个' }] })
+    guard.rememberUserMessage(session, trustedUserMessage('还是用这个'))
     expect(() => guard.assertInstallAuthorized(session, bound, resolution, binding))
       .toThrow(/current host user turn/i)
   })
@@ -236,7 +236,7 @@ describe('final use_this Host commitment', () => {
   it('cannot replay the install grant after settlement', () => {
     const session = agent()
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_install' })
-    guard.rememberUserMessage(session, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(session, trustedUserMessage('用这个'))
     const bound = githubReview()
     const workflow = workflowFor(bound)
     const receipt = receiptFor(guard, session, workflow)

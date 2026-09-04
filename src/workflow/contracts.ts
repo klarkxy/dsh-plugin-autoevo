@@ -110,8 +110,8 @@ export type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery'
 
 export interface WorkflowOption {
   id: WorkflowOptionId
-  labelEn: string
-  labelZh: string
+  labelEn?: string
+  labelZh?: string
   /** When present, the action is valid only for these interrupt-bound snapshot candidates. */
   candidateIds?: string[]
   /** Agent-selectable Host-sealed recovery plans. Only apply_recovery uses these ids. */
@@ -790,23 +790,18 @@ export const TERMINAL_NODES: ReadonlySet<WorkflowNodeId> = new Set([
 ])
 
 export const WORKFLOW_OPTIONS: Record<WorkflowOptionId, WorkflowOption> = {
-  clarify_requirement: { id: 'clarify_requirement', labelEn: 'Answer the one clarification before search', labelZh: '回答搜寻前的唯一澄清问题', placement: 'primary' },
-  review_candidates: { id: 'review_candidates', labelEn: 'Review selected candidates', labelZh: '审查选中的候选', placement: 'primary' },
-  review_existing: { id: 'review_existing', labelEn: 'Review the known plugin source', labelZh: '审查这份插件的已知来源', placement: 'primary' },
-  search_more: { id: 'search_more', labelEn: 'Search for plugins anyway', labelZh: '继续找插件', placement: 'primary' },
-  reuse_local: { id: 'reuse_local', labelEn: 'Use existing local capability unchanged', labelZh: '原样使用已有本地能力', placement: 'primary' },
-  enable_builtin: { id: 'enable_builtin', labelEn: 'Enable the built-in Host capability', labelZh: '直接启用内置能力', placement: 'primary' },
-  create_new: { id: 'create_new', labelEn: 'Create new', labelZh: '新建', placement: 'advanced' },
-  stop: { id: 'stop', labelEn: 'Stop for now', labelZh: '先停', placement: 'recovery' },
-  use_this: { id: 'use_this', labelEn: 'Use this plugin', labelZh: '用这个', placement: 'primary' },
-  apply_recovery: {
-    id: 'apply_recovery',
-    labelEn: 'Apply the selected recovery plan',
-    labelZh: '执行所选恢复方案',
-    placement: 'primary',
-  },
-  modify_this: { id: 'modify_this', labelEn: 'Improve this plugin', labelZh: '在这个上改', placement: 'advanced' },
-  finish_managed_work: { id: 'finish_managed_work', labelEn: 'Continue managed construction', labelZh: '继续托管施工', placement: 'primary' },
+  clarify_requirement: { id: 'clarify_requirement' },
+  review_candidates: { id: 'review_candidates' },
+  review_existing: { id: 'review_existing' },
+  search_more: { id: 'search_more' },
+  reuse_local: { id: 'reuse_local' },
+  enable_builtin: { id: 'enable_builtin' },
+  create_new: { id: 'create_new' },
+  stop: { id: 'stop' },
+  use_this: { id: 'use_this' },
+  apply_recovery: { id: 'apply_recovery' },
+  modify_this: { id: 'modify_this' },
+  finish_managed_work: { id: 'finish_managed_work' },
 }
 
 export function isInterruptKind(value: string | undefined): value is InterruptKind {

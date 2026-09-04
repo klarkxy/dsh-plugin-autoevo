@@ -6,7 +6,6 @@ export default defineConfig({
     exclude: [
       'tests/unit/package-artifact.spec.ts',
       'tests/unit/confirmation-gates.spec.ts',
-      'tests/unit/semantic-review-attach.spec.ts',
     ],
     passWithNoTests: false,
   },

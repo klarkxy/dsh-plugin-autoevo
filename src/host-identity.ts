@@ -28,7 +28,3 @@ export function newInterruptId(binding: {
 }): string {
   return `interrupt_${hashObject({ ...binding, at: new Date().toISOString() }).slice(0, 24)}`
 }
-
-export function newTurnId(sessionId: string, sequence: number): string {
-  return `turn_${hashObject({ sessionId, sequence }).slice(0, 24)}`
-}

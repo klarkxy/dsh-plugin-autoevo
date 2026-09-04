@@ -1,7 +1,7 @@
 import { t as EVOLUTION_PRESET_ID } from "./evolution-contracts.js";
 import { LoadHookContext } from "node:module";
 import Schema from "@deepseek-ai/schemastery";
-import { PreToolDecision, ToolExecution, ToolExecutionResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
+import { PreToolDecision, ToolExecution, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import "@deepseek-ai/cordis-plugin-include";
 import { SandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
 import { Session } from "@deepseek-ai/dsh-session";
@@ -632,15 +632,6 @@ type ExecutionEndpoint = {
   mountId: string;
   targetProfile: string;
 };
-interface FrozenCandidateIdentity {
-  kind: 'local' | 'remote';
-  localKind?: LocalCapabilityCandidate['kind'];
-  name: string;
-  identity: string;
-  availability?: CandidateAvailability;
-  fit?: 'full' | 'partial' | 'none';
-  repository?: string;
-}
 /** Host-derived from SelectionReceipt + the interrupt-bound candidate snapshot. */
 interface ActionCommitment {
   id: string;
@@ -648,9 +639,6 @@ interface ActionCommitment {
   snapshotDigest: string;
   candidateId?: string;
   candidateDigest?: string;
-  frozenIdentity: FrozenCandidateIdentity | {
-    kind: 'none';
-  };
   requestedAction: NavigationKind | AuthorizationAction;
   recoveryId?: string;
   retention?: InstallationRetention;
@@ -809,8 +797,8 @@ type InterruptKind = 'await_clarification' | 'await_selection' | 'await_confirma
 type WorkflowOptionPlacement = 'primary' | 'advanced' | 'recovery';
 interface WorkflowOption {
   id: WorkflowOptionId;
-  labelEn: string;
-  labelZh: string;
+  labelEn?: string;
+  labelZh?: string;
   /** When present, the action is valid only for these interrupt-bound snapshot candidates. */
   candidateIds?: string[];
   /** Agent-selectable Host-sealed recovery plans. Only apply_recovery uses these ids. */
@@ -1329,7 +1317,6 @@ declare class CreationGuard {
   preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision>;
   /** Final monotonic check: no earlier waterfall listener can override this denial. */
   guard(exec: Readonly<ToolExecution>): string | undefined;
-  result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void;
   authorization(agent: Agent): ResolutionAuthorization | undefined;
 }
 //#endregion
@@ -2303,5 +2290,5 @@ type Config = Config$1;
 declare const Config: import("@deepseek-ai/schemastery").default<Config$1>;
 declare function apply(ctx: Context, input: Config): void;
 //#endregion
-export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, type ExecutionEndpoint, ExecutionGuard, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type FrozenCandidateIdentity, type MechanicalFacts, POLICY_VERSION, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type SelectionReceipt, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, apply, classifyRuntimeSurface, hostLayerSuccess, inject, lifecycleStateFor, name, probeWorkspaceWriteSandbox, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv };
+export { type ActionCommitment, BRIDGE_EXECUTION_TOOLS, CapabilityEvolutionService, Config, CreationGuard, DshRepairChildHost, type ExecutionEndpoint, ExecutionGuard, FORGED_RESUME_HOST_KEYS, FaultRepairMode, type FaultRepairPrepareInput, type FaultRepairResumeInput, type FaultRepairTicketView, type MechanicalFacts, POLICY_VERSION, type RepairChildHost, type RepairChildRequest, type RepairChildResult, type SelectionReceipt, StateStore, TOOL_NAMES, VERIFICATION_LAYER_KINDS, VERIFICATION_STATUSES, type VerificationEvidence, type VerificationLayerKind, type VerificationStatus, type WorkflowLifecycleState, type WorkflowRecord, type WorkflowView, apply, classifyRuntimeSurface, hostLayerSuccess, inject, lifecycleStateFor, name, probeWorkspaceWriteSandbox, reviewIdentity, sanitizeHostVerificationEvidence, selectInstallVerificationLayer, verificationChildEnv };
 //# sourceMappingURL=index.d.ts.map

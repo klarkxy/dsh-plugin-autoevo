@@ -751,7 +751,7 @@ export class PluginInstaller {
       await this.authorizeInstall(review, exec, binding)
       exec.signal?.throwIfAborted()
     } else {
-      assertDirectUseAllowed(review, binding?.workflow)
+      assertDirectUseAllowed(review)
     }
 
     const strictSpec = assertStrictInstallSpec(review)

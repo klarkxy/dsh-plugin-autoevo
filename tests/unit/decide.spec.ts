@@ -4,11 +4,11 @@ import { POLICY_VERSION, type AuthorizationDecisionInput, type ReviewRecord } fr
 import { CreationGuard } from '../../src/creation-guard.js'
 import {
   assertUseThisReceipt,
-  nextStepForAuthorization,
   resolveDecisionFromModel,
   reviewIdentity,
 } from '../../src/lifecycle/decide.js'
 import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const candidateId = `candidate_${'c'.repeat(24)}`
 const repository = 'anonymous-lab/dsh-plugin-alpha'
@@ -51,20 +51,10 @@ function interrupt(ids: Array<keyof typeof WORKFLOW_OPTIONS>): InterruptPayload 
 }
 
 describe('resume validation', () => {
-  it('tells the model to submit its semantic interpretation as a structured decision', () => {
-    const text = nextStepForAuthorization('改进插件', {
-      state: 'confirmation_required',
-      resolutionId: `resolution_${'f'.repeat(24)}`,
-      reason: 'review complete',
-    })
-    expect(text).toContain('结构化 decision')
-    expect(text).toContain('审查结论')
-  })
-
   it('trusts the model action for wording the old regex could not understand', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['modify_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '在 2 上改' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('在 2 上改'))
     expect(resolveDecisionFromModel({
       guard,
       agent,
@@ -87,7 +77,7 @@ describe('resume validation', () => {
   it('rejects unavailable or out-of-scope model decisions without consuming the fresh turn', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['modify_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '你来理解这个决定' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('你来理解这个决定'))
     expect(() => resolveDecisionFromModel({
       guard, agent, interrupt: current, decision: { action: 'create_new' },
     })).toThrow(/not available/i)
@@ -114,7 +104,7 @@ describe('resume validation', () => {
   it('accepts a complete authentic user turn beyond the legacy presentation limit', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: 'x'.repeat(2_001) }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('x'.repeat(2_001)))
     expect(resolveDecisionFromModel({
       guard, agent, interrupt: current, decision: { action: 'stop' },
     }).userMessage).toHaveLength(2_001)
@@ -123,7 +113,7 @@ describe('resume validation', () => {
   it('makes every use_this decision persistent', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('用这个'))
     expect(resolveDecisionFromModel({
       guard,
       agent,
@@ -138,7 +128,7 @@ describe('resume validation', () => {
   it('accepts only a sealed recovery id and never accepts recovery parameters on other actions', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['apply_recovery', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '按这个恢复方案继续' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('按这个恢复方案继续'))
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
@@ -190,7 +180,7 @@ describe('resume validation', () => {
       profileStoreFingerprint: 'a'.repeat(64),
       effectScope: 'single_install_command',
     }]
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '先修复安装环境，再继续这个候选' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('先修复安装环境，再继续这个候选'))
 
     expect(resolveDecisionFromModel({
       guard,
@@ -214,7 +204,7 @@ describe('resume validation', () => {
   it('rejects legacy public retention even when it says persistent', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '以后都用它' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('以后都用它'))
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
@@ -226,7 +216,7 @@ describe('resume validation', () => {
   it('keeps manual_runtime adoption persistent and rejects legacy retention input', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('装这个'))
     expect(resolveDecisionFromModel({
       guard,
       agent,
@@ -234,7 +224,7 @@ describe('resume validation', () => {
       decision: { action: 'use_this', candidateId },
     })).toMatchObject({ install: { retention: 'persistent' } })
     const nextGuard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
-    nextGuard.rememberUserMessage(agent, { content: [{ type: 'text', text: '装这个' }] })
+    nextGuard.rememberUserMessage(agent, trustedUserMessage('装这个'))
     expect(() => resolveDecisionFromModel({
       guard: nextGuard,
       agent,
@@ -246,7 +236,7 @@ describe('resume validation', () => {
   it('keeps automatically verifiable candidates persistent too', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_decide' })
     const current = interrupt(['use_this', 'stop'])
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('用这个'))
     expect(resolveDecisionFromModel({
       guard,
       agent,
@@ -357,7 +347,7 @@ describe('install authorization receipts', () => {
         }],
       },
     }
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '替换现装插件' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('替换现装插件'))
     const resume = resolveDecisionFromModel({
       guard,
       agent,
@@ -377,7 +367,7 @@ describe('install authorization receipts', () => {
       ...current,
       interruptId: `interrupt_${'b'.repeat(24)}`,
     }
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '临时装' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('临时装'))
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
@@ -420,7 +410,7 @@ describe('install authorization receipts', () => {
           }],
         },
       }
-      guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个长期保留' }] })
+      guard.rememberUserMessage(agent, trustedUserMessage('用这个长期保留'))
       const resume = resolveDecisionFromModel({
         guard,
         agent,

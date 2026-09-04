@@ -237,7 +237,6 @@ export async function probeWorkspaceWriteSandbox(
       }
     }
   }
-  throwIfAborted(signal)
   return result!
 }
 

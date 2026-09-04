@@ -54,5 +54,3 @@ export function evolutionTargetFromProfile(input: {
     dependencySpec: input.dependencySpec,
   })
 }
-
-export const _testing = { EXACT_GITHUB }

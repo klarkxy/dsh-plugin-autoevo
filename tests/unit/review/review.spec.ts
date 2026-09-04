@@ -5,8 +5,6 @@ import path from 'node:path'
 import type { RuntimeConfig } from '../../../src/config.js'
 import {
   classifyRuntimeSurface,
-  VERIFICATION_LAYER_KINDS,
-  VERIFICATION_STATUSES,
   type RuntimeSurfaceFacts,
 } from '../../../src/contracts.js'
 import { evaluatePluginContent, freezeRuntimeSurface, requiresSemanticContext, previewGithubPlugins, reviewGithubPluginWithFiles } from '../../../src/review/review.js'
@@ -1157,16 +1155,5 @@ describe('Policy V9 runtime surface classification', () => {
       files: [],
     })
     expect(frozen.verificationLayer).toBe('manual_runtime')
-  })
-
-  it('exposes the frozen verification layer and status unions', () => {
-    expect(VERIFICATION_LAYER_KINDS).toEqual(['bundle_activation', 'tool_roundtrip', 'manual_runtime'])
-    expect(VERIFICATION_STATUSES).toEqual([
-      'passed',
-      'pending_user_test',
-      'blocked_precondition',
-      'failed',
-      'uncertain',
-    ])
   })
 })

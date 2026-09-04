@@ -1,5 +1,5 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { PreToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type {
   ActionCommitment,
   ResolutionAuthorization,
@@ -8,8 +8,7 @@ import type {
   SelectionReceipt,
 } from './contracts.js'
 import { EvolutionError } from './errors.js'
-import { OUTSIDE_EVOLUTION_MODE_DENIAL } from './evolution-contracts.js'
-import { newBootId, newTurnId, ownerSessionId } from './host-identity.js'
+import { newBootId, ownerSessionId } from './host-identity.js'
 import { isRecord } from './internal-utils.js'
 import { assertUseThisReceipt } from './lifecycle/decide.js'
 import {
@@ -80,10 +79,6 @@ export function isTrustedTopLevelUserMessage(message: unknown): message is Trust
   return message.source.kind === 'user'
 }
 
-function hasExplicitMessageIdentity(message: UserFacingMessage): boolean {
-  return message.id !== undefined || message.role !== undefined || message.source !== undefined
-}
-
 export function extractUserFacingText(message: UserFacingMessage): string {
   const parts: string[] = []
   for (const block of message.content ?? []) {
@@ -112,10 +107,6 @@ export function isNewCordisDefinition(exec: Pick<ToolExecution, 'name' | 'argume
   if (exec.name !== 'cordis_define' || !isRecord(exec.arguments)) return false
   const plugin = exec.arguments.plugin
   return isRecord(plugin) && plugin.kind === 'new'
-}
-
-function outsideEvolutionModeReason(): string {
-  return OUTSIDE_EVOLUTION_MODE_DENIAL
 }
 
 export interface CreationGuardOptions {
@@ -154,9 +145,7 @@ export class CreationGuard {
   }
 
   rememberUserMessage(agent: Agent | undefined, message: UserFacingMessage): boolean {
-    if (!agent) return false
-    const explicitIdentity = hasExplicitMessageIdentity(message)
-    if (explicitIdentity && !isTrustedTopLevelUserMessage(message)) return false
+    if (!agent || !isTrustedTopLevelUserMessage(message)) return false
     const text = extractUserFacingText(message)
     if (!text) return false
     const sessionId = ownerSessionId(agent) ?? 'anonymous'
@@ -168,16 +157,12 @@ export class CreationGuard {
       consumedTurnIds: new Set<string>(),
       sessionId,
     }
-    const messageId = isTrustedTopLevelUserMessage(message)
-      ? message.id.trim()
-      : `legacy_${state.turnSequence + 1}`
+    const messageId = message.id.trim()
     if (state.seenMessageIds.has(messageId)) return false
     state.turnSequence += 1
     state.seenMessageIds.add(messageId)
     state.currentMessageId = messageId
-    state.currentTurnId = isTrustedTopLevelUserMessage(message)
-      ? `turn_${hashObject({ sessionId, messageId }).slice(0, 24)}`
-      : newTurnId(sessionId, state.turnSequence)
+    state.currentTurnId = `turn_${hashObject({ sessionId, messageId }).slice(0, 24)}`
     state.lastUserMessage = text
     state.sessionId = sessionId
     this.states.set(agent, state)
@@ -467,7 +452,7 @@ export class CreationGuard {
       !== hashObject(commitment.allowedParameterConstraints.recoveryPlan ?? null)) {
       throw new EvolutionError('review_rejected', 'Install recovery plan does not match the Host commitment')
     }
-    assertDirectUseAllowed(review, binding?.workflow)
+    assertDirectUseAllowed(review)
     assertUseThisReceipt(review, resolution)
   }
 
@@ -556,10 +541,6 @@ export class CreationGuard {
     return this.protocolDenial(exec)
   }
 
-  result(_exec: Readonly<ToolExecution>, _result: Readonly<ToolExecutionResult>): void {
-    // No per-result bookkeeping remains; kept because index.ts wires tools/result here.
-  }
-
   authorization(agent: Agent): ResolutionAuthorization | undefined {
     return this.states.get(agent)?.authorization
   }
@@ -567,6 +548,5 @@ export class CreationGuard {
 
 export const _testing = {
   extractUserFacingText,
-  outsideEvolutionModeReason,
   preservesHostGrant,
 }

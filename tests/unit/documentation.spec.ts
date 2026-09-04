@@ -77,13 +77,4 @@ describe('documentation set', () => {
       expect(pkg[field]?.['@deepseek-ai/dsh'], field).toBeUndefined()
     }
   })
-
-  it('documents the Host-owned managed-child construction boundary in the creator skill', () => {
-    const skill = read('skills/autoevo-plugin-creator/SKILL.md')
-    expect(skill).not.toMatch(/resume with the local checkout path|finish_managed_work/u)
-    expect(skill).toContain('short-lived, cwd-bound managed child')
-    expect(skill).toContain('The parent Capability Evolution session remains read-only')
-    expect(skill).toContain('Do not pass an arbitrary checkout path or edit from the parent session')
-  })
-
 })

@@ -707,16 +707,6 @@ export type ExecutionEndpoint =
   | { kind: 'bridge'; tools: readonly string[]; target: string }
   | { kind: 'host_bundled_enable'; packageName: string; version: string; mountId: string; targetProfile: string }
 
-export interface FrozenCandidateIdentity {
-  kind: 'local' | 'remote'
-  localKind?: LocalCapabilityCandidate['kind']
-  name: string
-  identity: string
-  availability?: CandidateAvailability
-  fit?: 'full' | 'partial' | 'none'
-  repository?: string
-}
-
 /** Host-derived from SelectionReceipt + the interrupt-bound candidate snapshot. */
 export interface ActionCommitment {
   id: string
@@ -724,7 +714,6 @@ export interface ActionCommitment {
   snapshotDigest: string
   candidateId?: string
   candidateDigest?: string
-  frozenIdentity: FrozenCandidateIdentity | { kind: 'none' }
   requestedAction: NavigationKind | AuthorizationAction
   recoveryId?: string
   retention?: InstallationRetention

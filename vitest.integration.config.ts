@@ -6,7 +6,6 @@ export default defineConfig({
       'tests/integration/**/*.spec.ts',
       'tests/unit/package-artifact.spec.ts',
       'tests/unit/confirmation-gates.spec.ts',
-      'tests/unit/semantic-review-attach.spec.ts',
     ],
     passWithNoTests: false,
   },

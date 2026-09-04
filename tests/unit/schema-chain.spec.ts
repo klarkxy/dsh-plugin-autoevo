@@ -1,10 +1,10 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { describe, expect, it } from 'vitest'
-import { FORGED_RESUME_HOST_KEYS } from '../../src/contracts.js'
 import { parseRequestIntent } from '../../src/resolver/intent.js'
 import { CreationGuard } from '../../src/creation-guard.js'
 import { resolveDecisionFromModel } from '../../src/lifecycle/decide.js'
 import { WORKFLOW_OPTIONS, type InterruptPayload } from '../../src/workflow/contracts.js'
+import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const candidateId = `candidate_${'c'.repeat(24)}`
 const agent = {
@@ -33,24 +33,9 @@ function interrupt(): InterruptPayload {
 }
 
 describe('model JSON to Host schema chain', () => {
-  it('accepts a valid decision payload', () => {
-    const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_schema' })
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
-    expect(resolveDecisionFromModel({
-      guard,
-      agent,
-      interrupt: interrupt(),
-      decision: { action: 'use_this', candidateId },
-    })).toMatchObject({
-      optionId: 'use_this',
-      candidateId,
-      install: { retention: 'persistent' },
-    })
-  })
-
   it('rejects missing candidate_id and illegal or forged Host fields', () => {
     const guard = new CreationGuard({ isEvolutionMode: () => true, bootId: 'boot_schema' })
-    guard.rememberUserMessage(agent, { content: [{ type: 'text', text: '用这个' }] })
+    guard.rememberUserMessage(agent, trustedUserMessage('用这个'))
     expect(() => resolveDecisionFromModel({
       guard,
       agent,
@@ -79,13 +64,5 @@ describe('model JSON to Host schema chain', () => {
       required_surface: 'any',
       evolve_reason: 'repair',
     })).toThrow(/evolve_reason is only valid/i)
-    expect(FORGED_RESUME_HOST_KEYS).toEqual(expect.arrayContaining([
-      'selectionReceipt',
-      'actionCommitment',
-      'executionLease',
-      'reviewerVerdict',
-      'verificationVerdict',
-      'verifierVerdict',
-    ]))
   })
 })

@@ -4,6 +4,10 @@ All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Ver
 
 ## Unreleased
 
+- Stop writing the unused `ActionCommitment.frozenIdentity` field and interrupt option labels/placement. Canonical interrupt hashing now uses option id plus candidate/recovery ids only, so in-flight V14 workflows still resume. Historical JSON remains readable. The public `FrozenCandidateIdentity` type is removed.
+- `rememberUserMessage` requires a trusted top-level user identity (the live inbox already filtered). Remove the tests-only `legacy_` turn path, the no-op CreationGuard `tools/result` hook, and the unused outside-evolution denial string.
+- Drop redundant unit pins and duplicate Gate coverage that did not protect a distinct contract.
+
 ## 1.3.0
 
 - Remove the never-wired independent semantic reviewer/verifier stack (`DshSemanticReviewerHost`, `DshSemanticVerifierHost`, `ReviewerRequest`/`ReviewerVerdict`, `VerifierRequest`/`VerificationVerdict`, the `reviewerRequestId`/`reviewerVerdictDigest` commitment fields). Mechanical verification was already Host-only; the Agent view now exposes `semantic_context_required` as a hint instead of a reviewer decision. Historical review receipts that still carry reviewer fields remain readable.

@@ -1632,10 +1632,8 @@ export class SourceManager {
 }
 
 export const _testing = {
-  isPathInside,
   sourceIdForRepository,
   sourceIdForCreate,
   hashObject,
   forbiddenUntrackedPath,
-  HOST_SOURCE_EXCLUDES,
 }

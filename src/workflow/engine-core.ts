@@ -211,15 +211,20 @@ export abstract class WorkflowEngineCore {
     workflow: WorkflowRecord,
     expected: Omit<InterruptPayload, 'interruptId' | 'ownerSessionId' | 'bootId' | 'validAfterTurnId' | 'snapshotDigest'>,
   ): void {
+    const authorizingOptions = (options: InterruptPayload['options']) => options.map((option) => ({
+      id: option.id,
+      ...(option.candidateIds ? { candidateIds: option.candidateIds } : {}),
+      ...(option.recoveryIds ? { recoveryIds: option.recoveryIds } : {}),
+    }))
     if (!workflow.interrupt
       || workflow.interrupt.kind !== workflow.cursor
       || hashObject({
         kind: workflow.interrupt.kind,
-        options: workflow.interrupt.options,
+        options: authorizingOptions(workflow.interrupt.options),
         facts: workflow.interrupt.facts,
       }) !== hashObject({
         kind: expected.kind,
-        options: expected.options,
+        options: authorizingOptions(expected.options),
         facts: expected.facts,
       })) {
       throw new EvolutionError('invalid_input', 'Workflow interrupt policy no longer matches canonical Host control; no decision was applied')

@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
-  name,
-  inject,
   readEvolutionModeMarker,
 } from '../../src/evolution-mode.js'
 import {
@@ -36,11 +34,6 @@ function mockContext(overrides?: {
 }
 
 describe('evolution-mode entry', () => {
-  it('exports the scoped Cordis plugin name and inject list', () => {
-    expect(name).toBe('autoevo-evolution-mode')
-    expect(inject).toEqual([])
-  })
-
   it('provides only the scoped marker so the root autonomy contract is not duplicated', () => {
     const { ctx, register, section, provide } = mockContext()
     apply(ctx)

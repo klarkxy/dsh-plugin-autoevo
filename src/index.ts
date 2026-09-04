@@ -49,7 +49,6 @@ export {
 export type {
   ActionCommitment,
   ExecutionEndpoint,
-  FrozenCandidateIdentity,
   MechanicalFacts,
   SelectionReceipt,
   VerificationEvidence,
@@ -140,10 +139,6 @@ export function apply(ctx: Context, input: Config): void {
     const inEvolution = Boolean(exec.agent && isEvolutionMode(exec.agent))
     if (inEvolution) return guardFor(exec.agent).guard(exec) ?? creationGuard.guard(exec)
     return creationGuard.guard(exec)
-  })
-  ctx.on('tools/result', (exec, result) => {
-    creationGuard.result(exec, result)
-    return undefined
   })
   for (const tool of createTools(service)) ctx.tools.register(tool)
 }

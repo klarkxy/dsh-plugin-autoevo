@@ -172,7 +172,3 @@ export function isEvolutionPresetManifest(value: unknown): value is EvolutionPre
   }
   return true
 }
-
-/** Stable denial when AutoEvo-governed construction is attempted outside genuine evolution mode. */
-export const OUTSIDE_EVOLUTION_MODE_DENIAL =
-  'AutoEvo denied this governed construction action: start or switch a blank/new session to the Capability Evolution (evolution) agent preset. Host-managed create/modify continues only there after Search-first review and an explicit final user decision.'

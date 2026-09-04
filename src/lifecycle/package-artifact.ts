@@ -259,7 +259,6 @@ async function freezePackedSource(sourceRoot: string, options: FreezeOptions): P
     await chmod(tarball, 0o444)
     options.signal?.throwIfAborted()
     const installSpec = shellForwardedFileSpec(tarball)
-    options.signal?.throwIfAborted()
     return {
       installSpec,
       artifactRoot,

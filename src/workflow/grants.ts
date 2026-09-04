@@ -15,18 +15,6 @@ import {
 import { hashObject } from '../state/hashes.js'
 import { lookupBuiltinEnablement, type CandidateSnapshotItem, type InterruptPayload, type WorkflowRecord } from './contracts.js'
 
-function frozenIdentityFor(candidate: CandidateSnapshotItem): ActionCommitment['frozenIdentity'] {
-  return {
-    kind: candidate.kind,
-    name: candidate.name,
-    identity: candidate.identity,
-    ...(candidate.localKind ? { localKind: candidate.localKind } : {}),
-    ...(candidate.availability ? { availability: candidate.availability } : {}),
-    ...(candidate.fit ? { fit: candidate.fit } : {}),
-    ...(candidate.repository ? { repository: candidate.repository } : {}),
-  }
-}
-
 export function endpointForLocalReuse(candidate: CandidateSnapshotItem): ExecutionEndpoint {
   const name = candidate.localName ?? candidate.name
   if (candidate.availability === 'available_via_tool_search') {
@@ -145,7 +133,6 @@ export function mintActionCommitment(input: {
     snapshotDigest: input.receipt.snapshotDigest,
     ...(input.candidate ? { candidateId: input.candidate.id } : {}),
     ...(candidateDigest ? { candidateDigest } : {}),
-    frozenIdentity: input.candidate ? frozenIdentityFor(input.candidate) : { kind: 'none' },
     requestedAction: input.action,
     ...(input.receipt.recoveryId ? { recoveryId: input.receipt.recoveryId } : {}),
     ...(input.retention ? { retention: input.retention } : {}),
