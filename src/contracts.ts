@@ -29,7 +29,7 @@ export type AuthorizationState =
   | 'modify_review'
   | 'create_authorized'
 export type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source' | 'host_bundled'
-export type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup'
+export type RemoteCandidateSource = 'github' | 'npm' | 'github+npm' | 'dsh-find-plugin' | 'marketplace-setup'
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 export type DecisionPhase = 'gate1' | 'gate2'
 export type AuthorizationAction =
@@ -184,6 +184,8 @@ export interface RemotePluginCandidate {
   updatedAt: string | null
   topics: string[]
   packageName?: string
+  /** Registry-linked GitHub package root, when npm metadata gives an exact path. */
+  packagePath?: string
   defaultBranch?: string
   matchedTerms?: string[]
   /** Search phrases whose bounded GitHub result page contained this repository. */

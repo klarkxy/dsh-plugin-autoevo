@@ -64,7 +64,7 @@ src/
 ├─ internal-utils.ts           # 共享小工具（类型守卫、路径 containment 等）
 ├─ workflow/                   # 图引擎、生命周期映射、Agent 展示协议
 ├─ resolver/                   # 本地/已装来源、intent、lineage 与 profile ownership
-├─ discovery/                  # scoped GitHub 发现与归一化
+├─ discovery/                  # scoped GitHub、npm 发现与归一化
 ├─ review/                     # exact snapshot 与机械审查事实
 ├─ lifecycle/                  # install/snapshot/launcher/remove/recovery
 ├─ source-manager.ts           # 托管 Git 源、锁、commit 与 source receipt
@@ -110,7 +110,7 @@ lib/                           # tsdown 生成且提交/发布的运行产物
 
 ## 6. Resolver 与来源 lineage
 
-解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 Host 侧 `topic:dsh-plugin` GitHub 搜索。远端摘要始终是不可信数据；Host 只做严格 GitHub 仓库标识、客观状态、有界摘要和去重，完整有界结果由 Agent 判断语义相关性。精确仓库置顶；只有 Agent 密封的 1–5 项读取受限预览。
+解析顺序是本地优先：当前 Agent 可见工具、技能、桥接能力，再到 Host 侧 `topic:dsh-plugin` GitHub 搜索和 `keywords:dsh-plugin` npm 搜索。远端摘要始终是不可信数据；npm 条目必须链接可验证的 GitHub 仓库，正式审查仍以该仓库的精确提交为准。Host 只做严格仓库标识、客观状态、有界摘要和去重，完整有界结果由 Agent 判断语义相关性。精确仓库置顶；只有 Agent 密封的 1–5 项读取受限预览。
 
 已安装来源必须由 live profile ownership 解析，不能仅凭本地 inventory 推断。replacement 只适用于：
 
@@ -243,10 +243,10 @@ HTTP 200 只证明 Web 服务可访问，不能证明目标插件功能可用；
 4. 更新对应的用户、开发、架构、安全或样例文档；
 5. 检查 diff 中的凭据、本机路径、账号、私有地址和专有逻辑；
 6. `git diff --check`，确认工作树中未混入临时 artifact；
-7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的发布 tag（`documentation.spec.ts` 会校验一致性）；
+7. 发布时同步 README.md / README.en.md / user-guide.md / user-guide.en.md 安装命令中的 npm 包版本（`documentation.spec.ts` 会校验一致性）；
 8. 发布候选运行 `pnpm check:release` 与 pack 内容检查。
 
-仓库 PR/`main` CI 跑快速门，不自动创建 release；完整 DSH 验收在发布候选与 Live E2E。发行仅通过 GitHub；commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权，且 CI 不会发布到 npm。installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
+仓库 PR/`main` CI 跑快速门，不自动创建 release；完整 DSH 验收在发布候选与 Live E2E。维护者把与 `package.json` 版本一致的 `v*` 标签推到当前 `main` 后，[npm-publish.yml](https://github.com/klarkxy/dsh-plugin-autoevo/blob/main/.github/workflows/npm-publish.yml) 会重跑快速检查、集成测试与打包验收，发布并核对压缩包完整性。`pnpm publish:preview` 只打包并生成 `.pack/npm-release/report.json`，不会上传。首次创建 npm 包时，仓库须先配置具备非交互发布权限的 `NPM_TOKEN` secret；包创建后可在 npm 设置中把 `klarkxy/dsh-plugin-autoevo` 的 `npm-publish.yml` 绑定为 trusted publisher，再移除临时 token。commit、push、tag、GitHub release 或上游 PR 都是独立动作，需要维护者明确授权。installation receipt 中的 `contributionAdvice.eligible` 只表示可以建议贡献，不是发布授权。
 
 ## 参考入口
 

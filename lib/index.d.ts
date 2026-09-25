@@ -56,7 +56,7 @@ type ResolutionDecision = 'use_local' | 'inspect_remote' | 'none';
 /** Evidence states wait; action states are minted only after a recorded human answer. */
 type AuthorizationState = 'selection_required' | 'confirmation_required' | 'market_required' | 'stopped' | 'reuse_local' | 'enable_builtin' | 'use_review' | 'modify_review' | 'create_authorized';
 type CandidateAvailability = 'available' | 'available_via_tool_search' | 'installed_in_profile' | 'known_source' | 'host_bundled';
-type RemoteCandidateSource = 'github' | 'dsh-find-plugin' | 'marketplace-setup';
+type RemoteCandidateSource = 'github' | 'npm' | 'github+npm' | 'dsh-find-plugin' | 'marketplace-setup';
 /** `gate1` remains readable for legacy receipts; current policy mints only gate2. */
 type DecisionPhase = 'gate1' | 'gate2';
 type AuthorizationAction = 'create_new' | 'stop' | 'use_this' | 'apply_recovery' | 'modify_this' | 'enable_builtin';
@@ -181,6 +181,8 @@ interface RemotePluginCandidate {
   updatedAt: string | null;
   topics: string[];
   packageName?: string;
+  /** Registry-linked GitHub package root, when npm metadata gives an exact path. */
+  packagePath?: string;
   defaultBranch?: string;
   matchedTerms?: string[];
   /** Search phrases whose bounded GitHub result page contained this repository. */
@@ -875,7 +877,7 @@ interface DiscoveryBudget {
   /** Legacy persisted per-turn cap from schemaVersion 3 records that predate maxQueriesPerTurn. */
   maxRefinementQueries?: 5;
   /** Bounded rolling window; semantic relevance never removes an eligible result. */
-  maxCandidates: 113;
+  maxCandidates: 113 | 163;
 }
 interface CandidatePreview {
   candidateId: string;

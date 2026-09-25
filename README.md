@@ -28,11 +28,12 @@
 ## 安装
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact dsh-plugin-autoevo@1.4.0
 ```
 
 - `--profile web` 换成你实际使用的 profile；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。
 - 安装或升级后重启该 profile 加载新 bundle；日常启动：`npx @deepseek-ai/dsh web`。
+- 发现流程同时搜索 GitHub 的 `dsh-plugin` topic 与 npm 的 `dsh-plugin` 关键词。npm 候选须声明可核对的 GitHub 仓库；正式审查以该仓库的精确提交为准。
 - 要求 Node.js `^22.19.0 || ^24.0.0`，DSH `>=0.1.0-rc.6 <0.2.0`。
 
 ## 快速体验

@@ -202,7 +202,7 @@ export interface DiscoveryBudget {
   /** Legacy persisted per-turn cap from schemaVersion 3 records that predate maxQueriesPerTurn. */
   maxRefinementQueries?: 5
   /** Bounded rolling window; semantic relevance never removes an eligible result. */
-  maxCandidates: 113
+  maxCandidates: 113 | 163
 }
 
 export interface CandidatePreview {

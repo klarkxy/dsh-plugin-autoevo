@@ -10,12 +10,12 @@
 
 GitHub 仓库里的 README、源码、注释、manifest、Issue 或 PR 一律按不可信数据处理。系统提示只含本插件固定策略。审查输出是来源路径、派生风险代码、短事实说明、blob/content hash、fit 和兼容性结论。
 
-远端发现是 Host 自己的 scoped GitHub 搜索，不是第三方市场插件：
+远端发现是 Host 自己的 scoped GitHub 与 npm 搜索，不是第三方市场插件：
 
-- 通过 argv-only `gh api` 查询 `topic:dsh-plugin`；不安装 `dsh-find-plugin`，也不降级到无 topic 的全站搜索。
-- 只有严格 `owner/repository` 标识且客观可用的非 archived、非 fork、非 disabled 仓库会被归一化为候选，摘要长度受限并去重；语义相关性由 Agent 判断，不是 Host 淘汰条件。
+- 通过 argv-only `gh api` 查询 `topic:dsh-plugin`，通过公开 npm Registry 查询 `keywords:dsh-plugin`；不安装 `dsh-find-plugin`，也不降级到无标签的全站搜索。
+- GitHub 候选必须有严格 `owner/repository` 标识且非 archived、非 fork、非 disabled；npm 候选必须有 `dsh-plugin` 关键词并链接可验证的 GitHub 仓库，审查时还要核对包名。摘要长度受限并去重；语义相关性由 Agent 判断，不是 Host 淘汰条件。
 - Host 只为 Agent 密封的 1–5 个候选读取有界的根 package、README 与 DSH manifest 预览；外部文本始终作为不可信数据展示。
-- 空、畸形或明显无关结果视为没有可复用候选；`gh` 执行失败则发现未完成，不能发放创建权限。
+- 空、畸形或明显无关结果视为没有可复用候选；GitHub 或 npm 搜索失败则发现未完成，不能发放创建权限。
 - 模型不得直接调用 `find_dsh_plugin` 或裸 `gh`。
 
 保留下来的候选都不能跳过下述审查与批准门槛。

@@ -122,7 +122,7 @@ import {
 } from './service-versions.js'
 import { runInWorkspace } from './workspace-layout.js'
 import { WorkflowEngine } from './workflow/engine.js'
-import { DISCOVERY_REMOTE_POOL_MAX, remotePackageSnapshotItem } from './workflow/candidates.js'
+import { DISCOVERY_REMOTE_POOL_MAX, remoteCandidateId, remotePackageSnapshotItem } from './workflow/candidates.js'
 import { assertBuiltinEnablementBinding } from './workflow/grants.js'
 import type {
   CandidatePreview,
@@ -664,7 +664,7 @@ export class CapabilityEvolutionService implements WorkflowHost {
       candidates: CandidateSnapshotItem[]
       previews: CandidatePreview[]
     }> => {
-      const remote = resolution.remoteCandidates.find((item) => item.repository.toLowerCase() === candidate.repository.toLowerCase())
+      const remote = resolution.remoteCandidates.find((item) => remoteCandidateId(item) === candidate.candidateId)
       if (!remote) throw new EvolutionError('invalid_input', 'Preview candidate is outside the current discovery resolution')
       const packages = await previewGithubPlugins({
         runner: this.runner,
@@ -672,9 +672,12 @@ export class CapabilityEvolutionService implements WorkflowHost {
         cwd: resolution.cwd,
         repository: remote.repository,
         ref: candidate.ref ?? remote.defaultBranch ?? 'HEAD',
-        ...(candidate.packagePath ? { packagePath: candidate.packagePath } : {}),
+        ...(candidate.packagePath || remote.packagePath ? { packagePath: candidate.packagePath ?? remote.packagePath } : {}),
         ...(exec.signal ? { signal: exec.signal } : {}),
       })
+      if (remote.packageName && (packages.length !== 1 || packages[0]?.manifest.packageName !== remote.packageName)) {
+        throw new EvolutionError('review_rejected', 'The npm listing does not match a unique DSH bundle in its linked repository')
+      }
       const expanded = packages.map((preview, index) => ({
         ...remotePackageSnapshotItem(remote, preview),
         index: index + 1,

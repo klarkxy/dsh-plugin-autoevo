@@ -64,7 +64,7 @@ src/
 ├─ internal-utils.ts           # Shared helpers (type guards, path containment)
 ├─ workflow/                   # Graph engine, lifecycle mapping, Agent view protocol
 ├─ resolver/                   # Local/installed sources, intent, lineage, profile ownership
-├─ discovery/                  # Scoped GitHub discovery and normalization
+├─ discovery/                  # Scoped GitHub and npm discovery and normalization
 ├─ review/                     # Exact snapshot and mechanical review facts
 ├─ lifecycle/                  # install, snapshot, launcher, remove, recovery
 ├─ source-manager.ts           # Managed Git source, lock, commit, source receipt
@@ -110,7 +110,7 @@ Policy is V14. The state machine, the two confirmation gates, and the lifecycle 
 
 ## 6. Resolver and source lineage
 
-Resolution is local-first: Agent-visible tools, skills, bridge capabilities, then Host-owned `topic:dsh-plugin` GitHub search. Remote summaries are always untrusted. The Host validates strict repository identity and objective repository state, bounds and deduplicates the complete search union, and leaves semantic relevance to the Agent. Exact repositories are pinned; only the Agent-sealed 1–5 candidates receive bounded previews.
+Resolution is local-first: Agent-visible tools, skills, bridge capabilities, then Host-owned `topic:dsh-plugin` GitHub search and `keywords:dsh-plugin` npm search. Remote summaries are always untrusted. npm listings must link to a verifiable GitHub repository; formal review still pins a commit from that repository. The Host validates strict repository identity and objective repository state, bounds and deduplicates the complete search union, and leaves semantic relevance to the Agent. Exact repositories are pinned; only the Agent-sealed 1–5 candidates receive bounded previews.
 
 Installed sources must be resolved from live profile ownership, never inferred from local inventory alone. Replacement applies only to:
 
@@ -243,10 +243,10 @@ Before committing:
 4. Update the corresponding user, developer, architecture, security, or sample documentation;
 5. Scan the diff for credentials, local paths, accounts, private addresses, and proprietary logic;
 6. Run `git diff --check` and confirm no temporary artifacts slipped into the worktree;
-7. At release time, sync the published tag in the install command across README.md / README.en.md / user-guide.md / user-guide.en.md (`documentation.spec.ts` enforces consistency);
+7. At release time, sync the npm package version in the install command across README.md / README.en.md / user-guide.md / user-guide.en.md (`documentation.spec.ts` enforces consistency);
 8. For a release candidate, run `pnpm check:release` and inspect pack contents.
 
-Pull-request and `main` CI run the fast gate and do not create a release; full DSH acceptance runs on a release candidate and Live E2E. Distribution is GitHub-only: commit, push, tag, GitHub release, and upstream PR are separate actions requiring explicit maintainer authorization, and CI never publishes to npm. The `contributionAdvice.eligible` flag in an installation receipt only means a contribution can be suggested, not publication authority.
+Pull-request and `main` CI run the fast gate and do not create a release; full DSH acceptance runs on a release candidate and Live E2E. A `v*` tag matching `package.json` on current `main` triggers [npm-publish.yml](https://github.com/klarkxy/dsh-plugin-autoevo/blob/main/.github/workflows/npm-publish.yml), which reruns fast checks, integration tests, and packaged acceptance before publishing and confirming archive integrity. `pnpm publish:preview` only packs and writes `.pack/npm-release/report.json`; it does not upload. The first publication needs a repository `NPM_TOKEN` secret with non-interactive publish permission. Once the package exists, bind `klarkxy/dsh-plugin-autoevo` and `npm-publish.yml` as its npm trusted publisher, then remove the temporary token. Commit, push, tag, GitHub release, and upstream PR remain separate actions requiring explicit maintainer authorization. The `contributionAdvice.eligible` flag in an installation receipt only means a contribution can be suggested, not publication authority.
 
 ## References
 

@@ -28,11 +28,12 @@ Each topic has one canonical home. Interactive flow diagrams (standalone HTML wi
 ## Install
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact dsh-plugin-autoevo@1.4.0
 ```
 
 - Replace `--profile web` with the profile you actually use; keep the `@deepseek-ai/` prefix (the unscoped `dsh` package on npm is an unrelated project).
 - Restart the profile after installing or upgrading so it loads the new bundle; start it day to day with `npx @deepseek-ai/dsh web`.
+- Discovery searches both GitHub's `dsh-plugin` topic and npm's `dsh-plugin` keyword. npm candidates must link to a verifiable GitHub repository; formal review pins an exact commit from that repository.
 - Requires Node.js `^22.19.0 || ^24.0.0` and DSH `>=0.1.0-rc.6 <0.2.0`.
 
 ## Quick start

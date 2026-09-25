@@ -2,6 +2,7 @@ export type EvolutionErrorCode =
   | 'approval_required'
   | 'command_failed'
   | 'github_unavailable'
+  | 'npm_unavailable'
   | 'invalid_input'
   | 'not_found'
   | 'review_expired'

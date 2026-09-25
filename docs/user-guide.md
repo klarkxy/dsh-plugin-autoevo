@@ -14,7 +14,7 @@
 ## 2. 安装、升级与首次加载
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact dsh-plugin-autoevo@1.4.0
 ```
 
 通过 npx 运行 DSH，无需全局安装；命令必须带 `@deepseek-ai/` 前缀（npm 上无 scoped 的 `dsh` 是无关项目）。安装或升级后重启该 profile，让新 bundle 生效。
@@ -34,6 +34,8 @@ npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-pl
 ### 3.2 第一道确认门：选候选去审查
 
 Agent 会在有界预算内补充查询，然后密封 1–5 个候选。用一条新消息选择想审查的候选，例如：
+
+远端搜索同时查找 GitHub `dsh-plugin` topic 和 npm `dsh-plugin` 关键词。npm 条目必须声明可核对的 GitHub 仓库；审查读取的是该仓库的精确提交，而非直接信任 npm 搜索摘要。
 
 - “先看第二个。”
 - “按你推荐的那个审查。”

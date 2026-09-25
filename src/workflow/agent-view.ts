@@ -156,7 +156,8 @@ function candidateEvidence(
 ): AgentCandidateEvidence[] {
   return items.map((item) => {
     const remote = item.repository
-      ? resolution?.remoteCandidates.find((candidate) => candidate.repository.toLowerCase() === item.repository!.toLowerCase())
+      ? resolution?.remoteCandidates.find((candidate) => candidate.repository.toLowerCase() === item.repository!.toLowerCase()
+        && (!candidate.packageName || candidate.packageName === item.name))
       : undefined
     const local = item.kind === 'local'
       ? resolution?.localCandidates.find((candidate) => candidate.name === item.name)
