@@ -750,7 +750,7 @@ describe('workflow engine autonomous discovery', () => {
       activeTurnId: 'turn_unknown',
       activeTurnQueriesUsed: [],
       maxQueriesPerTurn: 5,
-      maxCandidates: 113,
+      maxCandidates: 163,
     })
     expect((await store.getWorkflow(view.workflow.id)).resolutionId).toBe(resolution().id)
   })

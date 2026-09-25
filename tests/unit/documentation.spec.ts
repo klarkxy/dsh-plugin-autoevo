@@ -59,10 +59,11 @@ describe('documentation set', () => {
   })
 
   it('keeps the published install target consistent across user entry points', () => {
-    const match = read('README.md').match(/github:klarkxy\/dsh-plugin-autoevo#v\d+\.\d+\.\d+/u)
-    expect(match?.[0]).toBeTruthy()
+    const pkg = JSON.parse(read('package.json')) as { name: string; version: string }
+    const installTarget = `${pkg.name}@${pkg.version}`
+    expect(read('README.md')).toContain(`add --save-exact ${installTarget}`)
     for (const relativePath of ['README.en.md', 'docs/user-guide.md', 'docs/user-guide.en.md']) {
-      expect(read(relativePath)).toContain(match?.[0])
+      expect(read(relativePath)).toContain(`add --save-exact ${installTarget}`)
     }
   })
 

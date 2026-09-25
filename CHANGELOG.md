@@ -4,6 +4,12 @@ All notable changes to AutoEvo are documented here. AutoEvo follows Semantic Ver
 
 ## Unreleased
 
+## 1.4.0
+
+- Search public npm packages tagged `dsh-plugin` alongside scoped GitHub repositories. Link npm results to verified GitHub repositories and require the reviewed bundle name to match the registry listing.
+- Publish AutoEvo as an installable npm package with its existing unscoped package name.
+- Add tag-triggered GitHub Actions publication with archive-integrity reconciliation.
+
 ## 1.3.1
 
 - Stop writing the unused `ActionCommitment.frozenIdentity` field and interrupt option labels/placement. Canonical interrupt hashing now uses option id plus candidate/recovery ids only, so in-flight V14 workflows still resume. Historical JSON remains readable. The public `FrozenCandidateIdentity` type is removed.

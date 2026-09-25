@@ -1,7 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeConfig } from '../../src/config.js'
 import { discoverRemoteCandidates, _testing } from '../../src/discovery/remote.js'
 import { scopedGithubQuery, searchGithubRepositories } from '../../src/github/index.js'
+import { searchNpmPackages } from '../../src/discovery/npm.js'
+import { remoteCandidateId } from '../../src/workflow/candidates.js'
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ objects: [] }), { status: 200 })))
+})
+afterEach(() => vi.unstubAllGlobals())
 
 const config: RuntimeConfig = {
   dshHome: 'C:/dsh',
@@ -460,5 +467,63 @@ describe('scoped GitHub discovery', () => {
     expect(result.candidates).toEqual([])
     expect(result.complete).toBe(false)
     expect(result.reasons.join(' ')).toContain('transient github failure')
+  })
+})
+
+describe('npm DSH plugin discovery', () => {
+  const npmItem = (name: string, homepage?: string) => ({ package: {
+    name,
+    description: 'DSH capability',
+    keywords: ['dsh-plugin', 'deepseek-harness'],
+    date: '2026-09-24T00:00:00Z',
+    links: {
+      repository: 'git+https://github.com/klarkxy/dsh-editor.git',
+      ...(homepage ? { homepage } : {}),
+    },
+  } })
+
+  it('searches the public registry with a scoped keyword and preserves distinct monorepo packages', async () => {
+    const npmFetch = vi.fn(async (url: URL) => {
+      expect(url.origin).toBe('https://registry.npmjs.org')
+      expect(url.searchParams.get('text')).toBe('keywords:dsh-plugin writing')
+      return new Response(JSON.stringify({ objects: [
+        npmItem('@klarkxy/dsh-memory', 'https://github.com/klarkxy/dsh-editor/tree/main/packages/dsh-memory#readme'),
+        npmItem('@klarkxy/dsh-mood', 'https://github.com/klarkxy/dsh-editor/tree/main/packages/dsh-mood#readme'),
+      ] }), { status: 200 })
+    })
+    const results = await searchNpmPackages({ query: 'writing', limit: 10, fetch: npmFetch as typeof fetch })
+    expect(results.map((item) => [item.packageName, item.packagePath])).toEqual([
+      ['@klarkxy/dsh-memory', 'packages/dsh-memory'],
+      ['@klarkxy/dsh-mood', 'packages/dsh-mood'],
+    ])
+    const combined = await discoverRemoteCandidates({
+      runner: runnerFor(() => ({ items: [] })), config, cwd: 'C:/workspace',
+      requirement: 'writing', queries: ['writing'], fetch: npmFetch as typeof fetch,
+    })
+    expect(combined.complete).toBe(true)
+    expect(combined.source).toBe('npm')
+    expect(combined.candidates.map((item) => item.packageName)).toEqual(['@klarkxy/dsh-memory', '@klarkxy/dsh-mood'])
+    expect(new Set(combined.candidates.map(remoteCandidateId)).size).toBe(2)
+  })
+
+  it('does not offer npm listings without a verified GitHub source or DSH keyword', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ objects: [
+      { package: { name: 'unrelated', keywords: ['utility'], links: { repository: 'https://github.com/a/b' } } },
+      { package: { name: 'wrong-host', keywords: ['dsh-plugin'], links: { repository: 'https://evil.test/a/b' } } },
+      { package: { name: 'no-source', keywords: ['dsh-plugin'] } },
+      npmItem('dsh-valid'),
+    ] }), { status: 200 }))
+    const results = await searchNpmPackages({ query: 'writing', limit: 10, fetch: fetchMock as typeof fetch })
+    expect(results.map((item) => item.packageName)).toEqual(['dsh-valid'])
+  })
+
+  it('keeps creation blocked when npm search fails even if GitHub succeeds', async () => {
+    const result = await discoverRemoteCandidates({
+      runner: runnerFor(() => ({ items: [] })), config, cwd: 'C:/workspace',
+      requirement: 'writing', queries: ['writing'],
+      fetch: vi.fn(async () => { throw new Error('registry unavailable') }) as typeof fetch,
+    })
+    expect(result.complete).toBe(false)
+    expect(result.reasons.join(' ')).toContain('registry unavailable')
   })
 })

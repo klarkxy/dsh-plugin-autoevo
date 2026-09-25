@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { testRuntimeConfig } from '../helpers/runtime-config.js'
 import { trackTempDirs } from '../helpers/temp-dirs.js'
 import type { RuntimeConfig } from '../../src/config.js'
@@ -21,6 +21,11 @@ import { StateStore } from '../../src/state/store.js'
 import { trustedUserMessage } from '../helpers/trusted-user-message.js'
 
 const temporary = trackTempDirs()
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ objects: [] }), { status: 200 })))
+})
+afterEach(() => vi.unstubAllGlobals())
 
 function config(root: string): RuntimeConfig {
   return testRuntimeConfig(root)

@@ -2,6 +2,7 @@ import type { RuntimeConfig } from '../config.js'
 import type { RemoteCandidateSource, RemotePluginCandidate } from '../contracts.js'
 import { errorMessage } from '../errors.js'
 import { searchGithubRepositories, validateGithubRepository } from '../github/index.js'
+import { searchNpmPackages } from './npm.js'
 import type { CommandRunner } from '../process/runner.js'
 import { capabilityQueries, marketplaceSearchQueries, normalizeDiscoveryQueries } from '../resolver/keywords.js'
 import { matchConfidence } from '../resolver/local.js'
@@ -44,7 +45,7 @@ export function annotateRemoteCandidate(
     ...(matchedTerms.length > 0 ? { matchedTerms } : {}),
     matchReason: matchedTerms.length > 0
       ? `matched ${matchedTerms.join(', ')}`
-      : 'Eligible GitHub topic result; semantic fit is for the Agent to judge',
+      : 'Eligible DSH plugin listing; semantic fit is for the Agent to judge',
   }
 }
 
@@ -99,9 +100,8 @@ export function githubSearchPhrases(requirement: string, extra?: readonly string
 }
 
 /**
- * Host-owned GitHub discovery scoped to `topic:dsh-plugin`. Empty results mean
- * there is no reusable plugin. An unavailable `gh` search is incomplete and
- * must not grant create permission.
+ * Host-owned GitHub and npm discovery scoped to DSH plugin labels. An
+ * unavailable source is incomplete and must not grant create permission.
  */
 export async function discoverRemoteCandidates(options: {
   runner: CommandRunner
@@ -110,11 +110,12 @@ export async function discoverRemoteCandidates(options: {
   requirement: string
   queries?: readonly string[]
   signal?: AbortSignal
+  fetch?: typeof fetch
 }): Promise<RemoteDiscoveryResult> {
   const phrases = githubSearchPhrases(options.requirement, options.queries)
   const reasons: string[] = []
   if (phrases.length === 0) {
-    reasons.push('No scoped GitHub search phrase could be derived from the requirement.')
+    reasons.push('No scoped remote search phrase could be derived from the requirement.')
     return { candidates: [], complete: true, queries: [], reasons }
   }
 
@@ -122,6 +123,8 @@ export async function discoverRemoteCandidates(options: {
   const merged = new Map<string, RemotePluginCandidate>()
   let succeeded = 0
   let failed = 0
+  let githubFound = false
+  let npmFound = false
   const queries: string[] = []
   for (const phrase of phrases) {
     options.signal?.throwIfAborted()
@@ -136,6 +139,7 @@ export async function discoverRemoteCandidates(options: {
       })
       options.signal?.throwIfAborted()
       succeeded += 1
+      githubFound ||= batch.length > 0
       queries.push(phrase)
       reasons.push(`GitHub topic search ${JSON.stringify(phrase)} returned ${batch.length} summaries.`)
       for (const candidate of batch) {
@@ -156,19 +160,46 @@ export async function discoverRemoteCandidates(options: {
       queries.push(phrase)
       reasons.push(`GitHub topic search ${JSON.stringify(phrase)} was unavailable: ${boundedText(errorMessage(error), 300)}`)
     }
+    options.signal?.throwIfAborted()
+    try {
+      const batch = await searchNpmPackages({
+        query: phrase,
+        limit: 10,
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+      })
+      options.signal?.throwIfAborted()
+      succeeded += 1
+      npmFound ||= batch.length > 0
+      reasons.push(`npm DSH plugin search ${JSON.stringify(phrase)} returned ${batch.length} source-linked packages.`)
+      for (const candidate of batch) {
+        const key = candidate.packageName!.toLowerCase()
+        const prior = merged.get(key)
+        merged.set(key, {
+          ...(prior && (prior.updatedAt ?? '') > (candidate.updatedAt ?? '') ? prior : candidate),
+          matchedQueries: [...new Set([...(prior?.matchedQueries ?? []), phrase])],
+        })
+      }
+    } catch (error) {
+      options.signal?.throwIfAborted()
+      failed += 1
+      reasons.push(`npm DSH plugin search ${JSON.stringify(phrase)} was unavailable: ${boundedText(errorMessage(error), 300)}`)
+    }
   }
 
   if (succeeded === 0) {
     return { candidates: [], complete: false, queries, reasons }
   }
 
-  const candidates = relevantRemoteCandidates(options.requirement, [...merged.values()], options.queries)
+  const npmRepositories = new Set([...merged.values()].filter((item) => item.packageName).map((item) => item.repository.toLowerCase()))
+  const candidates = relevantRemoteCandidates(options.requirement,
+    [...merged.values()].filter((item) => item.packageName || !npmRepositories.has(item.repository.toLowerCase())), options.queries)
   if (candidates.length === 0) {
-    reasons.push('Scoped GitHub topic search returned no valid reusable candidates.')
+    reasons.push('Scoped GitHub and npm searches returned no valid reusable candidates.')
   }
   return {
     candidates,
-    ...(candidates.length > 0 ? { source: 'github' as const } : {}),
+    ...(candidates.length > 0 ? { source: githubFound && npmFound ? 'github+npm' as const : npmFound ? 'npm' as const : 'github' as const } : {}),
     complete: failed === 0,
     queries,
     reasons,

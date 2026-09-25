@@ -14,10 +14,10 @@ function localCandidateIdentity(item: ResolutionRecord['localCandidates'][number
 }
 
 export const MIXED_SNAPSHOT_MAX = 8
-/** Five bounded GitHub pages plus five exact repositories in one user turn. */
-export const DISCOVERY_REMOTE_POOL_MAX = 105
+/** Five bounded GitHub pages, npm pages, and five exact repositories. */
+export const DISCOVERY_REMOTE_POOL_MAX = 155
 /** Preserve the complete remote union without letting the bounded local set consume its slots. */
-export const DISCOVERY_POOL_MAX = 113 as const
+export const DISCOVERY_POOL_MAX = 163 as const
 export const SEALED_SHORTLIST_MAX = 5
 
 export function candidateId(
@@ -80,6 +80,8 @@ function localSnapshotItem(item: ResolutionRecord['localCandidates'][number]): O
 function remoteEvidenceDigest(item: ResolutionRecord['remoteCandidates'][number]): string {
   return hashObject({
     repository: item.repository,
+    packageName: item.packageName,
+    packagePath: item.packagePath,
     name: item.name,
     description: item.description,
     stars: item.stars,
@@ -92,17 +94,18 @@ function remoteEvidenceDigest(item: ResolutionRecord['remoteCandidates'][number]
 }
 
 export function remoteCandidateId(item: ResolutionRecord['remoteCandidates'][number]): string {
-  return candidateId('remote', item.repository, remoteEvidenceDigest(item))
+  return candidateId('remote', item.packageName ?? item.repository, remoteEvidenceDigest(item))
 }
 
 function remoteSnapshotItem(item: ResolutionRecord['remoteCandidates'][number]): Omit<CandidateSnapshotItem, 'index'> {
   const digest = remoteEvidenceDigest(item)
   return {
-    id: candidateId('remote', item.repository, digest),
+    id: candidateId('remote', item.packageName ?? item.repository, digest),
     kind: 'remote',
-    name: item.name,
-    identity: item.repository,
+    name: item.packageName ?? item.name,
+    identity: item.packageName ?? item.repository,
     repository: item.repository,
+    ...(item.packagePath ? { packagePath: item.packagePath } : {}),
     digest,
   }
 }

@@ -178,7 +178,7 @@ async function assertPackedCurrentPolicy(packedRoot) {
   assert.match(packedJs, /awaiting_user_test/u)
   assert.match(packedJs, /bundle_activation/u)
   assert.match(packedJs, /tool_roundtrip/u)
-  assert.match(packedJs, /manual_runtime cannot be installed as a temporary trial/u)
+  assert.match(packedJs, /npm registry search returned HTTP/u)
   assert.match(packedJs, /Completed-install restart is driven by a fresh explicit user request/u)
   assert.match(packedJs, /verification_already_attempted/u)
   assert.match(packedJs, /modify_attempts_exhausted/u)
@@ -223,7 +223,7 @@ async function assertPackedCurrentPolicy(packedRoot) {
     'utf8',
   )
   assert.match(skill, /Host `tool_roundtrip` passed/u)
-  assert.match(skill, /model judgment, semantic verifier,[^\n]+cannot mint `verified`/u)
+  assert.match(skill, /Model judgment, `installed`, or `loaded` alone cannot mint `verified`/u)
   assert.match(skill, /short-lived, cwd-bound managed child/u)
   assert.match(skill, /parent Capability Evolution session remains read-only/u)
   assert.doesNotMatch(skill, /finish_managed_work/u)
@@ -277,7 +277,7 @@ try {
     process.stdout.write(`${JSON.stringify({
       status: 'static-passed',
       installedFrom: path.basename(tarball),
-      policyVersion: '13',
+      policyVersion: '14',
       hostRuntime: 'skipped',
     })}\n`)
   } else {

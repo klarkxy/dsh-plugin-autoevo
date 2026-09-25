@@ -14,7 +14,7 @@ This guide is for users who discover, install, improve, or create capabilities i
 ## 2. Install, upgrade, and first load
 
 ```powershell
-npx @deepseek-ai/dsh plugin --profile web add --save-exact github:klarkxy/dsh-plugin-autoevo#v1.3.1
+npx @deepseek-ai/dsh plugin --profile web add --save-exact dsh-plugin-autoevo@1.4.0
 ```
 
 Run DSH through npx; no global install needed. Keep the `@deepseek-ai/` prefix — the unscoped `dsh` package on npm is an unrelated project. Restart the profile after installing or upgrading so the new bundle takes effect.
@@ -34,6 +34,8 @@ A clear need starts search immediately. The Agent only asks a clarification when
 ### 3.2 Gate 1: choose a candidate to review
 
 The Agent runs bounded supplemental queries, then seals 1–5 candidates. Use a fresh chat message to choose what to review, for example:
+
+Remote discovery searches both GitHub's `dsh-plugin` topic and npm's `dsh-plugin` keyword. An npm listing must link to a verifiable GitHub repository; review reads an exact commit there rather than trusting the registry search summary.
 
 - "Review the second one."
 - "Go with the one you recommend."

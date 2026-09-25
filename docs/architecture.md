@@ -84,7 +84,7 @@ Loader 通过 `cordis.patch.yml` 挂载 bundle。carrier bundle 只插入其它�
 
 ### 远端发现
 
-- Host 直接调用 `gh api /search/repositories`，每条查询强制带 `topic:dsh-plugin`；不安装 `dsh-find-plugin`，也不回退到无 topic 的全站搜索。
+- Host 调用 `gh api /search/repositories`（强制 `topic:dsh-plugin`）以及公开 npm Registry 搜索（强制 `keywords:dsh-plugin`）。npm 条目须带有效 GitHub 仓库链接，审查时仍冻结该仓库的精确提交；不回退到无标签的全站搜索。
 - 结果只接受严格 `owner/repository` 标识、有界摘要和客观可用的非 archived、非 fork 仓库；Host 不再用语义分数淘汰候选。
 - Agent 提供查询时 Host 只规范化、校验、加 scope 并执行，从不改写 Agent 短语。Agent 未提供查询且没有待澄清时，Host 可从权威需求派生互补兜底检索短语。
 - 五条查询的有界结果完整去重后交给 Agent。匹配分数只决定阅读顺序；用户给出的精确仓库固定置顶，不会被旧候选或池容量挤掉。
@@ -235,5 +235,5 @@ Review receipt 绑定 Policy 版本、需求、来源身份、GitHub exact commi
 
 - `src/review/review.ts`：exact snapshot、manifest/fit/security 派生事实。
 - `src/resolver/local.ts`：本地工具、技能和 tool-search 桥。
-- `src/discovery/remote.ts`：Host 侧 scoped GitHub 发现、候选归一化和来源记录；不回退无 topic 搜索。Agent 未提供查询且无待澄清时，可从权威需求派生互补兜底短语，但不改写 Agent 已给短语。
+- `src/discovery/remote.ts`：Host 侧 scoped GitHub 与 npm 发现、候选归一化和来源记录；不回退无标签搜索。Agent 未提供查询且无待澄清时，可从权威需求派生互补兜底短语，但不改写 Agent 已给短语。
 - `src/github/discovery.ts`：严格 `owner/repository` 标识校验，以及 `topic:dsh-plugin` 的 `gh api` 搜索。

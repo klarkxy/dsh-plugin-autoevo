@@ -55,8 +55,9 @@ export function mergeRemoteCandidatePool(
   explicitRepositories: readonly string[],
   limit: number,
 ): RemotePluginCandidate[] {
-  const existingByKey = new Map(existing.map((candidate) => [candidate.repository.toLowerCase(), candidate] as const))
-  const discoveredByKey = new Map(discovered.map((candidate) => [candidate.repository.toLowerCase(), candidate] as const))
+  const keyOf = (candidate: RemotePluginCandidate): string => (candidate.packageName ?? candidate.repository).toLowerCase()
+  const existingByKey = new Map(existing.map((candidate) => [keyOf(candidate), candidate] as const))
+  const discoveredByKey = new Map(discovered.map((candidate) => [keyOf(candidate), candidate] as const))
   const explicitOrder = [...new Map([
     ...explicitRepositories.map((repository) => {
       const normalized = validateGithubRepository(repository)
@@ -70,7 +71,7 @@ export function mergeRemoteCandidatePool(
   const explicitKeys = new Set(explicitOrder.map((repository) => repository.toLowerCase()))
   const merged = new Map<string, RemotePluginCandidate>()
   const put = (candidate: RemotePluginCandidate, preferIncoming: boolean): void => {
-    const key = candidate.repository.toLowerCase()
+    const key = keyOf(candidate)
     const prior = merged.get(key)
     const combined = prior
       ? preferIncoming ? { ...prior, ...candidate } : { ...candidate, ...prior }

@@ -118,7 +118,7 @@ function presentCapabilityToolCall(name: string, args: unknown): ToolCallView {
   return genericPendingCard(args, 'Working on the capability request', '正在处理能力请求', 'other')
 }
 
-const QUERY_SHAPE_RULE = '1–5 complementary exact GitHub search phrases, 1–2 terms each. GitHub ANDs terms inside a phrase, so never pass prose or pack many concepts into one query.'
+const QUERY_SHAPE_RULE = '1–5 complementary phrases for scoped GitHub and npm search, 1–2 terms each. GitHub ANDs terms inside a phrase, so never pass prose or pack many concepts into one query.'
 
 export function createTools(service: CapabilityEvolutionService): ToolDefinition[] {
   return [
