@@ -3,6 +3,11 @@ name: Publish npm package
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to retry after a CI-only correction
+        required: true
 
 permissions:
   contents: read
@@ -13,7 +18,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'klarkxy/dsh-plugin-autoevo' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'klarkxy/dsh-plugin-autoevo' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -39,6 +44,7 @@ jobs:
       - name: Publish and confirm exact archive
         run: node scripts/publish-npm.mjs --publish
         env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           # Required only for first publication; remove after binding npm trusted publishing.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Preserve archive and publication receipt

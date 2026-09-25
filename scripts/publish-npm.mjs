@@ -23,7 +23,8 @@ function run(command, args) {
     env: { ...process.env, NPM_CONFIG_CACHE: resolve(root, '.tmp/npm-cache') },
   })
   if (result.error || result.status !== 0) {
-    throw new Error(`${command} ${args[0]} failed: ${(result.stderr || result.stdout || result.error?.message || `exit ${result.status}`).slice(0, 2000)}`)
+    // npm prints the tarball inventory before the actual error. Keep the tail.
+    throw new Error(`${command} ${args[0]} failed: ${(result.stderr || result.stdout || result.error?.message || `exit ${result.status}`).slice(-4000)}`)
   }
   return result.stdout.trim()
 }
@@ -55,14 +56,26 @@ try {
     throw new Error('Package is not explicitly configured for public npm publication')
   }
   if (publish) {
-    const tag = process.env.GITHUB_REF?.replace(/^refs\/tags\//u, '')
+    const tag = process.env.RELEASE_TAG ?? process.env.GITHUB_REF?.replace(/^refs\/tags\//u, '')
     if (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REPOSITORY !== 'klarkxy/dsh-plugin-autoevo'
-      || process.env.GITHUB_REF !== `refs/tags/v${manifest.version}` || tag !== `v${manifest.version}`) {
-      throw new Error('Publication requires this repository’s matching version tag in GitHub Actions')
+      || tag !== `v${manifest.version}`) {
+      throw new Error('Publication requires this repository’s matching version in GitHub Actions')
     }
     run('git', ['fetch', 'origin', 'main'])
     if (run('git', ['rev-parse', 'HEAD']) !== run('git', ['rev-parse', 'origin/main'])) {
-      throw new Error('Release tag does not point to current main')
+      throw new Error('Publication must run from current main')
+    }
+    if (process.env.GITHUB_REF === `refs/tags/${tag}`) {
+      // Normal tag-triggered publication.
+    } else if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.GITHUB_REF === 'refs/heads/main') {
+      // Retry the immutable tag after a CI-only correction. Packed files must match.
+      run('git', ['merge-base', '--is-ancestor', tag, 'HEAD'])
+      const changed = run('git', ['diff', '--name-only', tag, 'HEAD']).split(/\r?\n/u).filter(Boolean)
+      if (changed.some((file) => file !== '.github/workflows/npm-publish.yml' && file !== 'scripts/publish-npm.mjs')) {
+        throw new Error('Manual publication retry changed package files after the release tag')
+      }
+    } else {
+      throw new Error('Publication requires a matching tag push or a CI-only retry from main')
     }
   }
   mkdirSync(output, { recursive: true })
